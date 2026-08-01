@@ -1,0 +1,106 @@
+---
+description: kano-proxy project conventions (docs, Cloudflare stack, LLM proxy)
+alwaysApply: true
+---
+
+# kano-proxy
+
+Canonical project rules. Cursor / Agents / Claude entrypoints symlink to this file.
+
+## Docs, artifacts, and secrets
+
+### Documentation
+
+- Before non-trivial work, read `docs/index.md` (when it exists) and any linked docs that match the task.
+- `docs/` is the source of truth for requirements, API behavior, data models, and deploy steps.
+- For feature or schema changes: update `docs/` first, then implement. Small fixes (typos, formatting, obvious bugs) do not require a docs change first.
+- When adding, moving, deleting, or renaming docs, update `docs/index.md` paths and summaries.
+- If a user request conflicts with docs, state the conflict and wait for docs (or explicit user override) before changing behavior.
+
+### Build artifacts and `.gitignore`
+
+- Confirm compile/tool outputs are gitignored (`node_modules/`, `dist/`, `.wrangler/`, `coverage/`, `.vite/`, `*.tsbuildinfo`, etc.).
+- Do not delete ignored artifacts just to clean `git status`.
+- Delete artifacts only when the user asks, they cause errors, or a clean rebuild must be verified; explain why first.
+- New tools that create local outputs must update `.gitignore`.
+
+### Secrets
+
+- Never commit secrets: API tokens, upstream LLM keys, OAuth client secrets, private keys, cookie/session secrets, or personal credentials.
+- Committed examples and docs may only use placeholders such as `<upstream-api-key>`, `<google-client-id>`.
+- Real secrets live in gitignored files (`.dev.vars`, `.env.local`) or Cloudflare / CI secret stores.
+- Read secrets from env or bindings; never hardcode them in source, docs, fixtures, or scripts.
+- Do not print secret values in replies, logs, or command summaries—only whether a key exists.
+- If unsure whether a value is secret, treat it as secret unless the user says it may be committed.
+
+## Cloudflare stack and project structure
+
+### Platform
+
+- Default stack is Cloudflare only: Workers (API/proxy), Pages (web), D1 (relational data), KV (rate limits/cache), Durable Objects when strong consistency or coordination is required, R2 only if docs call for object storage (e.g. export/logs).
+- Environments: local development and production only. No staging env, staging domain, or staging D1/KV/R2 unless the user explicitly approves and `docs/` is updated.
+- Prefer Cloudflare-recommended patterns and what is written in `docs/`.
+- Non-Cloudflare services require a docs update covering reason, risk, and alternatives before implementation.
+
+### Domains and deploy
+
+- Web on Pages; API/proxy on Workers. Same-hostname routing (e.g. Pages at apex, Worker on `/v1/*` or `/api/*`) must be documented in `docs/deployment.md`.
+- Create correct DNS records before attaching custom domains; do not leave pending hostnames and fix DNS later.
+- Record DNS type, target, proxy status, and bind order in `docs/deployment.md`.
+- Before deploy: run the project's local verify/test/build or preview steps. Commands belong in package scripts or `docs/`, not undocumented one-offs.
+
+### Data
+
+- D1 schema is managed only via Wrangler migrations under `apps/api/migrations/` (or the path named in docs). Do not change production schema in the Dashboard.
+- Before schema changes: update `docs/database.md`, then add a migration; apply with `wrangler d1 migrations create/apply/list`.
+
+### Languages and apps
+
+- API/proxy: TypeScript on Cloudflare Workers.
+- Web: Vue.js + Vite + TypeScript on Cloudflare Pages.
+- Prefer TypeScript for tests, tooling, and config when practical. Plain JS only when a tool or platform requires it.
+- Do not introduce Rust, Go, Python, or other primary languages in API/web without a docs rationale.
+- Scaffold with official tools (`npm create cloudflare`, `npm create vite`, etc.) unless docs record why a manual layout is required.
+
+### Architecture
+
+- Follow the monorepo layout in `docs/project-structure.md` once it exists; keep modules with clear boundaries.
+- Entry files wire routes and dependencies; put logic in focused modules (`routes/`, `auth/`, `proxy/`, `services/`, `http/`, `utils/`, etc.).
+- Vue: split into `layouts/`, `views/`, `components/`, `composables/`, `services/`, `types/`, `utils/`; keep `App.vue` thin.
+- Do not add packages or abstractions without a clear ownership and test approach. Prefer refactoring a bad structure (docs first if behavior/architecture changes) over stacking patches.
+
+## LLM API proxy
+
+### Proxy behavior
+
+- Primary product is an LLM API proxy (prefer OpenAI-compatible routes such as `/v1/chat/completions`) plus a small admin/web UI.
+- Preserve end-to-end streaming (SSE / chunked responses). Do not buffer an entire upstream stream in memory when proxying chat completions.
+- Upstream provider keys stay in Cloudflare secrets / `.dev.vars` only. Clients authenticate with project-issued keys or sessions—never with upstream keys.
+- Prefer multi-upstream failover (primary → backup providers) and short timeouts so one provider outage does not take down the service.
+- Rate limits and usage accounting must fail closed for abuse (reject over-quota) but must not crash the Worker or wipe unrelated state.
+- Do not log full prompts, completions, or secrets by default; if auditing is required, document retention and redaction in `docs/` first.
+
+### Auth
+
+- No password-based login for the admin/web UI.
+- Use OIDC (e.g. Google) for operator/admin sign-in; details (callback, session cookie, CSRF) live in `docs/auth.md`.
+- Client access to the proxy uses issued API keys (or another scheme defined in docs), stored hashed at rest when persisted in D1.
+
+### Admin UI UX
+
+- Cache-first is for admin metadata only (account display, issued key list metadata, usage summaries)—not for proxying LLM traffic.
+- If cache exists, show it first, then refresh in the background; on refresh failure, keep showing cache and surface a non-blocking error/retry.
+- Never put access tokens, refresh tokens, or session secrets in local UI cache.
+- Cache keys must be scoped to the signed-in user.
+
+### Naming
+
+- Fix clear typos or non-idiomatic names in code identifiers and filenames when touching that code; tell the user what was renamed. Do not rename user-facing product strings or deliberate spellings without asking.
+
+## Real data only (no fake data)
+
+- **Do not invent product data.** Lists and UI that represent real system state (models, accounts, usage, keys, profiles, plans, etc.) must come from live APIs, D1, or upstream provider responses—not hard-coded catalogs, dummy rows, or placeholder business content in app source.
+- **Frontend:** do not ship static fake arrays for models/accounts/usage/keys. Render only what the backend returns (empty list is fine if the API returns empty).
+- **Backend:** do not hard-code model IDs, account emails, usage percentages, or similar as if they were live. Prefer upstream endpoints (e.g. provider `/v1/models`, OAuth usage/profile) or persisted D1 rows created by real user/provider flows.
+- **Allowed exceptions:** unit-test fixtures and mocks in `tests/`; docs/examples with explicit placeholders; pure UI chrome (labels, empty-state copy). If a live source is missing, return empty/`available: false` and document the gap—do not fabricate a convincing list.
+- When existing code uses hard-coded product lists, treat that as debt: replace with API-sourced data when touching that area (or when the user asks).
