@@ -90,11 +90,9 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
       if (blocks && blocks.some((b) => b.type === "tool_result")) {
         for (const b of blocks) {
           if (b.type === "tool_result") {
-            messages.push({
-              role: "tool",
-              tool_call_id: b.tool_use_id,
-              content: contentToText(b.content),
-            })
+            const { toolMessage, imageMessage } = toolResultToOpenAI(b.tool_use_id, b.content)
+            messages.push(toolMessage)
+            if (imageMessage) messages.push(imageMessage)
           }
         }
         const nonTool = blocks.filter((b) => b.type !== "tool_result")
@@ -143,19 +141,37 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
   }
 
   if (Array.isArray(cleaned.tools)) {
-    out.tools = (cleaned.tools as Array<Record<string, unknown>>).map((t) => {
-      if (t && typeof t === "object" && t.name && !t.function) {
-        return {
+    const tools: unknown[] = []
+    for (const t of cleaned.tools as Array<Record<string, unknown>>) {
+      if (!t || typeof t !== "object" || t.function) {
+        // Not a plain object, or already OpenAI-shaped — pass through.
+        tools.push(t)
+        continue
+      }
+      const hasInputSchema = "input_schema" in t
+      const type = typeof t.type === "string" ? t.type : undefined
+      if (type && type !== "custom" && !hasInputSchema) {
+        // Anthropic server-side tool (web_search_*, bash_*, text_editor_*,
+        // computer_*, code_execution_*, ...). Grok/codex cannot execute
+        // these; forwarding a fake empty-schema function would invite an
+        // uncallable tool call, so drop it instead of converting.
+        continue
+      }
+      if (t.name) {
+        // Client-defined tool: has input_schema, or type is absent/"custom".
+        tools.push({
           type: "function",
           function: {
             name: t.name,
             description: t.description,
             parameters: t.input_schema ?? { type: "object", properties: {} },
           },
-        }
+        })
+        continue
       }
-      return t
-    })
+      tools.push(t)
+    }
+    out.tools = tools
   }
   if (cleaned.tool_choice) {
     out.tool_choice = mapAnthropicToolChoice(cleaned.tool_choice)
@@ -165,12 +181,21 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
     if (of.type === "json_schema" && of.schema) {
       out.response_format = {
         type: "json_schema",
-        json_schema: { schema: of.schema },
+        json_schema: { name: "response", schema: of.schema },
       }
     }
   }
-  // optional extension if clients send reasoning_effort on Anthropic body
-  if (cleaned.reasoning_effort != null) out.reasoning_effort = cleaned.reasoning_effort
+  // Reasoning is effort-only: `thinking`/`budget_tokens` is never read here.
+  // `reasoning_effort` is a nonstandard extension some Anthropic-shaped
+  // clients send directly; `output_config.effort` (the native Anthropic
+  // field) is the fallback when that is absent. Explicit reasoning_effort
+  // always wins.
+  const outputConfig = cleaned.output_config as { effort?: unknown } | undefined
+  if (cleaned.reasoning_effort != null) {
+    out.reasoning_effort = cleaned.reasoning_effort
+  } else if (typeof outputConfig?.effort === "string") {
+    out.reasoning_effort = outputConfig.effort
+  }
 
   return out
 }
@@ -206,6 +231,53 @@ function anthropicBlocksToOpenAIContent(
   }
   if (onlyText) return textJoined
   return parts.length ? parts : textJoined
+}
+
+/**
+ * Anthropic `tool_result` → OpenAI `role: "tool"` message. OpenAI's tool
+ * message has no multi-part (text + image) shape, so when the result
+ * contains `image` blocks: the tool message keeps the text plus a short
+ * placeholder line, and a separate `role: "user"` message carries the
+ * image(s) right after it — the same image conversion `anthropicBlocksToOpenAIContent`
+ * uses for regular user content. A tool_result with no images is unchanged.
+ */
+function toolResultToOpenAI(
+  toolUseId: unknown,
+  content: unknown,
+): { toolMessage: Record<string, unknown>; imageMessage: Record<string, unknown> | null } {
+  const blocks = Array.isArray(content) ? (content as Array<Record<string, unknown>>) : null
+  const images = blocks ? blocks.filter((b) => b.type === "image") : []
+  if (!blocks || images.length === 0) {
+    return {
+      toolMessage: {
+        role: "tool",
+        tool_call_id: toolUseId,
+        content: contentToText(content),
+      },
+      imageMessage: null,
+    }
+  }
+  const text = blocks
+    .filter((b) => b.type === "text")
+    .map((b) => String(b.text ?? ""))
+    .join("")
+  const placeholder =
+    images.length === 1 ? "[image attached below]" : `[${images.length} images attached below]`
+  const imageParts = anthropicBlocksToOpenAIContent(images)
+  return {
+    toolMessage: {
+      role: "tool",
+      tool_call_id: toolUseId,
+      content: text ? `${text}\n${placeholder}` : placeholder,
+    },
+    imageMessage: {
+      role: "user",
+      content: [
+        { type: "text", text: `[Image(s) from tool result ${toolUseId}]` },
+        ...(Array.isArray(imageParts) ? imageParts : []),
+      ],
+    },
+  }
 }
 
 function mapAnthropicToolChoice(tc: unknown): unknown {
@@ -605,6 +677,20 @@ export function openaiSseToAnthropicStream(
             }
             try {
               const json = JSON.parse(data) as Record<string, unknown>
+              if (stopped) continue
+              // A top-level `error` object with no `choices` (codex mid-turn
+              // failure, relayed as an OpenAI-shaped error line) has no
+              // Anthropic chunk equivalent — surface it as its own event and
+              // end the message here; no message_delta/message_stop after it.
+              const errorObj = json.error as { message?: string } | undefined
+              if (errorObj && !("choices" in json)) {
+                emitEvent("error", {
+                  type: "error",
+                  error: { type: "api_error", message: errorObj.message || "upstream error" },
+                })
+                stopped = true
+                continue
+              }
               // Usage rides on a final chunk that carries no choices, so read
               // it before the choice guard below discards that chunk.
               const usage = json.usage as
@@ -933,6 +1019,15 @@ export function anthropicSseToOpenAIStream(
   // SSE event name must survive chunk boundaries: the `event:` line and its
   // `data:` line routinely arrive in different reads.
   let event = ""
+  // Usage rides on message_start (input side) and message_delta (output
+  // side), the same fields anthropicToOpenAIResponse sums for the non-stream
+  // response. null until an actual usage object is seen.
+  let promptTokens: number | null = null
+  let completionTokens: number | null = null
+  let sawUsage = false
+  // Set once the message has concluded — normally or via a mid-stream
+  // `event: error` — so nothing more is emitted after.
+  let stopped = false
 
   return new ReadableStream({
     async start(controller) {
@@ -971,7 +1066,25 @@ export function anthropicSseToOpenAIStream(
               if (!data) continue
               try {
                 const json = JSON.parse(data) as Record<string, unknown>
-                if (event === "content_block_start") {
+                if (stopped) {
+                  event = ""
+                  continue
+                }
+                if (event === "message_start") {
+                  const msg = json.message as
+                    | { usage?: Record<string, number> }
+                    | undefined
+                  const usage = msg?.usage
+                  if (usage) {
+                    // Same summation anthropicToOpenAIResponse uses for the
+                    // non-stream response: cache tokens count as prompt tokens.
+                    promptTokens =
+                      (usage.input_tokens ?? 0) +
+                      (usage.cache_read_input_tokens ?? 0) +
+                      (usage.cache_creation_input_tokens ?? 0)
+                    sawUsage = true
+                  }
+                } else if (event === "content_block_start") {
                   const block = json.content_block as
                     | { type?: string; id?: string; name?: string }
                     | undefined
@@ -1062,8 +1175,21 @@ export function anthropicSseToOpenAIStream(
                   if (d?.stop_reason === "tool_use") finishReason = "tool_calls"
                   else if (d?.stop_reason === "max_tokens") finishReason = "length"
                   else if (d?.stop_reason) finishReason = "stop"
+                  const u = json.usage as
+                    | { input_tokens?: number; output_tokens?: number }
+                    | undefined
+                  if (u) {
+                    if (typeof u.output_tokens === "number") {
+                      completionTokens = u.output_tokens
+                      sawUsage = true
+                    }
+                    if (typeof u.input_tokens === "number") {
+                      promptTokens = u.input_tokens
+                      sawUsage = true
+                    }
+                  }
                 } else if (event === "message_stop") {
-                  emit({
+                  const payload: Record<string, unknown> = {
                     id,
                     object: "chat.completion.chunk",
                     created: Math.floor(Date.now() / 1000),
@@ -1075,8 +1201,32 @@ export function anthropicSseToOpenAIStream(
                         finish_reason: finishReason ?? "stop",
                       },
                     ],
-                  })
+                  }
+                  // Same pattern codexSseToOpenAIStream uses: usage rides on
+                  // the finish chunk, only when some count was actually seen.
+                  if (sawUsage) {
+                    const prompt = promptTokens ?? 0
+                    const completion = completionTokens ?? 0
+                    payload.usage = {
+                      prompt_tokens: prompt,
+                      completion_tokens: completion,
+                      total_tokens: prompt + completion,
+                    }
+                  }
+                  emit(payload)
                   controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+                  stopped = true
+                } else if (event === "error") {
+                  const errObj = json.error as
+                    | { type?: string; message?: string }
+                    | undefined
+                  emit({
+                    error: {
+                      message: errObj?.message || "upstream error",
+                      type: errObj?.type || "api_error",
+                    },
+                  })
+                  stopped = true
                 }
               } catch {
                 /* ignore parse */

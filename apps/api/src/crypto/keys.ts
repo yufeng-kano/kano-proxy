@@ -1,18 +1,8 @@
 /** API key generation and hashing (no secrets in logs). */
 
 const KEY_PREFIX = "sk-kano-proxy-"
-
-export function generateApiKey(): { plaintext: string; prefix: string; hash: string } {
-  const bytes = new Uint8Array(24)
-  crypto.getRandomValues(bytes)
-  const body = base64Url(bytes)
-  const plaintext = `${KEY_PREFIX}${body}`
-  return {
-    plaintext,
-    prefix: plaintext.slice(0, 14),
-    hash: "", // filled async
-  }
-}
+/** Constant prefix (14 chars) + 6 distinguishing chars, so two keys are visually distinct. */
+const DISPLAY_PREFIX_LENGTH = 20
 
 export async function hashApiKey(plaintext: string): Promise<string> {
   const data = new TextEncoder().encode(plaintext)
@@ -30,7 +20,7 @@ export async function createApiKeyMaterial(): Promise<{
   const body = base64Url(bytes)
   const plaintext = `${KEY_PREFIX}${body}`
   const hash = await hashApiKey(plaintext)
-  return { plaintext, prefix: plaintext.slice(0, 14), hash }
+  return { plaintext, prefix: plaintext.slice(0, DISPLAY_PREFIX_LENGTH), hash }
 }
 
 export function extractBearer(authHeader: string | undefined): string | null {

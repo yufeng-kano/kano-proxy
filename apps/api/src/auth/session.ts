@@ -30,9 +30,24 @@ async function hmac(secret: string, data: string): Promise<string> {
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("")
 }
 
+/**
+ * Constant-time string equality — length check first, then XOR-accumulate
+ * over every char code regardless of where a mismatch occurs, so response
+ * timing cannot be used to guess a valid signature byte-by-byte.
+ */
+export function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return diff === 0
+}
+
 export async function createSession(
   env: Env,
   userId: string,
+  opts?: { secure?: boolean },
 ): Promise<{ id: string; cookie: string }> {
   const secret = env.SESSION_SECRET
   if (!secret) throw new Error("SESSION_SECRET is not configured")
@@ -44,7 +59,7 @@ export async function createSession(
     .bind(id, userId, expires, nowIso())
     .run()
   const sig = await signPayload(secret, id)
-  const cookie = `${COOKIE}=${id}.${sig}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}`
+  const cookie = `${COOKIE}=${id}.${sig}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${opts?.secure ? "; Secure" : ""}`
   return { id, cookie }
 }
 
@@ -52,8 +67,8 @@ export async function destroySession(env: Env, sessionId: string): Promise<void>
   await env.DB.prepare(`DELETE FROM sessions WHERE id = ?`).bind(sessionId).run()
 }
 
-export function clearSessionCookie(): string {
-  return `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`
+export function clearSessionCookie(secure?: boolean): string {
+  return `${COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`
 }
 
 export async function loadSessionUser(
@@ -66,7 +81,7 @@ export async function loadSessionUser(
   const [sessionId, sig] = match[1]!.split(".")
   if (!sessionId || !sig) return null
   const expect = await signPayload(env.SESSION_SECRET, sessionId)
-  if (expect !== sig) return null
+  if (!timingSafeEqual(expect, sig)) return null
   const row = await env.DB.prepare(
     `SELECT user_id, expires_at FROM sessions WHERE id = ?`,
   )

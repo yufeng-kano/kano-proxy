@@ -4,7 +4,8 @@
 
 - **No password login.**
 - Flow: Authorization Code + PKCE (preferred) or code flow suitable for Workers.
-- Session: HTTP-only secure cookie (`kano-proxy_session`), signed/encrypted with `SESSION_SECRET`.
+- Session: HTTP-only cookie (`kano-proxy_session`), HMAC-signed with `SESSION_SECRET`. The `Secure` attribute is set whenever the request that issued it was HTTPS — `createSession(env, userId, { secure })` / `clearSessionCookie(secure)` take an explicit flag; the callback and logout routes derive it from that request's own `protocol` — so local HTTP dev still gets a working cookie while production (always HTTPS behind the Worker) gets `Secure`.
+- Cookie signature verification (`loadSessionUser`) uses a constant-time comparison (`timingSafeEqual` in `auth/session.ts`), not `!==`, so response timing cannot be used to guess the HMAC byte-by-byte.
 - CSRF: state param on OAuth; same-site cookies for mutating `/api/*`.
 
 ### Config placeholders (never commit real values)
@@ -32,6 +33,12 @@ GOOGLE_REDIRECT_URI=http://127.0.0.1:8787/api/auth/callback
 | GET | `/api/auth/me` | Current user profile |
 
 Anyone with a Google account may register on first login (insert user row).
+
+## CORS
+
+- `/api/*` (session-cookie-authenticated admin JSON): origin-locked to `APP_URL`'s origin, `credentials: true` — only the admin SPA can make cookie-authenticated cross-origin requests. A request whose `Origin` does not match `APP_URL` gets no `Access-Control-Allow-Origin` header at all (browser blocks it), never a wildcard.
+- `/openai/*`, `/anthropic/*`, `/health`: permissive CORS (any origin), **no credentials**. Browser-based clients that authenticate with a project API key (never the session cookie) must be able to call these from any origin.
+- The session-loading middleware stays global (`app.use("*", ...)`) regardless of path — only the CORS policy is split.
 
 ## Client API keys
 

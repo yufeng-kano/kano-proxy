@@ -43,6 +43,8 @@ export type ChatCompletionRequest = {
   reasoning_effort?: ReasoningEffort
   /** OpenAI `stop` / Anthropic `stop_sequences`, forwarded verbatim. */
   stop?: string[]
+  /** OpenAI Chat Completions field. Forwarded to `codex` only; ignored elsewhere. */
+  prompt_cache_key?: string
   affinity?: AffinityIds
 }
 
@@ -61,6 +63,13 @@ export type ProviderAdapter = {
   ): Promise<Response>
   /** Optional native Anthropic Messages (claude-code only). */
   messages?(
+    env: Env,
+    account: AcquiredAccount,
+    body: unknown,
+    headers: Headers,
+  ): Promise<Response>
+  /** Optional native Anthropic count_tokens (claude-code only). Never streams. */
+  countTokens?(
     env: Env,
     account: AcquiredAccount,
     body: unknown,

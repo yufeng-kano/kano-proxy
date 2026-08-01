@@ -73,6 +73,10 @@ openaiRoutes.post("/chat/completions", async (c) => {
       : typeof body.max_completion_tokens === "number"
         ? body.max_completion_tokens
         : undefined
+  const promptCacheKey =
+    typeof body.prompt_cache_key === "string" && body.prompt_cache_key
+      ? body.prompt_cache_key
+      : undefined
 
   return dispatchChatCompletions(c.env, {
     userId,
@@ -90,6 +94,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
       response_format: body.response_format,
       reasoning_effort: effort,
       stop: stop.length ? stop : undefined,
+      prompt_cache_key: promptCacheKey,
       affinity: {
         convId: c.req.header("x-grok-conv-id"),
         sessionId: c.req.header("x-grok-session-id"),

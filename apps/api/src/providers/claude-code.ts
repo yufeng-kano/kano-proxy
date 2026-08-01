@@ -52,7 +52,9 @@ async function refreshClaude(
   return { row: account.row, credential: next }
 }
 
-function betaHeaders(extra?: string | null): string {
+const EFFORT_BETA = "effort-2025-11-24"
+
+export function betaHeaders(extra?: string | null): string {
   const base = [
     "oauth-2025-04-20",
     "claude-code-20250219",
@@ -66,6 +68,23 @@ function betaHeaders(extra?: string | null): string {
     }
   }
   return base.join(",")
+}
+
+/**
+ * anthropic-beta header for the native /anthropic passthrough. A client body
+ * carrying `output_config` needs the effort beta upstream, or Anthropic
+ * rejects/ignores `output_config` — add it automatically, deduped the same
+ * way client-supplied extras are (so a client that already sent it is not
+ * doubled).
+ */
+export function resolveBetaHeader(opts: {
+  clientBeta?: string | null
+  hasOutputConfig: boolean
+}): string {
+  const extras = [opts.clientBeta, opts.hasOutputConfig ? EFFORT_BETA : null]
+    .filter((v): v is string => !!v)
+    .join(",")
+  return betaHeaders(extras || null)
 }
 
 function prependRequiredSystem(body: Record<string, unknown>): Record<string, unknown> {
@@ -92,6 +111,35 @@ function prependRequiredSystem(body: Record<string, unknown>): Record<string, un
     ...body,
     system: [{ type: "text", text: REQUIRED_SYSTEM }],
   }
+}
+
+/**
+ * Shared native-passthrough forward for `/v1/messages` and
+ * `/v1/messages/count_tokens` — same auth injection, beta header resolution,
+ * and required-system prepend either endpoint needs.
+ */
+async function forwardToAnthropic(
+  url: string,
+  env: Env,
+  account: AcquiredAccount,
+  body: unknown,
+  headers: Headers,
+): Promise<Response> {
+  const acc = await refreshClaude(env, account)
+  const raw = typeof body === "object" && body ? { ...(body as object) } : {}
+  const patched = prependRequiredSystem(raw as Record<string, unknown>)
+  const clientBeta = headers.get("anthropic-beta")
+  const hasOutputConfig = "output_config" in patched
+  return fetch(url, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${acc.credential.access_token}`,
+      "content-type": "application/json",
+      "anthropic-version": headers.get("anthropic-version") || "2023-06-01",
+      "anthropic-beta": resolveBetaHeader({ clientBeta, hasOutputConfig }),
+    },
+    body: JSON.stringify(patched),
+  })
 }
 
 export const claudeCodeAdapter: ProviderAdapter = {
@@ -133,21 +181,17 @@ export const claudeCodeAdapter: ProviderAdapter = {
   },
 
   async messages(env, account, body, headers) {
-    const acc = await refreshClaude(env, account)
-    const raw = typeof body === "object" && body ? { ...(body as object) } : {}
-    const patched = prependRequiredSystem(raw as Record<string, unknown>)
-    const clientBeta = headers.get("anthropic-beta")
-    const res = await fetch(`${ANTHROPIC_API}/v1/messages`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${acc.credential.access_token}`,
-        "content-type": "application/json",
-        "anthropic-version": headers.get("anthropic-version") || "2023-06-01",
-        "anthropic-beta": betaHeaders(clientBeta),
-      },
-      body: JSON.stringify(patched),
-    })
-    return res
+    return forwardToAnthropic(`${ANTHROPIC_API}/v1/messages`, env, account, body, headers)
+  },
+
+  async countTokens(env, account, body, headers) {
+    return forwardToAnthropic(
+      `${ANTHROPIC_API}/v1/messages/count_tokens`,
+      env,
+      account,
+      body,
+      headers,
+    )
   },
 
   async chatCompletions(env, account, req) {
@@ -179,7 +223,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
         authorization: `Bearer ${acc.credential.access_token}`,
         "content-type": "application/json",
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": betaHeaders("effort-2025-11-24"),
+        "anthropic-beta": betaHeaders(EFFORT_BETA),
       },
       body: JSON.stringify(withSystem),
     })

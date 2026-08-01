@@ -96,30 +96,7 @@ export const codexAdapter: ProviderAdapter = {
     const chatgptAccountId =
       acc.credential.account_id || accountIdFromJwt(acc.credential.access_token) || ""
 
-    const input = openaiMessagesToCodexInput(req.messages)
-    const body: Record<string, unknown> = {
-      model: req.upstreamModel,
-      input,
-      stream: true, // codex backend is SSE-oriented
-    }
-    if (mapped.reasoning) body.reasoning = mapped.reasoning
-    if (req.tools) body.tools = mapTools(req.tools)
-    if (req.response_format) {
-      const rf = req.response_format as {
-        type?: string
-        json_schema?: { name?: string; schema?: unknown; strict?: boolean }
-      }
-      if (rf.type === "json_schema" && rf.json_schema?.schema) {
-        body.text = {
-          format: {
-            type: "json_schema",
-            name: rf.json_schema.name || "response",
-            schema: rf.json_schema.schema,
-            strict: rf.json_schema.strict ?? false,
-          },
-        }
-      }
-    }
+    const body = buildCodexRequestBody(req, mapped.reasoning)
 
     const res = await fetch(`${CODEX_BASE}/codex/responses`, {
       method: "POST",
@@ -158,6 +135,10 @@ export const codexAdapter: ProviderAdapter = {
     if (!res.body) return res
     const { collectCodexSse } = await import("../proxy/codex_openai")
     const openai = await collectCodexSse(res.body, req.upstreamModel)
+    if ("error" in openai) {
+      // response.failed / error mid-turn: never fabricate a 200 completion.
+      return Response.json(openai, { status: 502 })
+    }
     return Response.json(openai)
   },
 
@@ -196,18 +177,82 @@ export const codexAdapter: ProviderAdapter = {
   },
 }
 
+/**
+ * Pure builder for the `/codex/responses` request body — no network, so it is
+ * unit-testable directly. `reasoning` is passed in already mapped (the
+ * adapter resolves/validates `reasoning_effort` before calling this).
+ */
+export function buildCodexRequestBody(
+  req: Pick<
+    ChatCompletionRequest,
+    "upstreamModel" | "messages" | "tools" | "tool_choice" | "response_format" | "prompt_cache_key"
+  >,
+  reasoning?: { effort: string; summary: "auto" },
+): Record<string, unknown> {
+  const instructions = extractSystemInstructions(req.messages)
+  // `tools: []` counts as no tools — upstream may reject tool_choice without tools.
+  const hasTools = Array.isArray(req.tools) && req.tools.length > 0
+  const body: Record<string, unknown> = {
+    model: req.upstreamModel,
+    input: openaiMessagesToCodexInput(req.messages),
+    stream: true, // codex backend is SSE-oriented
+    store: false,
+  }
+  if (instructions) body.instructions = instructions
+  if (reasoning) body.reasoning = reasoning
+  if (hasTools) body.tools = mapTools(req.tools)
+  const toolChoice = mapCodexToolChoice(req.tool_choice, hasTools)
+  if (toolChoice !== undefined) body.tool_choice = toolChoice
+  if (req.response_format) {
+    const rf = req.response_format as {
+      type?: string
+      json_schema?: { name?: string; schema?: unknown; strict?: boolean }
+    }
+    if (rf.type === "json_schema" && rf.json_schema?.schema) {
+      body.text = {
+        format: {
+          type: "json_schema",
+          name: rf.json_schema.name || "response",
+          schema: rf.json_schema.schema,
+          strict: rf.json_schema.strict ?? false,
+        },
+      }
+    }
+  }
+  if (req.prompt_cache_key) body.prompt_cache_key = req.prompt_cache_key
+  return body
+}
+
+/**
+ * OpenAI Chat Completions `tool_choice` → Responses flattened shape.
+ * Upstream may reject `tool_choice` sent without `tools`, so callers must
+ * gate `hasTools` themselves and drop an `undefined` result.
+ */
+function mapCodexToolChoice(toolChoice: unknown, hasTools: boolean): unknown {
+  if (!hasTools) return undefined
+  if (toolChoice == null) return "auto"
+  if (toolChoice === "auto" || toolChoice === "none" || toolChoice === "required") {
+    return toolChoice
+  }
+  if (typeof toolChoice === "object") {
+    const tc = toolChoice as { type?: string; function?: { name?: string } }
+    if (tc.type === "function" && tc.function?.name) {
+      return { type: "function", name: tc.function.name }
+    }
+  }
+  return toolChoice
+}
+
+/**
+ * `role: "system"` messages are pulled out of the message list entirely —
+ * they become the top-level Responses `instructions` field (see
+ * `extractSystemInstructions`), not fake `role: "user"` input items.
+ */
 function openaiMessagesToCodexInput(messages: unknown[]): unknown[] {
   const input: unknown[] = []
   for (const m of messages as Array<Record<string, unknown>>) {
     const role = String(m.role ?? "")
-    if (role === "system") {
-      // folded into instructions by caller if needed; keep as message
-      input.push({
-        role: "user",
-        content: [{ type: "input_text", text: `[system]\n${contentText(m.content)}` }],
-      })
-      continue
-    }
+    if (role === "system") continue
     if (role === "user") {
       input.push({
         role: "user",
@@ -216,6 +261,15 @@ function openaiMessagesToCodexInput(messages: unknown[]): unknown[] {
       continue
     }
     if (role === "assistant") {
+      // Text precedes the tool calls it led up to — matches the order the
+      // original message carried them in.
+      const text = contentText(m.content)
+      if (text) {
+        input.push({
+          role: "assistant",
+          content: [{ type: "output_text", text }],
+        })
+      }
       const toolCalls = m.tool_calls as Array<Record<string, unknown>> | undefined
       if (toolCalls?.length) {
         for (const tc of toolCalls) {
@@ -228,13 +282,6 @@ function openaiMessagesToCodexInput(messages: unknown[]): unknown[] {
           })
         }
       }
-      const text = contentText(m.content)
-      if (text) {
-        input.push({
-          role: "assistant",
-          content: [{ type: "output_text", text }],
-        })
-      }
       continue
     }
     if (role === "tool") {
@@ -246,6 +293,17 @@ function openaiMessagesToCodexInput(messages: unknown[]): unknown[] {
     }
   }
   return input
+}
+
+/** Join every `role: "system"` message's text, in order, with a blank line. */
+function extractSystemInstructions(messages: unknown[]): string {
+  const chunks: string[] = []
+  for (const m of messages as Array<Record<string, unknown>>) {
+    if (String(m.role ?? "") !== "system") continue
+    const text = contentText(m.content)
+    if (text) chunks.push(text)
+  }
+  return chunks.join("\n\n")
 }
 
 function contentText(content: unknown): string {

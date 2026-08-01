@@ -28,7 +28,9 @@ authRoutes.get("/callback", async (c) => {
   try {
     const profile = await completeGoogleLogin(c.env, code, state)
     const user = await upsertGoogleUser(c.env.DB, profile)
-    const { cookie } = await createSession(c.env, user.id)
+    const { cookie } = await createSession(c.env, user.id, {
+      secure: new URL(c.req.url).protocol === "https:",
+    })
     const app = (c.env.APP_URL || "").replace(/\/$/, "")
     return new Response(null, {
       status: 302,
@@ -49,7 +51,7 @@ authRoutes.post("/logout", async (c) => {
   return new Response(JSON.stringify({ ok: true }), {
     headers: {
       "content-type": "application/json",
-      "set-cookie": clearSessionCookie(),
+      "set-cookie": clearSessionCookie(new URL(c.req.url).protocol === "https:"),
     },
   })
 })

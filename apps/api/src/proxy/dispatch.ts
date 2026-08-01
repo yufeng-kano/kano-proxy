@@ -70,6 +70,13 @@ export async function dispatchChatCompletions(
     if (shouldBenchStatus(res.status)) {
       await benchAccount(env, opts.userId, opts.provider, account.row.id)
       exclude.add(account.row.id)
+      if (lastResponse) {
+        try {
+          await lastResponse.body?.cancel()
+        } catch {
+          /* */
+        }
+      }
       lastResponse = res
       continue
     }
@@ -143,9 +150,11 @@ export async function dispatchChatCompletions(
 }
 
 /**
- * Native Anthropic Messages for claude-code only (passthrough + auth).
- * cache_control is never rewritten — body goes through adapter.messages as-is
- * aside from fixed system prepend inside the adapter.
+ * Native Anthropic Messages (or count_tokens) for claude-code only
+ * (passthrough + auth). cache_control is never rewritten — body goes through
+ * the adapter method as-is aside from fixed system prepend inside the
+ * adapter. `endpoint` selects which adapter method carries the request;
+ * both share this same bench/failover loop rather than duplicating it.
  */
 export async function dispatchAnthropicMessages(
   env: Env,
@@ -155,13 +164,16 @@ export async function dispatchAnthropicMessages(
     body: unknown
     headers: Headers
     model: string
+    endpoint?: "messages" | "count_tokens"
   },
 ): Promise<Response> {
   const started = Date.now()
   const adapter = getAdapter("claude-code")
-  if (!adapter.messages) {
+  const endpoint = opts.endpoint ?? "messages"
+  const call = endpoint === "count_tokens" ? adapter.countTokens : adapter.messages
+  if (!call) {
     return Response.json(
-      { type: "error", error: { type: "api_error", message: "messages not supported" } },
+      { type: "error", error: { type: "api_error", message: `${endpoint} not supported` } },
       { status: 500 },
     )
   }
@@ -170,7 +182,18 @@ export async function dispatchAnthropicMessages(
   for (let i = 0; i < 8; i++) {
     const account = await acquireAccount(env, opts.userId, "claude-code", exclude)
     if (!account) {
-      if (last) return last
+      if (last) {
+        await logRequest(env, {
+          userId: opts.userId,
+          apiKeyId: opts.apiKeyId,
+          provider: "claude-code",
+          model: opts.model,
+          statusCode: last.status,
+          latencyMs: Date.now() - started,
+          errorCode: "upstream_error",
+        })
+        return last
+      }
       return Response.json(
         {
           type: "error",
@@ -184,10 +207,17 @@ export async function dispatchAnthropicMessages(
     }
     let refreshed = account
     if (adapter.refreshIfNeeded) refreshed = await adapter.refreshIfNeeded(env, account)
-    const res = await adapter.messages(env, refreshed, opts.body, opts.headers)
+    const res = await call(env, refreshed, opts.body, opts.headers)
     if (shouldBenchStatus(res.status)) {
       await benchAccount(env, opts.userId, "claude-code", account.row.id)
       exclude.add(account.row.id)
+      if (last) {
+        try {
+          await last.body?.cancel()
+        } catch {
+          /* */
+        }
+      }
       last = res
       continue
     }

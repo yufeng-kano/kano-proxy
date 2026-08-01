@@ -13,7 +13,18 @@ type CodexEvent = {
   }
   response?: {
     usage?: { input_tokens?: number; output_tokens?: number }
+    error?: { message?: string }
   }
+  /** Present on a top-level `response.failed` / `error` event. */
+  error?: { message?: string }
+  message?: string
+}
+
+/** `ev.response?.error?.message`, `ev.error?.message`, `ev.message`, then a fallback. */
+function codexErrorMessage(ev: CodexEvent): string {
+  return (
+    ev.response?.error?.message || ev.error?.message || ev.message || "codex upstream failure"
+  )
 }
 
 export function codexSseToOpenAIStream(
@@ -101,6 +112,20 @@ export function codexSseToOpenAIStream(
         )
         controller.enqueue(encoder.encode("data: [DONE]\n\n"))
       }
+      /**
+       * `response.failed` / `error`: a single OpenAI-shaped error line, no
+       * finish chunk, no [DONE] — marks the stream finished so the trailing
+       * `finish()` at read-loop end is a no-op and no further events process.
+       */
+      const emitError = (message: string) => {
+        if (finished) return
+        finished = true
+        controller.enqueue(
+          encoder.encode(
+            `data: ${JSON.stringify({ error: { message, type: "upstream_error" } })}\n\n`,
+          ),
+        )
+      }
       try {
         for (;;) {
           const { done, value } = await reader.read()
@@ -124,6 +149,10 @@ export function codexSseToOpenAIStream(
                 ensureRole()
                 if (ev.type === "response.output_text.delta") {
                   chunk({ delta: { content: text } })
+                } else {
+                  // De-facto extension field (DeepSeek/OpenRouter convention);
+                  // OpenAI Chat Completions has no first-party reasoning field.
+                  chunk({ delta: { reasoning_content: text } })
                 }
               } else if (
                 ev.type === "response.output_item.added" &&
@@ -190,6 +219,8 @@ export function codexSseToOpenAIStream(
                       }
                     : undefined,
                 )
+              } else if (ev.type === "response.failed" || ev.type === "error") {
+                emitError(codexErrorMessage(ev))
               }
             } catch {
               /* */
@@ -198,6 +229,7 @@ export function codexSseToOpenAIStream(
         }
         // Upstream ended without response.completed: terminate the stream
         // properly so downstream consumers do not hang on a half-open turn.
+        // A no-op when emitError() already finished the stream.
         finish()
         controller.close()
       } catch (e) {
@@ -207,15 +239,20 @@ export function codexSseToOpenAIStream(
   })
 }
 
+/** Discriminant used by callers to tell a real completion from an upstream failure. */
+export type CodexUpstreamError = { error: { message: string; type: "upstream_error" } }
+
 export async function collectCodexSse(
   body: ReadableStream<Uint8Array>,
   model: string,
-): Promise<Record<string, unknown>> {
+): Promise<Record<string, unknown> | CodexUpstreamError> {
   const decoder = new TextDecoder()
   const reader = body.getReader()
   let buffer = ""
   let text = ""
+  let reasoningText = ""
   let usage: { input_tokens?: number; output_tokens?: number } | undefined
+  let error: CodexUpstreamError["error"] | null = null
   const tool_calls: Array<Record<string, unknown>> = []
   for (;;) {
     const { done, value } = await reader.read()
@@ -227,9 +264,20 @@ export async function collectCodexSse(
       if (!line.startsWith("data:")) continue
       const data = line.slice(5).trim()
       if (!data) continue
+      // Stop processing once a failure event lands: the turn is over, and a
+      // later well-formed event must not overwrite the error with a fake
+      // partial success.
+      if (error) continue
       try {
         const ev = JSON.parse(data) as CodexEvent
+        if (ev.type === "response.failed" || ev.type === "error") {
+          error = { message: codexErrorMessage(ev), type: "upstream_error" }
+          continue
+        }
         if (ev.type === "response.output_text.delta" && ev.delta) text += ev.delta
+        if (ev.type === "response.reasoning_summary_text.delta" && ev.delta) {
+          reasoningText += ev.delta
+        }
         if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
           tool_calls.push({
             id: ev.item.call_id,
@@ -251,6 +299,7 @@ export async function collectCodexSse(
       }
     }
   }
+  if (error) return { error }
   return {
     id: `chatcmpl_${Date.now()}`,
     object: "chat.completion",
@@ -262,6 +311,8 @@ export async function collectCodexSse(
         message: {
           role: "assistant",
           content: text || null,
+          // De-facto extension field (DeepSeek/OpenRouter convention).
+          reasoning_content: reasoningText || undefined,
           tool_calls: tool_calls.length ? tool_calls : undefined,
         },
         finish_reason: tool_calls.length ? "tool_calls" : "stop",

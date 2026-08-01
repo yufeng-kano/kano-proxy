@@ -1138,3 +1138,330 @@ describe("anthropicSseToOpenAIStream tool_use", () => {
     expect(out).toContain("data: [DONE]")
   })
 })
+
+describe("anthropicSseToOpenAIStream usage + error", () => {
+  function chunked(text: string, size: number): ReadableStream<Uint8Array> {
+    const bytes = new TextEncoder().encode(text)
+    return new ReadableStream({
+      start(c) {
+        for (let i = 0; i < bytes.length; i += size) c.enqueue(bytes.subarray(i, i + size))
+        c.close()
+      },
+    })
+  }
+
+  async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
+    const reader = stream.getReader()
+    let out = ""
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      out += new TextDecoder().decode(value)
+    }
+    return out
+  }
+
+  it("attaches usage on the final chunk: message_start input (+ cache fields) and message_delta output", async () => {
+    const sse = [
+      "event: message_start",
+      'data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10,"cache_read_input_tokens":2,"cache_creation_input_tokens":3}}}',
+      "",
+      "event: content_block_start",
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+      "",
+      "event: content_block_delta",
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}',
+      "",
+      "event: content_block_stop",
+      'data: {"type":"content_block_stop","index":0}',
+      "",
+      "event: message_delta",
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}',
+      "",
+      "event: message_stop",
+      'data: {"type":"message_stop"}',
+      "",
+    ].join("\n")
+    const out = await collect(anthropicSseToOpenAIStream(chunked(sse, 17), "claude-code/m"))
+    // 10 + 2 + 3 input-side tokens, same summation anthropicToOpenAIResponse uses.
+    expect(out).toContain('"prompt_tokens":15')
+    expect(out).toContain('"completion_tokens":7')
+    expect(out).toContain('"total_tokens":22')
+    expect(out).toContain('"finish_reason":"stop"')
+    expect(out).toContain("data: [DONE]")
+  })
+
+  it("omits usage entirely when neither message_start nor message_delta reported any", async () => {
+    const sse = [
+      "event: message_start",
+      'data: {"type":"message_start","message":{"id":"msg_1"}}',
+      "",
+      "event: message_stop",
+      'data: {"type":"message_stop"}',
+      "",
+    ].join("\n")
+    const out = await collect(anthropicSseToOpenAIStream(chunked(sse, 13), "claude-code/m"))
+    expect(out).not.toContain('"usage"')
+    expect(out).toContain("data: [DONE]")
+  })
+
+  it("converts a mid-stream event: error into an OpenAI error line — no finish chunk, no [DONE]", async () => {
+    const sse = [
+      "event: message_start",
+      'data: {"type":"message_start","message":{"id":"msg_1"}}',
+      "",
+      "event: content_block_start",
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+      "",
+      "event: content_block_delta",
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+      "",
+      "event: error",
+      'data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+      "",
+    ].join("\n")
+    const out = await collect(anthropicSseToOpenAIStream(chunked(sse, 19), "claude-code/m"))
+    expect(out).toContain('"content":"partial"')
+    expect(out).toContain('data: {"error":{"message":"Overloaded","type":"overloaded_error"}}')
+    expect(out).not.toContain("[DONE]")
+    expect(out).not.toContain('"finish_reason":"stop"')
+  })
+
+  it("falls back to a generic message/type when the error event omits them", async () => {
+    const sse = ["event: error", 'data: {"type":"error"}', ""].join("\n")
+    const out = await collect(anthropicSseToOpenAIStream(chunked(sse, 5), "claude-code/m"))
+    expect(out).toContain('data: {"error":{"message":"upstream error","type":"api_error"}}')
+  })
+})
+
+describe("anthropicToOpenAIChatRequest: server-side tool dropping", () => {
+  it("drops an Anthropic server-side tool (no input_schema, non-custom type)", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+    })
+    expect(out.tools).toEqual([])
+  })
+
+  it("still converts a custom tool with input_schema", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        {
+          type: "custom",
+          name: "lookup",
+          description: "d",
+          input_schema: { type: "object", properties: { q: { type: "string" } } },
+        },
+      ],
+    })
+    expect(out.tools).toEqual([
+      {
+        type: "function",
+        function: {
+          name: "lookup",
+          description: "d",
+          parameters: { type: "object", properties: { q: { type: "string" } } },
+        },
+      },
+    ])
+  })
+
+  it("still converts a client tool with no type field at all", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "lookup", description: "d" }],
+    })
+    expect(out.tools).toEqual([
+      {
+        type: "function",
+        function: { name: "lookup", description: "d", parameters: { type: "object", properties: {} } },
+      },
+    ])
+  })
+
+  it("passes an already-OpenAI-shaped tool through unchanged", () => {
+    const openaiTool = {
+      type: "function",
+      function: { name: "lookup", parameters: { type: "object", properties: {} } },
+    }
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [openaiTool],
+    })
+    expect(out.tools).toEqual([openaiTool])
+  })
+
+  it("drops server tools alongside a client tool in the same request", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [
+        { type: "bash_20250124", name: "bash" },
+        { name: "lookup", input_schema: { type: "object", properties: {} } },
+      ],
+    })
+    expect(out.tools).toEqual([
+      {
+        type: "function",
+        function: { name: "lookup", description: undefined, parameters: { type: "object", properties: {} } },
+      },
+    ])
+  })
+})
+
+describe("anthropicToOpenAIChatRequest: tool_result images", () => {
+  it("leaves a text-only tool_result unchanged (no follow-up user message)", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "plain text result" }],
+        },
+      ],
+    })
+    expect(out.messages).toEqual([
+      { role: "tool", tool_call_id: "t1", content: "plain text result" },
+    ])
+  })
+
+  it("re-attaches a single image as a follow-up user message with a placeholder in the tool message", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                { type: "text", text: "here is a screenshot" },
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "abc123" },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    expect(out.messages).toEqual([
+      {
+        role: "tool",
+        tool_call_id: "t1",
+        content: "here is a screenshot\n[image attached below]",
+      },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "[Image(s) from tool result t1]" },
+          {
+            type: "image_url",
+            image_url: { url: "data:image/png;base64,abc123" },
+          },
+        ],
+      },
+    ])
+  })
+
+  it("counts multiple images in the placeholder and forwards every image_url part", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t2",
+              content: [
+                { type: "image", source: { type: "url", url: "https://example.com/a.png" } },
+                { type: "image", source: { type: "url", url: "https://example.com/b.png" } },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    const [toolMessage, imageMessage] = out.messages as Array<Record<string, unknown>>
+    expect(toolMessage).toEqual({
+      role: "tool",
+      tool_call_id: "t2",
+      content: "[2 images attached below]",
+    })
+    expect(imageMessage!.content).toEqual([
+      { type: "text", text: "[Image(s) from tool result t2]" },
+      { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+      { type: "image_url", image_url: { url: "https://example.com/b.png" } },
+    ])
+  })
+})
+
+describe("anthropicToOpenAIChatRequest: reasoning_effort / output_config.effort", () => {
+  it("falls back to output_config.effort when reasoning_effort is absent", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      output_config: { effort: "high" },
+    })
+    expect(out.reasoning_effort).toBe("high")
+  })
+
+  it("prefers an explicit reasoning_effort over output_config.effort", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      reasoning_effort: "low",
+      output_config: { effort: "high" },
+    })
+    expect(out.reasoning_effort).toBe("low")
+  })
+
+  it("leaves reasoning_effort unset when neither field is present", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(out.reasoning_effort).toBeUndefined()
+  })
+
+  it("ignores a non-string output_config.effort", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      output_config: { effort: 5 },
+    })
+    expect(out.reasoning_effort).toBeUndefined()
+  })
+
+  it("never reads thinking — budget_tokens is not mapped to reasoning_effort", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      thinking: { type: "enabled", budget_tokens: 4096 },
+    })
+    expect(out.reasoning_effort).toBeUndefined()
+    expect(JSON.stringify(out)).not.toContain("budget_tokens")
+  })
+})
+
+describe("anthropicToOpenAIChatRequest: output_format → json_schema", () => {
+  it("includes name: response inside json_schema", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      output_format: { type: "json_schema", schema: { type: "object", properties: {} } },
+    })
+    expect(out.response_format).toEqual({
+      type: "json_schema",
+      json_schema: { name: "response", schema: { type: "object", properties: {} } },
+    })
+  })
+})

@@ -11,13 +11,27 @@ import { providerRoutes } from "./routes/providers"
 
 const app = new Hono<HonoEnv>()
 
+// /api/*: admin SPA only, cookie-credentialed — origin must match APP_URL.
 app.use(
-  "*",
+  "/api/*",
   cors({
-    origin: (origin) => origin || "*",
+    origin: (origin, c) => {
+      const appOrigin = (c.env.APP_URL || "").replace(/\/$/, "")
+      try {
+        return origin && new URL(origin).origin === new URL(appOrigin).origin ? origin : ""
+      } catch {
+        return ""
+      }
+    },
     credentials: true,
   }),
 )
+
+// LLM surfaces + health: any origin, but never credentialed — clients
+// authenticate with a project API key, never the session cookie.
+app.use("/openai/*", cors())
+app.use("/anthropic/*", cors())
+app.use("/health", cors())
 
 app.use("*", async (c, next) => {
   c.set("user", null)
