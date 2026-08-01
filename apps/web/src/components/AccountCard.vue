@@ -63,6 +63,11 @@ const secondaryLine = computed(() => {
     null
   return plan ? formatPlan(plan) : null
 })
+
+/** Codex usage API blocked by chatgpt.com edge — not a real account failure. */
+function isUsageEdgeBlocked(error: string | null | undefined): boolean {
+  return !!error && /edge blocked|403 bot challenge/i.test(error)
+}
 </script>
 
 <template>
@@ -73,7 +78,11 @@ const secondaryLine = computed(() => {
         <span class="account-name">{{ displayName }}</span>
         <span v-if="secondaryLine" class="account-plan">{{ secondaryLine }}</span>
         <span class="status-pill">{{ account.status }}</span>
-        <span v-if="account.stale" class="status-pill" title="Usage may be stale">stale</span>
+        <span
+          v-if="account.stale && !isUsageEdgeBlocked(account.error)"
+          class="status-pill"
+          title="Usage may be stale"
+        >stale</span>
       </div>
       <div class="account-actions">
         <button
@@ -99,24 +108,19 @@ const secondaryLine = computed(() => {
     <div v-if="account.usage?.windows?.length" class="usage-list">
       <UsageBar v-for="(w, i) in account.usage.windows" :key="i" :window="w" />
     </div>
-    <p v-else class="faint" style="margin: 0; font-size: 12.5px">
+    <!-- Codex usage edge bot-wall: omit empty-state and error (chat still works) -->
+    <p
+      v-else-if="!isUsageEdgeBlocked(account.error)"
+      class="faint"
+      style="margin: 0; font-size: 12.5px"
+    >
       No usage data
-      <template v-if="account.error && /edge blocked|403/i.test(account.error)">
-        — ChatGPT blocks usage API from this host (account still usable for chat)
-      </template>
     </p>
 
     <p
-      v-if="account.error && !/edge blocked|403/i.test(account.error)"
+      v-if="account.error && !isUsageEdgeBlocked(account.error)"
       class="banner error"
       style="margin: 0"
-    >
-      {{ account.error }}
-    </p>
-    <p
-      v-else-if="account.error && /edge blocked|403/i.test(account.error)"
-      class="faint"
-      style="margin: 0; font-size: 12px"
     >
       {{ account.error }}
     </p>

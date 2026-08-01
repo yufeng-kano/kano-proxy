@@ -15,3 +15,11 @@ apps/web/dist/
 apps/api/.wrangler/
 *.log
 .turbo/
+
+# Local agent / operator private data (never open-source)
+# Template: .local.example/  — copy to .local/ and fill in.
+.local/
+
+# Operator production Wrangler config (real D1/KV ids + production host vars)
+# Template: apps/api/wrangler.production.example.toml
+apps/api/wrangler.production.toml

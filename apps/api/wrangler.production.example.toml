@@ -1,0 +1,33 @@
+# Copy to wrangler.production.toml (gitignored) and fill real ids.
+#   cp wrangler.production.example.toml wrangler.production.toml
+#
+# Deploy / migrate production:
+#   pnpm exec wrangler deploy --config wrangler.production.toml
+#   pnpm exec wrangler d1 migrations apply kano-proxy --remote --config wrangler.production.toml
+#   pnpm exec wrangler secret put SESSION_SECRET --config wrangler.production.toml
+#
+# Do not commit wrangler.production.toml.
+
+name = "kano-proxy"
+main = "src/index.ts"
+compatibility_date = "2025-02-24"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "kano-proxy"
+database_id = "<d1-database-id>"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "BENCH"
+id = "<kv-bench-id>"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "<kv-cache-id>"
+
+[vars]
+APP_URL = "https://<your-domain>"
+GOOGLE_REDIRECT_URI = "https://<your-domain>/api/auth/callback"
+CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"

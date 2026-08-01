@@ -21,7 +21,9 @@ kano-proxy/
         crypto/          # token encryption, key hash
         logging/
       migrations/
-      wrangler.toml
+      wrangler.toml                 # public placeholders (local dev)
+      wrangler.production.example.toml
+      wrangler.production.toml      # gitignored: real D1/KV + prod host
       package.json
     web/                 # Vue + Vite → Pages
       src/
@@ -34,6 +36,11 @@ kano-proxy/
   packages/
     shared/              # shared types (optional)
   docs/
+  scripts/
+    ci/                  # CI helpers (e.g. write production wrangler from env)
+  .github/workflows/     # release-deploy on GitHub Release publish
+  .local.example/        # committed templates for private operator data
+  .local/                # gitignored: real DNS, host, deploy notes (not open-source)
   package.json           # workspace root
 ```
 

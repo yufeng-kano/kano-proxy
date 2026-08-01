@@ -3,6 +3,12 @@ main = "src/index.ts"
 compatibility_date = "2025-02-24"
 compatibility_flags = ["nodejs_compat"]
 
+# Open-source defaults: placeholders only.
+# Your real D1/KV ids + production APP_URL live in the gitignored
+#   wrangler.production.toml
+# (copy from wrangler.production.example.toml). Deploy with:
+#   pnpm exec wrangler deploy --config wrangler.production.toml
+
 [[d1_databases]]
 binding = "DB"
 database_name = "kano-proxy"
@@ -19,11 +25,11 @@ id = "local-kano-proxy-cache-placeholder"
 
 [vars]
 # Local: land on Vite admin UI after Google OAuth.
-# Production: set APP_URL / GOOGLE_REDIRECT_URI to https://<your-domain> (wrangler secret/vars or Dashboard).
+# Production: set in wrangler.production.toml (not here — this file is public).
 APP_URL = "http://127.0.0.1:5173"
 GOOGLE_REDIRECT_URI = "http://127.0.0.1:8787/api/auth/callback"
 # Codex public client only allows this registered redirect (lincy). Manual paste completes the flow.
 CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
-# Secrets via .dev.vars / wrangler secret:
+# Secrets via .dev.vars / wrangler secret (never commit):
 # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, TOKEN_ENCRYPTION_KEY

@@ -19,18 +19,28 @@ Canonical project rules. Cursor / Agents / Claude entrypoints symlink to this fi
 
 ### Build artifacts and `.gitignore`
 
-- Confirm compile/tool outputs are gitignored (`node_modules/`, `dist/`, `.wrangler/`, `coverage/`, `.vite/`, `*.tsbuildinfo`, etc.).
+- Confirm compile/tool outputs are gitignored (`node_modules/`, `dist/`, `.wrangler/`, `coverage/`, `.vite/`, `*.tsbuildinfo`, `.local/`, etc.).
 - Do not delete ignored artifacts just to clean `git status`.
 - Delete artifacts only when the user asks, they cause errors, or a clean rebuild must be verified; explain why first.
 - New tools that create local outputs must update `.gitignore`.
+
+### Local agent data (`.local/`)
+
+- **`.local/`** at the repo root is **gitignored** private operator/agent context (not open-source): real DNS, production hostname, zone notes, Worker route bind order, deploy checklist progress, Cloudflare account labels.
+- **Template (committed):** `.local.example/`. First-time setup: `cp -R .local.example .local`, then fill in real values under `.local/` only.
+- Before deploy, DNS, custom domain, or production bootstrap work: **read `.local/` when it exists** (e.g. `dns.md`, `deploy-notes.md`) and prefer those facts over inventing hostnames.
+- **Never commit** `.local/`, never copy real hostnames/DNS/account ids from it into `docs/`, source, commits, PR text, or public examples. Public docs keep placeholders such as `<your-domain>`.
+- Prefer structured markdown under `.local/` (see `.local.example/`). Do not use `.local/` as a dump for API tokens or OAuth client secrets — those stay in `.dev.vars` / `wrangler secret` / CI secret stores.
+- If `.local/` is missing, continue with placeholders and ask the user for private values rather than writing them into tracked files.
+- **Production Wrangler config:** committed `apps/api/wrangler.toml` must keep **placeholder** D1/KV ids and local `APP_URL`. Real production ids + production host vars go only in gitignored `apps/api/wrangler.production.toml` (from `wrangler.production.example.toml`). Never commit production resource UUIDs or live hostnames into tracked wrangler/docs for this open-source repo. Deploy/migrate/secret with `--config wrangler.production.toml`.
 
 ### Secrets
 
 - Never commit secrets: API tokens, upstream LLM keys, OAuth client secrets, private keys, cookie/session secrets, or personal credentials.
 - Committed examples and docs may only use placeholders such as `<upstream-api-key>`, `<google-client-id>`.
-- Real secrets live in gitignored files (`.dev.vars`, `.env.local`) or Cloudflare / CI secret stores.
+- Real secrets live in gitignored files (`.dev.vars`, `.env.local`, **not** casually in git history) or Cloudflare / CI secret stores. Private non-secret ops context (DNS, hostnames) lives in **`.local/`**.
 - Read secrets from env or bindings; never hardcode them in source, docs, fixtures, or scripts.
-- Do not print secret values in replies, logs, or command summaries—only whether a key exists.
+- Do not print secret values in replies, logs, or command summaries—only whether a key exists. Same for raw private DNS/hostname tables from `.local/` unless the user is actively doing deploy work and needs them.
 - If unsure whether a value is secret, treat it as secret unless the user says it may be committed.
 
 ## Cloudflare stack and project structure
@@ -44,10 +54,20 @@ Canonical project rules. Cursor / Agents / Claude entrypoints symlink to this fi
 
 ### Domains and deploy
 
-- Web on Pages; API/proxy on Workers. Same-hostname routing (e.g. Pages at apex, Worker on `/v1/*` or `/api/*`) must be documented in `docs/deployment.md`.
+- Web on Pages; API/proxy on Workers. Same-hostname routing (e.g. Pages at apex, Worker on `/v1/*` or `/api/*`) must be documented in `docs/deployment.md` using **placeholders** only.
 - Create correct DNS records before attaching custom domains; do not leave pending hostnames and fix DNS later.
-- Record DNS type, target, proxy status, and bind order in `docs/deployment.md`.
+- Record **real** DNS type, target, proxy status, and bind order in **`.local/dns.md`** (gitignored). Do not put production hostnames or live DNS tables into tracked `docs/` unless the user explicitly wants them public.
 - Before deploy: run the project's local verify/test/build or preview steps. Commands belong in package scripts or `docs/`, not undocumented one-offs.
+
+### Releases, versioning, and CI deploy
+
+- **Production deploys are release-driven**, not every commit. Publishing a GitHub Release runs `.github/workflows/release-deploy.yml` (test → typecheck → build → D1 migrate remote → Worker deploy → Pages deploy). Manual re-run: `workflow_dispatch`.
+- **Versioning is SemVer** `MAJOR.MINOR.PATCH`, tags **`vMAJOR.MINOR.PATCH`** (e.g. `v1.2.0`).
+- **Default bump is minor:** treat the next release as **`x.(y+1).0`** (patch resets to `0`). Example: last tag `v1.2.3` → default next `v1.3.0`. Agents helping cut a release should propose this bump unless the user specifies otherwise.
+- **Major (`(x+1).0.0`)** only for breaking API/product changes the user acknowledges. **Patch (`x.y.(z+1)`)** only when the user asks for a fix-only release (no feature bump).
+- Do not auto-deploy from push to `main` or from PRs. PRs may get verify-only CI later; production stays on Release publish.
+- CI must **not** commit production ids: the workflow builds a temporary `wrangler.production.toml` from GitHub Secrets / Variables (see `docs/deployment.md`). Worker app secrets (`GOOGLE_*`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`) remain in Cloudflare secret store—not re-uploaded on every release unless the operator deliberately rotates them.
+- Never put `CLOUDFLARE_API_TOKEN` or production resource UUIDs into the repo; only GitHub Secrets / gitignored `.local/`.
 
 ### Data
 

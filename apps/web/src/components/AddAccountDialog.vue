@@ -194,9 +194,10 @@ function showImport() {
 
       <div v-else-if="step === 'codex'" class="stack">
         <p class="muted" style="margin: 0">
-          請留在錯誤頁，從網址列複製整段
+          1. Open authorize URL and approve.<br />
+          2. Stay on the error page, copy the full
           <code class="mono">http://localhost:1455/auth/callback?code=…</code>
-          貼到下方，再按 Complete。
+          URL from the address bar, paste it below, then click Complete.
         </p>
         <a
           v-if="authUrl"
@@ -208,7 +209,7 @@ function showImport() {
           Open authorize URL
         </a>
         <div class="field">
-          <label for="paste-codex">完整 callback URL</label>
+          <label for="paste-codex">Full callback URL</label>
           <textarea
             id="paste-codex"
             v-model="pasteCode"

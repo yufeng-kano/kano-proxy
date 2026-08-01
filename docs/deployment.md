@@ -15,13 +15,29 @@ APP_URL=https://<your-domain>
 GOOGLE_REDIRECT_URI=https://<your-domain>/api/auth/callback
 ```
 
+### Private operator data (not in git)
+
+Real production hostname, DNS tables, route bind order, and bootstrap scratch notes are **not** stored in this open docs tree. Use the gitignored local agent folder:
+
+```bash
+cp -R .local.example .local
+# edit .local/dns.md, .local/deploy-notes.md, …
+```
+
+| Path | Tracked? | Contents |
+|------|----------|----------|
+| `.local.example/` | yes | Placeholder templates |
+| `.local/` | **no** (gitignored) | Your real DNS, host, deploy checklist |
+
+Agents and humans should read `.local/` when present; never copy live values from it into commits or public docs. Secrets (OAuth client secret, session keys, etc.) still go in `.dev.vars` / `wrangler secret`, not only as notes in `.local/`.
+
 ### DNS (Cloudflare)
 
 | Type | Name | Target | Proxy |
 |------|------|--------|-------|
 | CNAME or A/AAAA | `<subdomain>` (or apex) | Pages/Workers as per CF attach flow | Proxied (orange cloud) |
 
-Record exact bind order when attaching custom domain in dashboard; prefer Worker routes + Pages project on same zone.
+Record exact bind order when attaching custom domain in dashboard; prefer Worker routes + Pages project on same zone. **Write the filled-in table to `.local/dns.md`**, not into this file.
 
 Suggested Worker routes (replace host):
 
@@ -43,7 +59,15 @@ npx wrangler kv namespace create kano-proxy-bench
 npx wrangler kv namespace create kano-proxy-cache
 ```
 
-Paste the printed D1 `database_id` and KV `id`s into `apps/api/wrangler.toml` (replace local placeholders). Resource titles use the full `kano-proxy` prefix; Worker script name and D1 `database_name` are both `kano-proxy`.
+**Do not put real production ids into the committed `apps/api/wrangler.toml`** (open-source placeholders only). Copy the production template and fill ids there:
+
+```bash
+cd apps/api
+cp wrangler.production.example.toml wrangler.production.toml
+# paste D1 database_id + KV ids; set APP_URL / GOOGLE_REDIRECT_URI to your domain
+```
+
+`wrangler.production.toml` is gitignored. Resource titles use the full `kano-proxy` prefix; Worker script name and D1 `database_name` are both `kano-proxy`. Optional: also mirror ids in gitignored `.local/deploy-notes.md`.
 
 ### Vars vs secrets
 
@@ -75,11 +99,19 @@ Google Cloud Console: authorize `https://<your-domain>/api/auth/callback`.
 
 ### Migrate + Worker
 
+Always pass the **production** config so public `wrangler.toml` placeholders are not used against prod:
+
 ```bash
 pnpm test
 pnpm --filter api typecheck
-cd apps/api && pnpm db:migrate:remote && pnpm deploy
+cd apps/api
+pnpm exec wrangler d1 migrations apply kano-proxy --remote --config wrangler.production.toml
+pnpm exec wrangler deploy --config wrangler.production.toml
+# secrets (values from .dev.vars or a password manager — never commit):
+#   printf %s "$VAL" | pnpm exec wrangler secret put NAME --config wrangler.production.toml
 ```
+
+Local dev keeps using `wrangler.toml` + `.dev.vars` (`pnpm --filter api dev`).
 
 ### Pages (admin UI)
 
@@ -161,3 +193,54 @@ pnpm --filter api typecheck
 pnpm --filter web build
 # then migrate:remote + api deploy + pages deploy (see Production deploy)
 ```
+
+## CI / GitHub Actions (release deploy)
+
+Production updates run when a **GitHub Release is published** (workflow: `.github/workflows/release-deploy.yml`). Pushing to `main` alone does **not** deploy.
+
+### Version tags
+
+| Policy | Rule |
+|--------|------|
+| Format | SemVer tag `vMAJOR.MINOR.PATCH` (e.g. `v1.2.0`) |
+| **Default next release** | **Minor bump** → `x.(y+1).0` (patch resets to `0`) |
+| Major | Breaking changes only, when intentional |
+| Patch | Fix-only when you explicitly want `x.y.(z+1)` |
+
+Example: last release `v0.3.1` → default next tag `v0.4.0`.
+
+```bash
+# after merging to main — default minor bump from latest tag
+git fetch --tags
+# e.g. create v0.4.0 on GitHub Releases UI, or:
+gh release create v0.4.0 --generate-notes
+```
+
+### Repository secrets (Settings → Secrets and variables → Actions)
+
+| Secret | Purpose |
+|--------|---------|
+| `CLOUDFLARE_API_TOKEN` | Deploy Worker/Pages, apply D1 migrations |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account id |
+| `CF_D1_DATABASE_ID` | Production D1 `database_id` |
+| `CF_KV_BENCH_ID` | Production KV id for `BENCH` |
+| `CF_KV_CACHE_ID` | Production KV id for `CACHE` |
+
+### Repository variables
+
+| Variable | Purpose |
+|----------|---------|
+| `APP_URL` | Production origin, e.g. `https://<your-domain>` (no trailing slash). Workflow sets `GOOGLE_REDIRECT_URI` to `$APP_URL/api/auth/callback`. |
+
+Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`) are **not** set by CI on each release; configure once with `wrangler secret put --config wrangler.production.toml`.
+
+### What the workflow does
+
+1. Checkout release commit  
+2. `pnpm install` → test → typecheck → web build  
+3. Write ephemeral `apps/api/wrangler.production.toml` from secrets/vars (not committed)  
+4. `wrangler d1 migrations apply --remote`  
+5. `wrangler deploy` (Worker)  
+6. `wrangler pages deploy` (project `kano-proxy`)
+
+Manual re-deploy of a ref: Actions → **Release deploy** → Run workflow.
