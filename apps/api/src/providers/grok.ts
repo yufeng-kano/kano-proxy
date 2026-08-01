@@ -127,7 +127,11 @@ export const grokAdapter: ProviderAdapter = {
     if (req.tools) body.tools = req.tools
     if (req.tool_choice) body.tool_choice = req.tool_choice
     if (req.response_format) body.response_format = req.response_format
+    if (req.stop?.length) body.stop = req.stop
     if (mapped.reasoning_effort) body.reasoning_effort = mapped.reasoning_effort
+    // Ask for the final usage chunk: without it every converted Anthropic
+    // response reports input_tokens 0 and clients cannot track context.
+    if (req.stream) body.stream_options = { include_usage: true }
     // strip temperature if present in original — already not copied
 
     const headers: Record<string, string> = {

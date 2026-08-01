@@ -49,6 +49,7 @@ Supported fields:
 | `tools` / `tool_choice` | Forwarded via adapter |
 | `response_format` | json_object / json_schema when upstream supports |
 | `reasoning_effort` | optional string (see below) |
+| `stop` | string or string[]; forwarded to `grok`, and as Anthropic `stop_sequences` to `claude-code`. Dropped for `codex` — the Responses API has no equivalent |
 | `temperature` | **Ignored** (stripped) |
 | image parts | Vision when upstream supports |
 
@@ -67,9 +68,17 @@ Same providers as the OpenAI surface. Model id is always `provider/upstream` (no
 | `model` provider | Behavior |
 |------------------|----------|
 | `claude-code` | Anthropic Messages **passthrough** to Claude Code OAuth upstream: auth inject, fixed Claude Code system prepend if missing (identical string every time), `anthropic-beta` merged, **`cache_control` never rewritten** (block- or top-level). Upstream `model` field is the bare id after the prefix. |
-| `grok` / `codex` | Convert Messages → internal Chat Completions shape → existing provider adapter → convert response/SSE back to Anthropic Messages. Streaming conversion includes **text and `tool_use`** (`input_json_delta` from OpenAI `tool_calls` argument chunks) so Claude Code / CC Switch can complete tool rounds. Anthropic `cache_control` has no equivalent → **stripped on convert** (not forwarded, not reinvented as Grok sticky headers). Optional client headers `x-grok-conv-id` / `x-grok-session-id` / `x-grok-turn-idx` are forwarded on the Grok path when present; never synthesized. |
+| `grok` / `codex` | Convert Messages → internal Chat Completions shape → existing provider adapter → convert response/SSE back to Anthropic Messages. Streaming conversion includes **text and `tool_use`** (`input_json_delta` from OpenAI `tool_calls` argument chunks) so Claude Code / CC Switch can complete tool rounds on **grok**. `stop_sequences` forwards as OpenAI `stop`; `system` blocks are joined with a blank line. **Known gap:** the codex *streaming* converter handles text only — a codex tool call is dropped on stream (the non-streaming path maps it). Claude Code always streams, so tool rounds do not work on `codex/*` today. Anthropic `cache_control` has no equivalent → **stripped on convert** (not forwarded, not reinvented as Grok sticky headers). Optional client headers `x-grok-conv-id` / `x-grok-session-id` / `x-grok-turn-idx` are forwarded on the Grok path when present; never synthesized. |
 
 `model` **must** be `provider/upstream` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`). Bare ids → `400` `invalid_model`.
+
+Converted streams follow the Anthropic content-block contract: blocks are strictly
+sequential (one open at a time, dense ascending indices, never reopened). Because an
+OpenAI chunk stream may interleave text with a call's `arguments` — and may alternate
+fragments between several `tool_calls[].index` values — the converter streams the first
+tool call live, buffers interleaved text into its own block, and emits any further calls
+complete at the end of the turn. `usage` is taken from the upstream final chunk
+(`stream_options.include_usage`) when the provider reports it.
 
 ### `GET /anthropic/v1/models`
 

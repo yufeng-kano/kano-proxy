@@ -64,6 +64,7 @@ Must work for coding agents:
 - `response_format` / JSON schema where upstream allows
 - `max_tokens` / Anthropic `max_tokens`
 - `reasoning_effort` (see [api.md](./api.md))
+- `stop` / Anthropic `stop_sequences`
 - `temperature` accepted but **stripped** (not forwarded)
 
 ## Usage UI

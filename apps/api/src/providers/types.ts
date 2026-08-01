@@ -41,6 +41,8 @@ export type ChatCompletionRequest = {
   tool_choice?: unknown
   response_format?: unknown
   reasoning_effort?: ReasoningEffort
+  /** OpenAI `stop` / Anthropic `stop_sequences`, forwarded verbatim. */
+  stop?: string[]
   affinity?: AffinityIds
 }
 

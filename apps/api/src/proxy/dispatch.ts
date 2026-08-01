@@ -266,6 +266,7 @@ export async function dispatchAnthropicViaOpenAI(
       tool_choice: converted.tool_choice,
       response_format: converted.response_format,
       reasoning_effort: effort,
+      stop: converted.stop,
       affinity: opts.affinity,
     },
   })
@@ -277,10 +278,16 @@ export async function dispatchAnthropicViaOpenAI(
       const text = await openaiRes.text()
       return anthropicErrorFromOpenAIText(text, openaiRes.status)
     }
-    return new Response(openaiSseToAnthropicStream(openaiRes.body, opts.rawModel), {
-      status: openaiRes.status,
-      headers: passthroughStreamHeaders(openaiRes.headers),
-    })
+    // Keepalive again on the converted stream: the upstream wrapper's comments
+    // are consumed by the converter, and no Anthropic event is emitted until
+    // the first token — a long reasoning turn would otherwise send zero bytes.
+    return new Response(
+      streamWithKeepalive(openaiSseToAnthropicStream(openaiRes.body, opts.rawModel)),
+      {
+        status: openaiRes.status,
+        headers: passthroughStreamHeaders(openaiRes.headers),
+      },
+    )
   }
 
   const text = await openaiRes.text()

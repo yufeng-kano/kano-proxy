@@ -59,6 +59,14 @@ openaiRoutes.post("/chat/completions", async (c) => {
   }
 
   // temperature intentionally stripped
+  const stopRaw = Array.isArray(body.stop)
+    ? body.stop
+    : typeof body.stop === "string"
+      ? [body.stop]
+      : []
+  const stop = stopRaw.filter(
+    (s): s is string => typeof s === "string" && s.length > 0,
+  )
   const maxTokens =
     typeof body.max_tokens === "number"
       ? body.max_tokens
@@ -81,6 +89,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
       tool_choice: body.tool_choice,
       response_format: body.response_format,
       reasoning_effort: effort,
+      stop: stop.length ? stop : undefined,
       affinity: {
         convId: c.req.header("x-grok-conv-id"),
         sessionId: c.req.header("x-grok-session-id"),

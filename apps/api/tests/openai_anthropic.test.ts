@@ -25,6 +25,23 @@ describe("openaiToAnthropicMessages", () => {
     expect(body.system).toBe("hi")
   })
 
+  it("maps stop to stop_sequences", () => {
+    const body = openaiToAnthropicMessages({
+      model: "m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "x" }],
+      stop: ["END"],
+    })
+    expect(body.stop_sequences).toEqual(["END"])
+    expect(
+      openaiToAnthropicMessages({
+        model: "m",
+        max_tokens: 10,
+        messages: [{ role: "user", content: "x" }],
+      }).stop_sequences,
+    ).toBeUndefined()
+  })
+
   it("maps tools", () => {
     const body = openaiToAnthropicMessages({
       model: "m",
@@ -413,6 +430,37 @@ describe("anthropicSseToOpenAIStream", () => {
 })
 
 describe("stripCacheControl / anthropicToOpenAIChatRequest", () => {
+  it("joins multi-block system prompts without running lines together", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      system: [
+        { type: "text", text: "You are Claude Code." },
+        { type: "text", text: "" },
+        { type: "text", text: "You are an interactive agent.", cache_control: { type: "ephemeral" } },
+      ],
+    })
+    expect(out.messages[0]).toEqual({
+      role: "system",
+      content: "You are Claude Code.\n\nYou are an interactive agent.",
+    })
+  })
+
+  it("forwards stop_sequences as OpenAI stop, dropping empties", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      stop_sequences: ["END", "", "\n\nHuman:"],
+    })
+    expect(out.stop).toEqual(["END", "\n\nHuman:"])
+    expect(
+      anthropicToOpenAIChatRequest({
+        model: "grok/m",
+        messages: [{ role: "user", content: "hi" }],
+      }).stop,
+    ).toBeUndefined()
+  })
+
   it("strips cache_control deeply", () => {
     const stripped = stripCacheControl({
       system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }],
@@ -684,6 +732,359 @@ describe("openaiSseToAnthropicStream", () => {
     // two tool_use starts
     expect(out.match(/"type":"tool_use"/g)?.length).toBe(2)
     expect(out).toContain('"stop_reason":"tool_use"')
+  })
+
+  /**
+   * Rebuild content blocks from the emitted SSE and assert the Anthropic
+   * invariant: blocks are strictly sequential — one open at a time, dense
+   * ascending indices, never reopened.
+   */
+  function parseBlocks(
+    sse: string,
+  ): Array<{ index: number; type: string; id?: string; name?: string; body: string }> {
+    const blocks: Array<{
+      index: number
+      type: string
+      id?: string
+      name?: string
+      body: string
+    }> = []
+    const byIndex = new Map<number, number>()
+    let open: number | null = null
+    let event = ""
+    let sawMessageStart = false
+    let ended = false
+    for (const line of sse.split("\n")) {
+      if (line.startsWith("event:")) {
+        event = line.slice(6).trim()
+        continue
+      }
+      if (!line.startsWith("data:")) continue
+      const json = JSON.parse(line.slice(5).trim())
+      if (event === "message_start") {
+        sawMessageStart = true
+      } else if (event === "message_delta" || event === "message_stop") {
+        expect(open, "message ended with a content block still open").toBe(null)
+        ended = true
+      } else if (event.startsWith("content_block")) {
+        expect(sawMessageStart, "content block before message_start").toBe(true)
+        expect(ended, "content block after the message ended").toBe(false)
+      }
+      if (event === "content_block_start") {
+        expect(open, "a block started while another was still open").toBe(null)
+        expect(byIndex.has(json.index), "content block index reused").toBe(false)
+        expect(json.index, "content block indices must be dense").toBe(blocks.length)
+        byIndex.set(json.index, blocks.length)
+        blocks.push({
+          index: json.index,
+          type: json.content_block.type,
+          id: json.content_block.id,
+          name: json.content_block.name,
+          body: "",
+        })
+        open = json.index
+      } else if (event === "content_block_delta") {
+        expect(open, "delta outside an open block").toBe(json.index)
+        const b = blocks[byIndex.get(json.index)!]!
+        b.body += json.delta.partial_json ?? json.delta.text ?? ""
+      } else if (event === "content_block_stop") {
+        expect(open).toBe(json.index)
+        open = null
+      }
+    }
+    expect(open, "stream ended with an unclosed content block").toBe(null)
+    expect(ended, "stream ended without message_delta / message_stop").toBe(true)
+    return blocks
+  }
+
+  it("keeps one tool call in one block when text interleaves its arguments", async () => {
+    // Grok 4.5 emits `content` between `arguments` fragments. Closing the tool
+    // block for that text used to split one call across two blocks sharing an
+    // id, truncating file_path and making both halves invalid JSON.
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":""}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"file_path\\":\\"/repo/p"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"content":"one moment"}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ackage.json\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const out = await collect(
+      openaiSseToAnthropicStream(chunked(sse, 17), "grok/grok-4.5"),
+    )
+    const blocks = parseBlocks(out)
+    const tools = blocks.filter((b) => b.type === "tool_use")
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.id).toBe("call_1")
+    expect(JSON.parse(tools[0]!.body)).toEqual({ file_path: "/repo/package.json" })
+    // Text is preserved, in its own block.
+    expect(blocks.filter((b) => b.type === "text").map((b) => b.body)).toEqual([
+      "one moment",
+    ])
+    expect(out).toContain('"stop_reason":"tool_use"')
+  })
+
+  it("flushes buffered text between two tool calls in order", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":\\"/a\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"content":"now the other one"}}]}',
+      "",
+      'data: {"choices":[{"index":1,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":\\"/b\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const blocks = parseBlocks(
+      await collect(openaiSseToAnthropicStream(chunked(sse, 29), "grok/m")),
+    )
+    expect(blocks.map((b) => b.type)).toEqual(["tool_use", "text", "tool_use"])
+    expect(blocks[1]!.body).toBe("now the other one")
+    expect(blocks.map((b) => b.id).filter(Boolean)).toEqual(["call_a", "call_b"])
+  })
+
+  it("closes a tool block and flushes text when the stream ends abruptly", async () => {
+    // No finish_reason, no [DONE] — upstream connection simply drops.
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":\\"/a\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"content":"trailing"}}]}',
+      "",
+    ].join("\n")
+
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 31), "grok/m"))
+    const blocks = parseBlocks(out)
+    expect(blocks.map((b) => b.type)).toEqual(["tool_use", "text"])
+    expect(JSON.parse(blocks[0]!.body)).toEqual({ file_path: "/a" })
+    expect(blocks[1]!.body).toBe("trailing")
+    expect(out).toContain('"stop_reason":"tool_use"')
+  })
+
+  it("emits a well-formed empty message when upstream sends nothing usable", async () => {
+    const out = await collect(
+      openaiSseToAnthropicStream(chunked("data: [DONE]\n\n", 8), "grok/m"),
+    )
+    const blocks = parseBlocks(out)
+    expect(blocks.map((b) => b.type)).toEqual(["text"])
+    expect(blocks[0]!.body).toBe("")
+    expect(out).toContain("event: message_start")
+    expect(out).toContain('"stop_reason":"end_turn"')
+    expect(out).toContain("event: message_stop")
+  })
+
+  it("waits for the id before opening a block when name arrives first", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Read"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late","type":"function","function":{"arguments":"{\\"file_path\\":\\"/a\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const tools = parseBlocks(
+      await collect(openaiSseToAnthropicStream(chunked(sse, 41), "grok/m")),
+    ).filter((b) => b.type === "tool_use")
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.id).toBe("call_late")
+    expect(tools[0]!.name).toBe("Read")
+    expect(JSON.parse(tools[0]!.body)).toEqual({ file_path: "/a" })
+  })
+
+  it("still emits a name-only tool call as a zero-argument call", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Ping"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 43), "grok/m"))
+    const tools = parseBlocks(out).filter((b) => b.type === "tool_use")
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.name).toBe("Ping")
+    expect(tools[0]!.body).toBe("")
+    expect(out).toContain('"stop_reason":"tool_use"')
+  })
+
+  it("keeps parallel calls intact when their fragments alternate", async () => {
+    // Fragments arriving 0,1,0,1,0,1 — the live call streams, the second is
+    // held back and emitted whole, so neither JSON gets interleaved.
+    const frag = (index: number, patch: string) =>
+      `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":${index},${patch}}]}}]}`
+    const sse = [
+      frag(0, '"id":"call_a","type":"function","function":{"name":"A","arguments":""}'),
+      "",
+      frag(1, '"id":"call_b","type":"function","function":{"name":"B","arguments":""}'),
+      "",
+      frag(0, '"function":{"arguments":"{\\"a\\":"}'),
+      "",
+      frag(1, '"function":{"arguments":"{\\"b\\":"}'),
+      "",
+      frag(0, '"function":{"arguments":"1}"}'),
+      "",
+      frag(1, '"function":{"arguments":"2}"}'),
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const tools = parseBlocks(
+      await collect(openaiSseToAnthropicStream(chunked(sse, 47), "grok/m")),
+    ).filter((b) => b.type === "tool_use")
+    expect(tools.map((t) => t.id)).toEqual(["call_a", "call_b"])
+    expect(tools.map((t) => t.name)).toEqual(["A", "B"])
+    expect(tools.map((t) => JSON.parse(t.body))).toEqual([{ a: 1 }, { b: 2 }])
+  })
+
+  it("reports real upstream usage when the provider sends it", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      "",
+      'data: {"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":56}}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 53), "grok/m"))
+    parseBlocks(out)
+    expect(out).toContain('"input_tokens":1234')
+    expect(out).toContain('"output_tokens":56')
+  })
+
+  it("treats a re-sent function name as the same call, not a new one", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Read","arguments":"\\"/a\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const tools = parseBlocks(
+      await collect(openaiSseToAnthropicStream(chunked(sse, 59), "grok/m")),
+    ).filter((b) => b.type === "tool_use")
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.id).toBe("call_1")
+    expect(JSON.parse(tools[0]!.body)).toEqual({ file_path: "/a" })
+  })
+
+  it("adopts a late id for a call that opened on arguments alone", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Read","arguments":"{\\"file_path\\":\\"/a\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late","type":"function"}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const tools = parseBlocks(
+      await collect(openaiSseToAnthropicStream(chunked(sse, 61), "grok/m")),
+    ).filter((b) => b.type === "tool_use")
+    expect(tools).toHaveLength(1)
+    expect(tools[0]!.name).toBe("Read")
+    expect(JSON.parse(tools[0]!.body)).toEqual({ file_path: "/a" })
+  })
+
+  it("emits a well-formed message for a zero-byte upstream body", async () => {
+    // No [DONE], no events at all — the shape that makes clients retry silently.
+    const out = await collect(openaiSseToAnthropicStream(chunked("", 8), "grok/m"))
+    const blocks = parseBlocks(out)
+    expect(blocks.map((b) => b.type)).toEqual(["text"])
+    expect(out).toContain("event: message_start")
+    expect(out).toContain("event: message_stop")
+  })
+
+  it("reads usage that rides on the finish_reason chunk", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":8}}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 67), "grok/m"))
+    parseBlocks(out)
+    expect(out).toContain('"input_tokens":7')
+    expect(out).toContain('"output_tokens":8')
+  })
+
+  it("ignores content that arrives after finish_reason", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"content":"late"}}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 37), "grok/m"))
+    const blocks = parseBlocks(out)
+    expect(blocks.map((b) => b.body)).toEqual(["done"])
+    expect(out).not.toContain("late")
+  })
+
+  it("splits a new tool id at the same index into its own block", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":\\"/a\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_b","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":\\"/b\\"}"}}]}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const tools = parseBlocks(
+      await collect(openaiSseToAnthropicStream(chunked(sse, 23), "grok/m")),
+    ).filter((b) => b.type === "tool_use")
+    expect(tools.map((t) => t.id)).toEqual(["call_a", "call_b"])
+    expect(tools.map((t) => JSON.parse(t.body))).toEqual([
+      { file_path: "/a" },
+      { file_path: "/b" },
+    ])
+  })
+
+  it("emits parallel tool calls as sequential, non-overlapping blocks", async () => {
+    const tools = parseBlocks(
+      await collect(
+        openaiSseToAnthropicStream(
+          chunked(OPENAI_PARALLEL_TOOLS_SSE, 19),
+          "grok/m",
+        ),
+      ),
+    ).filter((b) => b.type === "tool_use")
+    expect(tools.map((t) => t.id)).toEqual(["call_a", "call_b"])
+    expect(tools.map((t) => JSON.parse(t.body))).toEqual([{ a: 1 }, { b: 2 }])
   })
 })
 

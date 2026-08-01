@@ -30,6 +30,7 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
   tool_choice?: unknown
   response_format?: unknown
   reasoning_effort?: unknown
+  stop?: string[]
 } {
   const cleaned = stripCacheControl(body) as Record<string, unknown>
   const messages: unknown[] = []
@@ -38,6 +39,8 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
   if (typeof system === "string" && system) {
     messages.push({ role: "system", content: system })
   } else if (Array.isArray(system)) {
+    // Separate system blocks are distinct instructions upstream; joining them
+    // with "" would run the last line of one into the first of the next.
     const text = system
       .map((b) => {
         if (b && typeof b === "object" && (b as { type?: string }).type === "text") {
@@ -45,7 +48,8 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
         }
         return ""
       })
-      .join("")
+      .filter((t) => t)
+      .join("\n\n")
     if (text) messages.push({ role: "system", content: text })
   }
 
@@ -124,11 +128,19 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
     tool_choice?: unknown
     response_format?: unknown
     reasoning_effort?: unknown
+    stop?: string[]
   } = {
     messages,
     stream: !!cleaned.stream,
   }
   if (typeof cleaned.max_tokens === "number") out.max_tokens = cleaned.max_tokens
+
+  if (Array.isArray(cleaned.stop_sequences)) {
+    const stop = cleaned.stop_sequences.filter(
+      (s): s is string => typeof s === "string" && s.length > 0,
+    )
+    if (stop.length) out.stop = stop
+  }
 
   if (Array.isArray(cleaned.tools)) {
     out.tools = (cleaned.tools as Array<Record<string, unknown>>).map((t) => {
@@ -284,11 +296,51 @@ export function openaiSseToAnthropicStream(
   let outputTokens = 0
   let stopped = false
   let sawToolCall = false
-  /** OpenAI tool_calls[].index → Anthropic content block index + metadata */
-  const toolBlocks = new Map<
-    number,
-    { blockIndex: number; id: string; name: string; started: boolean }
-  >()
+  /** finish_reason seen, mapped to an Anthropic stop_reason; null until then. */
+  let stopReason: string | null = null
+  /** Real upstream usage, when the provider reports it. */
+  let promptTokens: number | null = null
+  let completionTokens: number | null = null
+  /**
+   * Anthropic content blocks are strictly sequential: a block must stop before
+   * the next one starts, and a stopped block can never be reopened. An OpenAI
+   * chunk stream has no such rule — it may interleave `content` text with a
+   * tool call's `arguments`, and may alternate fragments between several
+   * `tool_calls[].index` values. Nothing may therefore be closed early:
+   *
+   * - the first tool call streams live into an open block;
+   * - text arriving while it is open is buffered (closing the block for text
+   *   would split one call's JSON across two blocks sharing a tool id);
+   * - every *other* tool call accumulates and is emitted complete at the end,
+   *   which is what makes arbitrary fragment interleaving safe.
+   *
+   * Only the first of several parallel calls streams incrementally; providers
+   * finish one call before starting the next, so in practice that costs
+   * nothing, and a single tool call — the overwhelmingly common case — always
+   * streams live.
+   */
+  let liveTool:
+    | {
+        openaiIndex: number
+        blockIndex: number
+        id: string
+        idSynthesized: boolean
+        name: string
+      }
+    | null = null
+  /** Tool calls held back until finish, in arrival order. */
+  const deferredTools: Array<{
+    openaiIndex: number
+    id: string | null
+    name: string | null
+    args: string
+  }> = []
+  /** Text that arrived while a tool block was open; emitted as its own block. */
+  let pendingText = ""
+  /** Tool names seen before their call could be opened (name-before-id). */
+  const pendingToolNames = new Map<number, string>()
+  /** Indices that already produced a block, so a re-sent name is not a new call. */
+  const openedToolIndexes = new Set<number>()
 
   return new ReadableStream({
     async start(controller) {
@@ -323,94 +375,216 @@ export function openaiSseToAnthropicStream(
         })
         textBlockOpen = false
       }
-      const ensureTextBlock = () => {
-        if (textBlockOpen) return
-        ensureStart()
-        closeOpenToolBlocks()
-        textBlockIndex = nextBlockIndex++
-        textBlockOpen = true
+      const closeToolBlock = () => {
+        if (!liveTool) return
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: liveTool.blockIndex,
+        })
+        liveTool = null
+      }
+      /** Emit buffered post-tool text as a complete block of its own. */
+      const flushPendingText = () => {
+        if (!pendingText) return
+        const text = pendingText
+        pendingText = ""
+        const index = nextBlockIndex++
         emitEvent("content_block_start", {
           type: "content_block_start",
-          index: textBlockIndex,
+          index,
           content_block: { type: "text", text: "" },
         })
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta: { type: "text_delta", text },
+        })
+        emitEvent("content_block_stop", { type: "content_block_stop", index })
       }
-      const closeOpenToolBlocks = () => {
-        // Close in ascending content-block index order for stable clients.
-        const open = [...toolBlocks.values()]
-          .filter((t) => t.started)
-          .sort((a, b) => a.blockIndex - b.blockIndex)
-        for (const t of open) {
-          emitEvent("content_block_stop", {
-            type: "content_block_stop",
-            index: t.blockIndex,
-          })
-          t.started = false
+      const appendText = (text: string) => {
+        ensureStart()
+        // Never close an open tool block for text — that would split its
+        // arguments JSON across two blocks sharing one tool_use id.
+        if (liveTool) {
+          pendingText += text
+          return
         }
+        if (!textBlockOpen) {
+          textBlockIndex = nextBlockIndex++
+          textBlockOpen = true
+          emitEvent("content_block_start", {
+            type: "content_block_start",
+            index: textBlockIndex,
+            content_block: { type: "text", text: "" },
+          })
+        }
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: textBlockIndex,
+          delta: { type: "text_delta", text },
+        })
       }
-      const ensureToolBlock = (
+      const emitArgs = (index: number, args: string) => {
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta: { type: "input_json_delta", partial_json: args },
+        })
+      }
+      /** A whole tool_use block at once, for calls that were held back. */
+      const emitCompleteToolBlock = (
+        openaiIndex: number,
+        id: string | null,
+        name: string | null,
+        args: string,
+      ) => {
+        const index = nextBlockIndex++
+        sawToolCall = true
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: {
+            type: "tool_use",
+            id: id || `toolu_${openaiIndex}_${msgId.slice(4, 12)}`,
+            name: name || "unknown",
+            input: {},
+          },
+        })
+        if (args) emitArgs(index, args)
+        emitEvent("content_block_stop", { type: "content_block_stop", index })
+      }
+      const lastDeferred = (openaiIndex: number) => {
+        for (let i = deferredTools.length - 1; i >= 0; i--) {
+          const entry = deferredTools[i]!
+          if (entry.openaiIndex === openaiIndex) return entry
+        }
+        return null
+      }
+      const routeToolFragment = (
         openaiIndex: number,
         id: string | undefined,
         name: string | undefined,
-      ): { blockIndex: number; id: string; name: string; started: boolean } => {
-        let entry = toolBlocks.get(openaiIndex)
-        if (!entry) {
-          entry = {
-            blockIndex: -1,
-            id: id || `toolu_${openaiIndex}_${msgId.slice(4, 12)}`,
-            name: name || "unknown",
-            started: false,
+        args: string | undefined,
+      ) => {
+        ensureStart()
+        const takeName = () => {
+          const resolved = name || pendingToolNames.get(openaiIndex) || null
+          pendingToolNames.delete(openaiIndex)
+          return resolved
+        }
+        // Once an index is deferred its later fragments must follow it, or a
+        // continuation would be appended to whichever call is live instead.
+        const deferred = lastDeferred(openaiIndex)
+        if (deferred) {
+          // A new id at a deferred index is a distinct call, not a continuation.
+          if (id && deferred.id && id !== deferred.id) {
+            deferredTools.push({
+              openaiIndex,
+              id,
+              name: takeName(),
+              args: args ?? "",
+            })
+            openedToolIndexes.add(openaiIndex)
+            return
           }
-          toolBlocks.set(openaiIndex, entry)
-        } else {
-          if (id) entry.id = id
-          if (name) entry.name = name
+          if (id) deferred.id = id
+          if (!deferred.name && name) deferred.name = name
+          deferred.args += args ?? ""
+          return
         }
-        if (!entry.started) {
-          ensureStart()
-          closeTextBlock()
-          // If another tool was open at a different openai index, leave it open
-          // (parallel tool calls are separate content blocks; stop on finish).
-          entry.blockIndex = nextBlockIndex++
-          entry.started = true
-          sawToolCall = true
-          emitEvent("content_block_start", {
-            type: "content_block_start",
-            index: entry.blockIndex,
-            content_block: {
-              type: "tool_use",
-              id: entry.id,
-              name: entry.name,
-              input: {},
-            },
+        if (
+          liveTool &&
+          liveTool.openaiIndex === openaiIndex &&
+          // A late id for a block opened on arguments alone belongs to that
+          // call — its block_start has already gone out under the synthesized
+          // id, so keep that and stop treating further ids as continuations.
+          (!id || id === liveTool.id || liveTool.idSynthesized)
+        ) {
+          if (id) liveTool.idSynthesized = false
+          if (args) emitArgs(liveTool.blockIndex, args)
+          return
+        }
+        if (liveTool) {
+          // Another call while one is streaming: hold it back so the live block
+          // stays open and its arguments stay in one piece.
+          deferredTools.push({
+            openaiIndex,
+            id: id ?? null,
+            name: takeName(),
+            args: args ?? "",
           })
+          openedToolIndexes.add(openaiIndex)
+          return
         }
-        return entry
+        closeTextBlock()
+        liveTool = {
+          openaiIndex,
+          blockIndex: nextBlockIndex++,
+          id: id || `toolu_${openaiIndex}_${msgId.slice(4, 12)}`,
+          idSynthesized: !id,
+          name: takeName() || "unknown",
+        }
+        openedToolIndexes.add(openaiIndex)
+        sawToolCall = true
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index: liveTool.blockIndex,
+          content_block: {
+            type: "tool_use",
+            id: liveTool.id,
+            name: liveTool.name,
+            input: {},
+          },
+        })
+        if (args) emitArgs(liveTool.blockIndex, args)
       }
       const finish = (stop_reason: string) => {
         if (stopped) return
         stopped = true
-        closeTextBlock()
-        // Close any tool blocks still open
-        for (const t of [...toolBlocks.values()].sort(
-          (a, b) => a.blockIndex - b.blockIndex,
-        )) {
-          if (t.started) {
-            emitEvent("content_block_stop", {
-              type: "content_block_stop",
-              index: t.blockIndex,
-            })
-            t.started = false
-          }
-        }
         ensureStart()
+        closeTextBlock()
+        closeToolBlock()
+        flushPendingText()
+        for (const t of deferredTools) {
+          emitCompleteToolBlock(t.openaiIndex, t.id, t.name, t.args)
+        }
+        deferredTools.length = 0
+        // A call announced by name only, with no id and no arguments, still has
+        // to reach the client — as a zero-argument call, which is what it is.
+        // An index that already produced a block is a re-sent name, not a call.
+        for (const [openaiIndex, name] of [...pendingToolNames.entries()].sort(
+          (a, b) => a[0] - b[0],
+        )) {
+          if (openedToolIndexes.has(openaiIndex)) continue
+          emitCompleteToolBlock(openaiIndex, null, name, "")
+        }
+        pendingToolNames.clear()
+        if (nextBlockIndex === 0) {
+          // Upstream sent no usable events. An SSE response carrying no content
+          // block is a protocol error to Anthropic clients, which retry the
+          // turn; emit a well-formed empty message instead.
+          emitEvent("content_block_start", {
+            type: "content_block_start",
+            index: nextBlockIndex,
+            content_block: { type: "text", text: "" },
+          })
+          emitEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: nextBlockIndex++,
+          })
+        }
         // Prefer tool_use if we streamed any tools even when finish_reason was missing.
         const reason =
           stop_reason === "end_turn" && sawToolCall ? "tool_use" : stop_reason
         emitEvent("message_delta", {
           type: "message_delta",
           delta: { stop_reason: reason, stop_sequence: null },
-          usage: { output_tokens: outputTokens },
+          // Real upstream counts when the provider reports them; the character
+          // estimate is only a floor for providers that report nothing.
+          usage: {
+            ...(promptTokens != null ? { input_tokens: promptTokens } : {}),
+            output_tokens: completionTokens ?? outputTokens,
+          },
         })
         emitEvent("message_stop", { type: "message_stop" })
       }
@@ -426,23 +600,35 @@ export function openaiSseToAnthropicStream(
             const data = line.slice(5).trim()
             if (!data) continue
             if (data === "[DONE]") {
-              finish(sawToolCall ? "tool_use" : "end_turn")
+              finish(stopReason ?? (sawToolCall ? "tool_use" : "end_turn"))
               continue
             }
             try {
               const json = JSON.parse(data) as Record<string, unknown>
+              // Usage rides on a final chunk that carries no choices, so read
+              // it before the choice guard below discards that chunk.
+              const usage = json.usage as
+                | { prompt_tokens?: number; completion_tokens?: number }
+                | null
+                | undefined
+              if (usage) {
+                if (typeof usage.prompt_tokens === "number") {
+                  promptTokens = usage.prompt_tokens
+                }
+                if (typeof usage.completion_tokens === "number") {
+                  completionTokens = usage.completion_tokens
+                }
+              }
               const choice = (json.choices as Array<Record<string, unknown>> | undefined)?.[0]
               if (!choice) continue
+              // The turn is over once finish_reason lands; anything after it
+              // would have to be emitted past message_stop.
+              if (stopReason != null || stopped) continue
               const delta = choice.delta as Record<string, unknown> | undefined
               const content = delta?.content
               if (typeof content === "string" && content) {
-                ensureTextBlock()
                 outputTokens += Math.max(1, Math.ceil(content.length / 4))
-                emitEvent("content_block_delta", {
-                  type: "content_block_delta",
-                  index: textBlockIndex,
-                  delta: { type: "text_delta", text: content },
-                })
+                appendText(content)
               }
 
               const toolCalls = delta?.tool_calls as
@@ -458,42 +644,40 @@ export function openaiSseToAnthropicStream(
                   const id = typeof tc.id === "string" ? tc.id : undefined
                   const name =
                     typeof fn?.name === "string" ? fn.name : undefined
-                  // Start block when we have id/name, or when arguments arrive
-                  // without a prior start (some providers only send args chunks).
-                  const hasStartInfo = !!(id || name)
                   const args =
                     typeof fn?.arguments === "string" ? fn.arguments : undefined
-                  if (hasStartInfo || args != null) {
-                    const entry = ensureToolBlock(openaiIndex, id, name)
+                  // A name with no id yet is not enough to open a block: doing
+                  // so burns a fallback id that the real id would then have to
+                  // supersede with a second, empty block.
+                  if (id || args != null) {
                     if (args) {
                       outputTokens += Math.max(1, Math.ceil(args.length / 4))
-                      emitEvent("content_block_delta", {
-                        type: "content_block_delta",
-                        index: entry.blockIndex,
-                        delta: {
-                          type: "input_json_delta",
-                          partial_json: args,
-                        },
-                      })
                     }
+                    routeToolFragment(openaiIndex, id, name, args)
+                  } else if (name) {
+                    // Name alone cannot open a block yet; remember it for the
+                    // fragment that can. Routed fragments carry `name` directly.
+                    pendingToolNames.set(openaiIndex, name)
                   }
                 }
               }
 
               const fr = choice.finish_reason
               if (fr) {
-                let stop_reason = "end_turn"
-                if (fr === "tool_calls") stop_reason = "tool_use"
-                else if (fr === "length") stop_reason = "max_tokens"
-                else if (fr === "content_filter") stop_reason = "end_turn"
-                finish(stop_reason)
+                // Record it, but do not close the message yet: the usage chunk
+                // rides after this one, before [DONE].
+                if (fr === "tool_calls") stopReason = "tool_use"
+                else if (fr === "length") stopReason = "max_tokens"
+                else stopReason = "end_turn"
               }
             } catch {
               /* ignore parse */
             }
           }
         }
-        if (started && !stopped) finish(sawToolCall ? "tool_use" : "end_turn")
+        if (!stopped) {
+          finish(stopReason ?? (sawToolCall ? "tool_use" : "end_turn"))
+        }
         controller.close()
       } catch (e) {
         controller.error(e)
@@ -513,6 +697,7 @@ export function openaiToAnthropicMessages(input: {
   response_format?: unknown
   thinking?: { type: string }
   output_config?: { effort: string }
+  stop?: string[]
 }): Record<string, unknown> {
   const systemParts: Array<Record<string, unknown>> = []
   const messages: Array<Record<string, unknown>> = []
@@ -597,6 +782,7 @@ export function openaiToAnthropicMessages(input: {
   }
   if (input.thinking) body.thinking = input.thinking
   if (input.output_config) body.output_config = input.output_config
+  if (input.stop?.length) body.stop_sequences = input.stop
   if (input.response_format) {
     const rf = input.response_format as { type?: string; json_schema?: { schema?: unknown } }
     if (rf.type === "json_schema" && rf.json_schema?.schema) {
