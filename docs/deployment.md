@@ -203,17 +203,34 @@ Production updates run when a **GitHub Release is published** (workflow: `.githu
 | Policy | Rule |
 |--------|------|
 | Format | SemVer tag `vMAJOR.MINOR.PATCH` (e.g. `v1.2.0`) |
+| Canonical package version | Root `package.json` → `"version": "MAJOR.MINOR.PATCH"` (no leading `v`) |
 | **Default next release** | **Minor bump** → `x.(y+1).0` (patch resets to `0`) |
 | Major | Breaking changes only, when intentional |
 | Patch | Fix-only when you explicitly want `x.y.(z+1)` |
 
-Example: last release `v0.3.1` → default next tag `v0.4.0`.
+Example: last release `v0.3.1` → default next tag `v0.4.0` and `"version": "0.4.0"` in root `package.json`.
+
+### Cutting a release (required steps)
+
+A version bump is incomplete unless **all** of these land together:
+
+1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`).
+2. **Commit** that change with the release work (and any code/docs for the release).
+3. **Push** the commit to `origin` (`main` or the release branch).
+4. **Tag** `vMAJOR.MINOR.PATCH` on that commit and **publish a GitHub Release** (tag alone without a Release does not run deploy CI).
+
+Do **not** create a GitHub Release / tag without updating and pushing `package.json` first. Keep tag and `package.json` version in lockstep (`v1.0.1` ↔ `"1.0.1"`).
 
 ```bash
-# after merging to main — default minor bump from latest tag
-git fetch --tags
-# e.g. create v0.4.0 on GitHub Releases UI, or:
-gh release create v0.4.0 --generate-notes
+# example: patch 1.0.0 → 1.0.1 after work is ready on main
+# 1) set "version": "1.0.1" in package.json
+git add package.json  # + other release files
+git commit -m "Release v1.0.1: <summary>."
+git push origin main
+
+git tag -a v1.0.1 -m "v1.0.1"
+git push origin v1.0.1
+gh release create v1.0.1 --generate-notes
 ```
 
 ### Repository secrets (Settings → Secrets and variables → Actions)

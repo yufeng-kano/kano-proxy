@@ -62,7 +62,8 @@ Canonical project rules. Cursor / Agents / Claude entrypoints symlink to this fi
 ### Releases, versioning, and CI deploy
 
 - **Production deploys are release-driven**, not every commit. Publishing a GitHub Release runs `.github/workflows/release-deploy.yml` (test → typecheck → build → D1 migrate remote → Worker deploy → Pages deploy). Manual re-run: `workflow_dispatch`.
-- **Versioning is SemVer** `MAJOR.MINOR.PATCH`, tags **`vMAJOR.MINOR.PATCH`** (e.g. `v1.2.0`).
+- **Versioning is SemVer** `MAJOR.MINOR.PATCH`, tags **`vMAJOR.MINOR.PATCH`** (e.g. `v1.2.0`). Root **`package.json` `"version"`** must match (no leading `v`, e.g. `"1.2.0"`).
+- **Every version bump must simultaneously:** (1) update root `package.json` `"version"`, (2) **git commit**, (3) **git push** to origin, (4) create tag + GitHub Release on that commit. Never tag/release without the package.json bump committed and pushed.
 - **Default bump is minor:** treat the next release as **`x.(y+1).0`** (patch resets to `0`). Example: last tag `v1.2.3` → default next `v1.3.0`. Agents helping cut a release should propose this bump unless the user specifies otherwise.
 - **Major (`(x+1).0.0`)** only for breaking API/product changes the user acknowledges. **Patch (`x.y.(z+1)`)** only when the user asks for a fix-only release (no feature bump).
 - Do not auto-deploy from push to `main` or from PRs. PRs may get verify-only CI later; production stays on Release publish.
