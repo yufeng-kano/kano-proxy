@@ -24,7 +24,7 @@ Kano Proxy is a multi-tenant account-pool proxy: sign in, bind Claude Code / Cod
   Coding agent / SDK          Kano Proxy                 Your subscriptions
   ─────────────────      ─────────────────────      ─────────────────────────
   base URL + API key  →  auth + pool routing    →  Claude Code / Codex / Grok
-  model: provider/…   →  stream end-to-end     →  OAuth tokens never leave
+  model: provider/…   →  stream end-to-end      →  OAuth tokens never leave
                          usage & keys in UI         the Worker
 ```
 
