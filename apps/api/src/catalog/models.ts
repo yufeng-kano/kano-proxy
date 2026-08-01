@@ -1,8 +1,8 @@
 /**
- * Model list from live upstream APIs — no hard-coded product catalogs.
- * Claude Code: GET api.anthropic.com/v1/models
- * Grok: GET api.x.ai/v1/models
- * Codex: no models endpoint → empty (documented)
+ * Model list for bound providers.
+ * Claude Code: GET api.anthropic.com/v1/models (live)
+ * Grok: GET api.x.ai/v1/models (live)
+ * Codex: no models endpoint → empty (UI links official docs; no invented catalog)
  */
 
 import type { Env, ProviderId } from "../env"

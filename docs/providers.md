@@ -27,8 +27,9 @@ Timeouts: do not permanently shrink the pool on transport timeout alone when avo
 
 - Upstream: ChatGPT `codex/responses` (reverse-engineered; headers from lincy).
 - OpenAI adapter: Chat Completions ↔ Responses SSE.
+- **Models:** ChatGPT OAuth has **no** public `/models` endpoint. Platform `GET api.openai.com/v1/models` rejects these tokens (`api.model.read` missing). There is also **no trusted third-party API** that returns per-account Codex OAuth inventory. kano-proxy returns an **empty** list (no hard-coded catalog). Admin UI links official docs: [OpenAI models](https://developers.openai.com/api/docs/models), [ChatGPT / Codex models](https://learn.chatgpt.com/docs/models). Clients may still send a model id if a Codex account is bound; unknown/unsupported ids fail at upstream.
 - Usage: dynamic windows (label 5h / Week / Nd) from `/codex/usage` (alias `/wham/usage`).
-- Usage fetch: CLI `User-Agent: codex_cli_rs/0.144.3`. chatgpt.com edge **403 bot-challenges by TLS/client fingerprint, not headers** (verified 2026-08-01: same headers/IP → stdlib urllib 401 JSON passes the wall, curl and workerd `fetch` get 403 HTML). lincy passes only because Python urllib's fingerprint is allowed; a Worker cannot change its `fetch` fingerprint, so header tuning cannot fix this. When blocked, account stays **active/standby** (not unusable); UI shows stale + note that chat still works.
+- Usage fetch: CLI `User-Agent: codex_cli_rs/0.144.3`. chatgpt.com edge **403 bot-challenges by TLS/client fingerprint, not headers** (verified 2026-08-01: same headers/IP → stdlib urllib 401 JSON passes the wall, curl and workerd `fetch` get 403 HTML). lincy passes only because Python urllib's fingerprint is allowed; a Worker cannot change its `fetch` fingerprint, so header tuning cannot fix this. When blocked, account stays **active/standby** (not unusable); UI omits usage bars (chat still works).
 
 ## Grok
 
@@ -55,4 +56,6 @@ Within one user’s provider pool only. Never cross users.
 
 ## Catalog
 
-Static or semi-static allowlists in code/docs for known models + efforts; `/models` filters by user’s usable providers. Unknown model strings may still be attempted if provider is bound (optional strict mode later).
+- **Claude Code / Grok:** live upstream model lists when an account is bound.
+- **Codex:** empty list (no upstream or third-party list API); see Codex section.
+- `/models` only queries providers the user can use. Unknown model strings may still be attempted if that provider is bound.

@@ -147,10 +147,24 @@ async function copy(text: string, id: string) {
               </span>
             </div>
           </div>
+          <p v-else-if="group.id === 'codex'" class="faint" style="margin: 0; font-size: 12.5px">
+            No models list for ChatGPT OAuth (not a Platform API key). See
+            <a
+              href="https://developers.openai.com/api/docs/models"
+              target="_blank"
+              rel="noopener"
+            >OpenAI models</a>
+            and
+            <a
+              href="https://learn.chatgpt.com/docs/models"
+              target="_blank"
+              rel="noopener"
+            >ChatGPT / Codex models</a>.
+          </p>
           <p v-else class="faint" style="margin: 0; font-size: 12.5px">
             No models
             <template v-if="!group.error">
-              — bind an account on Accounts, or this provider has no models API.
+              — bind an account on Accounts to load this provider’s models.
             </template>
           </p>
         </section>

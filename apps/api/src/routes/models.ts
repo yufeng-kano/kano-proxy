@@ -22,8 +22,8 @@ function publicApiOrigin(c: Context<HonoEnv>): string {
 }
 
 /**
- * Admin UI: models from live upstream APIs for providers the user has bound.
- * ?refresh=true bypasses 90s KV cache.
+ * Admin UI: models from live upstream for providers the user has bound.
+ * Codex has no public list → empty. ?refresh=true bypasses 90s KV cache.
  */
 modelsRoutes.get("/", async (c) => {
   const user = await requireUser(c)

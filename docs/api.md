@@ -56,7 +56,7 @@ Streaming: SSE, OpenAI chunk shape, end-to-end without buffering entire completi
 
 ### `GET /openai/v1/models`
 
-Returns OpenAI-style `{ object: "list", data: [...] }` from **live upstream** model APIs for providers the key owner has bound. Ids are `provider/upstream_id`. Empty if no accounts or upstream has no list (e.g. Codex).
+Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key owner has bound. Ids are `provider/upstream_id`. Claude Code and Grok come from live upstream `/models`. Codex returns empty (ChatGPT OAuth has no models list API — see [providers.md](./providers.md)). Empty for a provider when the user has no usable account for it.
 
 ## Anthropic surface
 

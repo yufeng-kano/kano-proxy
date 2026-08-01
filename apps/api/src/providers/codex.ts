@@ -76,12 +76,12 @@ export const codexAdapter: ProviderAdapter = {
     return refreshCodex(env, account)
   },
 
-  /** ChatGPT Codex OAuth has no public models list endpoint (same as lincy). */
+  /**
+   * ChatGPT OAuth has no public models list (Platform /v1/models rejects these
+   * tokens). Do not invent a catalog — UI points at official docs instead.
+   */
   async listModels(_env, _account) {
-    return {
-      models: [],
-      error: "Codex has no upstream models list API",
-    }
+    return { models: [], error: null }
   },
 
   async chatCompletions(env, account, req) {
