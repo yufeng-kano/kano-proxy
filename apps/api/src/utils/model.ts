@@ -17,9 +17,10 @@ export function parseModelId(model: string): ParsedModel | null {
   return { provider, upstreamModel, raw }
 }
 
-/** Anthropic surface may send bare model or claude-code/model. */
+/**
+ * Anthropic surface uses the same provider/model ids as OpenAI.
+ * Bare upstream ids (no provider prefix) are rejected.
+ */
 export function parseAnthropicModel(model: string): ParsedModel | null {
-  const raw = model.trim()
-  if (raw.includes("/")) return parseModelId(raw)
-  return { provider: "claude-code", upstreamModel: raw, raw: `claude-code/${raw}` }
+  return parseModelId(model)
 }

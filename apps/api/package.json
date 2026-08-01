@@ -3,13 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --persist-to .wrangler/state",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:migrate:local": "wrangler d1 migrations apply kano-proxy --local",
-    "db:migrate:remote": "wrangler d1 migrations apply kano-proxy --remote"
+    "db:migrate:local": "wrangler d1 migrations apply kano-proxy --local --persist-to .wrangler/state",
+    "db:migrate:remote": "wrangler d1 migrations apply kano-proxy --remote",
+    "db:local:status": "wrangler d1 execute kano-proxy --local --persist-to .wrangler/state --command \"SELECT 'users' AS t, count(*) AS n FROM users UNION ALL SELECT 'accounts', count(*) FROM upstream_accounts UNION ALL SELECT 'keys', count(*) FROM api_keys;\""
   },
   "dependencies": {
     "hono": "^4.7.2"

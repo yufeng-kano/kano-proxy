@@ -60,25 +60,20 @@ Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key own
 
 ## Anthropic surface
 
+Same providers as the OpenAI surface. Model id is always `provider/upstream` (not bare).
+
 ### `POST /anthropic/v1/messages`
 
-Anthropic Messages body **passthrough** to Claude Code upstream (subscription OAuth), with:
+| `model` provider | Behavior |
+|------------------|----------|
+| `claude-code` | Anthropic Messages **passthrough** to Claude Code OAuth upstream: auth inject, fixed Claude Code system prepend if missing (identical string every time), `anthropic-beta` merged, **`cache_control` never rewritten** (block- or top-level). Upstream `model` field is the bare id after the prefix. |
+| `grok` / `codex` | Convert Messages → internal Chat Completions shape → existing provider adapter → convert response/SSE back to Anthropic Messages. Anthropic `cache_control` has no equivalent → **stripped on convert** (not forwarded, not reinvented as Grok sticky headers). Optional client headers `x-grok-conv-id` / `x-grok-session-id` / `x-grok-turn-idx` are forwarded on the Grok path when present; never synthesized. |
 
-- Auth replaced by pool access token
-- Optional fixed Claude Code system prepend (only if missing; identical string every time)
-- `anthropic-beta` merged, not stripped
-- **`cache_control` never rewritten** (block-level or top-level)
-
-`model` may be:
-
-- bare upstream id (`claude-opus-5`), or
-- `claude-code/...` (provider prefix stripped for upstream)
-
-Only **claude-code** pool serves this surface. Other providers → `400` with clear code.
+`model` **must** be `provider/upstream` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`). Bare ids → `400` `invalid_model`.
 
 ### `GET /anthropic/v1/models`
 
-Claude models available to this user (from pool / catalog), Anthropic-ish list shape or simplified `{ data: [{ id, display_name }] }` documented in OpenAPI comments in code.
+Same live catalog as `GET /openai/v1/models` for the key owner: all providers with usable accounts. Envelope is Anthropic-ish `{ data: [{ id, display_name, type: "model" }] }` with `id` = `provider/upstream`.
 
 ### Future
 
@@ -86,7 +81,7 @@ Same host keeps `/anthropic/*` for additional Anthropic routes if needed; do not
 
 ## Model routing
 
-1. Parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id).
+1. Parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id). Required on **both** surfaces.
 2. Resolve user’s pool for that provider.
 3. `acquire()` usable account; on 401/403/429 bench and try next.
 4. No usable account → error (below).
@@ -105,14 +100,14 @@ Client field (OpenAI body; Anthropic may use same via extension or map from omit
 
 Invalid combo for known models → `400`. Unknown model ids: pass effort through when possible.
 
-## Prompt cache (Anthropic)
+## Prompt cache
 
 | Path | Policy |
 |------|--------|
-| Native Anthropic | **Strict passthrough** of all `cache_control` |
-| OpenAI → Claude | **Do not add** top-level or block `cache_control` |
-
-Proxy must not reorder tools/system/messages or normalize away cache-relevant structure on Anthropic path.
+| `/anthropic` → `claude-code` | **Strict passthrough** of all client `cache_control`. Do not reorder tools/system/messages or normalize away cache-relevant structure. Fixed system prepend is byte-stable when added. |
+| `/openai/v1` → `claude-code` | **Do not add** top-level or block `cache_control` (these requests do not hit Anthropic prompt cache). |
+| `/anthropic` → `grok` / `codex` | Strip `cache_control` on convert; no Anthropic-style breakpoints upstream. |
+| `/openai/v1` or `/anthropic` → `grok` | Forward client `x-grok-conv-id` (and session/turn) when supplied; **never invent**. Prefix cache works without conv-id (see [providers.md](./providers.md)). |
 
 ## Errors
 

@@ -184,6 +184,27 @@ TOKEN_ENCRYPTION_KEY=   # 32 bytes base64
 GOOGLE_REDIRECT_URI=http://127.0.0.1:8787/api/auth/callback
 ```
 
+### Local D1 / KV persistence
+
+Local data **does** persist across `wrangler dev` restarts. It is **not** the same as production D1.
+
+| Rule | Why |
+|------|-----|
+| Always run API via `pnpm --filter api dev` / `pnpm --filter api db:migrate:local` | Scripts pin `--persist-to .wrangler/state` under `apps/api/`. Running bare `wrangler` from the monorepo root creates a **different** state tree. |
+| Do **not** change `database_id` in committed `wrangler.toml` | Local Miniflare maps D1 to a durable-object-style sqlite file keyed off that id. Changing the placeholder creates a **new empty** local DB and leaves the old one orphaned under `.wrangler/state/v3/d1/`. |
+| Keep `TOKEN_ENCRYPTION_KEY` stable in `.dev.vars` | Upstream OAuth blobs in `upstream_accounts.encrypted_payload` are AES-GCM with this key. Rotating it makes old local accounts decrypt-fail (UI looks empty / unusable). |
+| Do **not** delete `apps/api/.wrangler/state/` unless you want a wipe | That directory is the local D1 + KV store (gitignored). |
+| Prefer one wrangler dev at a time on this project | Concurrent dev processes can race local sqlite / metadata. |
+
+Quick health check (counts on the active local DB):
+
+```bash
+pnpm --filter api db:local:status
+```
+
+If accounts “vanish” after a re-login but the Google user still works: check for **multiple** `*.sqlite` under `apps/api/.wrangler/state/v3/d1/miniflare-D1DatabaseObject/`. Only one file should hold your data; extras are usually orphans from an earlier `database_id` / state split. Back up, then either re-bind accounts or merge rows into the sqlite that `db:local:status` is reading (same path as `--persist-to`).
+
+Local backups from recovery work may live under `apps/api/.wrangler/backups/` (also gitignored).
 
 ## Verify before deploy
 

@@ -55,8 +55,8 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
   - Grok: live upstream `GET /v1/models` with OAuth
   - Codex: no public / third-party models list → empty + links to official docs (see [providers.md](./providers.md))
 - Session API: `GET /api/models` (`?refresh=true` bypasses 90s KV cache)
-- Client: `GET /openai/v1/models` (same live list); Anthropic `GET /anthropic/v1/models` (claude only, bare ids)
-- Copy model id as `provider/upstream` for OpenAI clients
+- Client: `GET /openai/v1/models` and `GET /anthropic/v1/models` return the same live catalog; ids are always `provider/upstream`
+- Copy model id as `provider/upstream` — works on **both** OpenAI and Anthropic bases
 
 ## Keys page
 

@@ -26,9 +26,9 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 
 ## Product one-liner
 
-Users sign in with Google, bind their own subscription accounts (Claude Code / Codex / Grok), issue API keys, and call:
+Users sign in with Google, bind their own subscription accounts (Claude Code / Codex / Grok), issue API keys, and call **any bound provider** through either format:
 
 - `https://<your-domain>/openai/v1` — Chat Completions + Models  
 - `https://<your-domain>/anthropic` — Messages API (`/v1/messages`)
 
-Model ids use OpenRouter style: `provider/model` (e.g. `claude-code/claude-opus-5`). Set `<your-domain>` via DNS + Worker/Pages custom domain (see [deployment.md](./deployment.md)).
+Model ids use OpenRouter style on **both** bases: `provider/model` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`). Set `<your-domain>` via DNS + Worker/Pages custom domain (see [deployment.md](./deployment.md)).
