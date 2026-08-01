@@ -264,7 +264,11 @@ export function openaiToAnthropicMessage(
   }
 }
 
-/** Best-effort OpenAI SSE → Anthropic Messages SSE (text deltas). */
+/**
+ * OpenAI Chat Completions SSE → Anthropic Messages SSE.
+ * Handles text deltas and streamed tool_calls (required for Claude Code on
+ * /anthropic → grok|codex conversion).
+ */
 export function openaiSseToAnthropicStream(
   body: ReadableStream<Uint8Array>,
   model: string,
@@ -274,10 +278,17 @@ export function openaiSseToAnthropicStream(
   let buffer = ""
   const msgId = `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`
   let started = false
-  let blockOpen = false
-  let blockIndex = 0
+  let textBlockOpen = false
+  let textBlockIndex = -1
+  let nextBlockIndex = 0
   let outputTokens = 0
   let stopped = false
+  let sawToolCall = false
+  /** OpenAI tool_calls[].index → Anthropic content block index + metadata */
+  const toolBlocks = new Map<
+    number,
+    { blockIndex: number; id: string; name: string; started: boolean }
+  >()
 
   return new ReadableStream({
     async start(controller) {
@@ -304,30 +315,101 @@ export function openaiSseToAnthropicStream(
           },
         })
       }
-      const ensureBlock = () => {
-        if (blockOpen) return
+      const closeTextBlock = () => {
+        if (!textBlockOpen) return
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: textBlockIndex,
+        })
+        textBlockOpen = false
+      }
+      const ensureTextBlock = () => {
+        if (textBlockOpen) return
         ensureStart()
-        blockOpen = true
+        closeOpenToolBlocks()
+        textBlockIndex = nextBlockIndex++
+        textBlockOpen = true
         emitEvent("content_block_start", {
           type: "content_block_start",
-          index: blockIndex,
+          index: textBlockIndex,
           content_block: { type: "text", text: "" },
         })
+      }
+      const closeOpenToolBlocks = () => {
+        // Close in ascending content-block index order for stable clients.
+        const open = [...toolBlocks.values()]
+          .filter((t) => t.started)
+          .sort((a, b) => a.blockIndex - b.blockIndex)
+        for (const t of open) {
+          emitEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: t.blockIndex,
+          })
+          t.started = false
+        }
+      }
+      const ensureToolBlock = (
+        openaiIndex: number,
+        id: string | undefined,
+        name: string | undefined,
+      ): { blockIndex: number; id: string; name: string; started: boolean } => {
+        let entry = toolBlocks.get(openaiIndex)
+        if (!entry) {
+          entry = {
+            blockIndex: -1,
+            id: id || `toolu_${openaiIndex}_${msgId.slice(4, 12)}`,
+            name: name || "unknown",
+            started: false,
+          }
+          toolBlocks.set(openaiIndex, entry)
+        } else {
+          if (id) entry.id = id
+          if (name) entry.name = name
+        }
+        if (!entry.started) {
+          ensureStart()
+          closeTextBlock()
+          // If another tool was open at a different openai index, leave it open
+          // (parallel tool calls are separate content blocks; stop on finish).
+          entry.blockIndex = nextBlockIndex++
+          entry.started = true
+          sawToolCall = true
+          emitEvent("content_block_start", {
+            type: "content_block_start",
+            index: entry.blockIndex,
+            content_block: {
+              type: "tool_use",
+              id: entry.id,
+              name: entry.name,
+              input: {},
+            },
+          })
+        }
+        return entry
       }
       const finish = (stop_reason: string) => {
         if (stopped) return
         stopped = true
-        if (blockOpen) {
-          emitEvent("content_block_stop", {
-            type: "content_block_stop",
-            index: blockIndex,
-          })
-          blockOpen = false
+        closeTextBlock()
+        // Close any tool blocks still open
+        for (const t of [...toolBlocks.values()].sort(
+          (a, b) => a.blockIndex - b.blockIndex,
+        )) {
+          if (t.started) {
+            emitEvent("content_block_stop", {
+              type: "content_block_stop",
+              index: t.blockIndex,
+            })
+            t.started = false
+          }
         }
         ensureStart()
+        // Prefer tool_use if we streamed any tools even when finish_reason was missing.
+        const reason =
+          stop_reason === "end_turn" && sawToolCall ? "tool_use" : stop_reason
         emitEvent("message_delta", {
           type: "message_delta",
-          delta: { stop_reason, stop_sequence: null },
+          delta: { stop_reason: reason, stop_sequence: null },
           usage: { output_tokens: outputTokens },
         })
         emitEvent("message_stop", { type: "message_stop" })
@@ -344,7 +426,7 @@ export function openaiSseToAnthropicStream(
             const data = line.slice(5).trim()
             if (!data) continue
             if (data === "[DONE]") {
-              finish("end_turn")
+              finish(sawToolCall ? "tool_use" : "end_turn")
               continue
             }
             try {
@@ -354,19 +436,56 @@ export function openaiSseToAnthropicStream(
               const delta = choice.delta as Record<string, unknown> | undefined
               const content = delta?.content
               if (typeof content === "string" && content) {
-                ensureBlock()
+                ensureTextBlock()
                 outputTokens += Math.max(1, Math.ceil(content.length / 4))
                 emitEvent("content_block_delta", {
                   type: "content_block_delta",
-                  index: blockIndex,
+                  index: textBlockIndex,
                   delta: { type: "text_delta", text: content },
                 })
               }
+
+              const toolCalls = delta?.tool_calls as
+                | Array<Record<string, unknown>>
+                | undefined
+              if (Array.isArray(toolCalls)) {
+                for (const tc of toolCalls) {
+                  const openaiIndex =
+                    typeof tc.index === "number" ? tc.index : 0
+                  const fn = tc.function as
+                    | { name?: string; arguments?: string }
+                    | undefined
+                  const id = typeof tc.id === "string" ? tc.id : undefined
+                  const name =
+                    typeof fn?.name === "string" ? fn.name : undefined
+                  // Start block when we have id/name, or when arguments arrive
+                  // without a prior start (some providers only send args chunks).
+                  const hasStartInfo = !!(id || name)
+                  const args =
+                    typeof fn?.arguments === "string" ? fn.arguments : undefined
+                  if (hasStartInfo || args != null) {
+                    const entry = ensureToolBlock(openaiIndex, id, name)
+                    if (args) {
+                      outputTokens += Math.max(1, Math.ceil(args.length / 4))
+                      emitEvent("content_block_delta", {
+                        type: "content_block_delta",
+                        index: entry.blockIndex,
+                        delta: {
+                          type: "input_json_delta",
+                          partial_json: args,
+                        },
+                      })
+                    }
+                  }
+                }
+              }
+
               const fr = choice.finish_reason
               if (fr) {
                 let stop_reason = "end_turn"
                 if (fr === "tool_calls") stop_reason = "tool_use"
                 else if (fr === "length") stop_reason = "max_tokens"
+                else if (fr === "content_filter") stop_reason = "end_turn"
                 finish(stop_reason)
               }
             } catch {
@@ -374,7 +493,7 @@ export function openaiSseToAnthropicStream(
             }
           }
         }
-        if (started && !stopped) finish("end_turn")
+        if (started && !stopped) finish(sawToolCall ? "tool_use" : "end_turn")
         controller.close()
       } catch (e) {
         controller.error(e)
@@ -608,7 +727,10 @@ export function anthropicToOpenAIResponse(msg: Record<string, unknown>, model: s
   }
 }
 
-/** Best-effort Anthropic SSE → OpenAI SSE (text deltas). */
+/**
+ * Anthropic Messages SSE → OpenAI Chat Completions SSE.
+ * Handles text_delta and tool_use (input_json_delta) streaming.
+ */
 export function anthropicSseToOpenAIStream(
   body: ReadableStream<Uint8Array>,
   model: string,
@@ -618,6 +740,10 @@ export function anthropicSseToOpenAIStream(
   let buffer = ""
   const id = `chatcmpl_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`
   let sentRole = false
+  let finishReason: string | null = null
+  // Anthropic content block index → OpenAI tool_calls index (only tool_use blocks)
+  const toolIndexByBlock = new Map<number, number>()
+  let nextToolIndex = 0
   // SSE event name must survive chunk boundaries: the `event:` line and its
   // `data:` line routinely arrive in different reads.
   let event = ""
@@ -627,6 +753,23 @@ export function anthropicSseToOpenAIStream(
       const reader = body.getReader()
       const emit = (obj: unknown) => {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
+      }
+      const ensureRole = () => {
+        if (sentRole) return
+        emit({
+          id,
+          object: "chat.completion.chunk",
+          created: Math.floor(Date.now() / 1000),
+          model,
+          choices: [
+            {
+              index: 0,
+              delta: { role: "assistant", content: "" },
+              finish_reason: null,
+            },
+          ],
+        })
+        sentRole = true
       }
       try {
         for (;;) {
@@ -642,34 +785,110 @@ export function anthropicSseToOpenAIStream(
               if (!data) continue
               try {
                 const json = JSON.parse(data) as Record<string, unknown>
-                if (event === "content_block_delta") {
-                  const delta = json.delta as { type?: string; text?: string } | undefined
-                  if (delta?.type === "text_delta" && delta.text) {
-                    if (!sentRole) {
-                      emit({
-                        id,
-                        object: "chat.completion.chunk",
-                        created: Math.floor(Date.now() / 1000),
-                        model,
-                        choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }],
-                      })
-                      sentRole = true
-                    }
+                if (event === "content_block_start") {
+                  const block = json.content_block as
+                    | { type?: string; id?: string; name?: string }
+                    | undefined
+                  const blockIndex =
+                    typeof json.index === "number" ? json.index : 0
+                  if (block?.type === "tool_use") {
+                    ensureRole()
+                    const toolIndex = nextToolIndex++
+                    toolIndexByBlock.set(blockIndex, toolIndex)
                     emit({
                       id,
                       object: "chat.completion.chunk",
                       created: Math.floor(Date.now() / 1000),
                       model,
-                      choices: [{ index: 0, delta: { content: delta.text }, finish_reason: null }],
+                      choices: [
+                        {
+                          index: 0,
+                          delta: {
+                            tool_calls: [
+                              {
+                                index: toolIndex,
+                                id: block.id,
+                                type: "function",
+                                function: {
+                                  name: block.name,
+                                  arguments: "",
+                                },
+                              },
+                            ],
+                          },
+                          finish_reason: null,
+                        },
+                      ],
                     })
                   }
+                } else if (event === "content_block_delta") {
+                  const delta = json.delta as
+                    | { type?: string; text?: string; partial_json?: string }
+                    | undefined
+                  const blockIndex =
+                    typeof json.index === "number" ? json.index : 0
+                  if (delta?.type === "text_delta" && delta.text) {
+                    ensureRole()
+                    emit({
+                      id,
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: { content: delta.text },
+                          finish_reason: null,
+                        },
+                      ],
+                    })
+                  } else if (
+                    delta?.type === "input_json_delta" &&
+                    typeof delta.partial_json === "string"
+                  ) {
+                    const toolIndex = toolIndexByBlock.get(blockIndex) ?? 0
+                    ensureRole()
+                    emit({
+                      id,
+                      object: "chat.completion.chunk",
+                      created: Math.floor(Date.now() / 1000),
+                      model,
+                      choices: [
+                        {
+                          index: 0,
+                          delta: {
+                            tool_calls: [
+                              {
+                                index: toolIndex,
+                                function: {
+                                  arguments: delta.partial_json,
+                                },
+                              },
+                            ],
+                          },
+                          finish_reason: null,
+                        },
+                      ],
+                    })
+                  }
+                } else if (event === "message_delta") {
+                  const d = json.delta as { stop_reason?: string } | undefined
+                  if (d?.stop_reason === "tool_use") finishReason = "tool_calls"
+                  else if (d?.stop_reason === "max_tokens") finishReason = "length"
+                  else if (d?.stop_reason) finishReason = "stop"
                 } else if (event === "message_stop") {
                   emit({
                     id,
                     object: "chat.completion.chunk",
                     created: Math.floor(Date.now() / 1000),
                     model,
-                    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                    choices: [
+                      {
+                        index: 0,
+                        delta: {},
+                        finish_reason: finishReason ?? "stop",
+                      },
+                    ],
                   })
                   controller.enqueue(encoder.encode("data: [DONE]\n\n"))
                 }

@@ -572,6 +572,43 @@ describe("openaiSseToAnthropicStream", () => {
     "",
   ].join("\n")
 
+  const OPENAI_TOOL_SSE = [
+    'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":null},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":""}}]},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\""}}]},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\\"a.ts\\"}"}}]},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n")
+
+  const OPENAI_TEXT_THEN_TOOL_SSE = [
+    'data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x","type":"function","function":{"name":"Bash","arguments":"{\\"cmd\\":\\"ls\\"}"}}]},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n")
+
+  const OPENAI_PARALLEL_TOOLS_SSE = [
+    'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"A","arguments":"{\\"a\\":1}"}}]},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"B","arguments":"{\\"b\\":2}"}}]},"finish_reason":null}]}',
+    "",
+    'data: {"id":"c1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+    "",
+    "data: [DONE]",
+    "",
+  ].join("\n")
+
   function chunked(text: string, size: number): ReadableStream<Uint8Array> {
     const bytes = new TextEncoder().encode(text)
     return new ReadableStream({
@@ -600,5 +637,103 @@ describe("openaiSseToAnthropicStream", () => {
     expect(out).toContain('"text":"hel"')
     expect(out).toContain('"text":"lo"')
     expect(out).toContain("event: message_stop")
+  })
+
+  it("maps streamed tool_calls to tool_use + input_json_delta", async () => {
+    const out = await collect(
+      openaiSseToAnthropicStream(chunked(OPENAI_TOOL_SSE, 13), "grok/grok-4.5"),
+    )
+    expect(out).toContain("event: content_block_start")
+    expect(out).toContain('"type":"tool_use"')
+    expect(out).toContain('"id":"call_1"')
+    expect(out).toContain('"name":"Read"')
+    expect(out).toContain('"type":"input_json_delta"')
+    expect(out).toContain('"partial_json":"{\\"path\\""')
+    expect(out).toContain('"partial_json":":\\"a.ts\\"}"')
+    expect(out).toContain("event: content_block_stop")
+    expect(out).toContain('"stop_reason":"tool_use"')
+    expect(out).toContain("event: message_stop")
+  })
+
+  it("closes text block before tool_use when both appear", async () => {
+    const out = await collect(
+      openaiSseToAnthropicStream(chunked(OPENAI_TEXT_THEN_TOOL_SSE, OPENAI_TEXT_THEN_TOOL_SSE.length), "grok/m"),
+    )
+    const textStart = out.indexOf('"type":"text"')
+    const toolStart = out.indexOf('"type":"tool_use"')
+    const firstStop = out.indexOf("event: content_block_stop")
+    expect(textStart).toBeGreaterThan(-1)
+    expect(toolStart).toBeGreaterThan(textStart)
+    expect(firstStop).toBeGreaterThan(textStart)
+    expect(firstStop).toBeLessThan(toolStart)
+    expect(out).toContain('"name":"Bash"')
+    expect(out).toContain('"stop_reason":"tool_use"')
+  })
+
+  it("supports parallel tool_calls indices", async () => {
+    const out = await collect(
+      openaiSseToAnthropicStream(
+        chunked(OPENAI_PARALLEL_TOOLS_SSE, OPENAI_PARALLEL_TOOLS_SSE.length),
+        "grok/m",
+      ),
+    )
+    expect(out).toContain('"id":"call_a"')
+    expect(out).toContain('"id":"call_b"')
+    expect(out).toContain('"name":"A"')
+    expect(out).toContain('"name":"B"')
+    // two tool_use starts
+    expect(out.match(/"type":"tool_use"/g)?.length).toBe(2)
+    expect(out).toContain('"stop_reason":"tool_use"')
+  })
+})
+
+describe("anthropicSseToOpenAIStream tool_use", () => {
+  const ANTHROPIC_TOOL_SSE = [
+    "event: message_start",
+    'data: {"type":"message_start","message":{"id":"msg_1"}}',
+    "",
+    "event: content_block_start",
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Read","input":{}}}',
+    "",
+    "event: content_block_delta",
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"x\\"}"}}',
+    "",
+    "event: content_block_stop",
+    'data: {"type":"content_block_stop","index":0}',
+    "",
+    "event: message_delta",
+    'data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":5}}',
+    "",
+    "event: message_stop",
+    'data: {"type":"message_stop"}',
+    "",
+  ].join("\n")
+
+  async function collect(stream: ReadableStream<Uint8Array>): Promise<string> {
+    const reader = stream.getReader()
+    let out = ""
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      out += new TextDecoder().decode(value)
+    }
+    return out
+  }
+
+  it("maps tool_use stream to OpenAI tool_calls chunks", async () => {
+    const bytes = new TextEncoder().encode(ANTHROPIC_TOOL_SSE)
+    const stream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(bytes)
+        c.close()
+      },
+    })
+    const out = await collect(anthropicSseToOpenAIStream(stream, "claude-code/m"))
+    expect(out).toContain('"tool_calls"')
+    expect(out).toContain('"id":"toolu_1"')
+    expect(out).toContain('"name":"Read"')
+    expect(out).toContain('"arguments":"{\\"path\\":\\"x\\"}"')
+    expect(out).toContain('"finish_reason":"tool_calls"')
+    expect(out).toContain("data: [DONE]")
   })
 })
