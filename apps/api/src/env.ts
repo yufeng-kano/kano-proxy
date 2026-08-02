@@ -13,6 +13,8 @@ export type Env = {
   CODEX_OAUTH_CLIENT_ID?: string
   GROK_OAUTH_CLIENT_ID?: string
   REQUEST_LOG_RETENTION_DAYS?: string
+  GITHUB_REPO?: string
+  GITHUB_TOKEN?: string
 }
 
 export type ProviderId = "claude-code" | "codex" | "grok"

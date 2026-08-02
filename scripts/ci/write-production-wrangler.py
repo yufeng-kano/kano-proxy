@@ -3,6 +3,8 @@
 
 Required env:
   CF_D1_DATABASE_ID, CF_KV_BENCH_ID, CF_KV_CACHE_ID, APP_URL
+Optional env:
+  GITHUB_REPO (defaults to yufeng-kano/kano-proxy)
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ def main() -> None:
     d1 = require("CF_D1_DATABASE_ID")
     bench = require("CF_KV_BENCH_ID")
     cache = require("CF_KV_CACHE_ID")
+    # Optional — not in require(): CI must not fail for a missing optional var.
+    repo = os.environ.get("GITHUB_REPO", "yufeng-kano/kano-proxy").strip()
 
     root = Path(__file__).resolve().parents[2]
     path = root / "apps" / "api" / "wrangler.production.toml"
@@ -54,6 +58,7 @@ id = "{cache}"
 APP_URL = "{app}"
 GOOGLE_REDIRECT_URI = "{app}/api/auth/callback"
 CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
+GITHUB_REPO = "{repo}"
 
 [triggers]
 crons = ["17 3 * * *"]

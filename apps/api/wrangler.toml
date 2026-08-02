@@ -30,9 +30,12 @@ APP_URL = "http://127.0.0.1:5173"
 GOOGLE_REDIRECT_URI = "http://127.0.0.1:8787/api/auth/callback"
 # Codex public client only allows this registered redirect (lincy). Manual paste completes the flow.
 CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
+# Releases source for the changelog feature (public info) — forks point this at their own repo.
+GITHUB_REPO = "yufeng-kano/kano-proxy"
 
 # Secrets via .dev.vars / wrangler secret (never commit):
 # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, TOKEN_ENCRYPTION_KEY
+# GITHUB_TOKEN (optional — raises the GitHub rate limit from 60/hr to 5000/hr)
 
 # Daily retention sweep (request_logs / sessions / oauth_login_states) — see docs/logging.md.
 [triggers]

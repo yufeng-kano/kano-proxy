@@ -228,6 +228,59 @@ a {
   font-size: 14px;
 }
 
+/**
+ * Running version, linking to /changelog. Deliberately quiet — it is ambient
+ * context, not navigation, so it reads as a label until hovered.
+ */
+.version-badge {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 2px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+  font-family: var(--mono);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-decoration: none;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.version-badge:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+/* Never color-only: an update also changes the hover title and adds the dot. */
+.version-badge.has-update {
+  color: var(--text-secondary);
+}
+
+.update-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .nav {
   display: flex;
   gap: 4px;
@@ -812,6 +865,12 @@ a {
   }
 
   .brand-name {
+    display: none;
+  }
+
+  /* Same reason as .brand-name: the nav needs the width more than the topbar
+     needs the version. It is still on /changelog. */
+  .version-badge {
     display: none;
   }
 

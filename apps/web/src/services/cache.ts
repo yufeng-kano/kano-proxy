@@ -1,6 +1,7 @@
 import type {
   AccountsResponse,
   CatalogModel,
+  ChangelogResponse,
   CustomProvider,
   ModelsResponse,
   ProviderId,
@@ -11,10 +12,21 @@ import type {
 /** Frontend cache TTL — align with backend usage cache (90s). */
 export const CACHE_TTL_MS = 90_000
 
+/** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
+export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
+
 const ACCOUNTS_PREFIX = "kano-proxy:accounts:"
 const MODELS_PREFIX = "kano-proxy:models:"
 const CUSTOM_PROVIDERS_PREFIX = "kano-proxy:custom-providers:"
 const USAGE_PREFIX = "kano-proxy:usage:"
+/**
+ * Deliberately the whole key, with **no user id** appended — unlike every
+ * other prefix here. Release notes are identical for every operator and hold
+ * nothing user-identifying, so scoping the key would only mean each signed-in
+ * user re-fetching the same public payload. The logout sweep below still
+ * clears it, unconditionally.
+ */
+const CHANGELOG_KEY = "kano-proxy:changelog"
 
 type Timed<T> = {
   savedAt: number
@@ -100,7 +112,7 @@ export function writeAccountsCache(
   writeTimed(accountsKey(userId, provider), data)
 }
 
-/** Clears all session-scoped caches (accounts, models, custom providers, usage) — used on logout. */
+/** Clears all session-scoped caches (accounts, models, custom providers, usage, changelog) — used on logout. */
 export function clearAccountsCache(userId?: string | null): void {
   if (typeof sessionStorage === "undefined") return
   try {
@@ -108,6 +120,9 @@ export function clearAccountsCache(userId?: string | null): void {
     for (let i = 0; i < sessionStorage.length; i++) {
       const k = sessionStorage.key(i)
       if (!k) continue
+      // No user id in this key, so there is no per-user entry to single out:
+      // it is always the one shared entry, always cleared.
+      if (k === CHANGELOG_KEY) keys.push(k)
       if (k.startsWith(ACCOUNTS_PREFIX)) {
         if (userId && !k.startsWith(`${ACCOUNTS_PREFIX}${userId}:`)) continue
         keys.push(k)
@@ -217,6 +232,26 @@ export function writeUsageSummaryCache(
 ): void {
   if (!userId) return
   writeTimed(usageKey(userId, days), data)
+}
+
+/**
+ * Changelog cache. Takes no `userId` — see the CHANGELOG_KEY note above: the
+ * payload is public release notes plus the running version, identical for
+ * every operator. TTL defaults to an hour rather than the 90s the other
+ * domains use (docs/changelog.md § Web caching).
+ */
+export function readChangelogCache(): ChangelogResponse | null {
+  return readTimed<ChangelogResponse>(CHANGELOG_KEY)?.data ?? null
+}
+
+export function isChangelogCacheFresh(ttlMs = CHANGELOG_CACHE_TTL_MS): boolean {
+  const entry = readTimed<ChangelogResponse>(CHANGELOG_KEY)
+  if (!entry) return false
+  return Date.now() - entry.savedAt < ttlMs
+}
+
+export function writeChangelogCache(data: ChangelogResponse): void {
+  writeTimed(CHANGELOG_KEY, data)
 }
 
 // silence unused if tree-shaken elsewhere

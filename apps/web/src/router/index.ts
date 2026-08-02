@@ -53,6 +53,11 @@ const router = createRouter({
       component: () => import("@/pages/ModelsPage.vue"),
     },
     {
+      path: "/changelog",
+      name: "changelog",
+      component: () => import("@/pages/ChangelogPage.vue"),
+    },
+    {
       path: "/:pathMatch(.*)*",
       redirect: "/dashboard",
     },

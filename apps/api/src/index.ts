@@ -6,6 +6,7 @@ import type { Env } from "./env"
 import { runRetentionSweep } from "./maintenance/retention"
 import { anthropicRoutes } from "./routes/anthropic"
 import { authRoutes } from "./routes/auth"
+import { changelogRoutes } from "./routes/changelog"
 import { customProviderRoutes } from "./routes/custom_providers"
 import { keysRoutes } from "./routes/keys"
 import { modelsRoutes } from "./routes/models"
@@ -57,6 +58,7 @@ app.route("/api/models", modelsRoutes)
 app.route("/api/providers", providerRoutes)
 app.route("/api/custom-providers", customProviderRoutes)
 app.route("/api/usage", usageRoutes)
+app.route("/api/changelog", changelogRoutes)
 
 app.route("/openai/v1", openaiRoutes)
 app.route("/anthropic", anthropicRoutes)

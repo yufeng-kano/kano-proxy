@@ -237,3 +237,9 @@ Authenticated pre-dispatch failures (invalid model, no upstream account, loop-gu
 ## Rate limits
 
 No platform per-key quota. Upstream rate limits apply; pool benches on 401/403/429.
+
+## Changelog (admin)
+
+### `GET /api/changelog`
+
+Session-auth JSON for the admin UI: the running Worker version, the newest published release, an update flag, and the sanitized release list — sourced from this repo's GitHub Releases, cached in KV. `?refresh=true` bypasses the freshness window. Full contract (response shape, caching, stale-serve, sanitization) in [changelog.md](./changelog.md).

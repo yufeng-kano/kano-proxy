@@ -96,7 +96,10 @@ CLAUDE_CODE_OAUTH_CLIENT_ID
 CODEX_OAUTH_CLIENT_ID
 GROK_OAUTH_CLIENT_ID
 REQUEST_LOG_RETENTION_DAYS   # retention sweep window in days; default 90
+GITHUB_TOKEN                 # optional; raises the /changelog GitHub rate limit (secret)
 ```
+
+`GITHUB_REPO` (`owner/repo`, source of the `/changelog` release notes) is **public**, so it lives in `wrangler.toml` `[vars]` and is carried into production by the CI config writer — not in the secret store. `GITHUB_TOKEN` is optional: the KV cache keeps a deploy inside the unauthenticated 60/hr budget on its own. See [changelog.md](./changelog.md).
 
 Google Cloud Console: authorize `https://<your-domain>/api/auth/callback`.
 

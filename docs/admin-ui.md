@@ -12,6 +12,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 | `/models` | Catalog of `provider/model` ids; available when user has a bound account. Grouped by provider, including the user's custom endpoints |
 | `/keys` | List / create / revoke API keys; show base URLs copy blocks |
 | `/dashboard` | Token usage + cache-rate dashboard over `request_logs` (see Dashboard page below) |
+| `/changelog` | Published GitHub Releases, newest first; running version marked (see [changelog.md](./changelog.md)) |
 
 ## Theming
 
@@ -41,6 +42,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 - On refresh failure, keep showing cache and surface a non-blocking error.
 - Never store access tokens, refresh tokens, session secrets, or a custom provider's API key in local UI cache — a custom provider's cached row carries only the non-secret fields the `GET /api/custom-providers` response already returns (`key_mask`, never the key).
 - Cache keys scoped to the signed-in user id. Custom providers: sessionStorage key `kano-proxy:custom-providers:{userId}`, same 90s cache-first / background-refresh convention as accounts and models. Usage summary: `kano-proxy:usage:{userId}:{days}`.
+- **Changelog is the one exception to both rules above**: TTL is **1 hour** (release notes change on deploy, not continuously) and the key `kano-proxy:changelog` carries **no user id** — the data is identical for every operator and holds nothing user-identifying. The logout sweep still clears it. See [changelog.md](./changelog.md).
 
 ### View preferences (`localStorage`)
 
@@ -54,7 +56,7 @@ Server **data** stays in `sessionStorage` (cleared when the tab closes); **view 
 
 ## Dashboard page
 
-Route `/dashboard`; signed-in `/` redirects here (nav order: Dashboard, Accounts, Models, Keys). Data source: `GET /api/usage/summary?days=1|7|30` (session auth, see [auth.md](./auth.md)) aggregating `request_logs` — **live rows only, no fabricated numbers**; an empty range renders an explicit empty state.
+Route `/dashboard`; signed-in `/` redirects here (nav order: Dashboard, Accounts, Models, Keys; `/changelog` is reached from the topbar version badge, not the nav). Data source: `GET /api/usage/summary?days=1|7|30` (session auth, see [auth.md](./auth.md)) aggregating `request_logs` — **live rows only, no fabricated numbers**; an empty range renders an explicit empty state.
 
 - Range picker: 24h / 7d / 30d (`days=1|7|30`, default 7). Series buckets are hourly for 24h, daily otherwise (UTC bucket keys from the API, formatted client-side; missing buckets zero-filled client-side). Time runs **oldest-left → newest-right**; the newest bucket is the rightmost.
 - Stat tiles: total requests, total tokens (prompt + completion), **cache hit rate** (hero metric: Σ`cache_read_input_tokens` / Σ`prompt_tokens` over cache-known rows), errors (status ≥ 400), avg latency.

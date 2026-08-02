@@ -2,6 +2,7 @@ import type {
   AccountsResponse,
   ApiKey,
   CatalogModel,
+  ChangelogResponse,
   CreatedKey,
   CustomProvider,
   CustomProviderFormat,
@@ -265,4 +266,14 @@ export async function testCustomProvider(
 /** Aggregates over `request_logs` for the trailing `days` window. No server-side KV cache to bypass (D1 read is cheap and per-user), so there is no `refresh` param. */
 export async function getUsageSummary(days: UsageDays = 7): Promise<UsageSummary> {
   return request<UsageSummary>(`/api/usage/summary?days=${days}`)
+}
+
+// Changelog — session auth. See docs/changelog.md.
+
+/** Running version + published GitHub Releases. `?refresh=true` bypasses the 1h server-side KV freshness window. */
+export async function getChangelog(opts?: {
+  refresh?: boolean
+}): Promise<ChangelogResponse> {
+  const q = opts?.refresh ? "?refresh=true" : ""
+  return request<ChangelogResponse>(`/api/changelog${q}`)
 }

@@ -182,3 +182,34 @@ export type UsageSummary = {
   models: ModelUsageRow[]
   series: UsageSeriesPoint[]
 }
+
+// Changelog — GET /api/changelog. See docs/changelog.md.
+
+/** One published GitHub Release. */
+export type ChangelogRelease = {
+  /** Release tag, e.g. "v1.11.0" — carries the leading "v". */
+  tag: string
+  name: string
+  published_at: string
+  /** GitHub release page. */
+  url: string
+  /** Sanitized server-side (twice — GitHub's renderer, then ours). Rendered with `v-html`. */
+  body_html: string
+}
+
+export type ChangelogResponse = {
+  /** Running Worker version, bare SemVer with no "v" prefix, e.g. "1.11.0". */
+  current: string
+  /** Newest published tag, e.g. "v1.11.0" — MAY carry a leading "v". */
+  latest: string | null
+  /** Computed server-side by numeric SemVer compare; never recompute client-side. */
+  updateAvailable: boolean
+  /** Newest first. */
+  releases: ChangelogRelease[]
+  /** False when GITHUB_REPO is unset/misconfigured — `current` is still valid. */
+  available: boolean
+  cached: boolean
+  /** Last good data served after a failed refetch (deliberate stale-serve). */
+  stale: boolean
+  error: string | null
+}
