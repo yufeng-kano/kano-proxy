@@ -6,6 +6,7 @@ import {
   readUsageSummaryCache,
   writeUsageSummaryCache,
 } from "@/services/cache"
+import { getDashboardPrefs, setDashboardPrefs } from "@/services/prefs"
 import type { UsageDays, UsageSummary } from "@/types"
 
 type UsageState = {
@@ -37,7 +38,9 @@ const byDays = reactive<Record<UsageDays, UsageState>>({
 
 export function useUsage() {
   const userId = ref<string | null>(null)
-  const days = ref<UsageDays>(7)
+  // Seeded from the persisted view preference so a reopened tab reloads the
+  // range the user last picked, not the 7d default.
+  const days = ref<UsageDays>(getDashboardPrefs().days)
 
   function setUserId(id: string | null) {
     userId.value = id
@@ -96,6 +99,7 @@ export function useUsage() {
   function setDays(next: UsageDays) {
     if (days.value === next) return
     days.value = next
+    setDashboardPrefs({ days: next })
     void loadDays(next)
   }
 

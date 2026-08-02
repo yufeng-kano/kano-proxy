@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue"
+import { computed, onMounted, ref, watch } from "vue"
 import { useAuth } from "@/composables/useAuth"
+import { useScrollRestore } from "@/composables/useScrollRestore"
 import { useUsage } from "@/composables/useUsage"
+import { getDashboardPrefs, setDashboardPrefs, type ChartView } from "@/services/prefs"
 import type { ModelUsageRow, UsageDays, UsageSummary } from "@/types"
 import {
   formatCompactNumber,
@@ -22,11 +24,17 @@ const {
   setUserId,
   refresh,
 } = useUsage()
+const { markReady } = useScrollRestore()
 
 const RANGE_OPTIONS: { value: UsageDays; label: string }[] = [
   { value: 1, label: "24h" },
   { value: 7, label: "7d" },
   { value: 30, label: "30d" },
+]
+
+const CHART_VIEW_OPTIONS: { value: ChartView; label: string }[] = [
+  { value: "tokens", label: "Tokens" },
+  { value: "cache-rate", label: "Cache rate" },
 ]
 
 // ---------------------------------------------------------------------------
@@ -37,39 +45,99 @@ const CHART_VBH = 300
 const MARGIN = { top: 16, right: 16, bottom: 34, left: 52 }
 const innerW = CHART_VBW - MARGIN.left - MARGIN.right
 const innerH = CHART_VBH - MARGIN.top - MARGIN.bottom
-const BAR_GAP = 4
+const GROUP_GAP = 6
+const BAR_GAP = 2
 const MAX_BAR_W = 24
-const SEG_GAP = 2
 
-type ChartBucket = {
-  key: string
-  date: Date
-  /** prompt_tokens - cache_read_input_tokens, floored at 0. */
+/**
+ * Categorical slots for model identity (see the --series-* note in
+ * styles.css). Six is the validated set; everything past it folds into a
+ * single "Other" series rather than generating a 7th hue.
+ */
+const SERIES_COLORS = [
+  "var(--series-1)",
+  "var(--series-2)",
+  "var(--series-3)",
+  "var(--series-4)",
+  "var(--series-5)",
+  "var(--series-6)",
+]
+const OTHER_COLOR = "var(--series-other)"
+const OTHER_MODEL = "Other"
+
+type ModelSeries = {
+  model: string
+  color: string
+  /** Range-total tokens — drives both the slot assignment and the legend order. */
+  total: number
+}
+
+/** One model's slice of one time bucket. */
+type BucketModel = {
+  model: string
+  color: string
   uncached: number
   cached: number
   completion: number
   requests: number
+  promptTokens: number
+  cacheReadTokens: number
+  cacheKnownRequests: number
+  total: number
+  /** Bucket cache hit rate; null when no request here reported cache data. */
+  cacheRate: number | null
 }
 
-type SegRect = { y: number; h: number; roundedTop: boolean }
+type ChartBucket = {
+  key: string
+  date: Date
+  models: BucketModel[]
+  /** Bucket totals — the sum over `models`, kept for the tooltip and table. */
+  uncached: number
+  cached: number
+  completion: number
+  requests: number
+  total: number
+  cacheRate: number | null
+}
 
-type BarGeom = ChartBucket & {
-  /** Full slot (for the hover/focus hit target — wider than the visual bar). */
+type BarGeom = {
+  model: string
+  color: string
+  x: number
+  y: number
+  width: number
+  height: number
+  datum: BucketModel
+}
+
+type GroupGeom = ChartBucket & {
+  /** Full slot — the hover/focus hit target, wider than the bars it holds. */
   hitX: number
   hitWidth: number
-  barX: number
-  barWidth: number
-  /** Bottom-to-top: [uncached, cached, completion]. */
-  segs: SegRect[]
-  total: number
+  bars: BarGeom[]
 }
 
-const showTable = ref(false)
+const prefs = getDashboardPrefs()
+const showTable = ref(prefs.showTable)
+const chartView = ref<ChartView>(prefs.chartView)
 const hoveredIndex = ref<number | null>(null)
+
+watch(showTable, (v) => setDashboardPrefs({ showTable: v }))
+
+function setChartView(next: ChartView) {
+  if (chartView.value === next) return
+  chartView.value = next
+  hoveredIndex.value = null
+  setDashboardPrefs({ chartView: next })
+}
 
 onMounted(async () => {
   setUserId(user.value?.id ?? null)
   await refresh()
+  // Content has painted (or resolved to an empty state) — only now is the
+  // document tall enough for a saved scroll offset to land.
+  await markReady()
 })
 
 async function onManualRefresh() {
@@ -122,6 +190,73 @@ function bucketKeyFor(d: UsageDays, date: Date): string {
   return `${yyyy}-${mm}-${dd}`
 }
 
+/**
+ * Model identity, ordered by range-total tokens desc — the same order as the
+ * per-model table, so the two read as one story. Color follows the *model*,
+ * not its rank within a bucket, so a model keeps its hue across every bucket
+ * and across a range change. Past six models the tail folds into one "Other"
+ * series rather than generating a 7th hue.
+ */
+function buildModelSeries(s: UsageSummary): ModelSeries[] {
+  const totals = new Map<string, number>()
+  for (const p of s.series) {
+    totals.set(p.model, (totals.get(p.model) ?? 0) + p.prompt_tokens + p.completion_tokens)
+  }
+  const ranked = [...totals.entries()]
+    .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
+    .map(([model, total]) => ({ model, total }))
+
+  if (ranked.length <= SERIES_COLORS.length) {
+    return ranked.map((m, i) => ({ ...m, color: SERIES_COLORS[i]! }))
+  }
+  // Keep the first five named, fold the rest — so "Other" is always the last
+  // legend entry and never occupies a categorical slot.
+  const kept = ranked.slice(0, SERIES_COLORS.length - 1)
+  const folded = ranked.slice(SERIES_COLORS.length - 1)
+  return [
+    ...kept.map((m, i) => ({ ...m, color: SERIES_COLORS[i]! })),
+    {
+      model: OTHER_MODEL,
+      color: OTHER_COLOR,
+      total: folded.reduce((sum, m) => sum + m.total, 0),
+    },
+  ]
+}
+
+const modelSeries = computed<ModelSeries[]>(() =>
+  summary.value ? buildModelSeries(summary.value) : [],
+)
+
+/** Maps a raw model id to the series it renders as ("Other" for the folded tail). */
+const seriesForModel = computed<Map<string, ModelSeries>>(() => {
+  const named = new Set(modelSeries.value.map((m) => m.model))
+  const other = modelSeries.value.find((m) => m.model === OTHER_MODEL)
+  const out = new Map<string, ModelSeries>()
+  for (const m of modelSeries.value) out.set(m.model, m)
+  if (other && summary.value) {
+    for (const p of summary.value.series) {
+      if (!named.has(p.model)) out.set(p.model, other)
+    }
+  }
+  return out
+})
+
+function emptyBucketModel(s: ModelSeries): BucketModel {
+  return {
+    model: s.model,
+    color: s.color,
+    uncached: 0,
+    cached: 0,
+    completion: 0,
+    requests: 0,
+    promptTokens: 0,
+    cacheReadTokens: 0,
+    cacheKnownRequests: 0,
+    total: 0,
+    cacheRate: null,
+  }
+}
+
 function buildBuckets(s: UsageSummary): ChartBucket[] {
   const nominalCount = s.days === 1 ? 24 : s.days
   const stepMs = s.days === 1 ? 3_600_000 : 86_400_000
@@ -144,20 +279,65 @@ function buildBuckets(s: UsageSummary): ChartBucket[] {
   // the most recent, most relevant one — would be silently dropped.
   const bucketCount = nominalCount + 1
 
-  const byKey = new Map(s.series.map((p) => [p.bucket, p]))
+  // Series is sparse in both dimensions, so group it by bucket first; each
+  // bucket then gets a full row of model slots (zero-filled) so every group
+  // has the same bar count and the x positions stay stable across buckets.
+  const byBucket = new Map<string, typeof s.series>()
+  for (const p of s.series) {
+    const list = byBucket.get(p.bucket)
+    if (list) list.push(p)
+    else byBucket.set(p.bucket, [p])
+  }
+
+  const lookup = seriesForModel.value
   const out: ChartBucket[] = []
   for (let i = 0; i < bucketCount; i++) {
     const date = new Date(start.getTime() + i * stepMs)
-    const point = byKey.get(bucketKeyFor(s.days, date))
-    const prompt = point?.prompt_tokens ?? 0
-    const cachedRead = point?.cache_read_input_tokens ?? 0
+    const key = bucketKeyFor(s.days, date)
+
+    const slots = new Map<string, BucketModel>()
+    for (const series of modelSeries.value) slots.set(series.model, emptyBucketModel(series))
+
+    for (const p of byBucket.get(key) ?? []) {
+      // A model absent from `lookup` can't happen (both derive from the same
+      // series array) but folding to "Other" is the safe read either way.
+      const target = lookup.get(p.model)
+      const slot = target ? slots.get(target.model) : undefined
+      if (!slot) continue
+      slot.uncached += Math.max(0, p.prompt_tokens - p.cache_read_input_tokens)
+      slot.cached += p.cache_read_input_tokens
+      slot.completion += p.completion_tokens
+      slot.requests += p.requests
+      slot.promptTokens += p.prompt_tokens
+      slot.cacheReadTokens += p.cache_read_input_tokens
+      slot.cacheKnownRequests += p.cache_known_requests
+    }
+
+    const models = [...slots.values()]
+    for (const m of models) {
+      m.total = m.uncached + m.cached + m.completion
+      // Null, not 0: a bucket where nothing reported cache data is a gap in
+      // the curve, not a 0% reading.
+      m.cacheRate =
+        m.cacheKnownRequests > 0 && m.promptTokens > 0 ? m.cacheReadTokens / m.promptTokens : null
+    }
+
+    const uncached = models.reduce((sum, m) => sum + m.uncached, 0)
+    const cached = models.reduce((sum, m) => sum + m.cached, 0)
+    const completion = models.reduce((sum, m) => sum + m.completion, 0)
+    const promptTokens = models.reduce((sum, m) => sum + m.promptTokens, 0)
+    const cacheReadTokens = models.reduce((sum, m) => sum + m.cacheReadTokens, 0)
+    const cacheKnown = models.reduce((sum, m) => sum + m.cacheKnownRequests, 0)
     out.push({
-      key: bucketKeyFor(s.days, date),
+      key,
       date,
-      uncached: Math.max(0, prompt - cachedRead),
-      cached: cachedRead,
-      completion: point?.completion_tokens ?? 0,
-      requests: point?.requests ?? 0,
+      models,
+      uncached,
+      cached,
+      completion,
+      requests: models.reduce((sum, m) => sum + m.requests, 0),
+      total: uncached + cached + completion,
+      cacheRate: cacheKnown > 0 && promptTokens > 0 ? cacheReadTokens / promptTokens : null,
     })
   }
   return out
@@ -181,75 +361,54 @@ function buildYTicks(maxVal: number, targetCount = 4): number[] {
   return ticks
 }
 
+/** Tallest single bar — grouped bars scale to the per-model max, not a bucket sum. */
 const chartMaxRaw = computed(() =>
-  buckets.value.reduce((m, b) => Math.max(m, b.uncached + b.cached + b.completion), 0),
+  buckets.value.reduce((m, b) => b.models.reduce((mm, s) => Math.max(mm, s.total), m), 0),
 )
 const yTicks = computed(() => buildYTicks(chartMaxRaw.value))
 const chartMax = computed(() => yTicks.value[yTicks.value.length - 1] ?? 1)
 
-/** Stack bottom -> top, skipping zero-height segments; the outermost nonzero segment gets the rounded "data end". */
-function stackSegments(
-  values: number[],
-  scale: (v: number) => number,
-  baselineY: number,
-  segGap: number,
-): SegRect[] {
-  const heights = values.map((v) => (v > 0 ? Math.max(1.5, scale(v)) : 0))
-  let lastNonZero = -1
-  for (let i = heights.length - 1; i >= 0; i--) {
-    if (heights[i] > 0) {
-      lastNonZero = i
-      break
-    }
-  }
-  let cursorY = baselineY
-  let placed = false
-  const out: SegRect[] = []
-  for (let i = 0; i < heights.length; i++) {
-    const h = heights[i]
-    if (h <= 0) {
-      out.push({ y: cursorY, h: 0, roundedTop: false })
-      continue
-    }
-    if (placed) cursorY -= segGap
-    const topY = cursorY - h
-    out.push({ y: topY, h, roundedTop: i === lastNonZero })
-    cursorY = topY
-    placed = true
-  }
-  return out
-}
-
-const barGeom = computed<BarGeom[]>(() => {
+const groupGeom = computed<GroupGeom[]>(() => {
   const list = buckets.value
   const n = list.length
   if (!n) return []
-  const slot = (innerW - BAR_GAP * (n - 1)) / n
-  const barW = Math.min(MAX_BAR_W, Math.max(1, slot))
+  const seriesCount = Math.max(1, modelSeries.value.length)
+  const slot = (innerW - GROUP_GAP * (n - 1)) / n
+  // Bars share the slot; BAR_GAP is the surface gap between neighbours, and
+  // MAX_BAR_W caps thickness so a one-model range doesn't render a slab.
+  const barW = Math.min(MAX_BAR_W, Math.max(1, (slot - BAR_GAP * (seriesCount - 1)) / seriesCount))
+  const groupW = barW * seriesCount + BAR_GAP * (seriesCount - 1)
   const max = chartMax.value
-  const scale = (v: number) => (max > 0 ? (v / max) * innerH : 0)
   const baselineY = MARGIN.top + innerH
   return list.map((b, i) => {
-    const hitX = MARGIN.left + i * (slot + BAR_GAP)
-    const barX = hitX + (slot - barW) / 2
-    const segs = stackSegments([b.uncached, b.cached, b.completion], scale, baselineY, SEG_GAP)
-    return {
-      ...b,
-      hitX,
-      hitWidth: slot,
-      barX,
-      barWidth: barW,
-      segs,
-      total: b.uncached + b.cached + b.completion,
-    }
+    const hitX = MARGIN.left + i * (slot + GROUP_GAP)
+    const groupX = hitX + (slot - groupW) / 2
+    const bars: BarGeom[] = b.models.map((m, j) => {
+      // Floor a nonzero value at 1.5 so a small-but-real bucket stays visible.
+      const h = m.total > 0 ? Math.max(1.5, max > 0 ? (m.total / max) * innerH : 0) : 0
+      return {
+        model: m.model,
+        color: m.color,
+        x: groupX + j * (barW + BAR_GAP),
+        y: baselineY - h,
+        width: barW,
+        height: h,
+        datum: m,
+      }
+    })
+    return { ...b, hitX, hitWidth: slot, bars }
   })
 })
 
-const chartMinWidth = computed(() => Math.max(480, barGeom.value.length * 16))
-const xLabelStep = computed(() => Math.max(1, Math.ceil(barGeom.value.length / 8)))
+const chartMinWidth = computed(() => {
+  const n = groupGeom.value.length
+  const perGroup = Math.max(16, modelSeries.value.length * 8)
+  return Math.max(480, n * perGroup)
+})
+const xLabelStep = computed(() => Math.max(1, Math.ceil(groupGeom.value.length / 8)))
 
 function showXLabel(i: number): boolean {
-  const n = barGeom.value.length
+  const n = groupGeom.value.length
   return i % xLabelStep.value === 0 || i === n - 1
 }
 
@@ -257,6 +416,59 @@ function yFor(t: number): number {
   const max = chartMax.value
   return MARGIN.top + innerH - (max > 0 ? (t / max) * innerH : 0)
 }
+
+// ---------------------------------------------------------------------------
+// Cache-rate curve — one line per model, fixed 0–100% y-axis. A bucket where
+// no request reported cache data is a *gap*, not a zero: the line breaks
+// rather than diving to the floor and inventing a cache miss.
+// ---------------------------------------------------------------------------
+const RATE_TICKS = [0, 0.25, 0.5, 0.75, 1]
+
+type RatePoint = { x: number; y: number; rate: number; bucket: ChartBucket }
+type RateLine = { model: string; color: string; segments: string[]; points: RatePoint[] }
+
+function rateY(rate: number): number {
+  return MARGIN.top + innerH - Math.min(1, Math.max(0, rate)) * innerH
+}
+
+const rateLines = computed<RateLine[]>(() => {
+  const groups = groupGeom.value
+  if (!groups.length) return []
+  return modelSeries.value.map((series) => {
+    const points: RatePoint[] = []
+    const segments: string[] = []
+    let run: string[] = []
+    groups.forEach((group) => {
+      const m = group.models.find((bm) => bm.model === series.model)
+      const rate = m?.cacheRate ?? null
+      if (rate == null) {
+        // Break the run — a gap must not be bridged by a straight line
+        // through buckets that reported nothing.
+        if (run.length > 1) segments.push(run.join(" "))
+        run = []
+        return
+      }
+      // Share the bar view's slot centers so a point sits under the same
+      // hover band that highlights it, and the two views' x-axes line up
+      // when the user flips between them.
+      const x = group.hitX + group.hitWidth / 2
+      const y = rateY(rate)
+      points.push({ x, y, rate, bucket: group })
+      run.push(`${run.length === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`)
+    })
+    if (run.length > 1) segments.push(run.join(" "))
+    return { model: series.model, color: series.color, segments, points }
+  })
+})
+
+/**
+ * A lone reading between two gaps produces no line segment (a path needs two
+ * points), so its dot is the only mark carrying it — which is why dots render
+ * in both views rather than only at hover.
+ */
+
+/** True when no model has two consecutive readings — dots alone carry the data. */
+const rateHasAnyPoint = computed(() => rateLines.value.some((l) => l.points.length > 0))
 
 function plainRectPath(x: number, y: number, w: number, h: number): string {
   return `M${x},${y} h${w} v${h} h${-w} Z`
@@ -277,12 +489,9 @@ function roundedTopRectPath(x: number, y: number, w: number, h: number, r: numbe
   ].join(" ")
 }
 
-function segPath(bar: BarGeom, idx: number): string {
-  const seg = bar.segs[idx]
-  if (!seg || seg.h <= 0) return ""
-  return seg.roundedTop
-    ? roundedTopRectPath(bar.barX, seg.y, bar.barWidth, seg.h, 4)
-    : plainRectPath(bar.barX, seg.y, bar.barWidth, seg.h)
+function barPath(bar: BarGeom): string {
+  if (bar.height <= 0) return ""
+  return roundedTopRectPath(bar.x, bar.y, bar.width, bar.height, 4)
 }
 
 function formatBucketLabel(date: Date): string {
@@ -302,30 +511,57 @@ function formatBucketFull(date: Date): string {
   return date.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
 }
 
-function bucketAriaLabel(bar: BarGeom): string {
-  return (
-    `${formatBucketFull(bar.date)}: ${formatCompactNumber(bar.uncached)} uncached input tokens, ` +
-    `${formatCompactNumber(bar.cached)} cached input tokens, ${formatCompactNumber(bar.completion)} ` +
-    `completion tokens, ${formatCompactNumber(bar.total)} total, ${formatInt(bar.requests)} requests`
-  )
+/** Screen-reader summary of one time bucket, per active view. */
+function bucketAriaLabel(group: GroupGeom): string {
+  const when = formatBucketFull(group.date)
+  if (chartView.value === "cache-rate") {
+    const parts = group.models
+      .map((m) =>
+        m.cacheRate == null
+          ? `${m.model}: no cache data`
+          : `${m.model}: ${formatPercent1(m.cacheRate)}`,
+      )
+      .join(", ")
+    return `${when}: ${parts}`
+  }
+  const active = group.models.filter((m) => m.total > 0)
+  if (!active.length) return `${when}: no tokens`
+  const parts = active
+    .map((m) => `${m.model} ${formatCompactNumber(m.total)} tokens`)
+    .join(", ")
+  return `${when}: ${parts}; ${formatCompactNumber(group.total)} total, ${formatInt(group.requests)} requests`
 }
 
 const rangeBlurb = computed(() =>
   days.value === 1 ? "Last 24 hours, hourly buckets" : `Last ${days.value} days, daily buckets`,
 )
-const chartTitle = computed(() => `Tokens per bucket — ${rangeBlurb.value.toLowerCase()}`)
+const isRateView = computed(() => chartView.value === "cache-rate")
+const cardTitle = computed(() => (isRateView.value ? "Cache rate over time" : "Tokens over time"))
+const chartTitle = computed(() =>
+  isRateView.value
+    ? `Cache hit rate per model per bucket — ${rangeBlurb.value.toLowerCase()}`
+    : `Tokens per model per bucket — ${rangeBlurb.value.toLowerCase()}`,
+)
 const chartDesc = computed(() => {
   const t = totals.value
   if (!t) return ""
+  const modelCount = modelSeries.value.length
+  if (isRateView.value) {
+    return (
+      `Line chart of cache hit rate per bucket, one line per model (${modelCount} shown), on a 0 to 100 percent axis. ` +
+      `${formatPercent1(t.cache_rate)} cache hit rate over the period. Buckets where no request reported cache data ` +
+      `are gaps in the line, not zeros. Use the table view for exact per-bucket values.`
+    )
+  }
   return (
-    `Stacked bar chart of uncached input, cached input, and completion tokens per bucket. ` +
+    `Grouped column chart of tokens per bucket, one column per model (${modelCount} shown). ` +
     `${formatCompactNumber(t.prompt_tokens + t.completion_tokens)} tokens total, ` +
     `${formatPercent1(t.cache_rate)} cache hit rate over the period. Use the table view for exact per-bucket values.`
   )
 })
 
-const hoveredBucket = computed<BarGeom | null>(() =>
-  hoveredIndex.value != null ? (barGeom.value[hoveredIndex.value] ?? null) : null,
+const hoveredBucket = computed<GroupGeom | null>(() =>
+  hoveredIndex.value != null ? (groupGeom.value[hoveredIndex.value] ?? null) : null,
 )
 const tooltipLeftPct = computed(() => {
   const b = hoveredBucket.value
@@ -335,6 +571,24 @@ const tooltipLeftPct = computed(() => {
   // .chart-wrap even at its narrowest supported render width (480px, see
   // chartMinWidth): half-width 84px / 480px ~= 17.5%, rounded up to 18%.
   return Math.min(82, Math.max(18, (centerX / CHART_VBW) * 100))
+})
+
+/**
+ * Tooltip body for the hovered bucket. Only models with something to say are
+ * listed — a range with six models would otherwise print four "—" rows in
+ * every quiet bucket.
+ */
+const tooltipRows = computed<{ model: string; color: string; value: string }[]>(() => {
+  const b = hoveredBucket.value
+  if (!b) return []
+  if (isRateView.value) {
+    return b.models
+      .filter((m) => m.cacheRate != null)
+      .map((m) => ({ model: m.model, color: m.color, value: formatPercent1(m.cacheRate) }))
+  }
+  return b.models
+    .filter((m) => m.total > 0)
+    .map((m) => ({ model: m.model, color: m.color, value: formatCompactNumber(m.total) }))
 })
 
 // ---------------------------------------------------------------------------
@@ -431,43 +685,63 @@ function modelCoverageText(m: ModelUsageRow): string | null {
         <div class="card provider-card">
           <div class="provider-head">
             <div>
-              <h2 class="provider-title">Tokens over time</h2>
+              <h2 class="provider-title">{{ cardTitle }}</h2>
               <p class="provider-blurb">{{ rangeBlurb }}</p>
             </div>
-            <button type="button" class="btn btn-ghost btn-sm" @click="showTable = !showTable">
-              {{ showTable ? "Show chart" : "Show as table" }}
-            </button>
+            <div class="row-gap">
+              <div class="segmented" role="group" aria-label="Chart">
+                <button
+                  v-for="opt in CHART_VIEW_OPTIONS"
+                  :key="opt.value"
+                  type="button"
+                  class="segmented-btn"
+                  :class="{ active: chartView === opt.value }"
+                  :aria-pressed="chartView === opt.value"
+                  @click="setChartView(opt.value)"
+                >
+                  {{ opt.label }}
+                </button>
+              </div>
+              <button type="button" class="btn btn-ghost btn-sm" @click="showTable = !showTable">
+                {{ showTable ? "Show chart" : "Show as table" }}
+              </button>
+            </div>
           </div>
 
           <div class="provider-body">
             <template v-if="!showTable">
               <div class="chart-scroll">
                 <div class="chart-wrap" :style="{ width: `max(100%, ${chartMinWidth}px)` }">
-                  <div v-if="hoveredBucket" class="chart-tooltip" :style="{ left: tooltipLeftPct + '%' }">
+                  <div
+                    v-if="hoveredBucket"
+                    class="chart-tooltip"
+                    :style="{ left: tooltipLeftPct + '%' }"
+                  >
                     <div class="chart-tooltip-title">{{ formatBucketFull(hoveredBucket.date) }}</div>
-                    <div class="chart-tooltip-line">
-                      <span class="tt-key" style="background: var(--chart-input-soft)" />
-                      <span>Uncached input</span>
-                      <strong>{{ formatCompactNumber(hoveredBucket.uncached) }}</strong>
+                    <div
+                      v-for="rowItem in tooltipRows"
+                      :key="rowItem.model"
+                      class="chart-tooltip-line"
+                    >
+                      <span class="tt-key" :style="{ background: rowItem.color }" />
+                      <span>{{ rowItem.model }}</span>
+                      <strong>{{ rowItem.value }}</strong>
                     </div>
-                    <div class="chart-tooltip-line">
-                      <span class="tt-key" style="background: var(--chart-input)" />
-                      <span>Cached input</span>
-                      <strong>{{ formatCompactNumber(hoveredBucket.cached) }}</strong>
+                    <div v-if="!tooltipRows.length" class="faint chart-tooltip-requests">
+                      {{ isRateView ? "No cache data in this bucket" : "No tokens in this bucket" }}
                     </div>
-                    <div class="chart-tooltip-line">
-                      <span class="tt-key" style="background: var(--chart-completion)" />
-                      <span>Completion</span>
-                      <strong>{{ formatCompactNumber(hoveredBucket.completion) }}</strong>
-                    </div>
-                    <div class="chart-tooltip-line chart-tooltip-total">
-                      <span>Total</span>
-                      <strong>{{ formatCompactNumber(hoveredBucket.total) }}</strong>
-                    </div>
-                    <div class="faint chart-tooltip-requests">
-                      {{ formatInt(hoveredBucket.requests) }}
-                      request{{ hoveredBucket.requests === 1 ? "" : "s" }}
-                    </div>
+                    <template v-if="!isRateView && tooltipRows.length">
+                      <div class="chart-tooltip-line chart-tooltip-total">
+                        <span>Total</span>
+                        <strong>{{ formatCompactNumber(hoveredBucket.total) }}</strong>
+                      </div>
+                      <div class="faint chart-tooltip-requests">
+                        {{ formatCompactNumber(hoveredBucket.cached) }} cached ·
+                        {{ formatCompactNumber(hoveredBucket.completion) }} completion ·
+                        {{ formatInt(hoveredBucket.requests) }}
+                        request{{ hoveredBucket.requests === 1 ? "" : "s" }}
+                      </div>
+                    </template>
                   </div>
 
                   <svg
@@ -478,54 +752,116 @@ function modelCoverageText(m: ModelUsageRow): string | null {
                     <title>{{ chartTitle }}</title>
                     <desc>{{ chartDesc }}</desc>
 
-                    <line
-                      v-for="t in yTicks"
-                      :key="`grid-${t}`"
-                      :x1="MARGIN.left"
-                      :x2="CHART_VBW - MARGIN.right"
-                      :y1="yFor(t)"
-                      :y2="yFor(t)"
-                      class="chart-grid"
-                    />
-                    <text
-                      v-for="t in yTicks"
-                      :key="`ylabel-${t}`"
-                      :x="MARGIN.left - 8"
-                      :y="yFor(t)"
-                      class="chart-axis-label"
-                      text-anchor="end"
-                      dominant-baseline="middle"
-                    >{{ formatCompactNumber(t) }}</text>
+                    <template v-if="!isRateView">
+                      <line
+                        v-for="t in yTicks"
+                        :key="`grid-${t}`"
+                        :x1="MARGIN.left"
+                        :x2="CHART_VBW - MARGIN.right"
+                        :y1="yFor(t)"
+                        :y2="yFor(t)"
+                        class="chart-grid"
+                      />
+                      <text
+                        v-for="t in yTicks"
+                        :key="`ylabel-${t}`"
+                        :x="MARGIN.left - 8"
+                        :y="yFor(t)"
+                        class="chart-axis-label"
+                        text-anchor="end"
+                        dominant-baseline="middle"
+                      >{{ formatCompactNumber(t) }}</text>
+                    </template>
+                    <template v-else>
+                      <line
+                        v-for="t in RATE_TICKS"
+                        :key="`rgrid-${t}`"
+                        :x1="MARGIN.left"
+                        :x2="CHART_VBW - MARGIN.right"
+                        :y1="rateY(t)"
+                        :y2="rateY(t)"
+                        class="chart-grid"
+                      />
+                      <text
+                        v-for="t in RATE_TICKS"
+                        :key="`rylabel-${t}`"
+                        :x="MARGIN.left - 8"
+                        :y="rateY(t)"
+                        class="chart-axis-label"
+                        text-anchor="end"
+                        dominant-baseline="middle"
+                      >{{ Math.round(t * 100) }}%</text>
+                    </template>
 
-                    <g v-for="(bar, i) in barGeom" :key="bar.key">
+                    <!-- Grouped bars: one per model per bucket -->
+                    <g v-if="!isRateView">
+                      <g v-for="(group, i) in groupGeom" :key="group.key">
+                        <rect
+                          v-if="hoveredIndex === i"
+                          :x="group.hitX"
+                          :y="MARGIN.top"
+                          :width="group.hitWidth"
+                          :height="innerH"
+                          class="bar-hit-highlight"
+                        />
+                        <g class="bar-segs" :class="{ hovered: hoveredIndex === i }">
+                          <path
+                            v-for="bar in group.bars"
+                            :key="bar.model"
+                            :d="barPath(bar)"
+                            :fill="bar.color"
+                          />
+                        </g>
+                      </g>
+                    </g>
+
+                    <!-- Cache-rate curve: one line per model; gaps stay gaps -->
+                    <g v-else>
                       <rect
-                        v-if="hoveredIndex === i"
-                        :x="bar.hitX"
+                        v-if="hoveredBucket"
+                        :x="hoveredBucket.hitX"
                         :y="MARGIN.top"
-                        :width="bar.hitWidth"
+                        :width="hoveredBucket.hitWidth"
                         :height="innerH"
                         class="bar-hit-highlight"
                       />
-                      <g class="bar-segs" :class="{ hovered: hoveredIndex === i }">
-                        <path v-if="bar.segs[0].h > 0" :d="segPath(bar, 0)" fill="var(--chart-input-soft)" />
-                        <path v-if="bar.segs[1].h > 0" :d="segPath(bar, 1)" fill="var(--chart-input)" />
-                        <path v-if="bar.segs[2].h > 0" :d="segPath(bar, 2)" fill="var(--chart-completion)" />
+                      <g v-for="line in rateLines" :key="`line-${line.model}`">
+                        <path
+                          v-for="(d, si) in line.segments"
+                          :key="si"
+                          :d="d"
+                          class="rate-line"
+                          :stroke="line.color"
+                        />
+                        <circle
+                          v-for="(pt, pi) in line.points"
+                          :key="`dot-${pi}`"
+                          :cx="pt.x"
+                          :cy="pt.y"
+                          :r="hoveredIndex != null && groupGeom[hoveredIndex]?.key === pt.bucket.key ? 4 : 2.5"
+                          class="rate-dot"
+                          :fill="line.color"
+                        />
                       </g>
-                      <rect
-                        :x="bar.hitX"
-                        :y="MARGIN.top"
-                        :width="bar.hitWidth"
-                        :height="innerH"
-                        class="bar-hit"
-                        tabindex="0"
-                        role="group"
-                        :aria-label="bucketAriaLabel(bar)"
-                        @pointerenter="hoveredIndex = i"
-                        @pointerleave="hoveredIndex = null"
-                        @focus="hoveredIndex = i"
-                        @blur="hoveredIndex = null"
-                      />
                     </g>
+
+                    <!-- Hit targets last so they stay above the marks -->
+                    <rect
+                      v-for="(group, i) in groupGeom"
+                      :key="`hit-${group.key}`"
+                      :x="group.hitX"
+                      :y="MARGIN.top"
+                      :width="group.hitWidth"
+                      :height="innerH"
+                      class="bar-hit"
+                      tabindex="0"
+                      role="group"
+                      :aria-label="bucketAriaLabel(group)"
+                      @pointerenter="hoveredIndex = i"
+                      @pointerleave="hoveredIndex = null"
+                      @focus="hoveredIndex = i"
+                      @blur="hoveredIndex = null"
+                    />
 
                     <line
                       :x1="MARGIN.left"
@@ -534,31 +870,27 @@ function modelCoverageText(m: ModelUsageRow): string | null {
                       :y2="MARGIN.top + innerH"
                       class="chart-baseline"
                     />
-                    <template v-for="(bar, i) in barGeom" :key="`xlabel-${bar.key}`">
+                    <template v-for="(group, i) in groupGeom" :key="`xlabel-${group.key}`">
                       <text
                         v-if="showXLabel(i)"
-                        :x="bar.hitX + bar.hitWidth / 2"
+                        :x="group.hitX + group.hitWidth / 2"
                         :y="MARGIN.top + innerH + 18"
                         class="chart-axis-label"
                         text-anchor="middle"
-                      >{{ formatBucketLabel(bar.date) }}</text>
+                      >{{ formatBucketLabel(group.date) }}</text>
                     </template>
                   </svg>
                 </div>
               </div>
 
+              <p v-if="isRateView && !rateHasAnyPoint" class="faint chart-note">
+                No request in this range reported cache data, so there is no rate to plot.
+              </p>
+
               <div class="chart-legend">
-                <span class="legend-item">
-                  <span class="legend-swatch" style="background: var(--chart-input-soft)" />
-                  Uncached input
-                </span>
-                <span class="legend-item">
-                  <span class="legend-swatch" style="background: var(--chart-input)" />
-                  Cached input
-                </span>
-                <span class="legend-item">
-                  <span class="legend-swatch" style="background: var(--chart-completion)" />
-                  Completion
+                <span v-for="s in modelSeries" :key="s.model" class="legend-item">
+                  <span class="legend-swatch" :style="{ background: s.color }" />
+                  <span class="mono">{{ s.model }}</span>
                 </span>
               </div>
             </template>
@@ -566,25 +898,38 @@ function modelCoverageText(m: ModelUsageRow): string | null {
             <template v-else>
               <div class="table-scroll">
                 <table class="key-table">
-                  <caption class="sr-only">Tokens per bucket for the selected range</caption>
+                  <caption class="sr-only">
+                    {{ isRateView
+                      ? "Cache hit rate per model per bucket for the selected range"
+                      : "Tokens per model per bucket for the selected range" }}
+                  </caption>
                   <thead>
-                    <tr>
+                    <tr v-if="isRateView">
                       <th scope="col">Time</th>
-                      <th scope="col">Uncached input</th>
-                      <th scope="col">Cached input</th>
-                      <th scope="col">Completion</th>
+                      <th v-for="s in modelSeries" :key="s.model" scope="col">{{ s.model }}</th>
+                    </tr>
+                    <tr v-else>
+                      <th scope="col">Time</th>
+                      <th v-for="s in modelSeries" :key="s.model" scope="col">{{ s.model }}</th>
                       <th scope="col">Total</th>
                       <th scope="col">Requests</th>
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="bar in barGeom" :key="bar.key">
-                      <td>{{ formatBucketFull(bar.date) }}</td>
-                      <td class="tabular">{{ formatCompactNumber(bar.uncached) }}</td>
-                      <td class="tabular">{{ formatCompactNumber(bar.cached) }}</td>
-                      <td class="tabular">{{ formatCompactNumber(bar.completion) }}</td>
-                      <td class="tabular">{{ formatCompactNumber(bar.total) }}</td>
-                      <td class="tabular">{{ formatInt(bar.requests) }}</td>
+                    <tr v-for="group in groupGeom" :key="group.key">
+                      <td>{{ formatBucketFull(group.date) }}</td>
+                      <template v-if="isRateView">
+                        <td v-for="m in group.models" :key="m.model" class="tabular">
+                          {{ formatPercent1(m.cacheRate) }}
+                        </td>
+                      </template>
+                      <template v-else>
+                        <td v-for="m in group.models" :key="m.model" class="tabular">
+                          {{ formatCompactNumber(m.total) }}
+                        </td>
+                        <td class="tabular">{{ formatCompactNumber(group.total) }}</td>
+                        <td class="tabular">{{ formatInt(group.requests) }}</td>
+                      </template>
                     </tr>
                   </tbody>
                 </table>
@@ -774,6 +1119,11 @@ function modelCoverageText(m: ModelUsageRow): string | null {
   transform: translateX(-50%);
   z-index: 1;
   min-width: 168px;
+  /* Model ids are long ("claude-code/claude-sonnet-5"); without a ceiling the
+     tooltip either stretches past the card or wraps every row onto three
+     lines. The name column ellipsizes instead — the full id is one row above
+     in the legend and spelled out in the table view. */
+  max-width: 320px;
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -795,6 +1145,10 @@ function modelCoverageText(m: ModelUsageRow): string | null {
 .chart-tooltip-line span:nth-child(2) {
   color: var(--text-secondary);
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chart-tooltip-line strong {
   font-variant-numeric: tabular-nums;
@@ -836,11 +1190,30 @@ function modelCoverageText(m: ModelUsageRow): string | null {
   font-size: 10px;
 }
 .bar-segs path,
-.bar-hit-highlight {
+.bar-hit-highlight,
+.rate-line,
+.rate-dot {
   pointer-events: none;
 }
 .bar-segs.hovered path {
   filter: brightness(1.12);
+}
+/* 2px line, round join/cap per the dataviz mark spec; the surface-colored
+   ring keeps a dot legible where two models' curves cross. */
+.rate-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.rate-dot {
+  stroke: var(--surface);
+  stroke-width: 2;
+  transition: r 0.1s ease;
+}
+.chart-note {
+  font-size: 12px;
+  margin: 10px 0 0;
 }
 .bar-hit-highlight {
   fill: var(--hover);

@@ -154,13 +154,23 @@ export type ModelUsageRow = {
   cache_known_requests: number
 }
 
-/** One time-series bucket. `bucket` is an hour key ("YYYY-MM-DDTHH") when days=1, else a day key ("YYYY-MM-DD"); both UTC. Sparse — missing buckets are zero-filled client-side. */
+/**
+ * One (bucket, provider, model) group. `bucket` is an hour key
+ * ("YYYY-MM-DDTHH") when days=1, else a day key ("YYYY-MM-DD"); both UTC.
+ * Sparse in both dimensions — a bucket carries one point per model that had
+ * traffic, and the client zero-fills the bucket grid. A bucket's totals are
+ * the sum over its own model points (see docs/admin-ui.md § Series shape).
+ */
 export type UsageSeriesPoint = {
   bucket: string
+  provider: string
+  model: string
   requests: number
   prompt_tokens: number
   completion_tokens: number
   cache_read_input_tokens: number
+  /** Requests here with non-null cache_read_input_tokens — separates "0% cached" from "not reported". */
+  cache_known_requests: number
 }
 
 export type UsageSummary = {

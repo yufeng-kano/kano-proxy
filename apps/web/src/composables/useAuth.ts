@@ -1,6 +1,7 @@
 import { computed, ref } from "vue"
 import { fetchMe, loginUrl, logout as apiLogout } from "@/services/api"
 import { clearAccountsCache } from "@/services/cache"
+import { clearNavigationPrefs } from "@/services/prefs"
 import type { User } from "@/types"
 
 const user = ref<User | null>(null)
@@ -38,6 +39,9 @@ export function useAuth() {
       await apiLogout()
     } finally {
       clearAccountsCache(user.value?.id)
+      // Where the user was is theirs; the impersonal view choices (range,
+      // chart view) survive sign-out. See docs/admin-ui.md § View preferences.
+      clearNavigationPrefs()
       user.value = null
     }
   }

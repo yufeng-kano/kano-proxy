@@ -55,6 +55,28 @@
   --chart-input-soft: #86b6ef;
   --chart-input: #2a78d6;
   --chart-completion: #c94f8f;
+  /* Model identity for the grouped-bars and cache-rate-curve views — a
+     *different job* from the three tokens above (which encode token kind, not
+     which model). Six categorical slots in fixed order, assigned by a model's
+     rank in the range totals so a model keeps its color across buckets and
+     across a filter change; the 7th+ model folds into --series-other rather
+     than growing the palette. Validated as a set against this file's own
+     --surface with the dataviz skill's scripts/validate_palette.js: all six
+     clear the lightness band, chroma floor, adjacent CVD (worst 9.1 light /
+     8.4 dark, target >= 8) and the normal-vision floor (19.6 / 19.3, floor
+     15). Three light-mode slots sit below 3:1 on white (aqua 2.82, yellow
+     2.17, magenta 2.69) — legal here under the relief rule because every
+     view ships a legend, a hover/focus tooltip, and a table twin, so no
+     value is ever color-only. Re-run the validator in BOTH modes before
+     changing any slot, and keep the order: the ordering is the CVD-safety
+     mechanism, not cosmetics. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-other: #8b8b95;
   /* Focus indicator — needs 3:1 against --surface per WCAG 1.4.11. */
   --ring-border: #71717a;
   --ring: 0 0 0 3px rgb(24 24 27 / 6%);
@@ -102,6 +124,15 @@
     --chart-input-soft: #1c5cab;
     --chart-input: #3987e5;
     --chart-completion: #bd4a86;
+    /* Same six hues re-stepped for the dark surface (not an automatic flip) —
+       all six clear 3:1 on #131316. See the light block for the full note. */
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-other: #8b8b95;
     /* Focus indicator — needs 3:1 against --surface per WCAG 1.4.11. */
     --ring-border: #71717a;
     --ring: 0 0 0 3px rgb(250 250 250 / 10%);

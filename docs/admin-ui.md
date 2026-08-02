@@ -19,6 +19,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 - Light and dark are both first-class: dark values are declared in a single `@media (prefers-color-scheme: dark)` override of the same token names. `:root` sets `color-scheme: light dark` so native controls, scrollbars, and form widgets follow the OS.
 - No in-app theme toggle — the UI follows the OS preference. Adding a manual toggle requires a docs update first.
 - `--accent` / `--accent-fg` invert between themes (near-black button on light, near-white on dark). Anything using `--accent` must stay legible after that flip.
+- Dashboard chart colors are two separate token families: `--chart-input-soft` / `--chart-input` / `--chart-completion` encode **token kind** (uncached / cached / completion), and `--series-1..6` + `--series-other` encode **model identity** in the grouped and curve views. Both are validated categorical sets, not hand-picked — see the note above each block in `styles.css` before changing a value.
 - The login brand panel is intentionally dark in **both** themes; it uses its own local values, not `--surface`.
 
 ## Login page
@@ -41,16 +42,33 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 - Never store access tokens, refresh tokens, session secrets, or a custom provider's API key in local UI cache — a custom provider's cached row carries only the non-secret fields the `GET /api/custom-providers` response already returns (`key_mask`, never the key).
 - Cache keys scoped to the signed-in user id. Custom providers: sessionStorage key `kano-proxy:custom-providers:{userId}`, same 90s cache-first / background-refresh convention as accounts and models. Usage summary: `kano-proxy:usage:{userId}:{days}`.
 
+### View preferences (`localStorage`)
+
+Server **data** stays in `sessionStorage` (cleared when the tab closes); **view preferences** — what the user picked, not what the server said — persist in `localStorage` under a single `kano-proxy:prefs` key so a reopened tab lands where the user left off.
+
+- Stored: last visited route path, per-route scroll offset, the Dashboard's range (24h/7d/30d) and chart view (tokens / cache-rate), and the chart-vs-table toggle.
+- **Never** stores tokens, session state, emails, or any server payload — only enum-ish UI choices and integers. Unlike the sessionStorage caches it is therefore **not** user-id scoped: it holds nothing user-identifying, and a shared machine reveals only a route name.
+- Every read is validated against the current allowed values and falls back to the default on anything unexpected (stale schema, hand-edited storage, removed route). A malformed blob is discarded, never trusted.
+- Restore-on-boot only replays a route the router still knows and the signed-in user may see; the auth guard runs unchanged, so a persisted path never bypasses login.
+- Scroll restore waits for the page's first data paint, then sets the offset once; a user scroll during restore cancels it rather than fighting the user.
+
 ## Dashboard page
 
 Route `/dashboard`; signed-in `/` redirects here (nav order: Dashboard, Accounts, Models, Keys). Data source: `GET /api/usage/summary?days=1|7|30` (session auth, see [auth.md](./auth.md)) aggregating `request_logs` — **live rows only, no fabricated numbers**; an empty range renders an explicit empty state.
 
-- Range picker: 24h / 7d / 30d (`days=1|7|30`, default 7). Series buckets are hourly for 24h, daily otherwise (UTC bucket keys from the API, formatted client-side; missing buckets zero-filled client-side).
+- Range picker: 24h / 7d / 30d (`days=1|7|30`, default 7). Series buckets are hourly for 24h, daily otherwise (UTC bucket keys from the API, formatted client-side; missing buckets zero-filled client-side). Time runs **oldest-left → newest-right**; the newest bucket is the rightmost.
 - Stat tiles: total requests, total tokens (prompt + completion), **cache hit rate** (hero metric: Σ`cache_read_input_tokens` / Σ`prompt_tokens` over cache-known rows), errors (status ≥ 400), avg latency.
 - Per-model table: requests, prompt/completion tokens, cache read/write, cache rate; sorted by total tokens desc. When cache data covers only part of a model's requests, annotate coverage (e.g. "cache data on N of M requests") instead of silently mixing.
-- Time-series chart: tokens per bucket with the cached share visually distinguished. Hand-rolled inline SVG — **no charting dependency**; colors/typography from `styles.css` tokens only, legible in both themes.
+- **Chart switcher** above the time-series card — two views over the same range, one visible at a time:
+  - **Tokens** (default): **grouped** columns — within each time bucket, one column per model, ordered by the model's range-total tokens desc (same order as the per-model table). A column is one solid fill in the model's own color: hue here does **identity**, so the uncached / cached / completion split moves to the tooltip and the table rather than being double-encoded into the same mark. Models past the categorical cap fold into a single **Other** column rather than growing the palette.
+  - **Cache rate curve**: one 2px line per model of that bucket's cache hit rate (Σ`cache_read_input_tokens` / Σ`prompt_tokens` within the bucket), on a fixed 0–100% y-axis. Buckets with no cache-known request are gaps in the line, not zeros — an unreported bucket is not a 0% bucket.
+- Both views are hand-rolled inline SVG — **no charting dependency**; colors/typography from `styles.css` tokens only, legible in both themes. Model identity uses the categorical series tokens (`--series-1..6` + `--series-other`), assigned by the model's rank in the range totals so a model keeps its color across buckets. Every view ships a legend, a hover/focus tooltip, and a **Show as table** twin so identity and values are never color-only.
 - Cache-first like every other page: sessionStorage key above, 90s TTL, paint-then-background-refresh, keep cache + non-blocking error on failure. Server side reads D1 directly (no KV layer — the query is cheap and per-user).
 - Requests without usage data (`NULL` token fields — see [database.md](./database.md)) count toward request/error totals but are skipped by token/cache aggregates; the UI surfaces that coverage rather than hiding it.
+
+### Series shape
+
+`series[]` carries a per-model dimension so the grouped and per-model-curve views need no second request. Each point is one `(bucket, provider, model)` group: `bucket`, `provider`, `model`, `requests`, `prompt_tokens`, `completion_tokens`, `cache_read_input_tokens`, `cache_known_requests`. Sparse — only groups with at least one row; the client zero-fills the bucket grid and folds the model tail into "Other". Bucket-level totals are the client-side sum over a bucket's model points, not a separate field.
 
 ## Account row (align lincy Proxy page)
 

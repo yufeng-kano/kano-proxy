@@ -139,27 +139,36 @@ describe("summarizeUsageRows", () => {
     expect(hourly.series).toEqual([
       {
         bucket: "2026-08-02T10",
+        provider: "claude-code",
+        model: "claude-code/claude-opus-5",
         requests: 2,
         prompt_tokens: 30,
         completion_tokens: 3,
         cache_read_input_tokens: 0,
+        cache_known_requests: 0,
       },
       {
         bucket: "2026-08-02T12",
+        provider: "claude-code",
+        model: "claude-code/claude-opus-5",
         requests: 1,
         prompt_tokens: 30,
         completion_tokens: 3,
         cache_read_input_tokens: 0,
+        cache_known_requests: 0,
       },
     ])
     const daily = summarizeUsageRows(rows, 7, "from") as SummaryJson
     expect(daily.series).toEqual([
       {
         bucket: "2026-08-02",
+        provider: "claude-code",
+        model: "claude-code/claude-opus-5",
         requests: 3,
         prompt_tokens: 60,
         completion_tokens: 6,
         cache_read_input_tokens: 0,
+        cache_known_requests: 0,
       },
     ])
   })
@@ -171,6 +180,38 @@ describe("summarizeUsageRows", () => {
     ]
     const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
     expect(out.series.map((s) => s.bucket)).toEqual(["2026-08-01", "2026-08-03"])
+  })
+
+  it("splits a bucket into one point per (provider, model), ascending within the bucket", () => {
+    const rows = [
+      row({ model: "claude-code/claude-opus-5", prompt_tokens: 10, completion_tokens: 1 }),
+      row({ model: "claude-code/claude-sonnet-5", prompt_tokens: 20, completion_tokens: 2 }),
+      row({ model: "claude-code/claude-opus-5", prompt_tokens: 30, completion_tokens: 3 }),
+      row({ provider: "grok", model: "grok/grok-4.5", prompt_tokens: 40, completion_tokens: 4 }),
+    ]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    // One bucket, three models -> three points; sorted by provider then model.
+    expect(out.series.map((s) => [s.bucket, s.model, s.requests, s.prompt_tokens])).toEqual([
+      ["2026-08-02", "claude-code/claude-opus-5", 2, 40],
+      ["2026-08-02", "claude-code/claude-sonnet-5", 1, 20],
+      ["2026-08-02", "grok/grok-4.5", 1, 40],
+    ])
+    // Bucket totals are the client-side sum over its model points.
+    const bucketPrompt = out.series.reduce((sum, s) => sum + (s.prompt_tokens as number), 0)
+    expect(bucketPrompt).toBe(100) // 10 + 30 + 20 + 40
+  })
+
+  it("counts cache_known_requests per series point so 0% cached is distinguishable from unreported", () => {
+    const rows = [
+      row({ prompt_tokens: 100, cache_read_input_tokens: 25 }),
+      row({ prompt_tokens: 100, cache_read_input_tokens: 0 }), // reported, genuinely 0 cached
+      row({ prompt_tokens: 100, cache_read_input_tokens: null }), // never reported
+    ]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.series).toHaveLength(1)
+    expect(out.series[0]!.requests).toBe(3)
+    expect(out.series[0]!.cache_known_requests).toBe(2)
+    expect(out.series[0]!.cache_read_input_tokens).toBe(25)
   })
 
   it("echoes days and from verbatim", () => {
@@ -392,15 +433,38 @@ describe("GET /api/usage/summary", () => {
     expect(claude).toMatchObject({ model: "claude-code/claude-opus-5", requests: 2, errors: 0 })
     const grok = json.models.find((m) => m.provider === "grok")!
     expect(grok).toMatchObject({ model: "grok/grok-4.5", requests: 1, errors: 1 })
+    // 2026-08-02 holds two models (claude-code + grok) -> two points, not one.
     expect(json.series).toEqual([
       {
         bucket: "2026-08-02",
-        requests: 2,
+        provider: "claude-code",
+        model: "claude-code/claude-opus-5",
+        requests: 1,
         prompt_tokens: 100,
         completion_tokens: 40,
         cache_read_input_tokens: 20,
+        cache_known_requests: 1,
       },
-      { bucket: "2026-08-03", requests: 1, prompt_tokens: 0, completion_tokens: 0, cache_read_input_tokens: 0 },
+      {
+        bucket: "2026-08-02",
+        provider: "grok",
+        model: "grok/grok-4.5",
+        requests: 1,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_known_requests: 0,
+      },
+      {
+        bucket: "2026-08-03",
+        provider: "claude-code",
+        model: "claude-code/claude-opus-5",
+        requests: 1,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_known_requests: 0,
+      },
     ])
   })
 })
