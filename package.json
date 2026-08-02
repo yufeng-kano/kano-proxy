@@ -1,6 +1,6 @@
 {
   "name": "kano-proxy",
-  "version": "1.6.1",
+  "version": "1.8.0",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
