@@ -238,3 +238,36 @@ describe("Anthropic system → codex instructions (via anthropicToOpenAIChatRequ
     expect(body.instructions).toBe("Part one.\n\nPart two.")
   })
 })
+
+describe("codex ignores reasoning_content on replayed history", () => {
+  it("a history thinking block converts to reasoning_content, which the Responses input builder silently ignores", () => {
+    const converted = anthropicToOpenAIChatRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "reasoning from a prior turn" },
+            { type: "text", text: "here is the answer" },
+          ],
+        },
+        { role: "user", content: "thanks" },
+      ],
+    })
+    const assistantMsg = converted.messages[0] as Record<string, unknown>
+    expect(assistantMsg.reasoning_content).toBe("reasoning from a prior turn")
+
+    const body = buildCodexRequestBody({
+      upstreamModel: "gpt-5.2",
+      messages: converted.messages,
+    })
+    const serialized = JSON.stringify(body)
+    expect(serialized).not.toContain("reasoning_content")
+    expect(serialized).not.toContain("reasoning from a prior turn")
+    // The rest of that assistant turn is still built normally.
+    const input = body.input as Array<Record<string, unknown>>
+    expect(input[0]).toEqual({
+      role: "assistant",
+      content: [{ type: "output_text", text: "here is the answer" }],
+    })
+  })
+})

@@ -30,6 +30,8 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
   tool_choice?: unknown
   response_format?: unknown
   reasoning_effort?: unknown
+  temperature?: number
+  top_p?: number
   stop?: string[]
 } {
   const cleaned = stripCacheControl(body) as Record<string, unknown>
@@ -60,9 +62,16 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
       const blocks = Array.isArray(m.content) ? (m.content as Array<Record<string, unknown>>) : null
       if (blocks) {
         let text = ""
+        let reasoning = ""
         const tool_calls: Array<Record<string, unknown>> = []
         for (const b of blocks) {
           if (b.type === "text") text += String(b.text ?? "")
+          // Round-trip a prior converted turn's thinking block back into the
+          // de-facto reasoning_content field before replay upstream (grok
+          // accepts this echoed back; codex's request builder ignores the
+          // field; custom-openai forwards it verbatim). redacted_thinking has
+          // no plaintext to round-trip and is dropped, not an error.
+          if (b.type === "thinking") reasoning += String(b.thinking ?? "")
           if (b.type === "tool_use") {
             tool_calls.push({
               id: b.id,
@@ -78,6 +87,7 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
           role: "assistant",
           content: text || null,
         }
+        if (reasoning) msg.reasoning_content = reasoning
         if (tool_calls.length) msg.tool_calls = tool_calls
         messages.push(msg)
       } else {
@@ -126,12 +136,16 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
     tool_choice?: unknown
     response_format?: unknown
     reasoning_effort?: unknown
+    temperature?: number
+    top_p?: number
     stop?: string[]
   } = {
     messages,
     stream: !!cleaned.stream,
   }
   if (typeof cleaned.max_tokens === "number") out.max_tokens = cleaned.max_tokens
+  if (typeof cleaned.temperature === "number") out.temperature = cleaned.temperature
+  if (typeof cleaned.top_p === "number") out.top_p = cleaned.top_p
 
   if (Array.isArray(cleaned.stop_sequences)) {
     const stop = cleaned.stop_sequences.filter(
@@ -300,6 +314,14 @@ export function openaiToAnthropicMessage(
   const choice = (completion.choices as Array<Record<string, unknown>> | undefined)?.[0]
   const message = (choice?.message as Record<string, unknown> | undefined) ?? {}
   const content: Array<Record<string, unknown>> = []
+  // The de-facto reasoning_content extension field (grok's include_reasoning
+  // output, or codex's reasoning summary) becomes a leading, unsigned
+  // thinking block — no `signature`, since this proxy has none to attach;
+  // only a genuine Anthropic-origin thinking block carries one.
+  const reasoning = message.reasoning_content
+  if (typeof reasoning === "string" && reasoning) {
+    content.push({ type: "thinking", thinking: reasoning })
+  }
   const text = message.content
   if (typeof text === "string" && text) {
     content.push({ type: "text", text })
@@ -332,6 +354,7 @@ export function openaiToAnthropicMessage(
         prompt_tokens?: number
         completion_tokens?: number
         prompt_tokens_details?: { cached_tokens?: number }
+        completion_tokens_details?: { reasoning_tokens?: number }
       }
     | undefined
 
@@ -353,23 +376,29 @@ export function openaiToAnthropicMessage(
  * reported `prompt_tokens_details.cached_tokens`, subtract it out and
  * report it as `cache_read_input_tokens` instead. Unchanged when no cache
  * details were reported (docs/api.md "Usage cache details on converted
- * responses").
+ * responses"). `completion_tokens_details.reasoning_tokens`, when reported,
+ * is added into `output_tokens` — Anthropic's own `output_tokens` already
+ * includes thinking, so a converted response should match (docs/logging.md
+ * "Token usage capture").
  */
 function anthropicUsageFromOpenAI(usage: {
   prompt_tokens?: number
   completion_tokens?: number
   prompt_tokens_details?: { cached_tokens?: number }
+  completion_tokens_details?: { reasoning_tokens?: number }
 }): Record<string, unknown> {
   const prompt = usage.prompt_tokens ?? 0
+  const reasoning = usage.completion_tokens_details?.reasoning_tokens
+  const output = (usage.completion_tokens ?? 0) + (typeof reasoning === "number" ? reasoning : 0)
   const cached = usage.prompt_tokens_details?.cached_tokens
   if (typeof cached === "number") {
     return {
       input_tokens: prompt - cached,
-      output_tokens: usage.completion_tokens ?? 0,
+      output_tokens: output,
       cache_read_input_tokens: cached,
     }
   }
-  return { input_tokens: prompt, output_tokens: usage.completion_tokens ?? 0 }
+  return { input_tokens: prompt, output_tokens: output }
 }
 
 /**
@@ -388,6 +417,16 @@ export function openaiSseToAnthropicStream(
   let started = false
   let textBlockOpen = false
   let textBlockIndex = -1
+  /**
+   * Reasoning (grok's include_reasoning `reasoning_content`, or codex's
+   * reasoning summary) normally arrives before anything else and streams
+   * live into its own thinking block, closed as soon as real text/tool
+   * content starts. Unsigned — this proxy has no signature to attach.
+   */
+  let thinkingBlockOpen = false
+  let thinkingBlockIndex = -1
+  /** Reasoning that arrives after a text/tool block is already open; flushed whole at finish(), mirrors pendingText. */
+  let pendingThinking = ""
   let nextBlockIndex = 0
   let outputTokens = 0
   let stopped = false
@@ -481,6 +520,57 @@ export function openaiSseToAnthropicStream(
         })
         liveTool = null
       }
+      const closeThinkingBlock = () => {
+        if (!thinkingBlockOpen) return
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: thinkingBlockIndex,
+        })
+        thinkingBlockOpen = false
+      }
+      /** Emit buffered reasoning as a complete thinking block of its own. */
+      const flushPendingThinking = () => {
+        if (!pendingThinking) return
+        const thinking = pendingThinking
+        pendingThinking = ""
+        const index = nextBlockIndex++
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: { type: "thinking", thinking: "" },
+        })
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index,
+          delta: { type: "thinking_delta", thinking },
+        })
+        emitEvent("content_block_stop", { type: "content_block_stop", index })
+      }
+      const appendThinking = (text: string) => {
+        ensureStart()
+        // Reasoning normally precedes everything else. If a text or tool
+        // block is already open (a late/out-of-order fragment), do not
+        // interleave — buffer it and flush as one complete block at the end,
+        // same treatment as pendingText below.
+        if (textBlockOpen || liveTool) {
+          pendingThinking += text
+          return
+        }
+        if (!thinkingBlockOpen) {
+          thinkingBlockIndex = nextBlockIndex++
+          thinkingBlockOpen = true
+          emitEvent("content_block_start", {
+            type: "content_block_start",
+            index: thinkingBlockIndex,
+            content_block: { type: "thinking", thinking: "" },
+          })
+        }
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: thinkingBlockIndex,
+          delta: { type: "thinking_delta", thinking: text },
+        })
+      }
       /** Emit buffered post-tool text as a complete block of its own. */
       const flushPendingText = () => {
         if (!pendingText) return
@@ -501,6 +591,9 @@ export function openaiSseToAnthropicStream(
       }
       const appendText = (text: string) => {
         ensureStart()
+        // Reasoning (if any) always finishes before real content — close it
+        // the moment text/tool content actually starts.
+        closeThinkingBlock()
         // Never close an open tool block for text — that would split its
         // arguments JSON across two blocks sharing one tool_use id.
         if (liveTool) {
@@ -615,6 +708,7 @@ export function openaiSseToAnthropicStream(
           return
         }
         closeTextBlock()
+        closeThinkingBlock()
         liveTool = {
           openaiIndex,
           blockIndex: nextBlockIndex++,
@@ -642,7 +736,9 @@ export function openaiSseToAnthropicStream(
         ensureStart()
         closeTextBlock()
         closeToolBlock()
+        closeThinkingBlock()
         flushPendingText()
+        flushPendingThinking()
         for (const t of deferredTools) {
           emitCompleteToolBlock(t.openaiIndex, t.id, t.name, t.args)
         }
@@ -735,6 +831,7 @@ export function openaiSseToAnthropicStream(
                     prompt_tokens?: number
                     completion_tokens?: number
                     prompt_tokens_details?: { cached_tokens?: number }
+                    completion_tokens_details?: { reasoning_tokens?: number }
                   }
                 | null
                 | undefined
@@ -743,7 +840,13 @@ export function openaiSseToAnthropicStream(
                   promptTokens = usage.prompt_tokens
                 }
                 if (typeof usage.completion_tokens === "number") {
-                  completionTokens = usage.completion_tokens
+                  // Anthropic's own output_tokens already includes thinking —
+                  // fold reasoning_tokens in so a converted response matches
+                  // (docs/logging.md "Token usage capture").
+                  const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens
+                  completionTokens =
+                    usage.completion_tokens +
+                    (typeof reasoningTokens === "number" ? reasoningTokens : 0)
                 }
                 if (typeof usage.prompt_tokens_details?.cached_tokens === "number") {
                   cacheReadInputTokens = usage.prompt_tokens_details.cached_tokens
@@ -755,6 +858,13 @@ export function openaiSseToAnthropicStream(
               // would have to be emitted past message_stop.
               if (stopReason != null || stopped) continue
               const delta = choice.delta as Record<string, unknown> | undefined
+              // Reasoning (grok include_reasoning / codex reasoning summary)
+              // arrives before real content — see appendThinking above.
+              const reasoningContent = delta?.reasoning_content
+              if (typeof reasoningContent === "string" && reasoningContent) {
+                outputTokens += Math.max(1, Math.ceil(reasoningContent.length / 4))
+                appendThinking(reasoningContent)
+              }
               const content = delta?.content
               if (typeof content === "string" && content) {
                 outputTokens += Math.max(1, Math.ceil(content.length / 4))
@@ -828,6 +938,9 @@ export function openaiToAnthropicMessages(input: {
   thinking?: { type: string }
   output_config?: { effort: string }
   stop?: string[]
+  /** Clamped to Anthropic's [0, 1] — OpenAI's client-facing range is 0–2. */
+  temperature?: number
+  top_p?: number
 }): Record<string, unknown> {
   const systemParts: Array<Record<string, unknown>> = []
   const messages: Array<Record<string, unknown>> = []
@@ -889,6 +1002,11 @@ export function openaiToAnthropicMessages(input: {
     messages,
     stream: !!input.stream,
   }
+  // OpenAI's client-facing temperature range is 0–2; Anthropic caps at 1.
+  if (typeof input.temperature === "number") {
+    body.temperature = Math.max(0, Math.min(1, input.temperature))
+  }
+  if (typeof input.top_p === "number") body.top_p = input.top_p
   if (systemParts.length === 1 && systemParts[0]!.type === "text") {
     body.system = systemParts[0]!.text
   } else if (systemParts.length) {

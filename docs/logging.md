@@ -6,6 +6,37 @@
 - Request metadata: user_id, api_key_id, provider, model, account_id, status, latency_ms, prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens, error_code
 - Pool: bench, promote, remove (ids only)
 
+## Error codes
+
+`request_logs.error_code` (nullable TEXT), current full set:
+
+| Code | Meaning |
+|------|---------|
+| `no_upstream_account` | No usable account for the resolved provider (pool empty, or every account removed) |
+| `upstream_unavailable` | Every account in the pool benched/failing — attempts exhausted (503) |
+| `upstream_error` | Upstream returned a non-2xx after retries/failover, or every account got benched and there was a prior upstream response to fall back to |
+| `invalid_model` | Authenticated request; `model` did not resolve to a builtin provider or one of the caller's own custom provider slugs (400, pre-dispatch) |
+| `loop_detected` | Degenerate tool-call loop guard tripped on a grok/codex/custom-openai conversion request (400, pre-dispatch) — see [api.md](./api.md) |
+| `upstream_stall` | Streaming response: no upstream chunk for 120s — idle-timeout close, logged unconditionally regardless of whether a completion signal was already seen |
+| `client_abort` | Streaming response: the client cancelled before the upstream reported a completion signal |
+| `incomplete_stream` | Streaming response: the upstream connection ended — cleanly or with a transport error — before a completion signal ever arrived |
+| `NULL` | Success, or a streamed response that reached its documented completion signal before closing |
+
+## Pre-dispatch logging policy
+
+A request that fails before any upstream call is logged only when the caller **authenticated successfully** — an invalid/missing API key never writes a row (these are public endpoints; logging every scanner/bot hit would flood `request_logs` with nothing actionable). Once the API key is valid, every pre-dispatch failure gets exactly one row via `waitUntil`, same as a real dispatch:
+
+- Invalid `model` (`/v1/messages`, `/v1/messages/count_tokens`, `/chat/completions`): `error_code: "invalid_model"`; `provider` = the text before the first `/` in the raw model string, or `"unknown"` when there was no `/`; `model` = the raw string truncated to 200 chars.
+- No usable upstream account on the first acquire attempt, with no prior upstream response to fall back to (`/v1/messages` native passthrough — parity with the `/openai/v1` path, which already logged this case): `error_code: "no_upstream_account"`.
+- Loop guard trip (see [api.md](./api.md)): `error_code: "loop_detected"`.
+
+## Streaming rows
+
+A streamed request's row is written once, deferred to stream close (`waitUntil`) — see "Token usage capture" below. Two independent fields describe how it ended:
+
+- `status_code` is always whatever the upstream response headers said (typically `200`) — a failure discovered after headers are sent can never change it.
+- `error_code` marks a stream that closed before its documented completion signal was seen (Anthropic `message_stop`; OpenAI `[DONE]` or a chunk carrying a non-null `finish_reason`): `upstream_stall` (idle-timeout close, regardless of completeness), `client_abort` (client cancelled first, and no completion signal had been seen yet), or `incomplete_stream` (the connection just ended — clean EOF or a transport error — with no completion signal). A stream that did reach its completion signal keeps `error_code: NULL`, same as before this change.
+
 ## Forbidden by default
 
 - Full prompts, completions, tool arguments/results bodies
@@ -40,5 +71,6 @@ Rules:
 - Capture never rewrites or buffers the client stream: streamed bodies are inspected chunk-by-chunk as they pass through the existing keepalive pipe, holding only a bounded partial-line carry. On carry overflow or parse failure, capture is abandoned but the stream keeps flowing — a capture problem degrades to `NULL` token fields, never a failed request.
 - Exactly **one** `request_logs` row per client request, including the `/anthropic` → OpenAI-convert path.
 - `count_tokens` requests log a row like any other request but never carry token fields (their response is an estimate, not consumption).
+- Wherever an OpenAI-shaped `usage` is normalized into `completion_tokens` (this table's `grok`/custom-openai row, and the `/anthropic`-surface conversion's `output_tokens`), `usage.completion_tokens_details.reasoning_tokens` is added in when the upstream reports it, so a reasoning-heavy turn is not under-counted. In practice this only ever fires for `grok` (`include_reasoning: true`, see [api.md](./api.md)) and any custom openai-format upstream that happens to report the same field — codex's own Responses-shaped usage has no equivalent and is unaffected.
 
 The Dashboard admin page aggregates these rows via `GET /api/usage/summary` (see [auth.md](./auth.md), [admin-ui.md](./admin-ui.md)).

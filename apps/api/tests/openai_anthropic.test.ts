@@ -668,6 +668,86 @@ describe("openaiToAnthropicMessage", () => {
     )
     expect(out.usage).toEqual({ input_tokens: 5, output_tokens: 2 })
   })
+
+  describe("reasoning_content → leading thinking block", () => {
+    it("prepends an unsigned thinking block before text when reasoning_content is present", () => {
+      const out = openaiToAnthropicMessage(
+        {
+          id: "c1",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "answer",
+                reasoning_content: "thinking it through",
+              },
+              finish_reason: "stop",
+            },
+          ],
+        },
+        "grok/grok-4.5",
+      )
+      expect(out.content).toEqual([
+        { type: "thinking", thinking: "thinking it through" },
+        { type: "text", text: "answer" },
+      ])
+      expect(JSON.stringify(out)).not.toContain("signature")
+    })
+
+    it("omits the thinking block entirely when reasoning_content is absent or empty", () => {
+      const noField = openaiToAnthropicMessage(
+        { id: "c2", choices: [{ message: { role: "assistant", content: "answer" }, finish_reason: "stop" }] },
+        "grok/m",
+      )
+      expect(noField.content).toEqual([{ type: "text", text: "answer" }])
+
+      const emptyField = openaiToAnthropicMessage(
+        {
+          id: "c3",
+          choices: [
+            { message: { role: "assistant", content: "answer", reasoning_content: "" }, finish_reason: "stop" },
+          ],
+        },
+        "grok/m",
+      )
+      expect(emptyField.content).toEqual([{ type: "text", text: "answer" }])
+    })
+
+    it("adds completion_tokens_details.reasoning_tokens into output_tokens", () => {
+      const out = openaiToAnthropicMessage(
+        {
+          id: "c4",
+          choices: [
+            { message: { role: "assistant", content: "hi", reasoning_content: "r" }, finish_reason: "stop" },
+          ],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            completion_tokens_details: { reasoning_tokens: 7 },
+          },
+        },
+        "grok/m",
+      )
+      expect(out.usage).toEqual({ input_tokens: 10, output_tokens: 12 })
+    })
+
+    it("still subtracts cached tokens from input_tokens alongside a reasoning_tokens output addition", () => {
+      const out = openaiToAnthropicMessage(
+        {
+          id: "c5",
+          choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+          usage: {
+            prompt_tokens: 100,
+            completion_tokens: 40,
+            prompt_tokens_details: { cached_tokens: 30 },
+            completion_tokens_details: { reasoning_tokens: 10 },
+          },
+        },
+        "grok/m",
+      )
+      expect(out.usage).toEqual({ input_tokens: 70, output_tokens: 50, cache_read_input_tokens: 30 })
+    })
+  })
 })
 
 describe("openaiSseToAnthropicStream", () => {
@@ -850,7 +930,7 @@ describe("openaiSseToAnthropicStream", () => {
       } else if (event === "content_block_delta") {
         expect(open, "delta outside an open block").toBe(json.index)
         const b = blocks[byIndex.get(json.index)!]!
-        b.body += json.delta.partial_json ?? json.delta.text ?? ""
+        b.body += json.delta.partial_json ?? json.delta.text ?? json.delta.thinking ?? ""
       } else if (event === "content_block_stop") {
         expect(open).toBe(json.index)
         open = null
@@ -1166,6 +1246,98 @@ describe("openaiSseToAnthropicStream", () => {
     ).filter((b) => b.type === "tool_use")
     expect(tools.map((t) => t.id)).toEqual(["call_a", "call_b"])
     expect(tools.map((t) => JSON.parse(t.body))).toEqual([{ a: 1 }, { b: 2 }])
+  })
+
+  describe("reasoning_content → thinking block", () => {
+    it("streams reasoning live into a leading thinking block, closed before text starts", async () => {
+      const sse = [
+        'data: {"choices":[{"index":0,"delta":{"reasoning_content":"Let me "}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{"reasoning_content":"think."}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{"content":"The answer is 4."}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n")
+      const out = await collect(openaiSseToAnthropicStream(chunked(sse, 23), "grok/grok-4.5"))
+      const blocks = parseBlocks(out)
+      expect(blocks.map((b) => b.type)).toEqual(["thinking", "text"])
+      expect(blocks[0]!.body).toBe("Let me think.")
+      expect(blocks[1]!.body).toBe("The answer is 4.")
+      // Unsigned — no signature is fabricated for a converted-provider thinking block.
+      expect(out).not.toContain("signature")
+    })
+
+    it("closes the thinking block before a tool_use block opens", async () => {
+      const sse = [
+        'data: {"choices":[{"index":0,"delta":{"reasoning_content":"deciding"}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":\\"/a\\"}"}}]}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n")
+      const out = await collect(openaiSseToAnthropicStream(chunked(sse, 19), "grok/grok-4.5"))
+      const blocks = parseBlocks(out)
+      expect(blocks.map((b) => b.type)).toEqual(["thinking", "tool_use"])
+      expect(blocks[0]!.body).toBe("deciding")
+    })
+
+    it("buffers reasoning that arrives after a tool block is already open, flushing it whole at the end", async () => {
+      const sse = [
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":\\"/a\\"}"}}]}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{"reasoning_content":"late reasoning"}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n")
+      const out = await collect(openaiSseToAnthropicStream(chunked(sse, 29), "grok/m"))
+      const blocks = parseBlocks(out)
+      expect(blocks.map((b) => b.type)).toEqual(["tool_use", "thinking"])
+      expect(blocks[1]!.body).toBe("late reasoning")
+    })
+
+    it("counts reasoning text toward the character-estimate output_tokens", async () => {
+      const sse = [
+        // 10 chars => ceil(10/4) = 3 estimated tokens
+        'data: {"choices":[{"index":0,"delta":{"reasoning_content":"0123456789"}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n")
+      const out = await collect(openaiSseToAnthropicStream(chunked(sse, 17), "grok/m"))
+      expect(out).toContain('"output_tokens":3')
+    })
+
+    it("adds completion_tokens_details.reasoning_tokens into the reported output_tokens", async () => {
+      const sse = [
+        'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}',
+        "",
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"completion_tokens_details":{"reasoning_tokens":20}}}',
+        "",
+        "data: [DONE]",
+        "",
+      ].join("\n")
+      const out = await collect(openaiSseToAnthropicStream(chunked(sse, 31), "grok/m"))
+      expect(out).toContain('"output_tokens":25')
+    })
+
+    it("omits any thinking block when no reasoning_content ever arrives", async () => {
+      const out = await collect(
+        openaiSseToAnthropicStream(chunked(OPENAI_SSE, 11), "grok/m"),
+      )
+      expect(parseBlocks(out).map((b) => b.type)).not.toContain("thinking")
+    })
   })
 })
 
@@ -1564,5 +1736,165 @@ describe("anthropicToOpenAIChatRequest: output_format → json_schema", () => {
       type: "json_schema",
       json_schema: { name: "response", schema: { type: "object", properties: {} } },
     })
+  })
+})
+
+describe("anthropicToOpenAIChatRequest: temperature / top_p", () => {
+  it("copies numeric temperature and top_p verbatim", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 0.3,
+      top_p: 0.8,
+    })
+    expect(out.temperature).toBe(0.3)
+    expect(out.top_p).toBe(0.8)
+  })
+
+  it("omits temperature/top_p when absent or non-numeric", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: "high",
+    })
+    expect(out.temperature).toBeUndefined()
+    expect(out.top_p).toBeUndefined()
+
+    const bare = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(bare.temperature).toBeUndefined()
+    expect(bare.top_p).toBeUndefined()
+  })
+})
+
+describe("openaiToAnthropicMessages: temperature clamp / top_p passthrough", () => {
+  it("clamps an OpenAI temperature above Anthropic's ceiling down to 1", () => {
+    const body = openaiToAnthropicMessages({
+      model: "m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "x" }],
+      temperature: 1.4,
+    })
+    expect(body.temperature).toBe(1)
+  })
+
+  it("leaves an in-range temperature unchanged", () => {
+    const body = openaiToAnthropicMessages({
+      model: "m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "x" }],
+      temperature: 0.5,
+    })
+    expect(body.temperature).toBe(0.5)
+  })
+
+  it("clamps a negative temperature up to 0", () => {
+    const body = openaiToAnthropicMessages({
+      model: "m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "x" }],
+      temperature: -0.2,
+    })
+    expect(body.temperature).toBe(0)
+  })
+
+  it("passes top_p through unclamped when present, omits both fields when absent", () => {
+    const withTopP = openaiToAnthropicMessages({
+      model: "m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "x" }],
+      top_p: 0.9,
+    })
+    expect(withTopP.top_p).toBe(0.9)
+    expect("temperature" in withTopP).toBe(false)
+
+    const bare = openaiToAnthropicMessages({
+      model: "m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "x" }],
+    })
+    expect("temperature" in bare).toBe(false)
+    expect("top_p" in bare).toBe(false)
+  })
+})
+
+describe("anthropicToOpenAIChatRequest: thinking → reasoning_content round-trip", () => {
+  it("concatenates thinking blocks (in order) into reasoning_content on the assistant message", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "step one. " },
+            { type: "thinking", thinking: "step two." },
+            { type: "text", text: "answer" },
+          ],
+        },
+      ],
+    })
+    expect(out.messages[0]).toEqual({
+      role: "assistant",
+      content: "answer",
+      reasoning_content: "step one. step two.",
+    })
+  })
+
+  it("drops redacted_thinking blocks — no plaintext to round-trip, not an error", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "redacted_thinking", data: "opaque" },
+            { type: "text", text: "answer" },
+          ],
+        },
+      ],
+    })
+    expect(out.messages[0]).toEqual({ role: "assistant", content: "answer" })
+    expect(JSON.stringify(out)).not.toContain("reasoning_content")
+  })
+
+  it("includes reasoning_content alongside tool_calls even with no text (content: null)", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "deciding which tool" },
+            { type: "tool_use", id: "t1", name: "Read", input: { file_path: "/a" } },
+          ],
+        },
+      ],
+    })
+    expect(out.messages[0]).toEqual({
+      role: "assistant",
+      content: null,
+      reasoning_content: "deciding which tool",
+      tool_calls: [
+        { id: "t1", type: "function", function: { name: "Read", arguments: '{"file_path":"/a"}' } },
+      ],
+    })
+  })
+
+  it("does not synthesize reasoning_content for plain-string assistant content (array-content branch only)", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "assistant", content: "just text" }],
+    })
+    expect(out.messages[0]).toEqual({ role: "assistant", content: "just text" })
+  })
+
+  it("omits reasoning_content entirely when the assistant message has no thinking blocks", () => {
+    const out = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
+    })
+    expect(out.messages[0]).toEqual({ role: "assistant", content: "hi" })
   })
 })

@@ -208,6 +208,8 @@ export const claudeCodeAdapter: ProviderAdapter = {
       thinking: mapped.thinking,
       output_config: mapped.output_config,
       stop: req.stop,
+      temperature: req.temperature,
+      top_p: req.top_p,
     })
     // OpenAI→Claude: do NOT add cache_control
     const withSystem = prependRequiredSystem(anthropicBody)

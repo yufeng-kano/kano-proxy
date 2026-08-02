@@ -42,3 +42,15 @@ export function parseModelId(model: string): ParsedModel | null {
 export function parseAnthropicModel(model: string): ParsedModel | null {
   return parseModelId(model)
 }
+
+/**
+ * Best-effort provider extraction from a raw, possibly-malformed model
+ * string, for `invalid_model` pre-dispatch logging only — never used for
+ * routing (that stays on `splitModelId`'s stricter shape check). Text
+ * before the first "/", the whole string when there is no "/" at all, or
+ * `"unknown"` when that is empty (leading "/", or an empty model string).
+ */
+export function loggingProviderFromRawModel(raw: string): string {
+  const prefix = raw.split("/")[0] ?? ""
+  return prefix || "unknown"
+}

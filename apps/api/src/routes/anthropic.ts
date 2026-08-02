@@ -3,8 +3,11 @@ import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
 import type { ProviderId } from "../env"
+import { logRequest } from "../logging/request_log"
 import { resolveModel } from "../providers/resolve"
 import { dispatchAnthropicMessages, dispatchAnthropicViaOpenAI } from "../proxy/dispatch"
+import { detectAnthropicToolLoop, loopDetectedMessage } from "../utils/loop_guard"
+import { loggingProviderFromRawModel } from "../utils/model"
 
 export const anthropicRoutes = new Hono<HonoEnv>()
 
@@ -24,6 +27,7 @@ anthropicRoutes.get("/v1/models", async (c) => {
 })
 
 anthropicRoutes.post("/v1/messages", async (c) => {
+  const started = Date.now()
   const userId = c.get("apiKeyUserId")!
   const apiKeyId = c.get("apiKeyId")
   let body: Record<string, unknown>
@@ -38,6 +42,17 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   const modelRaw = String(body.model ?? "")
   const resolved = await resolveModel(c.env, userId, modelRaw)
   if (!resolved) {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: loggingProviderFromRawModel(modelRaw),
+        model: modelRaw.slice(0, 200),
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "invalid_model",
+      }),
+    )
     return c.json(
       {
         type: "error",
@@ -80,7 +95,32 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     })
   }
 
-  // grok / codex / custom-openai: convert Messages ↔ Chat Completions via existing adapters
+  // grok / codex / custom-openai: convert Messages ↔ Chat Completions via
+  // existing adapters. Loop guard applies only on this conversion ingress —
+  // never on the native passthrough branch above (docs/api.md "Degenerate
+  // tool-call loop guard").
+  const loop = detectAnthropicToolLoop((body.messages as unknown[]) ?? [])
+  if (loop.tripped) {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: resolved.provider,
+        model: resolved.raw,
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "loop_detected",
+      }),
+    )
+    return c.json(
+      {
+        type: "error",
+        error: { type: "invalid_request_error", message: loopDetectedMessage(loop) },
+      },
+      400,
+    )
+  }
+
   return dispatchAnthropicViaOpenAI(c.env, {
     userId,
     apiKeyId,
@@ -95,6 +135,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
 })
 
 anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
+  const started = Date.now()
   const userId = c.get("apiKeyUserId")!
   const apiKeyId = c.get("apiKeyId")
   let body: Record<string, unknown>
@@ -109,6 +150,17 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
   const modelRaw = String(body.model ?? "")
   const resolved = await resolveModel(c.env, userId, modelRaw)
   if (!resolved) {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: loggingProviderFromRawModel(modelRaw),
+        model: modelRaw.slice(0, 200),
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "invalid_model",
+      }),
+    )
     return c.json(
       {
         type: "error",

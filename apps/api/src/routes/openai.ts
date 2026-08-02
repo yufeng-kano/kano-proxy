@@ -2,8 +2,11 @@ import { Hono } from "hono"
 import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
+import { logRequest } from "../logging/request_log"
 import { resolveModel } from "../providers/resolve"
 import { dispatchChatCompletions } from "../proxy/dispatch"
+import { detectOpenAIToolLoop, loopDetectedMessage } from "../utils/loop_guard"
+import { loggingProviderFromRawModel } from "../utils/model"
 import { parseReasoningEffort } from "../utils/reasoning"
 
 export const openaiRoutes = new Hono<HonoEnv>()
@@ -26,6 +29,7 @@ openaiRoutes.get("/models", async (c) => {
 })
 
 openaiRoutes.post("/chat/completions", async (c) => {
+  const started = Date.now()
   const userId = c.get("apiKeyUserId")!
   const apiKeyId = c.get("apiKeyId")
   let body: Record<string, unknown>
@@ -40,6 +44,17 @@ openaiRoutes.post("/chat/completions", async (c) => {
   const modelRaw = String(body.model ?? "")
   const resolved = await resolveModel(c.env, userId, modelRaw)
   if (!resolved) {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: loggingProviderFromRawModel(modelRaw),
+        model: modelRaw.slice(0, 200),
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "invalid_model",
+      }),
+    )
     return c.json(
       {
         error: {
@@ -58,9 +73,43 @@ openaiRoutes.post("/chat/completions", async (c) => {
     )
   }
 
-  // temperature is intentionally never read into a named field below — built-in
-  // adapters build their upstream body from named fields only, so it never
-  // reaches them. It still reaches custom-openai providers via `rawBody`.
+  // Loop guard applies only on the conversion ingress (grok / codex /
+  // custom-openai — any adapter with no native Anthropic `messages()`);
+  // never on claude-code / custom-anthropic (docs/api.md "Degenerate
+  // tool-call loop guard").
+  if (!resolved.adapter.messages) {
+    const loop = detectOpenAIToolLoop((body.messages as unknown[]) ?? [])
+    if (loop.tripped) {
+      c.executionCtx.waitUntil(
+        logRequest(c.env, {
+          userId,
+          apiKeyId,
+          provider: resolved.provider,
+          model: modelRaw,
+          statusCode: 400,
+          latencyMs: Date.now() - started,
+          errorCode: "loop_detected",
+        }),
+      )
+      return c.json(
+        {
+          error: {
+            message: loopDetectedMessage(loop),
+            type: "invalid_request_error",
+            code: "loop_detected",
+          },
+        },
+        400,
+      )
+    }
+  }
+
+  // temperature / top_p: read numeric values verbatim. Built-in adapters
+  // decide per-provider what to do with them (grok forwards/defaults it,
+  // claude-code clamps it, codex ignores it — see providers/*.ts); a
+  // custom-openai provider forwards it verbatim via `rawBody` regardless.
+  const temperature = typeof body.temperature === "number" ? body.temperature : undefined
+  const topP = typeof body.top_p === "number" ? body.top_p : undefined
   const stopRaw = Array.isArray(body.stop)
     ? body.stop
     : typeof body.stop === "string"
@@ -97,6 +146,8 @@ openaiRoutes.post("/chat/completions", async (c) => {
       tool_choice: body.tool_choice,
       response_format: body.response_format,
       reasoning_effort: effort,
+      temperature,
+      top_p: topP,
       stop: stop.length ? stop : undefined,
       prompt_cache_key: promptCacheKey,
       affinity: {

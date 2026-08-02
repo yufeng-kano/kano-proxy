@@ -15,10 +15,40 @@ import {
   fromOpenAIUsage,
   type NormalizedUsage,
 } from "../logging/usage_capture"
-import { streamWithKeepalive } from "./sse"
+import { streamWithKeepalive, type StreamCloseReason } from "./sse"
 
 /** Keeps a Worker invocation alive for a deferred `logRequest` past the returned Response — `c.executionCtx.waitUntil` in production, a test double in tests. */
 export type WaitUntil = (promise: Promise<unknown>) => void
+
+/** No real upstream chunk for this long tears the stream down — docs/api.md "Streaming". */
+const DEFAULT_IDLE_TIMEOUT_MS = 120_000
+
+/** OpenAI-surface stall frame — exact text from docs/api.md "Streaming". */
+const OPENAI_STALL_FRAME = new TextEncoder().encode(
+  'data: {"error":{"message":"upstream stalled: no data received for 120s","type":"api_error","code":"upstream_stall"}}\n\n',
+)
+
+/** Anthropic-surface stall frame — exact text from docs/api.md "Streaming". */
+const ANTHROPIC_STALL_FRAME = new TextEncoder().encode(
+  'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"upstream stalled: no data received for 120s"}}\n\n',
+)
+
+/**
+ * `request_logs.error_code` for a streamed response, from how it closed and
+ * whether the sniffer ever saw the upstream's documented completion signal
+ * — see docs/logging.md "Streaming rows". An idle-timeout close is always
+ * `upstream_stall` regardless of completeness (the connection was abnormal
+ * even if, by coincidence, a full payload had already arrived); anything
+ * else that reached completion is unchanged (NULL); a client cancel before
+ * completion is `client_abort`; any other close before completion — a clean
+ * EOF with no completion signal, or a transport error — is `incomplete_stream`.
+ */
+function streamCloseErrorCode(reason: StreamCloseReason, complete: boolean): string | null {
+  if (reason === "idle_timeout") return "upstream_stall"
+  if (complete) return null
+  if (reason === "cancel") return "client_abort"
+  return "incomplete_stream"
+}
 
 export async function dispatchChatCompletions(
   env: Env,
@@ -31,10 +61,13 @@ export async function dispatchChatCompletions(
     adapter?: ProviderAdapter
     req: ChatCompletionRequest & { rawModel: string }
     waitUntil: WaitUntil
+    /** Testability hook for the streaming idle timeout; defaults to 120_000. */
+    idleTimeoutMs?: number
   },
 ): Promise<Response> {
   const started = Date.now()
   const adapter = opts.adapter ?? getAdapter(opts.provider as ProviderId)
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
   const exclude = new Set<string>()
   let lastResponse: Response | null = null
   let used: AcquiredAccount | null = null
@@ -103,8 +136,11 @@ export async function dispatchChatCompletions(
       const sniffer = createOpenAISseUsageSniffer()
       const body = streamWithKeepalive(res.body, undefined, {
         tap: (chunk) => sniffer.feed(chunk),
-        onClose: () => {
+        idleTimeoutMs,
+        stallFrame: OPENAI_STALL_FRAME,
+        onClose: (reason) => {
           const usage = sniffer.finish()
+          const errorCode = streamCloseErrorCode(reason, sniffer.complete())
           opts.waitUntil(
             logRequest(env, {
               userId: opts.userId,
@@ -114,6 +150,7 @@ export async function dispatchChatCompletions(
               accountId: account.row.id,
               statusCode: res.status,
               latencyMs,
+              errorCode,
               ...usageFields(usage),
             }),
           )
@@ -193,12 +230,15 @@ export async function dispatchAnthropicMessages(
     adapter?: ProviderAdapter
     endpoint?: "messages" | "count_tokens"
     waitUntil: WaitUntil
+    /** Testability hook for the streaming idle timeout; defaults to 120_000. */
+    idleTimeoutMs?: number
   },
 ): Promise<Response> {
   const started = Date.now()
   const provider = opts.provider ?? "claude-code"
   const adapter = opts.adapter ?? getAdapter(provider as ProviderId)
   const endpoint = opts.endpoint ?? "messages"
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
   const call = endpoint === "count_tokens" ? adapter.countTokens : adapter.messages
   if (!call) {
     return Response.json(
@@ -223,6 +263,15 @@ export async function dispatchAnthropicMessages(
         })
         return last
       }
+      await logRequest(env, {
+        userId: opts.userId,
+        apiKeyId: opts.apiKeyId,
+        provider,
+        model: opts.model,
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "no_upstream_account",
+      })
       return Response.json(
         {
           type: "error",
@@ -258,8 +307,15 @@ export async function dispatchAnthropicMessages(
       const sniffer = createAnthropicSseUsageSniffer()
       const body = streamWithKeepalive(res.body, undefined, {
         tap: (chunk) => sniffer.feed(chunk),
-        onClose: () => {
+        idleTimeoutMs,
+        stallFrame: ANTHROPIC_STALL_FRAME,
+        onClose: (reason) => {
           const usage = isCountTokens ? null : sniffer.finish()
+          // count_tokens never streams in practice, but if it ever did, its
+          // response isn't a message turn — completeness doesn't apply.
+          const errorCode = isCountTokens
+            ? null
+            : streamCloseErrorCode(reason, sniffer.complete())
           opts.waitUntil(
             logRequest(env, {
               userId: opts.userId,
@@ -269,6 +325,7 @@ export async function dispatchAnthropicMessages(
               accountId: account.row.id,
               statusCode: res.status,
               latencyMs,
+              errorCode,
               ...usageFields(usage),
             }),
           )
@@ -368,6 +425,8 @@ export async function dispatchAnthropicViaOpenAI(
       tool_choice: converted.tool_choice,
       response_format: converted.response_format,
       reasoning_effort: effort,
+      temperature: converted.temperature,
+      top_p: converted.top_p,
       stop: converted.stop,
       affinity: opts.affinity,
       // OpenAI-shaped body for the custom-openai passthrough adapter; a

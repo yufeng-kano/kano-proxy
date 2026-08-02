@@ -54,8 +54,13 @@ Supported fields:
 | `reasoning_effort` | optional string (see below) |
 | `stop` | string or string[]; forwarded to `grok`, and as Anthropic `stop_sequences` to `claude-code`. Dropped for `codex` — the Responses API has no equivalent |
 | `prompt_cache_key` | optional string, official OpenAI Chat Completions field. Forwarded verbatim to `codex`'s Responses `prompt_cache_key` when non-empty (see below). **Ignored** for `grok` and `claude-code` |
-| `temperature` | **Ignored** (stripped) for every built-in provider. A **custom openai-format** provider (see below) forwards it verbatim — it has no named handling here, so nothing strips it |
+| `temperature` | `grok`: forwarded when sent; defaults to `1` when the client omits it (see "Grok sampling defaults" below). `claude-code`: forwarded when sent, clamped to Anthropic's `0–1` range (OpenAI's client-facing range is `0–2`). `codex`: **ignored** — no sampling field is ever added to the Responses body. A **custom openai-format** provider forwards it verbatim, unclamped, no default |
+| `top_p` | `grok` and `claude-code`: forwarded only when the client sends it — no invented default. `codex`: **ignored**, same as `temperature`. Custom openai-format: forwarded verbatim |
 | image parts | Vision when upstream supports |
+
+**Grok sampling defaults.** xAI's `/v1/chat/completions` (the endpoint this proxy calls) documents no default `temperature`; a separate xAI surface (`/v1/responses`) was observed 2026-08-02 defaulting to `temperature 0.7` / `top_p 0.95`. Since Anthropic and OpenAI both document `1` as their own default, and this proxy exposes `grok` identically on both surfaces, `grok/*` pins `temperature: 1` explicitly whenever the client sends none, rather than leaving the field unset and inheriting whatever implicit default xAI's backend happens to apply.
+
+**Grok reasoning.** This proxy always sends xAI's `include_reasoning: true` on every `grok/*` request (verified 2026-08-02: without it, xAI's Chat Completions surface returns no reasoning text at all — only `usage.completion_tokens_details.reasoning_tokens` as a count; with it, non-stream responses carry `message.reasoning_content` and streaming carries `delta.reasoning_content` deltas that arrive before any `content`/`tool_calls` deltas). This is the same de-facto `reasoning_content` extension field (DeepSeek/OpenRouter convention) codex's adapter already uses for its own reasoning summary (see below) — OpenAI-surface clients see it automatically, no proxy changes needed on that surface since `grok`'s `/openai/v1` path is a near-passthrough. `usage.completion_tokens_details.reasoning_tokens`, when xAI reports it, is added into the `completion_tokens` (and, on the Anthropic surface, `output_tokens`) this proxy logs and returns, so a reasoning-heavy turn is not under-counted (see [logging.md](./logging.md)).
 
 ### Custom providers (`slug/upstream`, a user-defined endpoint)
 
@@ -75,7 +80,7 @@ Streaming: SSE, OpenAI chunk shape, end-to-end without buffering entire completi
 - **System → `instructions`:** `role: "system"` messages are never sent as `input` items. Their text (in order, `"\n\n"`-joined for multiple system messages) becomes the top-level Responses `instructions` field instead; this applies whether the system message came from the OpenAI surface directly or from an Anthropic `system` block converted to an OpenAI system message on the `/anthropic` surface.
 - **`store: false`:** every codex request sets `store: false` explicitly — the Responses API defaults to `store: true`, which this proxy does not want (no server-side conversation state is kept upstream).
 - **`prompt_cache_key`:** forwarded as-is when the client sends a non-empty string. Account acquisition is deterministic (highest `priority`, then newest `created_at` — see [providers.md](./providers.md)), so the same upstream ChatGPT account normally serves every turn of a conversation, and a stable `prompt_cache_key` lets that account's upstream prompt cache actually hit.
-- **`reasoning_content`:** when the upstream reasoning summary stream (`response.reasoning_summary_text.delta`) carries text, it is surfaced using the de-facto `reasoning_content` extension field (the DeepSeek/OpenRouter convention — there is no first-party OpenAI field for this): as `delta.reasoning_content` on streamed chunks, and as `message.reasoning_content` on the non-stream completion. On the `/anthropic` surface these chunks pass through the OpenAI→Anthropic converter harmlessly and are dropped (that converter only reads `content` / `tool_calls`); no Anthropic `thinking` block is synthesized from them.
+- **`reasoning_content`:** when the upstream reasoning summary stream (`response.reasoning_summary_text.delta`) carries text, it is surfaced using the de-facto `reasoning_content` extension field (the DeepSeek/OpenRouter convention — there is no first-party OpenAI field for this): as `delta.reasoning_content` on streamed chunks, and as `message.reasoning_content` on the non-stream completion. On the `/anthropic` surface this converts into a leading, **unsigned** Anthropic `thinking` content block — the same mechanism grok's `reasoning_content` uses (see the Grok reasoning note above and "Thinking blocks on the conversion path" below).
 - **Upstream failures mid-turn (`response.failed` / `error` events):** the ChatGPT backend can end a Responses SSE turn with a `response.failed` or `error` event instead of `response.completed` (rate limit, content policy, backend fault, etc.). This proxy never fabricates a `200` completion for that. Streaming: a single OpenAI-shaped error line (`data: {"error":{"message","type":"upstream_error"}}`) replaces the rest of the turn and the stream ends immediately — no `finish_reason` chunk, no `[DONE]`. Non-stream: the adapter returns `502` with `{"error":{"message","type":"upstream_error"}}` instead of a completion built from a partial/empty turn. On the `/anthropic` surface, the same failure converts to an Anthropic `event: error` (`{"type":"error","error":{"type":"api_error","message"}}`) and the stream ends there.
 
 ### Claude Code streaming usage
@@ -120,6 +125,8 @@ complete at the end of the turn. `usage` is taken from the upstream final chunk
 **Server-side tools are dropped, not forwarded.** Anthropic tool definitions that carry a `type` other than `"custom"` and no `input_schema` (`web_search_*`, `bash_*`, `text_editor_*`, `computer_*`, `code_execution_*`, and future Anthropic-hosted tools) have no `grok`/`codex` equivalent — neither backend can execute them. The converter drops these tools entirely instead of forwarding a fake empty-schema function, which would otherwise invite an uncallable tool call. Client-defined tools (anything with `input_schema`, or no `type` / `type: "custom"`) still convert to OpenAI function tools; anything already OpenAI-shaped (`{function: {...}}`) passes through unchanged.
 
 **Images inside `tool_result` are re-attached as a follow-up message.** `grok`/`codex` have no Anthropic-style multi-part `tool` message; when a `tool_result` block's content contains `image` blocks, the converted `role: "tool"` message keeps the text parts plus a short placeholder line, and is immediately followed by one `role: "user"` message carrying the image(s) as `image_url` parts (same base64 → data URI / URL conversion used for regular user content). A `tool_result` with no images converts as before (text only).
+
+**Thinking blocks on the conversion path.** Both grok's `reasoning_content` (see "Grok reasoning" above) and codex's reasoning summary carry the same de-facto OpenAI `reasoning_content` field, and both convert the same way: a leading, **unsigned** Anthropic `thinking` block (`{type: "thinking", thinking: "..."}` — no `signature`, since this proxy has none to attach; only a genuine Anthropic-origin thinking block, i.e. `claude-code`, carries one). Streamed live via `content_block_start` → `thinking_delta` → `content_block_stop` when reasoning precedes the rest of the turn (the normal order for both providers); if a reasoning fragment arrives after a text or tool block has already opened, it is buffered instead (mirrors the tool-call converter's interleaved-text buffering above) and flushed as one complete `thinking` block at the end of the turn. Non-stream responses get the same block prepended ahead of `text`/`tool_use`. **Round-trip:** when a later turn replays an Anthropic-shaped assistant message whose content contains `thinking` blocks, their text is concatenated (in block order) into that message's `reasoning_content` before it goes to grok/codex/custom-openai upstream; `redacted_thinking` blocks are dropped (no plaintext to round-trip). codex's Responses request builder does not read `reasoning_content` at all — the field is silently ignored, not an error. A custom openai-format provider forwards `reasoning_content` verbatim in both directions, same as any other unmodeled field.
 
 ### `POST /anthropic/v1/messages/count_tokens`
 
@@ -181,6 +188,32 @@ Only unknown tokens (anything outside the ladder above) → `400` via `parseReas
 | `/openai/v1` → custom, `format=anthropic` | **Do not add** `cache_control` — same rule as `claude-code`. |
 | `/anthropic` → custom, `format=openai` | Strip `cache_control` on convert, same as `grok`/`codex`. |
 
+## Streaming
+
+Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive wrapper (`proxy/sse.ts`):
+
+- **Keepalive comments** (`: keepalive\n\n`, an SSE comment line clients ignore) fire every 30s of silence — Cloudflare's own idle-connection mitigation. This now re-arms after **every** real upstream chunk, so any silence gap anywhere in the stream gets keepalives, not just the gap before the first token (a long tool-use or reasoning turn that goes quiet mid-stream used to stop getting them after the first byte).
+- **120s upstream idle timeout.** If no real upstream chunk (keepalive comments do not count) arrives for 120s, the proxy gives up on that upstream connection: it emits one final stall frame, then ends the stream cleanly. The response's HTTP status/headers were already sent when streaming started (always `200`), so this is a mid-stream error event, not an HTTP-level error — clients treat it the same as any other mid-turn `event: error` / OpenAI error chunk from the upstream itself (see codex's "Upstream failures mid-turn" above). Frame shape is surface-specific:
+  - Anthropic surface: `event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"upstream stalled: no data received for 120s"}}\n\n`
+  - OpenAI surface: `data: {"error":{"message":"upstream stalled: no data received for 120s","type":"api_error","code":"upstream_stall"}}\n\n`
+
+  Logged as `error_code: "upstream_stall"` unconditionally on an idle-timeout close — see [logging.md](./logging.md) for the full close-reason → `error_code` mapping.
+
+## Degenerate tool-call loop guard
+
+xAI hides grok's reasoning unless the proxy asks for it (see "Grok reasoning" above), and even with it exposed a client isn't guaranteed to notice or act on `reasoning_content`/`thinking` — so a converted agent (`grok`, `codex`, or a custom `format=openai` provider; never native `claude-code`/custom `format=anthropic` passthrough) can get stuck calling the identical tool with identical arguments indefinitely, burning usage with no upstream error to signal it. Before dispatching a conversion-path request — `resolved.adapter.messages` absent, i.e. the provider has no native Anthropic Messages support, checked identically on **both** surfaces — this proxy walks the trailing message history for a run of identical tool-call/tool-result rounds:
+
+- **Anthropic shape** (`/anthropic/v1/messages` body, before conversion): a *unit* is an assistant message whose content contains exactly one `tool_use` block (accompanying text blocks are ignored for identity), immediately followed by a user message carrying a `tool_result` for it. Identity = tool name + `JSON.stringify(input)`; `tool_result` contents are irrelevant to identity.
+- **OpenAI shape** (`/openai/v1/chat/completions` body): a unit is an assistant message with exactly one `tool_calls` entry, immediately followed by a `role: "tool"` result. Identity = `function.name` + the raw `function.arguments` string.
+- A trailing run of **8 or more** identical, consecutive units trips the guard (7 does not). An assistant message with two-or-more tool calls in the same turn, a differing identity partway back, or a plain trailing turn (no tool round at the very tail) all stop the run from extending further.
+
+On trip: `400`, no upstream call, logged with `error_code: "loop_detected"` (authenticated only — see [logging.md](./logging.md)):
+
+- Anthropic: `{"type":"error","error":{"type":"invalid_request_error","message":"degenerate tool-call loop detected: <name> repeated <n> times with identical input; aborting so the client can recover"}}`
+- OpenAI: `{"error":{"message":"degenerate tool-call loop detected: <name> repeated <n> times with identical input; aborting so the client can recover","type":"invalid_request_error","code":"loop_detected"}}`
+
+`claude-code` and custom `format=anthropic` are exempt — both are native Anthropic passthrough, never converted, so this proxy never reshapes their tool-call history to begin with.
+
 ## Errors
 
 JSON error objects; OpenAI-ish or Anthropic-ish envelope depending on surface.
@@ -193,8 +226,11 @@ JSON error objects; OpenAI-ish or Anthropic-ish envelope depending on surface.
 | All accounts benched / unavailable | 503 | `upstream_unavailable` (+ `Retry-After` when known) |
 | Upstream 4xx/5xx after retries | pass through status when possible | `upstream_error` |
 | Reasoning rejected | 400 | `invalid_reasoning` |
+| Degenerate tool-call loop (conversion path only — see above) | 400 | `loop_detected` |
 
 Auth failures (missing/invalid API key) are envelope-shaped per **surface**, matched on request path prefix rather than on provider: `/anthropic/*` gets the Anthropic shape `{"type":"error","error":{"type":"authentication_error","message":"Missing API key"|"Invalid API key"}}`; every other path (including `/openai/*`) keeps the OpenAI shape shown in the table above.
+
+Authenticated pre-dispatch failures (invalid model, no upstream account, loop-guard trip) are all logged as one `request_logs` row via `waitUntil`, same as a real dispatch; unauthenticated 401s are never logged — see [logging.md](./logging.md).
 
 ## Rate limits
 

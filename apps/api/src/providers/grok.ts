@@ -126,7 +126,14 @@ export const grokAdapter: ProviderAdapter = {
     // Ask for the final usage chunk: without it every converted Anthropic
     // response reports input_tokens 0 and clients cannot track context.
     if (req.stream) body.stream_options = { include_usage: true }
-    // strip temperature if present in original — already not copied
+    // Pin the surface default explicitly: Anthropic and OpenAI both document
+    // `1`, xAI's own default is unspecified (docs/providers.md "Sampling").
+    body.temperature = req.temperature ?? 1
+    if (req.top_p != null) body.top_p = req.top_p
+    // Reasoning is hidden upstream unless asked for — without this, xAI
+    // returns only usage.completion_tokens_details.reasoning_tokens, no
+    // text (verified 2026-08-02). See docs/api.md "Grok reasoning".
+    body.include_reasoning = true
 
     const headers: Record<string, string> = {
       ...grokClientHeaders(acc.credential.access_token),

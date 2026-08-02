@@ -41,6 +41,10 @@ export type ChatCompletionRequest = {
   tool_choice?: unknown
   response_format?: unknown
   reasoning_effort?: ReasoningEffort
+  /** Forwarded to `grok` (defaults to 1 when unset) and `claude-code` (clamped to [0, 1]); ignored by `codex`. */
+  temperature?: number
+  /** Forwarded to `grok` and `claude-code` only when present — no default. Ignored by `codex`. */
+  top_p?: number
   /** OpenAI `stop` / Anthropic `stop_sequences`, forwarded verbatim. */
   stop?: string[]
   /** OpenAI Chat Completions field. Forwarded to `codex` only; ignored elsewhere. */

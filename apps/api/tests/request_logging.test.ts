@@ -581,3 +581,340 @@ describe("/anthropic/v1/messages — via-OpenAI path (grok/codex/custom-openai):
     expect(rows[0]).toMatchObject({ provider: "grok", prompt_tokens: 50, completion_tokens: 10 })
   })
 })
+
+describe("invalid_model — pre-dispatch logging (authenticated only)", () => {
+  it("openai surface: an unresolvable model logs one row with error_code invalid_model", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "not-a-real-provider/some-model",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      provider: "not-a-real-provider",
+      model: "not-a-real-provider/some-model",
+      status_code: 400,
+      error_code: "invalid_model",
+    })
+  })
+
+  it("anthropic surface (/v1/messages): same logging", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+
+    const res = await app.request(
+      "/anthropic/v1/messages",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "bogus/model",
+          max_tokens: 10,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      provider: "bogus",
+      model: "bogus/model",
+      status_code: 400,
+      error_code: "invalid_model",
+    })
+  })
+
+  it("anthropic surface (/v1/messages/count_tokens): same logging", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+
+    const res = await app.request(
+      "/anthropic/v1/messages/count_tokens",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "bogus/model", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ provider: "bogus", error_code: "invalid_model" })
+  })
+
+  it("a model with no '/' logs provider as unknown", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "", messages: [] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    expect(db.rows("request_logs")[0]).toMatchObject({ provider: "unknown", model: "" })
+  })
+
+  it("truncates a long raw model string to 200 chars in the logged row", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    const longModel = "bogus-provider/" + "x".repeat(250)
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: longModel, messages: [] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const row = db.rows("request_logs")[0]!
+    expect(row.provider).toBe("bogus-provider")
+    expect((row.model as string).length).toBe(200)
+    expect(row.model).toBe(longModel.slice(0, 200))
+  })
+
+  it("an unauthenticated request is never logged", async () => {
+    const db = new FakeD1()
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "not-a-real-provider/some-model", messages: [] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(401)
+    expect(db.rows("request_logs")).toHaveLength(0)
+  })
+})
+
+describe("loop guard — pre-dispatch (conversion path only, grok/codex/custom-openai)", () => {
+  function anthropicUnit(id: string): unknown[] {
+    return [
+      { role: "assistant", content: [{ type: "tool_use", id, name: "Read", input: { file_path: "/a" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] },
+    ]
+  }
+  function anthropicLoopMessages(n = 8): unknown[] {
+    const out: unknown[] = []
+    for (let i = 0; i < n; i++) out.push(...anthropicUnit(`toolu_${i}`))
+    return out
+  }
+  function openaiUnit(id: string): unknown[] {
+    return [
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [{ id, type: "function", function: { name: "Read", arguments: '{"file_path":"/a"}' } }],
+      },
+      { role: "tool", tool_call_id: id, content: "ok" },
+    ]
+  }
+  function openaiLoopMessages(n = 8): unknown[] {
+    const out: unknown[] = []
+    for (let i = 0; i < n; i++) out.push(...openaiUnit(`call_${i}`))
+    return out
+  }
+
+  it("anthropic surface (grok conversion path): trips, no upstream call, logs loop_detected", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    let fetchCalled = false
+    globalThis.fetch = (async () => {
+      fetchCalled = true
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const res = await app.request(
+      "/anthropic/v1/messages",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "grok/grok-4.5",
+          max_tokens: 10,
+          messages: anthropicLoopMessages(),
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { error: { message: string } }
+    expect(json.error.message).toContain("Read repeated 8 times")
+    expect(fetchCalled).toBe(false)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ provider: "grok", status_code: 400, error_code: "loop_detected" })
+  })
+
+  it("openai surface (grok conversion path): trips, no upstream call, logs loop_detected", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    let fetchCalled = false
+    globalThis.fetch = (async () => {
+      fetchCalled = true
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "grok/grok-4.5", messages: openaiLoopMessages() }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { error: { code: string } }
+    expect(json.error.code).toBe("loop_detected")
+    expect(fetchCalled).toBe(false)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ provider: "grok", status_code: 400, error_code: "loop_detected" })
+  })
+
+  it("claude-code (native passthrough) is exempt — identical history dispatches normally", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedAccount(db, { userId: "user_1", provider: "claude-code" })
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200 },
+      )) as typeof fetch
+
+    const res = await app.request(
+      "/anthropic/v1/messages",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "claude-code/claude-opus-5",
+          max_tokens: 10,
+          messages: anthropicLoopMessages(),
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.error_code).toBeNull()
+  })
+
+  it("7 identical rounds does not trip — dispatch proceeds normally", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "grok/grok-4.5", messages: openaiLoopMessages(7) }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.error_code).toBeNull()
+  })
+})
+
+describe("no_upstream_account — pre-dispatch logging parity (anthropic native passthrough)", () => {
+  it("anthropic surface: no claude-code account at all logs error_code no_upstream_account", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    // No seedAccount call — the user has no claude-code account.
+
+    const res = await app.request(
+      "/anthropic/v1/messages",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "claude-code/claude-opus-5",
+          max_tokens: 10,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      provider: "claude-code",
+      status_code: 400,
+      error_code: "no_upstream_account",
+    })
+  })
+
+  it("openai surface: pre-existing behavior stays intact (no regression)", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "grok/grok-4.5", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ provider: "grok", status_code: 400, error_code: "no_upstream_account" })
+  })
+})

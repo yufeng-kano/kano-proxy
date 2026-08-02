@@ -56,6 +56,8 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
         tool_choice: req.tool_choice,
         response_format: req.response_format,
         stop: req.stop,
+        temperature: req.temperature,
+        top_p: req.top_p,
         // reasoning_effort intentionally dropped on this surface — no
         // thinking/output_config mapped from it for custom upstreams.
       })

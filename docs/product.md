@@ -40,7 +40,7 @@ Token **acquisition methods may differ**; once stored, pool semantics are the sa
 
 ### Custom endpoints (user-defined)
 
-Any user can also add their own OpenAI- or Anthropic-compatible endpoint (a self-hosted gateway, another provider's API, a proxy they run) by giving it a **slug**, a **base URL**, an **API key**, and a **format** (`openai` | `anthropic`). Once added it is a first-class provider on both surfaces with model ids `slug/upstream` and the same account-pool / bench / failover semantics as built-ins — see [providers.md](./providers.md) for the full contract, [database.md](./database.md) for the `custom_providers` table, and [auth.md](./auth.md) for the admin REST routes. Custom providers deliberately diverge from built-ins in two ways: an **openai**-format endpoint forwards the client's body near-verbatim (including `temperature` and `reasoning_effort`, with no ceiling clamp — built-ins strip `temperature` and clamp reasoning to a provider ceiling), and neither format has a usage/billing surface to poll.
+Any user can also add their own OpenAI- or Anthropic-compatible endpoint (a self-hosted gateway, another provider's API, a proxy they run) by giving it a **slug**, a **base URL**, an **API key**, and a **format** (`openai` | `anthropic`). Once added it is a first-class provider on both surfaces with model ids `slug/upstream` and the same account-pool / bench / failover semantics as built-ins — see [providers.md](./providers.md) for the full contract, [database.md](./database.md) for the `custom_providers` table, and [auth.md](./auth.md) for the admin REST routes. Custom providers deliberately diverge from built-ins in two ways: an **openai**-format endpoint forwards the client's body near-verbatim (including `temperature` and `reasoning_effort`, with no ceiling clamp and no default — built-ins forward `temperature`/`top_p` too now, but `grok` and `claude-code` clamp/default it and `codex` still ignores it entirely, see [api.md](./api.md)), and neither format has a usage/billing surface to poll.
 
 ## Model naming
 
@@ -71,7 +71,7 @@ Must work for coding agents:
 - `max_tokens` / Anthropic `max_tokens`
 - `reasoning_effort` (see [api.md](./api.md))
 - `stop` / Anthropic `stop_sequences`
-- `temperature` accepted but **stripped** (not forwarded) for built-in providers; a **custom openai-format** provider forwards it verbatim (see [providers.md](./providers.md))
+- `temperature` / `top_p`: forwarded to `grok` and `claude-code` (temperature clamped/defaulted per provider), **ignored** for `codex`; a **custom openai-format** provider forwards both verbatim (see [api.md](./api.md))
 
 ## Usage UI
 

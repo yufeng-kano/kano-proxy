@@ -33,14 +33,20 @@ function num(v: unknown): number | undefined {
  * official OpenAI equivalent — see docs/api.md), not something a real
  * OpenAI-compatible upstream sends. `prompt_tokens` is already
  * cache-inclusive, so it is stored as-is. A missing detail field means
- * unreported: NULL, never 0.
+ * unreported: NULL, never 0. `completion_tokens_details.reasoning_tokens`
+ * (grok's `include_reasoning`, or any upstream that reports it) is added
+ * into `completionTokens` when both it and `completion_tokens` itself are
+ * present — see docs/logging.md "Token usage capture".
  */
 export function fromOpenAIUsage(u: Record<string, unknown> | null | undefined): NormalizedUsage {
   if (!u) return { ...NULL_USAGE }
   const details = u.prompt_tokens_details as Record<string, unknown> | undefined
+  const completionDetails = u.completion_tokens_details as Record<string, unknown> | undefined
+  const completionBase = num(u.completion_tokens)
+  const reasoningTokens = num(completionDetails?.reasoning_tokens)
   return {
     promptTokens: num(u.prompt_tokens) ?? null,
-    completionTokens: num(u.completion_tokens) ?? null,
+    completionTokens: completionBase != null ? completionBase + (reasoningTokens ?? 0) : null,
     cacheReadInputTokens: num(details?.cached_tokens) ?? null,
     cacheCreationInputTokens: num(u.cache_creation_input_tokens) ?? null,
   }
@@ -73,6 +79,16 @@ export type UsageSniffer = {
   feed(chunk: Uint8Array): void
   /** null when nothing usable was captured (no usage seen, or carry overflow). */
   finish(): NormalizedUsage | null
+  /**
+   * Whether the stream reached its documented completion signal (Anthropic
+   * `message_stop`; OpenAI `[DONE]` or a chunk carrying a non-null
+   * `finish_reason`) at any point before this was called. False when
+   * capture was abandoned (carry overflow / parse failure) — an abandoned
+   * sniffer cannot vouch for completeness either way, so it degrades to
+   * "not complete" rather than a false positive. See docs/logging.md
+   * "Streaming rows".
+   */
+  complete(): boolean
 }
 
 /**
@@ -85,17 +101,36 @@ export function createOpenAISseUsageSniffer(): UsageSniffer {
   let carry = ""
   let abandoned = false
   let usage: Record<string, unknown> | null = null
+  /** [DONE], or a chunk whose choices[].finish_reason was a real (non-null) string. */
+  let seenCompletion = false
 
   function processLine(line: string): void {
     if (!line.startsWith("data:")) return
     const data = line.slice(5).trim()
-    // Cheap pre-filter before JSON.parse — every other SSE line (deltas,
-    // [DONE]) is skipped without ever being parsed.
-    if (!data || !data.includes('"usage"')) return
+    if (!data) return
+    if (data === "[DONE]") {
+      seenCompletion = true
+      return
+    }
+    // Cheap pre-filter before JSON.parse — every other SSE line (a plain
+    // content/tool_calls delta) is skipped without ever being parsed.
+    if (!data.includes('"usage"') && !data.includes('"finish_reason"')) return
     try {
-      const json = JSON.parse(data) as { usage?: unknown }
-      if (json && typeof json === "object" && json.usage && typeof json.usage === "object") {
+      const json = JSON.parse(data) as {
+        usage?: unknown
+        choices?: Array<{ finish_reason?: unknown }>
+      }
+      if (!json || typeof json !== "object") return
+      if (json.usage && typeof json.usage === "object") {
         usage = json.usage as Record<string, unknown>
+      }
+      if (Array.isArray(json.choices)) {
+        for (const choice of json.choices) {
+          if (typeof choice?.finish_reason === "string") {
+            seenCompletion = true
+            break
+          }
+        }
       }
     } catch {
       // Malformed line — skip it, keep listening for the next one.
@@ -125,7 +160,11 @@ export function createOpenAISseUsageSniffer(): UsageSniffer {
     return fromOpenAIUsage(usage)
   }
 
-  return { feed, finish }
+  function complete(): boolean {
+    return !abandoned && seenCompletion
+  }
+
+  return { feed, finish, complete }
 }
 
 /**
@@ -140,6 +179,7 @@ export function createAnthropicSseUsageSniffer(): UsageSniffer {
   let abandoned = false
   let event = ""
   let seen = false
+  let seenMessageStop = false
   let inputTokens: number | undefined
   let outputTokens: number | undefined
   let cacheReadInputTokens: number | undefined
@@ -167,7 +207,14 @@ export function createAnthropicSseUsageSniffer(): UsageSniffer {
     const data = line.slice(5).trim()
     const currentEvent = event
     event = ""
-    if (!data || !data.includes('"usage"')) return
+    if (!data) return
+    // message_stop's payload (`{"type":"message_stop"}`) never carries a
+    // "usage" substring, so this check must happen before that fast filter.
+    if (currentEvent === "message_stop") {
+      seenMessageStop = true
+      return
+    }
+    if (!data.includes('"usage"')) return
     try {
       const json = JSON.parse(data) as Record<string, unknown>
       if (currentEvent === "message_start") {
@@ -210,5 +257,9 @@ export function createAnthropicSseUsageSniffer(): UsageSniffer {
     })
   }
 
-  return { feed, finish }
+  function complete(): boolean {
+    return !abandoned && seenMessageStop
+  }
+
+  return { feed, finish, complete }
 }

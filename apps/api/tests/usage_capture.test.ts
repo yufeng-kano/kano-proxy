@@ -6,6 +6,31 @@ import {
   fromOpenAIUsage,
 } from "../src/logging/usage_capture"
 
+describe("fromOpenAIUsage — completion_tokens_details.reasoning_tokens", () => {
+  it("adds reasoning_tokens into completionTokens when both are present", () => {
+    expect(
+      fromOpenAIUsage({
+        prompt_tokens: 100,
+        completion_tokens: 40,
+        completion_tokens_details: { reasoning_tokens: 15 },
+      }),
+    ).toMatchObject({ promptTokens: 100, completionTokens: 55 })
+  })
+
+  it("leaves completionTokens unchanged when reasoning_tokens is absent", () => {
+    expect(fromOpenAIUsage({ prompt_tokens: 10, completion_tokens: 4 }).completionTokens).toBe(4)
+  })
+
+  it("does not fabricate completionTokens from reasoning_tokens alone when completion_tokens is absent", () => {
+    expect(
+      fromOpenAIUsage({
+        prompt_tokens: 10,
+        completion_tokens_details: { reasoning_tokens: 15 },
+      }).completionTokens,
+    ).toBeNull()
+  })
+})
+
 function byteChunks(text: string, size: number): Uint8Array[] {
   const bytes = new TextEncoder().encode(text)
   const out: Uint8Array[] = []
@@ -325,5 +350,93 @@ describe("createAnthropicSseUsageSniffer", () => {
     const huge = "data: " + "y".repeat(300 * 1024)
     expect(() => sniffer.feed(new TextEncoder().encode(huge))).not.toThrow()
     expect(sniffer.finish()).toBeNull()
+  })
+})
+
+describe("createOpenAISseUsageSniffer — complete()", () => {
+  it("is false before anything is fed", () => {
+    expect(createOpenAISseUsageSniffer().complete()).toBe(false)
+  })
+
+  it("[DONE] marks the stream complete", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    sniffer.feed(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'))
+    expect(sniffer.complete()).toBe(true)
+  })
+
+  it("a chunk carrying a real finish_reason marks it complete even without a literal [DONE]", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    sniffer.feed(
+      new TextEncoder().encode(
+        d({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }) + "\n\n",
+      ),
+    )
+    expect(sniffer.complete()).toBe(true)
+  })
+
+  it("an intermediate chunk with finish_reason: null does not mark it complete", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    sniffer.feed(
+      new TextEncoder().encode(
+        d({ choices: [{ index: 0, delta: { content: "hi" }, finish_reason: null }] }) + "\n\n",
+      ),
+    )
+    expect(sniffer.complete()).toBe(false)
+  })
+
+  it("no completion signal at all leaves it incomplete", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    sniffer.feed(new TextEncoder().encode(d({ choices: [{ delta: { content: "hi" } }] }) + "\n\n"))
+    expect(sniffer.complete()).toBe(false)
+  })
+
+  it("an abandoned sniffer (carry overflow) reports incomplete even after seeing [DONE] first", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    sniffer.feed(new TextEncoder().encode("data: [DONE]\n\n"))
+    expect(sniffer.complete()).toBe(true)
+    const huge = "data: " + "x".repeat(300 * 1024)
+    sniffer.feed(new TextEncoder().encode(huge))
+    expect(sniffer.complete()).toBe(false)
+  })
+})
+
+describe("createAnthropicSseUsageSniffer — complete()", () => {
+  it("is false before anything is fed", () => {
+    expect(createAnthropicSseUsageSniffer().complete()).toBe(false)
+  })
+
+  it("message_stop marks the stream complete, even with no usage anywhere", () => {
+    const sniffer = createAnthropicSseUsageSniffer()
+    sniffer.feed(
+      new TextEncoder().encode(
+        "event: message_stop\n" + d({ type: "message_stop" }) + "\n",
+      ),
+    )
+    expect(sniffer.complete()).toBe(true)
+    // No usage was ever seen, so finish() is still null — complete() is independent.
+    expect(sniffer.finish()).toBeNull()
+  })
+
+  it("no message_stop leaves it incomplete even when usage was captured", () => {
+    const sniffer = createAnthropicSseUsageSniffer()
+    sniffer.feed(
+      new TextEncoder().encode(
+        "event: message_start\n" +
+          d({ type: "message_start", message: { usage: { input_tokens: 5 } } }) +
+          "\n",
+      ),
+    )
+    expect(sniffer.complete()).toBe(false)
+  })
+
+  it("an abandoned sniffer (carry overflow) reports incomplete even after seeing message_stop first", () => {
+    const sniffer = createAnthropicSseUsageSniffer()
+    sniffer.feed(
+      new TextEncoder().encode("event: message_stop\n" + d({ type: "message_stop" }) + "\n"),
+    )
+    expect(sniffer.complete()).toBe(true)
+    const huge = "data: " + "z".repeat(300 * 1024)
+    sniffer.feed(new TextEncoder().encode(huge))
+    expect(sniffer.complete()).toBe(false)
   })
 })

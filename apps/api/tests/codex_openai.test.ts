@@ -389,24 +389,32 @@ describe("codexSseToOpenAIStream", () => {
 
   it("composes with the Anthropic converter when reasoning deltas precede the tool round", async () => {
     // Same round as above, but the upstream also streams a reasoning summary
-    // first. reasoning_content has no Anthropic equivalent: the OpenAI SSE →
-    // Anthropic SSE converter only reads `content` / `tool_calls`, so this
-    // must pass through harmlessly — no extra block, no protocol break, and
-    // the rest of the turn (tool_use, stop_reason, usage) unaffected.
+    // first. This now converts into a leading, unsigned Anthropic thinking
+    // block — the same mechanism grok's reasoning_content uses — closed
+    // before the tool_use block opens; the rest of the turn (tool_use,
+    // stop_reason, usage) is unaffected.
     const anthropic = await collect(
       openaiSseToAnthropicStream(
         codexSseToOpenAIStream(chunked(TOOL_CALL_WITH_REASONING_SSE, 17), "gpt-5.2"),
         "codex/gpt-5.2",
       ),
     )
-    expect(anthropic).not.toContain("reasoning_content")
-    expect(anthropic).not.toContain("Let me check")
+    expect(anthropic).toContain('"type":"thinking"')
+    expect(anthropic).toContain('"thinking":"Let me check "')
+    expect(anthropic).toContain('"thinking":"the file first."')
+    expect(anthropic).not.toContain("signature")
     expect(anthropic).toContain('"type":"tool_use"')
     expect(anthropic).toContain('"id":"call_1"')
     expect(anthropic).toContain('"name":"Read"')
     expect(anthropic).toContain('"stop_reason":"tool_use"')
     expect(anthropic).toContain('"input_tokens":120')
     expect(anthropic).toContain('"output_tokens":18')
+    // The thinking block closes before the tool_use block opens.
+    const thinkingIndex = anthropic.indexOf('"type":"thinking"')
+    const thinkingStop = anthropic.indexOf("content_block_stop", thinkingIndex)
+    const toolStart = anthropic.indexOf('"type":"tool_use"')
+    expect(thinkingStop).toBeGreaterThan(-1)
+    expect(thinkingStop).toBeLessThan(toolStart)
     const args = [...anthropic.matchAll(/"partial_json":"((?:[^"\\]|\\.)*)"/g)]
       .map((m) => JSON.parse(`"${m[1]}"`))
       .join("")
