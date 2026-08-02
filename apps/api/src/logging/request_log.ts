@@ -13,6 +13,8 @@ export async function logRequest(
     latencyMs: number
     promptTokens?: number | null
     completionTokens?: number | null
+    cacheReadInputTokens?: number | null
+    cacheCreationInputTokens?: number | null
     errorCode?: string | null
   },
 ): Promise<void> {
@@ -20,8 +22,9 @@ export async function logRequest(
     await env.DB.prepare(
       `INSERT INTO request_logs
        (id, user_id, api_key_id, provider, model, account_id, status_code, latency_ms,
-        prompt_tokens, completion_tokens, error_code, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+        error_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         newId("log"),
@@ -34,6 +37,8 @@ export async function logRequest(
         entry.latencyMs,
         entry.promptTokens ?? null,
         entry.completionTokens ?? null,
+        entry.cacheReadInputTokens ?? null,
+        entry.cacheCreationInputTokens ?? null,
         entry.errorCode ?? null,
         nowIso(),
       )

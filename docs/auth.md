@@ -56,6 +56,7 @@ Anyone with a Google account may register on first login (insert user row).
 | POST | `/api/keys` |
 | DELETE | `/api/keys/:id` |
 | GET | `/api/models` | Catalog with `available`; `?available=1` filters |
+| GET | `/api/usage/summary` | Aggregated `request_logs` for the dashboard; `?days=` 1, 7, or 30 (default 7) |
 
 ## Upstream OAuth (account binding)
 

@@ -1,4 +1,12 @@
-import type { AccountsResponse, CatalogModel, CustomProvider, ModelsResponse, ProviderId } from "@/types"
+import type {
+  AccountsResponse,
+  CatalogModel,
+  CustomProvider,
+  ModelsResponse,
+  ProviderId,
+  UsageDays,
+  UsageSummary,
+} from "@/types"
 
 /** Frontend cache TTL — align with backend usage cache (90s). */
 export const CACHE_TTL_MS = 90_000
@@ -6,6 +14,7 @@ export const CACHE_TTL_MS = 90_000
 const ACCOUNTS_PREFIX = "kano-proxy:accounts:"
 const MODELS_PREFIX = "kano-proxy:models:"
 const CUSTOM_PROVIDERS_PREFIX = "kano-proxy:custom-providers:"
+const USAGE_PREFIX = "kano-proxy:usage:"
 
 type Timed<T> = {
   savedAt: number
@@ -22,6 +31,10 @@ function modelsKey(userId: string): string {
 
 function customProvidersKey(userId: string): string {
   return `${CUSTOM_PROVIDERS_PREFIX}${userId}`
+}
+
+function usageKey(userId: string, days: UsageDays): string {
+  return `${USAGE_PREFIX}${userId}:${days}`
 }
 
 function readTimed<T>(storageKey: string): Timed<T> | null {
@@ -87,7 +100,7 @@ export function writeAccountsCache(
   writeTimed(accountsKey(userId, provider), data)
 }
 
-/** Clears all session-scoped caches (accounts, models, custom providers) — used on logout. */
+/** Clears all session-scoped caches (accounts, models, custom providers, usage) — used on logout. */
 export function clearAccountsCache(userId?: string | null): void {
   if (typeof sessionStorage === "undefined") return
   try {
@@ -105,6 +118,10 @@ export function clearAccountsCache(userId?: string | null): void {
       }
       if (k.startsWith(CUSTOM_PROVIDERS_PREFIX)) {
         if (userId && k !== customProvidersKey(userId)) continue
+        keys.push(k)
+      }
+      if (k.startsWith(USAGE_PREFIX)) {
+        if (userId && !k.startsWith(`${USAGE_PREFIX}${userId}:`)) continue
         keys.push(k)
       }
     }
@@ -167,6 +184,39 @@ export function writeCustomProvidersCache(
 ): void {
   if (!userId) return
   writeTimed(customProvidersKey(userId), data)
+}
+
+/**
+ * Usage summary cache, one entry per `days` range so switching the range
+ * picker can paint that range's own cache immediately. Only the aggregate
+ * JSON is ever cached — no prompts/completions/secrets pass through here.
+ */
+export function readUsageSummaryCache(
+  userId: string | null | undefined,
+  days: UsageDays,
+): UsageSummary | null {
+  if (!userId) return null
+  return readTimed<UsageSummary>(usageKey(userId, days))?.data ?? null
+}
+
+export function isUsageSummaryCacheFresh(
+  userId: string | null | undefined,
+  days: UsageDays,
+  ttlMs = CACHE_TTL_MS,
+): boolean {
+  if (!userId) return false
+  const entry = readTimed<UsageSummary>(usageKey(userId, days))
+  if (!entry) return false
+  return Date.now() - entry.savedAt < ttlMs
+}
+
+export function writeUsageSummaryCache(
+  userId: string | null | undefined,
+  days: UsageDays,
+  data: UsageSummary,
+): void {
+  if (!userId) return
+  writeTimed(usageKey(userId, days), data)
 }
 
 // silence unused if tree-shaken elsewhere

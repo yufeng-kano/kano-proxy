@@ -11,7 +11,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 | `/accounts` | Two groups: subscription pool cards (Claude / Codex / Grok — usage bars, add/promote/remove) and custom endpoint cards (user-defined BYO endpoints — status only, add/test/edit/remove) |
 | `/models` | Catalog of `provider/model` ids; available when user has a bound account. Grouped by provider, including the user's custom endpoints |
 | `/keys` | List / create / revoke API keys; show base URLs copy blocks |
-| `/usage` | Optional request log summary (no content) |
+| `/dashboard` | Token usage + cache-rate dashboard over `request_logs` (see Dashboard page below) |
 
 ## Theming
 
@@ -39,7 +39,18 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 - Backend also caches per-account usage in KV for **90s** to avoid provider 429 (see `apps/api/src/pool/usage_cache.ts`); custom-provider `models_mode=auto` catalog lookups use the same 90s KV cache (see [providers.md](./providers.md)).
 - On refresh failure, keep showing cache and surface a non-blocking error.
 - Never store access tokens, refresh tokens, session secrets, or a custom provider's API key in local UI cache — a custom provider's cached row carries only the non-secret fields the `GET /api/custom-providers` response already returns (`key_mask`, never the key).
-- Cache keys scoped to the signed-in user id. Custom providers: sessionStorage key `kano-proxy:custom-providers:{userId}`, same 90s cache-first / background-refresh convention as accounts and models.
+- Cache keys scoped to the signed-in user id. Custom providers: sessionStorage key `kano-proxy:custom-providers:{userId}`, same 90s cache-first / background-refresh convention as accounts and models. Usage summary: `kano-proxy:usage:{userId}:{days}`.
+
+## Dashboard page
+
+Route `/dashboard`; signed-in `/` redirects here (nav order: Dashboard, Accounts, Models, Keys). Data source: `GET /api/usage/summary?days=1|7|30` (session auth, see [auth.md](./auth.md)) aggregating `request_logs` — **live rows only, no fabricated numbers**; an empty range renders an explicit empty state.
+
+- Range picker: 24h / 7d / 30d (`days=1|7|30`, default 7). Series buckets are hourly for 24h, daily otherwise (UTC bucket keys from the API, formatted client-side; missing buckets zero-filled client-side).
+- Stat tiles: total requests, total tokens (prompt + completion), **cache hit rate** (hero metric: Σ`cache_read_input_tokens` / Σ`prompt_tokens` over cache-known rows), errors (status ≥ 400), avg latency.
+- Per-model table: requests, prompt/completion tokens, cache read/write, cache rate; sorted by total tokens desc. When cache data covers only part of a model's requests, annotate coverage (e.g. "cache data on N of M requests") instead of silently mixing.
+- Time-series chart: tokens per bucket with the cached share visually distinguished. Hand-rolled inline SVG — **no charting dependency**; colors/typography from `styles.css` tokens only, legible in both themes.
+- Cache-first like every other page: sessionStorage key above, 90s TTL, paint-then-background-refresh, keep cache + non-blocking error on failure. Server side reads D1 directly (no KV layer — the query is cheap and per-user).
+- Requests without usage data (`NULL` token fields — see [database.md](./database.md)) count toward request/error totals but are skipped by token/cache aggregates; the UI surfaces that coverage rather than hiding it.
 
 ## Account row (align lincy Proxy page)
 

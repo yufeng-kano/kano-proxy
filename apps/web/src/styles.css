@@ -33,6 +33,28 @@
   --bar-fill: #27272a;
   --bar-high: #b45309;
   --bar-full: #b91c1c;
+  /* Dashboard chart series (Dashboard page, docs/admin-ui.md). Categorical
+     identity colors, not status — kept out of the ok/warn/danger hue family
+     on purpose so a chart segment never reads as a severity signal.
+     --chart-input / --chart-input-soft are the same blue hue at two
+     lightness steps (an ordinal pair: cached input tokens vs uncached),
+     --chart-completion is a separate magenta hue for completion tokens.
+     Validated with the dataviz skill's six-checks script against this
+     file's own --surface (light #ffffff / dark #131316): input/completion
+     clears categorical CVD + normal-vision separation + 3:1 surface
+     contrast in both modes, and is also separated from the existing
+     --danger red in dark mode (chosen deliberately cooler/pinker than a
+     red-leaning magenta for this); input-soft/input clears the ordinal
+     ramp checks (monotone L, light-end contrast). input-soft vs completion
+     sits in the CVD 6–8 floor band in dark mode, which this method treats
+     as legal only with secondary encoding — covered here since the chart
+     always ships a legend, hover/focus tooltip, and table view alongside
+     color.
+     Re-validate with scripts/validate_palette.js from the dataviz skill
+     before changing any of the three. */
+  --chart-input-soft: #86b6ef;
+  --chart-input: #2a78d6;
+  --chart-completion: #c94f8f;
   /* Focus indicator — needs 3:1 against --surface per WCAG 1.4.11. */
   --ring-border: #71717a;
   --ring: 0 0 0 3px rgb(24 24 27 / 6%);
@@ -77,6 +99,9 @@
     --bar-fill: #d4d4d8;
     --bar-high: #f59e0b;
     --bar-full: #f87171;
+    --chart-input-soft: #1c5cab;
+    --chart-input: #3987e5;
+    --chart-completion: #bd4a86;
     /* Focus indicator — needs 3:1 against --surface per WCAG 1.4.11. */
     --ring-border: #71717a;
     --ring: 0 0 0 3px rgb(250 250 250 / 10%);

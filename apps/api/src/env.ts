@@ -12,6 +12,7 @@ export type Env = {
   CLAUDE_CODE_OAUTH_CLIENT_ID?: string
   CODEX_OAUTH_CLIENT_ID?: string
   GROK_OAUTH_CLIENT_ID?: string
+  REQUEST_LOG_RETENTION_DAYS?: string
 }
 
 export type ProviderId = "claude-code" | "codex" | "grok"

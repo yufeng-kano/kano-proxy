@@ -10,6 +10,8 @@ import type {
   LoginStart,
   ModelsResponse,
   ProviderId,
+  UsageDays,
+  UsageSummary,
   User,
 } from "@/types"
 
@@ -256,4 +258,11 @@ export async function testCustomProvider(
     method: "POST",
     body: JSON.stringify(body),
   })
+}
+
+// Usage dashboard — session auth, same as the routes above. See docs/admin-ui.md.
+
+/** Aggregates over `request_logs` for the trailing `days` window. No server-side KV cache to bypass (D1 read is cheap and per-user), so there is no `refresh` param. */
+export async function getUsageSummary(days: UsageDays = 7): Promise<UsageSummary> {
+  return request<UsageSummary>(`/api/usage/summary?days=${days}`)
 }

@@ -54,6 +54,9 @@ id = "{cache}"
 APP_URL = "{app}"
 GOOGLE_REDIRECT_URI = "{app}/api/auth/callback"
 CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
+
+[triggers]
+crons = ["17 3 * * *"]
 """
     path.write_text(content)
     print(f"wrote {path.relative_to(root)} (resource ids not logged)", file=sys.stderr)

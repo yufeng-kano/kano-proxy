@@ -31,3 +31,6 @@ id = "<kv-cache-id>"
 APP_URL = "https://<your-domain>"
 GOOGLE_REDIRECT_URI = "https://<your-domain>/api/auth/callback"
 CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
+
+[triggers]
+crons = ["17 3 * * *"]

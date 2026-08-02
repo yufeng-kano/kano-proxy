@@ -2,6 +2,8 @@ import { Hono } from "hono"
 import { cors } from "hono/cors"
 import type { HonoEnv } from "./auth/session"
 import { loadSessionUser } from "./auth/session"
+import type { Env } from "./env"
+import { runRetentionSweep } from "./maintenance/retention"
 import { anthropicRoutes } from "./routes/anthropic"
 import { authRoutes } from "./routes/auth"
 import { customProviderRoutes } from "./routes/custom_providers"
@@ -9,8 +11,12 @@ import { keysRoutes } from "./routes/keys"
 import { modelsRoutes } from "./routes/models"
 import { openaiRoutes } from "./routes/openai"
 import { providerRoutes } from "./routes/providers"
+import { usageRoutes } from "./routes/usage"
 
-const app = new Hono<HonoEnv>()
+// Named export so tests can call the Hono app's own `.request()` test helper
+// directly — the default export below is the Workers `{ fetch, scheduled }`
+// object, which has no `.request()`.
+export const app = new Hono<HonoEnv>()
 
 // /api/*: admin SPA only, cookie-credentialed — origin must match APP_URL.
 app.use(
@@ -50,10 +56,25 @@ app.route("/api/keys", keysRoutes)
 app.route("/api/models", modelsRoutes)
 app.route("/api/providers", providerRoutes)
 app.route("/api/custom-providers", customProviderRoutes)
+app.route("/api/usage", usageRoutes)
 
 app.route("/openai/v1", openaiRoutes)
 app.route("/anthropic", anthropicRoutes)
 
 app.notFound((c) => c.json({ error: "not found" }, 404))
 
-export default app
+// Cron-triggered retention sweep (see docs/logging.md) — kept out of the
+// request path. A sweep failure is logged and swallowed here so it can never
+// surface as an unhandled rejection in the runtime.
+const handler: ExportedHandler<Env> = {
+  fetch: app.fetch,
+  scheduled: (event, env, ctx) => {
+    ctx.waitUntil(
+      runRetentionSweep(env).catch((err) => {
+        console.error("[retention] sweep failed:", err)
+      }),
+    )
+  },
+}
+
+export default handler

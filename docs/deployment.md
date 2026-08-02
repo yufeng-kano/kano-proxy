@@ -69,6 +69,8 @@ cp wrangler.production.example.toml wrangler.production.toml
 
 `wrangler.production.toml` is gitignored. Resource titles use the full `kano-proxy` prefix; Worker script name and D1 `database_name` are both `kano-proxy`. Optional: also mirror ids in gitignored `.local/deploy-notes.md`.
 
+Every Wrangler config (committed `wrangler.toml`, the production example, the CI-generated production config) carries the same `[triggers] crons` block for the daily retention sweep (see [logging.md](./logging.md)). If your `wrangler.production.toml` predates it, copy the `[triggers]` block from `wrangler.production.example.toml` — a deploy from a config without it silently drops the cron.
+
 ### Vars vs secrets
 
 Public vars (Dashboard or wrangler production vars) — **not** the local defaults in `wrangler.toml`:
@@ -93,6 +95,7 @@ Optional overrides:
 CLAUDE_CODE_OAUTH_CLIENT_ID
 CODEX_OAUTH_CLIENT_ID
 GROK_OAUTH_CLIENT_ID
+REQUEST_LOG_RETENTION_DAYS   # retention sweep window in days; default 90
 ```
 
 Google Cloud Console: authorize `https://<your-domain>/api/auth/callback`.

@@ -27,6 +27,7 @@ async function onLogout() {
           <span class="brand-name">{{ SITE.name }}</span>
         </div>
         <nav class="nav">
+          <RouterLink to="/dashboard" class="nav-link">Dashboard</RouterLink>
           <RouterLink to="/accounts" class="nav-link">Accounts</RouterLink>
           <RouterLink to="/models" class="nav-link">Models</RouterLink>
           <RouterLink to="/keys" class="nav-link">Keys</RouterLink>

@@ -251,8 +251,8 @@ providerRoutes.post("/:provider/login", async (c) => {
   const loginId = newId("login")
   const expires = new Date(Date.now() + 900_000).toISOString()
 
-  // No scheduled sweeper for this table — prune expired rows opportunistically
-  // on the same path that adds new ones.
+  // Also opportunistically pruned here on the same path that adds new rows,
+  // ahead of whatever the next daily retention sweep does (docs/logging.md).
   await c.env.DB.prepare(`DELETE FROM oauth_login_states WHERE expires_at < ?`)
     .bind(nowIso())
     .run()

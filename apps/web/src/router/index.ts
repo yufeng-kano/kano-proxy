@@ -6,13 +6,18 @@ const router = createRouter({
   routes: [
     {
       path: "/",
-      redirect: "/accounts",
+      redirect: "/dashboard",
     },
     {
       path: "/login",
       name: "login",
       component: () => import("@/pages/LoginPage.vue"),
       meta: { public: true },
+    },
+    {
+      path: "/dashboard",
+      name: "dashboard",
+      component: () => import("@/pages/DashboardPage.vue"),
     },
     {
       path: "/accounts",
@@ -31,7 +36,7 @@ const router = createRouter({
     },
     {
       path: "/:pathMatch(.*)*",
-      redirect: "/accounts",
+      redirect: "/dashboard",
     },
   ],
 })

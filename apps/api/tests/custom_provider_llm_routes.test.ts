@@ -4,7 +4,7 @@
  * apiKeyAuth, resolveModel, and dispatch, not just the adapters in isolation.
  */
 import { afterEach, describe, expect, it } from "vitest"
-import app from "../src/index"
+import { app } from "../src/index"
 import { hashApiKey } from "../src/crypto/keys"
 import { encryptJson } from "../src/crypto/token_crypto"
 import type { Env } from "../src/env"

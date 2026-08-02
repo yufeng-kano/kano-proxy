@@ -1,10 +1,12 @@
 /**
  * Minimal in-memory D1 substitute for route/db integration tests. Supports
  * exactly the query shapes this codebase's db/* modules issue: single-table
- * SELECT/INSERT/UPDATE/DELETE with equality WHERE clauses (AND-joined),
- * `SELECT COUNT(*)`, `SELECT COALESCE(MAX(col), 0)`, and `UPDATE ... SET
- * col = ?` / `col = COALESCE(?, col)`. Not a SQL engine — anything outside
- * these shapes throws so a mismatch fails loudly instead of silently no-op.
+ * SELECT/INSERT/UPDATE/DELETE with `=`, `>=`, or `<` WHERE conditions
+ * (AND-joined), `SELECT COUNT(*)`, `SELECT COALESCE(MAX(col), 0)`, `UPDATE
+ * ... SET col = ?` / `col = COALESCE(?, col)`, and the retention sweep's
+ * batched `DELETE ... WHERE col IN (SELECT col FROM <same table> WHERE
+ * <cond> LIMIT n)` shape. Not a SQL engine — anything outside these shapes
+ * throws so a mismatch fails loudly instead of silently no-op.
  */
 
 type Row = Record<string, unknown>
@@ -94,11 +96,19 @@ function filterRows(rows: Row[], whereClause: string | undefined, params: unknow
   const conditions = splitTopLevel(whereClause, /^\s+AND\s+/i).map((c) => c.trim())
   let pi = 0
   const consumed = conditions.map((cond) => {
-    const eq = cond.match(/^(\w+)\s*=\s*\?$/)
-    if (eq) return { col: eq[1]!, paramIndex: pi++ }
+    const cmp = cond.match(/^(\w+)\s*(=|>=|<)\s*\?$/)
+    if (cmp) return { col: cmp[1]!, op: cmp[2]!, paramIndex: pi++ }
     throw new Error(`FakeD1: unsupported WHERE condition: ${cond}`)
   })
-  return rows.filter((row) => consumed.every(({ col, paramIndex }) => row[col] === params[paramIndex]))
+  return rows.filter((row) =>
+    consumed.every(({ col, op, paramIndex }) => {
+      const actual = row[col] as string | number
+      const expected = params[paramIndex] as string | number
+      if (op === ">=") return actual >= expected
+      if (op === "<") return actual < expected
+      return actual === expected
+    }),
+  )
 }
 
 function sortRows(rows: Row[], orderByClause: string): Row[] {
@@ -186,6 +196,26 @@ function execute(
       pi = 0
     }
     return { rows: [], changes: rows.length }
+  }
+
+  // Batched retention-style delete: `DELETE FROM t WHERE col IN (SELECT col
+  // FROM t WHERE <cond> LIMIT n)`. Checked ahead of the plain DELETE below —
+  // that one would otherwise "match" too (the whole IN (...) clause as its
+  // WHERE) and then fail deeper inside filterRows on the subquery text.
+  m = sql.match(/^DELETE FROM (\w+) WHERE (\w+) IN \(SELECT \2 FROM \1 WHERE (.+) LIMIT (\d+)\)$/i)
+  if (m) {
+    const table = m[1]!
+    const idCol = m[2]!
+    const innerWhere = m[3]!
+    const limit = Number(m[4])
+    const all = db.rows(table)
+    const candidates = filterRows(all, innerWhere, params).slice(0, limit)
+    const ids = new Set(candidates.map((r) => r[idCol]))
+    const remaining = all.filter((r) => !ids.has(r[idCol]))
+    const changes = all.length - remaining.length
+    all.length = 0
+    all.push(...remaining)
+    return { rows: [], changes }
   }
 
   m = sql.match(/^DELETE FROM (\w+)(?:\s+WHERE\s+(.+))?$/i)

@@ -373,6 +373,42 @@ describe("anthropicToOpenAIResponse", () => {
     const choices = out.choices as Array<{ finish_reason: string }>
     expect(choices[0]!.finish_reason).toBe("length")
   })
+
+  it("attaches prompt_tokens_details.cached_tokens and cache_creation_input_tokens from upstream usage", () => {
+    const out = anthropicToOpenAIResponse(
+      {
+        id: "msg_4",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: {
+          input_tokens: 2,
+          output_tokens: 4,
+          cache_read_input_tokens: 1,
+          cache_creation_input_tokens: 6,
+        },
+      },
+      "claude-code/m",
+    )
+    const usage = out.usage as {
+      prompt_tokens_details?: { cached_tokens: number }
+      cache_creation_input_tokens?: number
+    }
+    expect(usage.prompt_tokens_details).toEqual({ cached_tokens: 1 })
+    expect(usage.cache_creation_input_tokens).toBe(6)
+  })
+
+  it("attaches cache fields as 0 (not omitted) when usage was present but the cache fields were not", () => {
+    const out = anthropicToOpenAIResponse(
+      { id: "msg_5", content: [{ type: "text", text: "ok" }], stop_reason: "end_turn", usage: { input_tokens: 3, output_tokens: 1 } },
+      "claude-code/m",
+    )
+    const usage = out.usage as {
+      prompt_tokens_details?: { cached_tokens: number }
+      cache_creation_input_tokens?: number
+    }
+    expect(usage.prompt_tokens_details).toEqual({ cached_tokens: 0 })
+    expect(usage.cache_creation_input_tokens).toBe(0)
+  })
 })
 
 describe("anthropicSseToOpenAIStream", () => {
@@ -603,6 +639,34 @@ describe("openaiToAnthropicMessage", () => {
     expect(out.content).toEqual([
       { type: "tool_use", id: "call_1", name: "foo", input: { x: 2 } },
     ])
+  })
+
+  it("subtracts prompt_tokens_details.cached_tokens into cache_read_input_tokens (Anthropic semantics)", () => {
+    const out = openaiToAnthropicMessage(
+      {
+        id: "c",
+        choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 40,
+          prompt_tokens_details: { cached_tokens: 30 },
+        },
+      },
+      "grok/m",
+    )
+    expect(out.usage).toEqual({ input_tokens: 70, output_tokens: 40, cache_read_input_tokens: 30 })
+  })
+
+  it("leaves usage unchanged (no cache_read_input_tokens field) when no cache details are reported", () => {
+    const out = openaiToAnthropicMessage(
+      {
+        id: "c",
+        choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 5, completion_tokens: 2 },
+      },
+      "grok/m",
+    )
+    expect(out.usage).toEqual({ input_tokens: 5, output_tokens: 2 })
   })
 })
 
@@ -971,6 +1035,23 @@ describe("openaiSseToAnthropicStream", () => {
     expect(out).toContain('"output_tokens":56')
   })
 
+  it("subtracts prompt_tokens_details.cached_tokens into cache_read_input_tokens when the upstream reports it", async () => {
+    const sse = [
+      'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}',
+      "",
+      'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":56,"prompt_tokens_details":{"cached_tokens":300}}}',
+      "",
+      "data: [DONE]",
+      "",
+    ].join("\n")
+
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 41), "grok/m"))
+    parseBlocks(out)
+    expect(out).toContain('"input_tokens":700')
+    expect(out).toContain('"cache_read_input_tokens":300')
+    expect(out).toContain('"output_tokens":56')
+  })
+
   it("treats a re-sent function name as the same call, not a new one", async () => {
     const sse = [
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":"{\\"file_path\\":"}}]}}]}',
@@ -1189,6 +1270,26 @@ describe("anthropicSseToOpenAIStream usage + error", () => {
     expect(out).toContain('"total_tokens":22')
     expect(out).toContain('"finish_reason":"stop"')
     expect(out).toContain("data: [DONE]")
+    // Cache details attached alongside it (docs/api.md cache details section).
+    expect(out).toContain('"prompt_tokens_details":{"cached_tokens":2}')
+    expect(out).toContain('"cache_creation_input_tokens":3')
+  })
+
+  it("attaches cache fields as 0 (not omitted) when message_start's usage carried no cache fields", async () => {
+    const sse = [
+      "event: message_start",
+      'data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":10}}}',
+      "",
+      "event: message_delta",
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}',
+      "",
+      "event: message_stop",
+      'data: {"type":"message_stop"}',
+      "",
+    ].join("\n")
+    const out = await collect(anthropicSseToOpenAIStream(chunked(sse, 19), "claude-code/m"))
+    expect(out).toContain('"prompt_tokens_details":{"cached_tokens":0}')
+    expect(out).toContain('"cache_creation_input_tokens":0')
   })
 
   it("omits usage entirely when neither message_start nor message_delta reported any", async () => {

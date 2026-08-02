@@ -76,6 +76,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       model: resolved.raw,
       provider: resolved.provider,
       adapter: resolved.adapter,
+      waitUntil: (p) => c.executionCtx.waitUntil(p),
     })
   }
 
@@ -89,6 +90,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     upstreamModel: resolved.upstreamModel,
     body,
     affinity,
+    waitUntil: (p) => c.executionCtx.waitUntil(p),
   })
 })
 
@@ -148,6 +150,7 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     provider: resolved.provider,
     adapter: resolved.adapter,
     endpoint: "count_tokens",
+    waitUntil: (p) => c.executionCtx.waitUntil(p),
   })
 })
 

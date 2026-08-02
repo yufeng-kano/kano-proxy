@@ -328,7 +328,11 @@ export function openaiToAnthropicMessage(
   else if (finish === "length") stop_reason = "max_tokens"
 
   const usage = completion.usage as
-    | { prompt_tokens?: number; completion_tokens?: number }
+    | {
+        prompt_tokens?: number
+        completion_tokens?: number
+        prompt_tokens_details?: { cached_tokens?: number }
+      }
     | undefined
 
   return {
@@ -339,13 +343,33 @@ export function openaiToAnthropicMessage(
     content: content.length ? content : [{ type: "text", text: "" }],
     stop_reason,
     stop_sequence: null,
-    usage: usage
-      ? {
-          input_tokens: usage.prompt_tokens ?? 0,
-          output_tokens: usage.completion_tokens ?? 0,
-        }
-      : { input_tokens: 0, output_tokens: 0 },
+    usage: usage ? anthropicUsageFromOpenAI(usage) : { input_tokens: 0, output_tokens: 0 },
   }
+}
+
+/**
+ * OpenAI-shaped `usage` → Anthropic semantics: `prompt_tokens` is
+ * cache-inclusive, Anthropic `input_tokens` is not — so when the upstream
+ * reported `prompt_tokens_details.cached_tokens`, subtract it out and
+ * report it as `cache_read_input_tokens` instead. Unchanged when no cache
+ * details were reported (docs/api.md "Usage cache details on converted
+ * responses").
+ */
+function anthropicUsageFromOpenAI(usage: {
+  prompt_tokens?: number
+  completion_tokens?: number
+  prompt_tokens_details?: { cached_tokens?: number }
+}): Record<string, unknown> {
+  const prompt = usage.prompt_tokens ?? 0
+  const cached = usage.prompt_tokens_details?.cached_tokens
+  if (typeof cached === "number") {
+    return {
+      input_tokens: prompt - cached,
+      output_tokens: usage.completion_tokens ?? 0,
+      cache_read_input_tokens: cached,
+    }
+  }
+  return { input_tokens: prompt, output_tokens: usage.completion_tokens ?? 0 }
 }
 
 /**
@@ -373,6 +397,8 @@ export function openaiSseToAnthropicStream(
   /** Real upstream usage, when the provider reports it. */
   let promptTokens: number | null = null
   let completionTokens: number | null = null
+  /** From `prompt_tokens_details.cached_tokens`, when the upstream reports it. */
+  let cacheReadInputTokens: number | null = null
   /**
    * Anthropic content blocks are strictly sequential: a block must stop before
    * the next one starts, and a stopped block can never be reopened. An OpenAI
@@ -648,14 +674,25 @@ export function openaiSseToAnthropicStream(
         // Prefer tool_use if we streamed any tools even when finish_reason was missing.
         const reason =
           stop_reason === "end_turn" && sawToolCall ? "tool_use" : stop_reason
+        // Anthropic input_tokens excludes cached reads; OpenAI prompt_tokens
+        // does not. Subtract out cached_tokens when the upstream reported it
+        // (docs/api.md "Usage cache details on converted responses") —
+        // unchanged otherwise.
+        const inputTokens =
+          promptTokens != null && cacheReadInputTokens != null
+            ? promptTokens - cacheReadInputTokens
+            : promptTokens
         emitEvent("message_delta", {
           type: "message_delta",
           delta: { stop_reason: reason, stop_sequence: null },
           // Real upstream counts when the provider reports them; the character
           // estimate is only a floor for providers that report nothing.
           usage: {
-            ...(promptTokens != null ? { input_tokens: promptTokens } : {}),
+            ...(inputTokens != null ? { input_tokens: inputTokens } : {}),
             output_tokens: completionTokens ?? outputTokens,
+            ...(cacheReadInputTokens != null
+              ? { cache_read_input_tokens: cacheReadInputTokens }
+              : {}),
           },
         })
         emitEvent("message_stop", { type: "message_stop" })
@@ -694,7 +731,11 @@ export function openaiSseToAnthropicStream(
               // Usage rides on a final chunk that carries no choices, so read
               // it before the choice guard below discards that chunk.
               const usage = json.usage as
-                | { prompt_tokens?: number; completion_tokens?: number }
+                | {
+                    prompt_tokens?: number
+                    completion_tokens?: number
+                    prompt_tokens_details?: { cached_tokens?: number }
+                  }
                 | null
                 | undefined
               if (usage) {
@@ -703,6 +744,9 @@ export function openaiSseToAnthropicStream(
                 }
                 if (typeof usage.completion_tokens === "number") {
                   completionTokens = usage.completion_tokens
+                }
+                if (typeof usage.prompt_tokens_details?.cached_tokens === "number") {
+                  cacheReadInputTokens = usage.prompt_tokens_details.cached_tokens
                 }
               }
               const choice = (json.choices as Array<Record<string, unknown>> | undefined)?.[0]
@@ -994,6 +1038,13 @@ export function anthropicToOpenAIResponse(msg: Record<string, unknown>, model: s
             (usage.cache_read_input_tokens ?? 0) +
             (usage.cache_creation_input_tokens ?? 0) +
             (usage.output_tokens ?? 0),
+          // Attach the upstream cache numbers instead of discarding them
+          // (docs/api.md "Usage cache details on converted responses").
+          // 0 is a valid, meaningful value here — Anthropic usage always
+          // defines these fields, so they are attached whenever `usage`
+          // itself was present, not only when they are non-zero.
+          prompt_tokens_details: { cached_tokens: usage.cache_read_input_tokens ?? 0 },
+          cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
         }
       : undefined,
   }
@@ -1025,6 +1076,11 @@ export function anthropicSseToOpenAIStream(
   let promptTokens: number | null = null
   let completionTokens: number | null = null
   let sawUsage = false
+  // Cache numbers ride only on message_start's usage (the input side);
+  // null until that event is seen, then always a number (Anthropic usage
+  // always defines these fields — see fromAnthropicUsage).
+  let cacheReadInputTokens: number | null = null
+  let cacheCreationInputTokens: number | null = null
   // Set once the message has concluded — normally or via a mid-stream
   // `event: error` — so nothing more is emitted after.
   let stopped = false
@@ -1082,6 +1138,8 @@ export function anthropicSseToOpenAIStream(
                       (usage.input_tokens ?? 0) +
                       (usage.cache_read_input_tokens ?? 0) +
                       (usage.cache_creation_input_tokens ?? 0)
+                    cacheReadInputTokens = usage.cache_read_input_tokens ?? 0
+                    cacheCreationInputTokens = usage.cache_creation_input_tokens ?? 0
                     sawUsage = true
                   }
                 } else if (event === "content_block_start") {
@@ -1207,11 +1265,19 @@ export function anthropicSseToOpenAIStream(
                   if (sawUsage) {
                     const prompt = promptTokens ?? 0
                     const completion = completionTokens ?? 0
-                    payload.usage = {
+                    const usagePayload: Record<string, unknown> = {
                       prompt_tokens: prompt,
                       completion_tokens: completion,
                       total_tokens: prompt + completion,
                     }
+                    // Only known once message_start's usage was actually
+                    // seen — mirrors anthropicToOpenAIResponse's non-stream
+                    // enrichment (docs/api.md cache details section).
+                    if (cacheReadInputTokens != null) {
+                      usagePayload.prompt_tokens_details = { cached_tokens: cacheReadInputTokens }
+                      usagePayload.cache_creation_input_tokens = cacheCreationInputTokens ?? 0
+                    }
+                    payload.usage = usagePayload
                   }
                   emit(payload)
                   controller.enqueue(encoder.encode("data: [DONE]\n\n"))

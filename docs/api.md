@@ -82,6 +82,14 @@ Streaming: SSE, OpenAI chunk shape, end-to-end without buffering entire completi
 
 `claude-code` requests made through the OpenAI surface (`stream: true`) convert the upstream Anthropic Messages SSE into OpenAI chunks. Usage is not known until the upstream stream reports it, so — like the codex converter above — it rides on the **final** chunk rather than an early one: prompt tokens come from `message_start` (`usage.input_tokens` plus `cache_read_input_tokens` / `cache_creation_input_tokens`, summed the same way the non-stream response does), completion tokens from `message_delta.usage.output_tokens`, and the combined `{prompt_tokens, completion_tokens, total_tokens}` is attached to the last chunk (the one carrying `finish_reason`) whenever any of those counts were seen. An upstream Anthropic `event: error` mid-stream converts to an OpenAI-shaped error line and ends the stream — no trailing `finish_reason` chunk, no `[DONE]`.
 
+### Usage cache details on converted responses
+
+Wherever this proxy **builds** an OpenAI-shaped `usage` object (claude-code / custom-anthropic conversions, codex Responses conversions — stream final chunk and non-stream alike), it attaches the upstream cache numbers instead of discarding them: `prompt_tokens_details.cached_tokens` (official OpenAI field; from Anthropic `cache_read_input_tokens` or Responses `input_tokens_details.cached_tokens`) and, for Anthropic-shaped upstreams only, a `cache_creation_input_tokens` extension field alongside it. `prompt_tokens` remains the cache-inclusive total.
+
+Conversely, when building an Anthropic-shaped `usage` from an OpenAI upstream that reported `prompt_tokens_details.cached_tokens` (`/anthropic` → grok / codex / custom `format=openai`), the converted usage reports proper Anthropic semantics: `input_tokens` excludes the cached share, which appears as `cache_read_input_tokens`.
+
+Pure passthrough paths (`grok` and custom `format=openai` on `/openai/v1`; native `/anthropic` passthroughs) never rewrite upstream usage. These numbers also feed `request_logs` for the admin dashboard (see [logging.md](./logging.md)).
+
 ### `GET /openai/v1/models`
 
 Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key owner has bound. Ids are `provider/upstream_id`. Claude Code and Grok come from live upstream `/models`. Codex returns empty (ChatGPT OAuth has no models list API — see [providers.md](./providers.md)). Empty for a provider when the user has no usable account for it. The user's custom providers are appended after the builtins — manual list, or live + cache + fallback for `models_mode=auto` (see [providers.md](./providers.md)).

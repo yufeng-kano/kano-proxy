@@ -8,7 +8,17 @@ import {
 import { getAdapter } from "../providers"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import { logRequest } from "../logging/request_log"
+import {
+  createAnthropicSseUsageSniffer,
+  createOpenAISseUsageSniffer,
+  fromAnthropicUsage,
+  fromOpenAIUsage,
+  type NormalizedUsage,
+} from "../logging/usage_capture"
 import { streamWithKeepalive } from "./sse"
+
+/** Keeps a Worker invocation alive for a deferred `logRequest` past the returned Response — `c.executionCtx.waitUntil` in production, a test double in tests. */
+export type WaitUntil = (promise: Promise<unknown>) => void
 
 export async function dispatchChatCompletions(
   env: Env,
@@ -20,6 +30,7 @@ export async function dispatchChatCompletions(
     /** Pre-resolved adapter for custom providers; defaults to the builtin registry. */
     adapter?: ProviderAdapter
     req: ChatCompletionRequest & { rawModel: string }
+    waitUntil: WaitUntil
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -86,15 +97,27 @@ export async function dispatchChatCompletions(
 
     const latencyMs = Date.now() - started
     if (res.body && (opts.req.stream || isEventStream(res))) {
-      const body = streamWithKeepalive(res.body)
-      cExecutionLog(env, {
-        userId: opts.userId,
-        apiKeyId: opts.apiKeyId,
-        provider: opts.provider,
-        model: opts.req.rawModel,
-        accountId: account.row.id,
-        statusCode: res.status,
-        latencyMs,
+      // Row is written once the stream ends (waitUntil), so token fields can
+      // be populated — the sniffer taps the exact bytes piped to the client,
+      // never buffering the stream itself.
+      const sniffer = createOpenAISseUsageSniffer()
+      const body = streamWithKeepalive(res.body, undefined, {
+        tap: (chunk) => sniffer.feed(chunk),
+        onClose: () => {
+          const usage = sniffer.finish()
+          opts.waitUntil(
+            logRequest(env, {
+              userId: opts.userId,
+              apiKeyId: opts.apiKeyId,
+              provider: opts.provider,
+              model: opts.req.rawModel,
+              accountId: account.row.id,
+              statusCode: res.status,
+              latencyMs,
+              ...usageFields(usage),
+            }),
+          )
+        },
       })
       return new Response(body, {
         status: res.status,
@@ -104,14 +127,10 @@ export async function dispatchChatCompletions(
 
     // clone for logging tokens if json
     const text = await res.text()
-    let promptTokens: number | null = null
-    let completionTokens: number | null = null
+    let usage: NormalizedUsage | null = null
     try {
-      const j = JSON.parse(text) as {
-        usage?: { prompt_tokens?: number; completion_tokens?: number }
-      }
-      promptTokens = j.usage?.prompt_tokens ?? null
-      completionTokens = j.usage?.completion_tokens ?? null
+      const j = JSON.parse(text) as { usage?: Record<string, unknown> }
+      usage = fromOpenAIUsage(j.usage)
     } catch {
       /* */
     }
@@ -123,8 +142,7 @@ export async function dispatchChatCompletions(
       accountId: account.row.id,
       statusCode: res.status,
       latencyMs,
-      promptTokens,
-      completionTokens,
+      ...usageFields(usage),
     })
     return new Response(text, {
       status: res.status,
@@ -174,6 +192,7 @@ export async function dispatchAnthropicMessages(
     /** Pre-resolved adapter for custom providers; defaults to the builtin registry. */
     adapter?: ProviderAdapter
     endpoint?: "messages" | "count_tokens"
+    waitUntil: WaitUntil
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -231,6 +250,48 @@ export async function dispatchAnthropicMessages(
       last = res
       continue
     }
+    const latencyMs = Date.now() - started
+    // count_tokens estimates tokens, it never consumes them — never log a
+    // count from that endpoint, streaming or not (it never streams anyway).
+    const isCountTokens = endpoint === "count_tokens"
+    if (res.body && isEventStream(res)) {
+      const sniffer = createAnthropicSseUsageSniffer()
+      const body = streamWithKeepalive(res.body, undefined, {
+        tap: (chunk) => sniffer.feed(chunk),
+        onClose: () => {
+          const usage = isCountTokens ? null : sniffer.finish()
+          opts.waitUntil(
+            logRequest(env, {
+              userId: opts.userId,
+              apiKeyId: opts.apiKeyId,
+              provider,
+              model: opts.model,
+              accountId: account.row.id,
+              statusCode: res.status,
+              latencyMs,
+              ...usageFields(usage),
+            }),
+          )
+        },
+      })
+      return new Response(body, {
+        status: res.status,
+        headers: passthroughStreamHeaders(res.headers),
+      })
+    }
+
+    // Peek at the body for usage without disturbing what we return to the
+    // client — clone rather than reconstruct, so every upstream header
+    // (rate-limit headers included) still passes through untouched.
+    let usage: NormalizedUsage | null = null
+    if (!isCountTokens) {
+      try {
+        const json = (await res.clone().json()) as { usage?: Record<string, unknown> }
+        usage = fromAnthropicUsage(json.usage)
+      } catch {
+        /* not JSON, or no body — keep NULL usage */
+      }
+    }
     await logRequest(env, {
       userId: opts.userId,
       apiKeyId: opts.apiKeyId,
@@ -238,14 +299,9 @@ export async function dispatchAnthropicMessages(
       model: opts.model,
       accountId: account.row.id,
       statusCode: res.status,
-      latencyMs: Date.now() - started,
+      latencyMs,
+      ...usageFields(usage),
     })
-    if (res.body && isEventStream(res)) {
-      return new Response(streamWithKeepalive(res.body), {
-        status: res.status,
-        headers: passthroughStreamHeaders(res.headers),
-      })
-    }
     return res
   }
   return Response.json(
@@ -273,6 +329,7 @@ export async function dispatchAnthropicViaOpenAI(
     upstreamModel: string
     body: Record<string, unknown>
     affinity?: ChatCompletionRequest["affinity"]
+    waitUntil: WaitUntil
   },
 ): Promise<Response> {
   const { anthropicToOpenAIChatRequest, openaiToAnthropicMessage, openaiSseToAnthropicStream } =
@@ -299,6 +356,7 @@ export async function dispatchAnthropicViaOpenAI(
     apiKeyId: opts.apiKeyId,
     provider: opts.provider,
     adapter: opts.adapter,
+    waitUntil: opts.waitUntil,
     req: {
       model: opts.rawModel,
       rawModel: opts.rawModel,
@@ -400,10 +458,17 @@ function passthroughStreamHeaders(h: Headers): Headers {
   return out
 }
 
-function cExecutionLog(
-  env: Env,
-  entry: Parameters<typeof logRequest>[1],
-): void {
-  // fire-and-forget style for streams
-  void logRequest(env, entry)
+/** `null` (nothing captured) flattens to all-NULL request_logs token fields. */
+function usageFields(usage: NormalizedUsage | null): {
+  promptTokens: number | null
+  completionTokens: number | null
+  cacheReadInputTokens: number | null
+  cacheCreationInputTokens: number | null
+} {
+  return {
+    promptTokens: usage?.promptTokens ?? null,
+    completionTokens: usage?.completionTokens ?? null,
+    cacheReadInputTokens: usage?.cacheReadInputTokens ?? null,
+    cacheCreationInputTokens: usage?.cacheCreationInputTokens ?? null,
+  }
 }

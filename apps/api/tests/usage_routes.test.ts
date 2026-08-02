@@ -1,0 +1,406 @@
+import { describe, expect, it } from "vitest"
+import { summarizeUsageRows, usageRoutes } from "../src/routes/usage"
+import { createSession } from "../src/auth/session"
+import type { Env } from "../src/env"
+import { FakeD1, fakeKV } from "./helpers/fake_d1"
+
+type Row = {
+  provider: string
+  model: string
+  status_code: number
+  latency_ms: number
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  cache_read_input_tokens: number | null
+  cache_creation_input_tokens: number | null
+  created_at: string
+}
+
+function row(overrides: Partial<Row>): Row {
+  return {
+    provider: "claude-code",
+    model: "claude-code/claude-opus-5",
+    status_code: 200,
+    latency_ms: 100,
+    prompt_tokens: null,
+    completion_tokens: null,
+    cache_read_input_tokens: null,
+    cache_creation_input_tokens: null,
+    created_at: "2026-08-02T10:00:00.000Z",
+    ...overrides,
+  }
+}
+
+/** Loosely typed — this test asserts shape/values, not the response's own type. */
+type SummaryJson = {
+  days: number
+  from: string
+  totals: Record<string, unknown> & { requests: number; errors: number; avg_latency_ms: number | null }
+  models: Array<Record<string, unknown>>
+  series: Array<Record<string, unknown>>
+}
+
+describe("summarizeUsageRows", () => {
+  it("computes requests/errors (status_code >= 400) over all rows", () => {
+    const rows = [
+      row({ status_code: 200 }),
+      row({ status_code: 404 }),
+      row({ status_code: 500 }),
+    ]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.totals.requests).toBe(3)
+    expect(out.totals.errors).toBe(2)
+  })
+
+  it("averages latency_ms across all rows, rounded, and null for zero rows", () => {
+    const rows = [row({ latency_ms: 100 }), row({ latency_ms: 150 }), row({ latency_ms: 151 })]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.totals.avg_latency_ms).toBe(134) // 401/3 = 133.67 -> rounds to 134
+
+    const empty = summarizeUsageRows([], 7, "from") as SummaryJson
+    expect(empty.totals.avg_latency_ms).toBeNull()
+    expect(empty.totals.requests).toBe(0)
+  })
+
+  it("sums prompt_tokens/completion_tokens over non-null rows only — a null row is excluded, not zero-summed", () => {
+    const rows = [
+      row({ prompt_tokens: 100, completion_tokens: 50 }),
+      row({ prompt_tokens: 200, completion_tokens: null }), // completion unknown on this row alone
+      row({ prompt_tokens: null, completion_tokens: null }), // count_tokens-shaped row: usage wholly unknown
+    ]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.totals.prompt_tokens).toBe(300)
+    expect(out.totals.completion_tokens).toBe(50)
+    expect(out.totals.usage_known_requests).toBe(2)
+  })
+
+  it("cache_rate = SUM(cache_read)/SUM(prompt_tokens) only over rows where cache_read is known and prompt_tokens > 0", () => {
+    const rows = [
+      row({ prompt_tokens: 100, cache_read_input_tokens: 20 }), // counts toward the rate
+      row({ prompt_tokens: 200, cache_read_input_tokens: 50 }), // counts toward the rate
+      row({ prompt_tokens: 50, cache_read_input_tokens: null }), // cache unknown -> excluded from rate and its sum
+      row({ prompt_tokens: 0, cache_read_input_tokens: 10 }), // prompt_tokens not > 0 -> excluded from the rate only
+    ]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    // cache_read_input_tokens total sums every non-null row unconditionally (20+10, the 0-prompt row included).
+    expect(out.totals.cache_read_input_tokens).toBe(80)
+    expect(out.totals.cache_rate).toBeCloseTo((20 + 50) / (100 + 200))
+    expect(out.totals.cache_known_requests).toBe(3)
+  })
+
+  it("cache_rate is null when no row qualifies", () => {
+    const rows = [row({ prompt_tokens: 100, cache_read_input_tokens: null })]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.totals.cache_rate).toBeNull()
+  })
+
+  it("groups models[] by (provider, model), sorted by prompt+completion tokens desc, without avg_latency_ms", () => {
+    const rows = [
+      row({
+        provider: "claude-code",
+        model: "claude-code/claude-opus-5",
+        prompt_tokens: 10,
+        completion_tokens: 5,
+      }),
+      row({ provider: "grok", model: "grok/grok-4.5", prompt_tokens: 100, completion_tokens: 50 }),
+      row({
+        provider: "claude-code",
+        model: "claude-code/claude-opus-5",
+        prompt_tokens: 20,
+        completion_tokens: 5,
+      }),
+    ]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.models).toHaveLength(2)
+    expect(out.models[0]).toMatchObject({
+      provider: "grok",
+      model: "grok/grok-4.5",
+      requests: 1,
+      prompt_tokens: 100,
+      completion_tokens: 50,
+    })
+    expect(out.models[1]).toMatchObject({
+      provider: "claude-code",
+      model: "claude-code/claude-opus-5",
+      requests: 2,
+      prompt_tokens: 30,
+      completion_tokens: 10,
+    })
+    expect(out.models[0]!.avg_latency_ms).toBeUndefined()
+  })
+
+  it("buckets series by hour when days=1, by day otherwise", () => {
+    const rows = [
+      row({ created_at: "2026-08-02T10:15:00.000Z", prompt_tokens: 10, completion_tokens: 1 }),
+      row({ created_at: "2026-08-02T10:45:00.000Z", prompt_tokens: 20, completion_tokens: 2 }),
+      row({ created_at: "2026-08-02T12:00:00.000Z", prompt_tokens: 30, completion_tokens: 3 }),
+    ]
+    const hourly = summarizeUsageRows(rows, 1, "from") as SummaryJson
+    expect(hourly.series).toEqual([
+      {
+        bucket: "2026-08-02T10",
+        requests: 2,
+        prompt_tokens: 30,
+        completion_tokens: 3,
+        cache_read_input_tokens: 0,
+      },
+      {
+        bucket: "2026-08-02T12",
+        requests: 1,
+        prompt_tokens: 30,
+        completion_tokens: 3,
+        cache_read_input_tokens: 0,
+      },
+    ])
+    const daily = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(daily.series).toEqual([
+      {
+        bucket: "2026-08-02",
+        requests: 3,
+        prompt_tokens: 60,
+        completion_tokens: 6,
+        cache_read_input_tokens: 0,
+      },
+    ])
+  })
+
+  it("series is sparse (no zero-fill) and ascending", () => {
+    const rows = [
+      row({ created_at: "2026-08-03T00:00:00.000Z" }),
+      row({ created_at: "2026-08-01T00:00:00.000Z" }),
+    ]
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.series.map((s) => s.bucket)).toEqual(["2026-08-01", "2026-08-03"])
+  })
+
+  it("echoes days and from verbatim", () => {
+    const out = summarizeUsageRows([], 30, "2026-07-03T00:00:00.000Z") as SummaryJson
+    expect(out.days).toBe(30)
+    expect(out.from).toBe("2026-07-03T00:00:00.000Z")
+  })
+})
+
+const SESSION_SECRET = "test-session-secret-not-real"
+const APP_URL = "https://app.example.com"
+
+function buildEnv(db: FakeD1): Env {
+  return {
+    DB: db as unknown as D1Database,
+    BENCH: fakeKV(),
+    CACHE: fakeKV(),
+    APP_URL,
+    SESSION_SECRET,
+  } as unknown as Env
+}
+
+function seedUser(db: FakeD1, id = "user_1"): void {
+  db.seed("users", [
+    {
+      id,
+      google_sub: `sub-${id}`,
+      email: `${id}@example.com`,
+      name: "Test User",
+      picture_url: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    },
+  ])
+}
+
+async function cookieFor(env: Env, userId: string): Promise<string> {
+  const { cookie } = await createSession(env, userId)
+  return cookie.split(";")[0]!
+}
+
+let logCounter = 0
+function seedLog(db: FakeD1, overrides: Partial<Row> & { user_id: string; error_code?: string }): void {
+  db.seed("request_logs", [
+    {
+      id: `log_${logCounter++}`,
+      api_key_id: null,
+      provider: "claude-code",
+      model: "claude-code/claude-opus-5",
+      account_id: null,
+      status_code: 200,
+      latency_ms: 100,
+      prompt_tokens: null,
+      completion_tokens: null,
+      cache_read_input_tokens: null,
+      cache_creation_input_tokens: null,
+      error_code: null,
+      created_at: "2026-08-02T00:00:00.000Z",
+      ...overrides,
+    },
+  ])
+}
+
+function req(cookie?: string): RequestInit {
+  return { method: "GET", headers: cookie ? { cookie } : {} }
+}
+
+describe("GET /api/usage/summary", () => {
+  it("requires auth", async () => {
+    const db = new FakeD1()
+    const res = await usageRoutes.request("/summary", req(), buildEnv(db))
+    expect(res.status).toBe(401)
+  })
+
+  it("rejects a days value outside {1,7,30}", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await usageRoutes.request("/summary?days=3", req(cookie), env)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ error: "invalid_days" })
+  })
+
+  it("rejects a non-numeric days value", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await usageRoutes.request("/summary?days=abc", req(cookie), env)
+    expect(res.status).toBe(400)
+  })
+
+  it("defaults to days=7 when no query param is given", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await usageRoutes.request("/summary", req(cookie), env)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SummaryJson
+    expect(json.days).toBe(7)
+  })
+
+  it("accepts days=1 and days=30", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    for (const days of [1, 30]) {
+      const res = await usageRoutes.request(`/summary?days=${days}`, req(cookie), env)
+      expect(res.status).toBe(200)
+      const json = (await res.json()) as SummaryJson
+      expect(json.days).toBe(days)
+    }
+  })
+
+  it("scopes rows to the signed-in user — another user's rows never leak", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    seedUser(db, "user_2")
+    seedLog(db, { user_id: "user_1", prompt_tokens: 10, completion_tokens: 5 })
+    seedLog(db, { user_id: "user_2", prompt_tokens: 999, completion_tokens: 999 })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const res = await usageRoutes.request("/summary?days=30", req(cookie), env)
+    const json = (await res.json()) as SummaryJson
+    expect(json.totals.requests).toBe(1)
+    expect(json.totals.prompt_tokens).toBe(10)
+  })
+
+  it("excludes rows created before the `from` window (boundary)", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const now = Date.now()
+    // Comfortably inside / outside a 7-day window on either side of the cut,
+    // clear of clock-skew between this call and the route's own Date.now().
+    const inWindow = new Date(now - 6 * 86_400_000).toISOString()
+    const outOfWindow = new Date(now - 8 * 86_400_000).toISOString()
+    seedLog(db, { user_id: "user_1", created_at: inWindow, prompt_tokens: 10, completion_tokens: 1 })
+    seedLog(db, {
+      user_id: "user_1",
+      created_at: outOfWindow,
+      prompt_tokens: 999,
+      completion_tokens: 999,
+    })
+
+    const res = await usageRoutes.request("/summary?days=7", req(cookie), env)
+    const json = (await res.json()) as SummaryJson
+    expect(json.totals.requests).toBe(1)
+    expect(json.totals.prompt_tokens).toBe(10)
+  })
+
+  it("end-to-end: mixed NULLs, errors, multiple providers/models, matches totals/models/series math", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    seedLog(db, {
+      user_id: "user_1",
+      provider: "claude-code",
+      model: "claude-code/claude-opus-5",
+      status_code: 200,
+      latency_ms: 100,
+      prompt_tokens: 100,
+      completion_tokens: 40,
+      cache_read_input_tokens: 20,
+      cache_creation_input_tokens: 0,
+      created_at: "2026-08-02T09:00:00.000Z",
+    })
+    seedLog(db, {
+      user_id: "user_1",
+      provider: "grok",
+      model: "grok/grok-4.5",
+      status_code: 500,
+      latency_ms: 300,
+      prompt_tokens: null,
+      completion_tokens: null,
+      cache_read_input_tokens: null,
+      cache_creation_input_tokens: null,
+      error_code: "upstream_error",
+      created_at: "2026-08-02T09:30:00.000Z",
+    })
+    seedLog(db, {
+      user_id: "user_1",
+      provider: "claude-code",
+      model: "claude-code/claude-opus-5",
+      status_code: 200,
+      latency_ms: 200,
+      // count_tokens-shaped row: never carries tokens.
+      prompt_tokens: null,
+      completion_tokens: null,
+      cache_read_input_tokens: null,
+      cache_creation_input_tokens: null,
+      created_at: "2026-08-03T09:00:00.000Z",
+    })
+
+    const res = await usageRoutes.request("/summary?days=7", req(cookie), env)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SummaryJson
+    expect(json.totals).toMatchObject({
+      requests: 3,
+      errors: 1,
+      avg_latency_ms: 200, // (100+300+200)/3
+      prompt_tokens: 100,
+      completion_tokens: 40,
+      cache_read_input_tokens: 20,
+      cache_creation_input_tokens: 0,
+      cache_rate: 0.2, // 20/100
+      usage_known_requests: 1,
+      cache_known_requests: 1,
+    })
+    expect(json.models).toHaveLength(2)
+    const claude = json.models.find((m) => m.provider === "claude-code")!
+    expect(claude).toMatchObject({ model: "claude-code/claude-opus-5", requests: 2, errors: 0 })
+    const grok = json.models.find((m) => m.provider === "grok")!
+    expect(grok).toMatchObject({ model: "grok/grok-4.5", requests: 1, errors: 1 })
+    expect(json.series).toEqual([
+      {
+        bucket: "2026-08-02",
+        requests: 2,
+        prompt_tokens: 100,
+        completion_tokens: 40,
+        cache_read_input_tokens: 20,
+      },
+      { bucket: "2026-08-03", requests: 1, prompt_tokens: 0, completion_tokens: 0, cache_read_input_tokens: 0 },
+    ])
+  })
+})

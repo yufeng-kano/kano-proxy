@@ -33,3 +33,7 @@ CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
 # Secrets via .dev.vars / wrangler secret (never commit):
 # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, TOKEN_ENCRYPTION_KEY
+
+# Daily retention sweep (request_logs / sessions / oauth_login_states) — see docs/logging.md.
+[triggers]
+crons = ["17 3 * * *"]

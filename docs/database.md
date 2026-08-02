@@ -99,12 +99,25 @@ Optional cache; may also use KV with 60s TTL.
 | account_id | TEXT | nullable |
 | status_code | INTEGER | |
 | latency_ms | INTEGER | |
-| prompt_tokens | INTEGER | nullable |
+| prompt_tokens | INTEGER | nullable; **total** input tokens, including cached reads and cache writes |
 | completion_tokens | INTEGER | nullable |
+| cache_read_input_tokens | INTEGER | nullable; input tokens served from upstream prompt cache |
+| cache_creation_input_tokens | INTEGER | nullable; Anthropic cache-write tokens (no OpenAI equivalent) |
 | error_code | TEXT | nullable |
 | created_at | TEXT | |
 
 **No message content, no prompts, no completions.**
+
+Token semantics (normalized across providers — capture matrix in [logging.md](./logging.md)):
+
+- `prompt_tokens` is always the **total** input count. Anthropic-shaped usage reports `input_tokens` *excluding* cache reads/writes, so the logged value is `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`; OpenAI-shaped `prompt_tokens` already includes cached tokens and is stored as-is.
+- `cache_read_input_tokens` maps from Anthropic `cache_read_input_tokens`, OpenAI `prompt_tokens_details.cached_tokens`, or Responses `input_tokens_details.cached_tokens`.
+- `NULL` means *unreported*, not zero: when an Anthropic-shaped `usage` is present, absent cache fields default to `0` (the API defines them); OpenAI-shaped usage stores `NULL` unless `prompt_tokens_details` (or the `cache_creation_input_tokens` extension) was actually present. Cache-rate aggregation divides only over rows where `cache_read_input_tokens IS NOT NULL`.
+- Streamed requests write their row when the stream ends (`waitUntil`), so token fields can be populated; a client that disconnects mid-stream still gets a row with whatever usage was seen by then.
+
+Cache columns added in `0003_request_log_cache_tokens.sql`. Dashboard range queries are covered by the existing `request_logs_user_created_idx` on `(user_id, created_at)` from `0001_init.sql`.
+
+Rows past the retention window (default 90 days) are deleted by the daily cron sweep, which also purges expired `sessions` and `oauth_login_states` rows — see [logging.md](./logging.md).
 
 ### `oauth_login_states`
 

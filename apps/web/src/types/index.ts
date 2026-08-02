@@ -116,3 +116,59 @@ export type CustomProviderTestResult = {
   note?: string
   error?: string
 }
+
+// Usage dashboard — GET /api/usage/summary?days=1|7|30. See docs/admin-ui.md
+// (Dashboard page) and docs/database.md (request_logs NULL token semantics).
+
+/** Range picker options: 24h / 7d / 30d. */
+export type UsageDays = 1 | 7 | 30
+
+export type UsageTotals = {
+  requests: number
+  errors: number
+  avg_latency_ms: number | null
+  prompt_tokens: number
+  completion_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  /** Σcache_read_input_tokens / Σprompt_tokens over cache-known rows; null when none are cache-known. */
+  cache_rate: number | null
+  /** Requests with non-null token fields (used in the token aggregates). */
+  usage_known_requests: number
+  /** Requests with non-null cache_read_input_tokens (used in cache_rate). */
+  cache_known_requests: number
+}
+
+/** One row of the per-model breakdown. `model` is the full "provider/upstream" id. */
+export type ModelUsageRow = {
+  provider: string
+  model: string
+  requests: number
+  errors: number
+  prompt_tokens: number
+  completion_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  cache_rate: number | null
+  usage_known_requests: number
+  cache_known_requests: number
+}
+
+/** One time-series bucket. `bucket` is an hour key ("YYYY-MM-DDTHH") when days=1, else a day key ("YYYY-MM-DD"); both UTC. Sparse — missing buckets are zero-filled client-side. */
+export type UsageSeriesPoint = {
+  bucket: string
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  cache_read_input_tokens: number
+}
+
+export type UsageSummary = {
+  days: UsageDays
+  /** ISO UTC inclusive lower bound of the queried range. */
+  from: string
+  totals: UsageTotals
+  /** Sorted by total tokens desc (server-side). */
+  models: ModelUsageRow[]
+  series: UsageSeriesPoint[]
+}

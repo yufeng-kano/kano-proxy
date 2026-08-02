@@ -85,6 +85,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
     apiKeyId,
     provider: resolved.provider,
     adapter: resolved.adapter,
+    waitUntil: (p) => c.executionCtx.waitUntil(p),
     req: {
       model: modelRaw,
       rawModel: modelRaw,

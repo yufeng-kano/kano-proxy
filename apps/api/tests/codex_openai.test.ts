@@ -163,6 +163,37 @@ describe("codexSseToOpenAIStream", () => {
     expect(out.doneCount).toBe(1)
   })
 
+  it("maps input_tokens_details.cached_tokens onto prompt_tokens_details.cached_tokens", async () => {
+    const sse = [
+      d({ type: "response.output_text.delta", delta: "hi" }),
+      "",
+      d({
+        type: "response.completed",
+        response: {
+          usage: { input_tokens: 500, output_tokens: 20, input_tokens_details: { cached_tokens: 200 } },
+        },
+      }),
+      "",
+    ].join("\n")
+    const out = parseChunks(await collect(codexSseToOpenAIStream(chunked(sse, 15), "gpt-5.2")))
+    expect(out.usage).toEqual({
+      prompt_tokens: 500,
+      completion_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 200 },
+    })
+  })
+
+  it("omits prompt_tokens_details when the Responses API reports no cache detail", async () => {
+    const sse = [
+      d({ type: "response.output_text.delta", delta: "hi" }),
+      "",
+      d({ type: "response.completed", response: { usage: { input_tokens: 5, output_tokens: 1 } } }),
+      "",
+    ].join("\n")
+    const out = parseChunks(await collect(codexSseToOpenAIStream(chunked(sse, 15), "gpt-5.2")))
+    expect(out.usage).toEqual({ prompt_tokens: 5, completion_tokens: 1 })
+  })
+
   it("maps a streamed function call to tool_calls chunks", async () => {
     const out = parseChunks(
       await collect(codexSseToOpenAIStream(chunked(TOOL_CALL_SSE, 13), "gpt-5.2")),
@@ -455,6 +486,37 @@ describe("collectCodexSse", () => {
     expect(completion.usage).toEqual({ prompt_tokens: 120, completion_tokens: 18 })
     const choice = (completion.choices as Array<Record<string, unknown>>)[0]!
     expect(choice.finish_reason).toBe("tool_calls")
+  })
+
+  it("maps input_tokens_details.cached_tokens onto prompt_tokens_details.cached_tokens", async () => {
+    const sse = [
+      d({ type: "response.output_text.delta", delta: "hi" }),
+      "",
+      d({
+        type: "response.completed",
+        response: {
+          usage: { input_tokens: 500, output_tokens: 20, input_tokens_details: { cached_tokens: 200 } },
+        },
+      }),
+      "",
+    ].join("\n")
+    const completion = await collectOk(chunked(sse, 27), "gpt-5.2")
+    expect(completion.usage).toEqual({
+      prompt_tokens: 500,
+      completion_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 200 },
+    })
+  })
+
+  it("omits prompt_tokens_details when the Responses API reports no cache detail", async () => {
+    const sse = [
+      d({ type: "response.output_text.delta", delta: "hi" }),
+      "",
+      d({ type: "response.completed", response: { usage: { input_tokens: 5, output_tokens: 1 } } }),
+      "",
+    ].join("\n")
+    const completion = await collectOk(chunked(sse, 27), "gpt-5.2")
+    expect(completion.usage).toEqual({ prompt_tokens: 5, completion_tokens: 1 })
   })
 
   it("omits message.reasoning_content when no reasoning summary streamed", async () => {

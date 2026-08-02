@@ -12,7 +12,11 @@ type CodexEvent = {
     arguments?: string
   }
   response?: {
-    usage?: { input_tokens?: number; output_tokens?: number }
+    usage?: {
+      input_tokens?: number
+      output_tokens?: number
+      input_tokens_details?: { cached_tokens?: number }
+    }
     error?: { message?: string }
   }
   /** Present on a top-level `response.failed` / `error` event. */
@@ -216,6 +220,15 @@ export function codexSseToOpenAIStream(
                     ? {
                         prompt_tokens: u.input_tokens ?? 0,
                         completion_tokens: u.output_tokens ?? 0,
+                        // Only when the Responses API actually reported it —
+                        // absent means unreported, not zero (docs/database.md).
+                        ...(typeof u.input_tokens_details?.cached_tokens === "number"
+                          ? {
+                              prompt_tokens_details: {
+                                cached_tokens: u.input_tokens_details.cached_tokens,
+                              },
+                            }
+                          : {}),
                       }
                     : undefined,
                 )
@@ -251,7 +264,13 @@ export async function collectCodexSse(
   let buffer = ""
   let text = ""
   let reasoningText = ""
-  let usage: { input_tokens?: number; output_tokens?: number } | undefined
+  let usage:
+    | {
+        input_tokens?: number
+        output_tokens?: number
+        input_tokens_details?: { cached_tokens?: number }
+      }
+    | undefined
   let error: CodexUpstreamError["error"] | null = null
   const tool_calls: Array<Record<string, unknown>> = []
   for (;;) {
@@ -323,6 +342,15 @@ export async function collectCodexSse(
           usage: {
             prompt_tokens: usage.input_tokens ?? 0,
             completion_tokens: usage.output_tokens ?? 0,
+            // Only when the Responses API actually reported it — absent
+            // means unreported, not zero (docs/database.md).
+            ...(typeof usage.input_tokens_details?.cached_tokens === "number"
+              ? {
+                  prompt_tokens_details: {
+                    cached_tokens: usage.input_tokens_details.cached_tokens,
+                  },
+                }
+              : {}),
           },
         }
       : {}),
