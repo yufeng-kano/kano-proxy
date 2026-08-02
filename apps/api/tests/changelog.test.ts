@@ -216,25 +216,30 @@ describe("GET /api/changelog", () => {
   it("returns sanitized releases newest-first and computes updateAvailable from the package version", async () => {
     const db = new FakeD1()
     const { env, cookie } = await authed(db)
+    // Stay ahead of the bundled package version so this assertion survives
+    // every real SemVer bump (hardcoding the next tag breaks on that release).
+    const [maj, min] = version.split(".").map((p) => Number(p))
+    const newerTag = `v${maj}.${(min ?? 0) + 1}.0`
+    const olderTag = `v${maj}.${min ?? 0}.0`
     stubReleases(
       release({
-        tag_name: "v1.12.0",
+        tag_name: newerTag,
         body_html: '<p>new <a href="javascript:alert(1)">notes</a></p><script>bad()</script>',
       }),
-      release({ tag_name: "v1.11.0" }),
+      release({ tag_name: olderTag }),
     )
 
     const res = await changelogRoutes.request("/", req(cookie), env)
     expect(res.status).toBe(200)
     const json = (await res.json()) as ChangelogJson
     expect(json.current).toBe(version)
-    expect(json.latest).toBe("v1.12.0")
+    expect(json.latest).toBe(newerTag)
     expect(json.updateAvailable).toBe(true)
     expect(json.available).toBe(true)
     expect(json.cached).toBe(false)
     expect(json.stale).toBe(false)
     expect(json.error).toBeNull()
-    expect(json.releases.map((r) => r.tag)).toEqual(["v1.12.0", "v1.11.0"])
+    expect(json.releases.map((r) => r.tag)).toEqual([newerTag, olderTag])
     expect(json.releases[0]!.body_html).toBe("<p>new notes</p>bad()")
   })
 
