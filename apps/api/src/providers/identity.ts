@@ -18,7 +18,7 @@ export async function fetchClaudeIdentity(accessToken: string): Promise<{
     }
     const displayName = json.account?.display_name ?? null
     return {
-      email: displayName || json.account?.email ?? null,
+      email: (displayName || json.account?.email) ?? null,
       displayName: displayName,
     }
   } catch {
@@ -70,7 +70,7 @@ export async function fetchGrokIdentity(accessToken: string): Promise<{
     }
     const displayName = json.name ?? json.username ?? json.preferred_username ?? null
     return {
-      email: displayName || json.email ?? null,
+      email: (displayName || json.email) ?? null,
       displayName: displayName,
     }
   } catch {

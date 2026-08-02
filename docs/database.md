@@ -43,16 +43,37 @@ Migrations live in `apps/api/migrations/` and are applied only via Wrangler.
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | |
-| provider | TEXT | `claude-code` \| `codex` \| `grok` |
+| provider | TEXT | builtin `claude-code` \| `codex` \| `grok`, **or** a custom provider's `slug` (see `custom_providers` below) |
+| external_account_id | TEXT | nullable; upstream account id when known (e.g. codex's ChatGPT account id) |
 | label | TEXT | email or display |
 | priority | INTEGER | higher = preferred; promote bumps |
-| status | TEXT | active metadata; runtime bench in KV |
-| encrypted_payload | TEXT | AES-GCM blob: tokens + provider fields |
-| account_meta_json | TEXT | email, plan, non-secret |
+| encrypted_payload | TEXT | AES-GCM blob: tokens + provider fields. For a custom provider this is just `{access_token: <api key>}` |
+| account_meta_json | TEXT | email, plan, non-secret. For a custom provider: `{key_mask: "sk-abc…f3a2"}` (see [providers.md](./providers.md)) |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
+**There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / benched / unusable" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order plus the KV bench state (`pool/bench.ts`, `BENCH` namespace), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02.)
+
 Unique optional: `(user_id, provider, external_account_id)` when known.
+
+### `custom_providers`
+
+User-defined custom upstream providers (BYO endpoint + API key — see [providers.md](./providers.md)). Its API key(s) are ordinary `upstream_accounts` rows with `provider = slug`; this table only holds the provider-level config, and has no FK from `upstream_accounts` back to it (deleting a custom provider deletes its account rows at the application layer, not via `ON DELETE CASCADE`).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | |
+| user_id | TEXT FK | `ON DELETE CASCADE` |
+| slug | TEXT | immutable after creation; unique per user |
+| name | TEXT | display name |
+| format | TEXT | `openai` \| `anthropic`; immutable after creation |
+| base_url | TEXT | validated (https, no credentials/query/fragment, not localhost/private/loopback/own-host) and trailing-slash-stripped on save |
+| models_mode | TEXT | `auto` \| `manual`; `NOT NULL DEFAULT 'auto'` |
+| manual_models_json | TEXT | nullable; JSON array of upstream model id strings |
+| created_at | TEXT | |
+| updated_at | TEXT | |
+
+`UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-KV-bench convention as `upstream_accounts`, over that provider's account row(s).
 
 ### `usage_snapshots`
 

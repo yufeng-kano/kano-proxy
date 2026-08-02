@@ -3,6 +3,10 @@ import type {
   ApiKey,
   CatalogModel,
   CreatedKey,
+  CustomProvider,
+  CustomProviderFormat,
+  CustomProviderModelsMode,
+  CustomProviderTestResult,
   LoginStart,
   ModelsResponse,
   ProviderId,
@@ -186,6 +190,69 @@ export async function importAccount(
   },
 ): Promise<{ ok: boolean; id: string }> {
   return request(`/api/providers/${provider}/accounts/import`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+// Custom providers — user-defined BYO OpenAI-/Anthropic-compatible endpoints.
+// Session-cookie auth, same as the routes above. See docs/auth.md.
+
+export async function listCustomProviders(): Promise<CustomProvider[]> {
+  const data = await request<{ providers: CustomProvider[] }>("/api/custom-providers")
+  return data.providers
+}
+
+export async function createCustomProvider(body: {
+  name: string
+  slug: string
+  format: CustomProviderFormat
+  base_url: string
+  api_key: string
+  models_mode?: CustomProviderModelsMode
+  manual_models?: string[]
+}): Promise<CustomProvider> {
+  return request<CustomProvider>("/api/custom-providers", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/** Omitted/empty `api_key` keeps the stored key. `slug`/`format` are immutable. */
+export async function updateCustomProvider(
+  id: string,
+  body: {
+    name?: string
+    base_url?: string
+    api_key?: string
+    models_mode?: CustomProviderModelsMode
+    manual_models?: string[]
+  },
+): Promise<CustomProvider> {
+  return request<CustomProvider>(`/api/custom-providers/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
+}
+
+/** Removes the provider and its stored key(s). */
+export async function deleteCustomProvider(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/custom-providers/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  })
+}
+
+/**
+ * Connectivity probe. Pass unsaved form values (`format`/`base_url`/`api_key`)
+ * pre-save, or `{id, base_url?}` to test with a saved provider's stored key.
+ * Always resolves — the endpoint responds 200 with `ok:false` on failure.
+ */
+export async function testCustomProvider(
+  body:
+    | { format: CustomProviderFormat; base_url: string; api_key: string }
+    | { id: string; base_url?: string },
+): Promise<CustomProviderTestResult> {
+  return request<CustomProviderTestResult>("/api/custom-providers/test", {
     method: "POST",
     body: JSON.stringify(body),
   })

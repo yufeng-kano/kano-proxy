@@ -1,4 +1,3 @@
-import type { ProviderId } from "../env"
 import { newId, nowIso } from "../utils/id"
 
 export type AccountRow = {
@@ -14,10 +13,15 @@ export type AccountRow = {
   updated_at: string
 }
 
+/**
+ * `provider` is a builtin `ProviderId` or a custom provider's slug — this
+ * layer only ever interpolates it into SQL, so it is typed as `string` to
+ * serve both without duplicating these queries per kind.
+ */
 export async function listAccounts(
   db: D1Database,
   userId: string,
-  provider: ProviderId,
+  provider: string,
 ): Promise<AccountRow[]> {
   const res = await db
     .prepare(
@@ -47,7 +51,7 @@ export async function insertAccount(
   db: D1Database,
   input: {
     userId: string
-    provider: ProviderId
+    provider: string
     encryptedPayload: string
     label?: string | null
     externalAccountId?: string | null
@@ -181,7 +185,7 @@ export async function removeAccount(
 export async function userHasProvider(
   db: D1Database,
   userId: string,
-  provider: ProviderId,
+  provider: string,
 ): Promise<boolean> {
   const row = await db
     .prepare(
@@ -190,4 +194,22 @@ export async function userHasProvider(
     .bind(userId, provider)
     .first<{ ok: number }>()
   return !!row
+}
+
+/**
+ * Bulk-delete every account row for one (user, provider) — used when a
+ * custom provider is removed (its accounts have no FK to cascade on).
+ * Returns the deleted rows so callers can best-effort clear their bench keys.
+ */
+export async function deleteAccountsForProvider(
+  db: D1Database,
+  userId: string,
+  provider: string,
+): Promise<AccountRow[]> {
+  const rows = await listAccounts(db, userId, provider)
+  await db
+    .prepare(`DELETE FROM upstream_accounts WHERE user_id = ? AND provider = ?`)
+    .bind(userId, provider)
+    .run()
+  return rows
 }

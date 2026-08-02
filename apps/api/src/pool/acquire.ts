@@ -1,6 +1,6 @@
 import { decryptJson, encryptJson } from "../crypto/token_crypto"
 import { listAccounts, updateAccountPayload, type AccountRow } from "../db/accounts"
-import type { Env, ProviderId } from "../env"
+import type { Env } from "../env"
 import { isBenched, markBenched } from "./bench"
 
 export type StoredCredential = {
@@ -25,10 +25,15 @@ export function shouldBenchStatus(status: number): boolean {
   return FAILOVER_STATUS.has(status)
 }
 
+/**
+ * `provider` is a builtin `ProviderId` or a custom provider's slug — pool
+ * semantics (acquire/bench/promote) are identical for both, so this layer
+ * is typed as `string` rather than duplicated per kind.
+ */
 export async function listUsableAccounts(
   env: Env,
   userId: string,
-  provider: ProviderId,
+  provider: string,
   exclude: Set<string> = new Set(),
 ): Promise<AccountRow[]> {
   const rows = await listAccounts(env.DB, userId, provider)
@@ -44,7 +49,7 @@ export async function listUsableAccounts(
 export async function acquireAccount(
   env: Env,
   userId: string,
-  provider: ProviderId,
+  provider: string,
   exclude: Set<string> = new Set(),
 ): Promise<AcquiredAccount | null> {
   const candidates = await listUsableAccounts(env, userId, provider, exclude)
@@ -66,7 +71,7 @@ export async function acquireAccount(
 export async function benchAccount(
   env: Env,
   userId: string,
-  provider: ProviderId,
+  provider: string,
   accountId: string,
 ): Promise<void> {
   await markBenched(env, userId, provider, accountId)

@@ -90,9 +90,26 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 | GET | `/api/providers/:provider/login/:id` |
 | POST | `/api/providers/:provider/accounts/:id/promote` |
 | DELETE | `/api/providers/:provider/accounts/:id` |
+| POST | `/api/providers/:provider/accounts/import` |
 | GET | `/api/providers/:provider/usage?refresh=` |
 
-`:provider` ∈ `claude-code` | `codex` | `grok`.
+`:provider` ∈ `claude-code` | `codex` | `grok`. `accounts/import` is a manual credential-ingest route (bootstrapping / tests) — same shape as a completed OAuth login, but the caller supplies `access_token` (and optional `refresh_token` / `expires_at` / `account_id` / `email` / `label`) directly instead of running the OAuth dance.
+
+## Custom endpoint keys
+
+Custom providers (BYO OpenAI-/Anthropic-compatible endpoint — see [providers.md](./providers.md)) are managed through a separate route group, not `/api/providers/:provider/*` — `:provider` there is gated to the builtin union and always 400s on a custom slug.
+
+### Management routes (session required)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/custom-providers` | List the user's custom providers; masked key + computed status, never the raw key |
+| POST | `/api/custom-providers` | Create — body `{name, slug, format, base_url, api_key, models_mode?, manual_models?}`; inserts the provider row plus one `upstream_accounts` row |
+| PUT | `/api/custom-providers/:id` | Update — body `{name?, base_url?, api_key?, models_mode?, manual_models?}`; `slug`/`format` are immutable (`400` if a differing value is sent); omitted or empty `api_key` keeps the stored key; a non-empty `api_key` re-encrypts and replaces it in place (same account row) |
+| DELETE | `/api/custom-providers/:id` | Deletes the provider row and all its `upstream_accounts` rows (code-level cascade), then best-effort clears their bench keys |
+| POST | `/api/custom-providers/test` | Connectivity probe — body either `{format, base_url, api_key}` (pre-save) or `{id, base_url?}` (saved provider, uses its stored key); always `200` with `{ok, ...}` — see [providers.md](./providers.md) for the outcome mapping |
+
+The API key is **never** echoed back on any of these routes — `GET`/`POST`/`PUT` responses carry only `key_mask` (first 6 + `…` + last 4 of the plaintext key). Same session-cookie auth as `/api/providers/*`; same origin-locked CORS (see below).
 
 ## Encryption
 

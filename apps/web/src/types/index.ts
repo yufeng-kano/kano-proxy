@@ -62,11 +62,12 @@ export const PROVIDERS: { id: ProviderId; name: string; blurb: string }[] = [
 
 export type CatalogModel = {
   id: string
-  provider: ProviderId
+  /** Builtin `ProviderId`, or a custom provider's slug. */
+  provider: string
   upstream: string
   display_name: string
   available: boolean
-  owned_by: ProviderId
+  owned_by: string
   object: "model"
 }
 
@@ -74,11 +75,44 @@ export type ModelsResponse = {
   object: "list"
   data: CatalogModel[]
   providers?: Array<{
-    provider: ProviderId
+    provider: string
     count: number
     error: string | null
     cached: boolean
   }>
   openai_base?: string
   anthropic_base?: string
+}
+
+/** Wire format a custom endpoint speaks. Immutable after creation. */
+export type CustomProviderFormat = "openai" | "anthropic"
+
+export type CustomProviderModelsMode = "auto" | "manual"
+
+/** Only two states surfaced for custom cards — no standby/unusable nuance. */
+export type CustomProviderStatus = "active" | "benched"
+
+/** User-defined BYO OpenAI-/Anthropic-compatible upstream. `GET /api/custom-providers` item shape. */
+export type CustomProvider = {
+  id: string
+  slug: string
+  name: string
+  format: CustomProviderFormat
+  base_url: string
+  models_mode: CustomProviderModelsMode
+  manual_models: string[]
+  /** Non-secret display mask, e.g. "sk-abc…f3a2". Never the plaintext key. */
+  key_mask: string | null
+  status: CustomProviderStatus
+  created_at: string
+  updated_at: string
+}
+
+/** `POST /api/custom-providers/test` result — always HTTP 200. */
+export type CustomProviderTestResult = {
+  ok: boolean
+  models_count?: number | null
+  sample?: string[]
+  note?: string
+  error?: string
 }

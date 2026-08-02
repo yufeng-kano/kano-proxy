@@ -8,23 +8,29 @@
 import type { Env, ProviderId } from "../env"
 import { PROVIDERS } from "../env"
 import { listAccounts } from "../db/accounts"
+import { listCustomProviders, type CustomProviderRow } from "../db/custom_providers"
 import { decryptJson } from "../crypto/token_crypto"
 import type { StoredCredential } from "../pool/acquire"
 import { isBenched } from "../pool/bench"
 import { getAdapter } from "../providers"
+import { createCustomAnthropicAdapter } from "../providers/custom_anthropic"
+import { createCustomOpenAIAdapter } from "../providers/custom_openai"
+import type { UpstreamModel } from "../providers/types"
+import { parseManualModels } from "../utils/custom_provider"
 
 export type CatalogModel = {
   id: string
-  provider: ProviderId
+  /** Builtin `ProviderId`, or a custom provider's slug. */
+  provider: string
   upstream: string
   display_name: string
   available: boolean
-  owned_by: ProviderId
+  owned_by: string
   object: "model"
 }
 
 export type ProviderModelsSection = {
-  provider: ProviderId
+  provider: string
   models: CatalogModel[]
   error: string | null
   cached: boolean
@@ -32,7 +38,8 @@ export type ProviderModelsSection = {
 
 const MODELS_CACHE_TTL_SECONDS = 90
 
-function modelsCacheKey(userId: string, provider: ProviderId): string {
+/** `provider` is a builtin `ProviderId` or a custom provider's slug. */
+function modelsCacheKey(userId: string, provider: string): string {
   return `models:v1:${userId}:${provider}`
 }
 
@@ -45,7 +52,7 @@ type CachedModels = {
 async function readModelsCache(
   env: Env,
   userId: string,
-  provider: ProviderId,
+  provider: string,
 ): Promise<CachedModels | null> {
   try {
     const raw = await env.CACHE.get(modelsCacheKey(userId, provider), "json")
@@ -64,7 +71,7 @@ async function readModelsCache(
 async function writeModelsCache(
   env: Env,
   userId: string,
-  provider: ProviderId,
+  provider: string,
   snap: Omit<CachedModels, "fetchedAt">,
 ): Promise<void> {
   try {
@@ -81,7 +88,7 @@ async function writeModelsCache(
 async function pickUsableAccount(
   env: Env,
   userId: string,
-  provider: ProviderId,
+  provider: string,
 ): Promise<{ row: Awaited<ReturnType<typeof listAccounts>>[0]; credential: StoredCredential } | null> {
   const rows = await listAccounts(env.DB, userId, provider)
   for (const row of rows) {
@@ -168,6 +175,70 @@ async function fetchProviderModels(
   }
 }
 
+function toCustomCatalogModel(slug: string, m: UpstreamModel): CatalogModel {
+  return {
+    id: `${slug}/${m.id}`,
+    provider: slug,
+    upstream: m.id,
+    display_name: m.display_name || m.id,
+    available: true,
+    owned_by: slug,
+    object: "model" as const,
+  }
+}
+
+/**
+ * manual → the stored manual list. auto → live listModels with an acquired
+ * key (same 90s cache as built-ins, keyed by slug); on failure, or when no
+ * usable key exists to query, fall back to the manual list if non-empty,
+ * else empty. Never fabricates a catalog.
+ */
+async function fetchCustomProviderModels(
+  env: Env,
+  userId: string,
+  row: CustomProviderRow,
+  force: boolean,
+): Promise<ProviderModelsSection> {
+  const manualModels = (): CatalogModel[] =>
+    parseManualModels(row.manual_models_json).map((id) =>
+      toCustomCatalogModel(row.slug, { id, display_name: null }),
+    )
+
+  if (row.models_mode === "manual") {
+    return { provider: row.slug, models: manualModels(), error: null, cached: false }
+  }
+
+  if (!force) {
+    const cached = await readModelsCache(env, userId, row.slug)
+    if (cached) {
+      return { provider: row.slug, models: cached.models, error: cached.error, cached: true }
+    }
+  }
+
+  const picked = await pickUsableAccount(env, userId, row.slug)
+  if (!picked) {
+    // No usable key to query live — same "don't cache aggressively" policy as built-ins.
+    return { provider: row.slug, models: manualModels(), error: null, cached: false }
+  }
+
+  const adapter =
+    row.format === "anthropic" ? createCustomAnthropicAdapter(row) : createCustomOpenAIAdapter(row)
+  if (!adapter.listModels) {
+    return { provider: row.slug, models: manualModels(), error: null, cached: false }
+  }
+
+  const result = await adapter.listModels(env, picked)
+  if (result.error) {
+    const fallback = manualModels()
+    await writeModelsCache(env, userId, row.slug, { models: fallback, error: result.error })
+    return { provider: row.slug, models: fallback, error: result.error, cached: false }
+  }
+
+  const models = result.models.map((m) => toCustomCatalogModel(row.slug, m))
+  await writeModelsCache(env, userId, row.slug, { models, error: null })
+  return { provider: row.slug, models, error: null, cached: false }
+}
+
 /**
  * Live models for a user. Only providers with bound accounts are queried.
  * `availableOnly` is kept for API shape; all returned models are available.
@@ -186,6 +257,11 @@ export async function listModelsForUser(
   for (const provider of PROVIDERS) {
     const section = await fetchProviderModels(env, userId, provider, force)
     sections.push(section)
+  }
+
+  const customRows = await listCustomProviders(env.DB, userId)
+  for (const row of customRows) {
+    sections.push(await fetchCustomProviderModels(env, userId, row, force))
   }
 
   const models = sections.flatMap((s) => s.models)

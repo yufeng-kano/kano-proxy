@@ -1,4 +1,4 @@
-import type { Env, ProviderId } from "../env"
+import type { Env } from "../env"
 import type { AcquiredAccount } from "../pool/acquire"
 import type { ReasoningEffort } from "../utils/reasoning"
 
@@ -46,6 +46,15 @@ export type ChatCompletionRequest = {
   /** OpenAI Chat Completions field. Forwarded to `codex` only; ignored elsewhere. */
   prompt_cache_key?: string
   affinity?: AffinityIds
+  /**
+   * The OpenAI Chat Completions-shaped body this request came from — the raw
+   * client JSON on `/openai/v1`, or its Anthropic→OpenAI conversion on
+   * `/anthropic`. Built-in adapters build their upstream body from the named
+   * fields above and ignore this; the custom-openai adapter forwards it
+   * near-verbatim (only rewriting `model`) so unmodeled fields like
+   * `temperature` still reach the upstream, unlike built-ins which strip it.
+   */
+  rawBody: Record<string, unknown>
 }
 
 export type UpstreamModel = {
@@ -54,21 +63,22 @@ export type UpstreamModel = {
 }
 
 export type ProviderAdapter = {
-  id: ProviderId
+  /** Builtin `ProviderId`, or a custom provider's slug for BYO adapters. */
+  id: string
   /** Forward OpenAI-shaped chat completion using acquired credential. */
   chatCompletions(
     env: Env,
     account: AcquiredAccount,
     req: ChatCompletionRequest,
   ): Promise<Response>
-  /** Optional native Anthropic Messages (claude-code only). */
+  /** Optional native Anthropic Messages (claude-code and custom anthropic-format only). */
   messages?(
     env: Env,
     account: AcquiredAccount,
     body: unknown,
     headers: Headers,
   ): Promise<Response>
-  /** Optional native Anthropic count_tokens (claude-code only). Never streams. */
+  /** Optional native Anthropic count_tokens (same providers as `messages`). Never streams. */
   countTokens?(
     env: Env,
     account: AcquiredAccount,

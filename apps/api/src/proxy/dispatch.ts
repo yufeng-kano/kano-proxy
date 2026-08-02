@@ -6,7 +6,7 @@ import {
   type AcquiredAccount,
 } from "../pool/acquire"
 import { getAdapter } from "../providers"
-import type { ChatCompletionRequest } from "../providers/types"
+import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import { logRequest } from "../logging/request_log"
 import { streamWithKeepalive } from "./sse"
 
@@ -15,12 +15,15 @@ export async function dispatchChatCompletions(
   opts: {
     userId: string
     apiKeyId: string | null
-    provider: ProviderId
+    /** Builtin `ProviderId` or a custom provider's slug. */
+    provider: string
+    /** Pre-resolved adapter for custom providers; defaults to the builtin registry. */
+    adapter?: ProviderAdapter
     req: ChatCompletionRequest & { rawModel: string }
   },
 ): Promise<Response> {
   const started = Date.now()
-  const adapter = getAdapter(opts.provider)
+  const adapter = opts.adapter ?? getAdapter(opts.provider as ProviderId)
   const exclude = new Set<string>()
   let lastResponse: Response | null = null
   let used: AcquiredAccount | null = null
@@ -150,11 +153,13 @@ export async function dispatchChatCompletions(
 }
 
 /**
- * Native Anthropic Messages (or count_tokens) for claude-code only
- * (passthrough + auth). cache_control is never rewritten — body goes through
- * the adapter method as-is aside from fixed system prepend inside the
- * adapter. `endpoint` selects which adapter method carries the request;
- * both share this same bench/failover loop rather than duplicating it.
+ * Native Anthropic Messages (or count_tokens) passthrough — claude-code by
+ * default, or a custom anthropic-format provider when `provider`/`adapter`
+ * are given. cache_control is never rewritten — body goes through the
+ * adapter method as-is aside from whatever fixed prepend that adapter itself
+ * applies (claude-code only). `endpoint` selects which adapter method
+ * carries the request; both share this same bench/failover loop rather than
+ * duplicating it.
  */
 export async function dispatchAnthropicMessages(
   env: Env,
@@ -164,11 +169,16 @@ export async function dispatchAnthropicMessages(
     body: unknown
     headers: Headers
     model: string
+    /** Builtin `ProviderId` or a custom provider's slug. Defaults to claude-code. */
+    provider?: string
+    /** Pre-resolved adapter for custom providers; defaults to the builtin registry. */
+    adapter?: ProviderAdapter
     endpoint?: "messages" | "count_tokens"
   },
 ): Promise<Response> {
   const started = Date.now()
-  const adapter = getAdapter("claude-code")
+  const provider = opts.provider ?? "claude-code"
+  const adapter = opts.adapter ?? getAdapter(provider as ProviderId)
   const endpoint = opts.endpoint ?? "messages"
   const call = endpoint === "count_tokens" ? adapter.countTokens : adapter.messages
   if (!call) {
@@ -180,13 +190,13 @@ export async function dispatchAnthropicMessages(
   const exclude = new Set<string>()
   let last: Response | null = null
   for (let i = 0; i < 8; i++) {
-    const account = await acquireAccount(env, opts.userId, "claude-code", exclude)
+    const account = await acquireAccount(env, opts.userId, provider, exclude)
     if (!account) {
       if (last) {
         await logRequest(env, {
           userId: opts.userId,
           apiKeyId: opts.apiKeyId,
-          provider: "claude-code",
+          provider,
           model: opts.model,
           statusCode: last.status,
           latencyMs: Date.now() - started,
@@ -199,7 +209,7 @@ export async function dispatchAnthropicMessages(
           type: "error",
           error: {
             type: "invalid_request_error",
-            message: "No usable claude-code account",
+            message: `No usable ${provider} account`,
           },
         },
         { status: 400 },
@@ -209,7 +219,7 @@ export async function dispatchAnthropicMessages(
     if (adapter.refreshIfNeeded) refreshed = await adapter.refreshIfNeeded(env, account)
     const res = await call(env, refreshed, opts.body, opts.headers)
     if (shouldBenchStatus(res.status)) {
-      await benchAccount(env, opts.userId, "claude-code", account.row.id)
+      await benchAccount(env, opts.userId, provider, account.row.id)
       exclude.add(account.row.id)
       if (last) {
         try {
@@ -224,7 +234,7 @@ export async function dispatchAnthropicMessages(
     await logRequest(env, {
       userId: opts.userId,
       apiKeyId: opts.apiKeyId,
-      provider: "claude-code",
+      provider,
       model: opts.model,
       accountId: account.row.id,
       statusCode: res.status,
@@ -255,7 +265,10 @@ export async function dispatchAnthropicViaOpenAI(
   opts: {
     userId: string
     apiKeyId: string | null
-    provider: ProviderId
+    /** Builtin `ProviderId` or a custom provider's slug. */
+    provider: string
+    /** Pre-resolved adapter for custom providers; defaults to the builtin registry. */
+    adapter?: ProviderAdapter
     rawModel: string
     upstreamModel: string
     body: Record<string, unknown>
@@ -285,6 +298,7 @@ export async function dispatchAnthropicViaOpenAI(
     userId: opts.userId,
     apiKeyId: opts.apiKeyId,
     provider: opts.provider,
+    adapter: opts.adapter,
     req: {
       model: opts.rawModel,
       rawModel: opts.rawModel,
@@ -298,6 +312,9 @@ export async function dispatchAnthropicViaOpenAI(
       reasoning_effort: effort,
       stop: converted.stop,
       affinity: opts.affinity,
+      // OpenAI-shaped body for the custom-openai passthrough adapter; a
+      // no-op for built-ins, which build their own body from named fields.
+      rawBody: converted as unknown as Record<string, unknown>,
     },
   })
 

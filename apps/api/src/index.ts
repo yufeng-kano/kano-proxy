@@ -4,6 +4,7 @@ import type { HonoEnv } from "./auth/session"
 import { loadSessionUser } from "./auth/session"
 import { anthropicRoutes } from "./routes/anthropic"
 import { authRoutes } from "./routes/auth"
+import { customProviderRoutes } from "./routes/custom_providers"
 import { keysRoutes } from "./routes/keys"
 import { modelsRoutes } from "./routes/models"
 import { openaiRoutes } from "./routes/openai"
@@ -48,6 +49,7 @@ app.route("/api/auth", authRoutes)
 app.route("/api/keys", keysRoutes)
 app.route("/api/models", modelsRoutes)
 app.route("/api/providers", providerRoutes)
+app.route("/api/custom-providers", customProviderRoutes)
 
 app.route("/openai/v1", openaiRoutes)
 app.route("/anthropic", anthropicRoutes)

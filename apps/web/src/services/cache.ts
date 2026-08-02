@@ -1,10 +1,11 @@
-import type { AccountsResponse, CatalogModel, ModelsResponse, ProviderId } from "@/types"
+import type { AccountsResponse, CatalogModel, CustomProvider, ModelsResponse, ProviderId } from "@/types"
 
 /** Frontend cache TTL — align with backend usage cache (90s). */
 export const CACHE_TTL_MS = 90_000
 
 const ACCOUNTS_PREFIX = "kano-proxy:accounts:"
 const MODELS_PREFIX = "kano-proxy:models:"
+const CUSTOM_PROVIDERS_PREFIX = "kano-proxy:custom-providers:"
 
 type Timed<T> = {
   savedAt: number
@@ -17,6 +18,10 @@ function accountsKey(userId: string, provider: ProviderId): string {
 
 function modelsKey(userId: string): string {
   return `${MODELS_PREFIX}${userId}`
+}
+
+function customProvidersKey(userId: string): string {
+  return `${CUSTOM_PROVIDERS_PREFIX}${userId}`
 }
 
 function readTimed<T>(storageKey: string): Timed<T> | null {
@@ -82,6 +87,7 @@ export function writeAccountsCache(
   writeTimed(accountsKey(userId, provider), data)
 }
 
+/** Clears all session-scoped caches (accounts, models, custom providers) — used on logout. */
 export function clearAccountsCache(userId?: string | null): void {
   if (typeof sessionStorage === "undefined") return
   try {
@@ -95,6 +101,10 @@ export function clearAccountsCache(userId?: string | null): void {
       }
       if (k.startsWith(MODELS_PREFIX)) {
         if (userId && k !== modelsKey(userId)) continue
+        keys.push(k)
+      }
+      if (k.startsWith(CUSTOM_PROVIDERS_PREFIX)) {
+        if (userId && k !== customProvidersKey(userId)) continue
         keys.push(k)
       }
     }
@@ -127,6 +137,36 @@ export function writeModelsCache(
 ): void {
   if (!userId) return
   writeTimed(modelsKey(userId), data)
+}
+
+/**
+ * Custom providers list cache. `key_mask` is non-secret display data and is
+ * fine to cache — the API response never carries the plaintext `api_key`, so
+ * there is nothing key-shaped here to keep out of sessionStorage.
+ */
+export function readCustomProvidersCache(
+  userId: string | null | undefined,
+): CustomProvider[] | null {
+  if (!userId) return null
+  return readTimed<CustomProvider[]>(customProvidersKey(userId))?.data ?? null
+}
+
+export function isCustomProvidersCacheFresh(
+  userId: string | null | undefined,
+  ttlMs = CACHE_TTL_MS,
+): boolean {
+  if (!userId) return false
+  const entry = readTimed<CustomProvider[]>(customProvidersKey(userId))
+  if (!entry) return false
+  return Date.now() - entry.savedAt < ttlMs
+}
+
+export function writeCustomProvidersCache(
+  userId: string | null | undefined,
+  data: CustomProvider[],
+): void {
+  if (!userId) return
+  writeTimed(customProvidersKey(userId), data)
 }
 
 // silence unused if tree-shaken elsewhere

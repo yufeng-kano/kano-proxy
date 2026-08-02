@@ -3,11 +3,8 @@ import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
 import type { ProviderId } from "../env"
-import {
-  dispatchAnthropicMessages,
-  dispatchAnthropicViaOpenAI,
-} from "../proxy/dispatch"
-import { parseAnthropicModel } from "../utils/model"
+import { resolveModel } from "../providers/resolve"
+import { dispatchAnthropicMessages, dispatchAnthropicViaOpenAI } from "../proxy/dispatch"
 
 export const anthropicRoutes = new Hono<HonoEnv>()
 
@@ -39,8 +36,8 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const parsed = parseAnthropicModel(modelRaw)
-  if (!parsed) {
+  const resolved = await resolveModel(c.env, userId, modelRaw)
+  if (!resolved) {
     return c.json(
       {
         type: "error",
@@ -60,10 +57,11 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     turnIdx: c.req.header("x-grok-turn-idx") ?? undefined,
   }
 
-  if (parsed.provider === "claude-code") {
-    // Native passthrough: only normalize model to bare upstream id.
-    // Strict cache_control passthrough — do not touch other body fields.
-    const upstreamBody = { ...body, model: parsed.upstreamModel }
+  if (resolved.adapter.messages) {
+    // claude-code, or a custom anthropic-format provider: native passthrough.
+    // Only normalize model to the bare upstream id — strict cache_control
+    // passthrough, do not touch other body fields.
+    const upstreamBody = { ...body, model: resolved.upstreamModel }
     const headers = new Headers()
     const beta = c.req.header("anthropic-beta")
     const ver = c.req.header("anthropic-version")
@@ -75,17 +73,20 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       apiKeyId,
       body: upstreamBody,
       headers,
-      model: parsed.raw,
+      model: resolved.raw,
+      provider: resolved.provider,
+      adapter: resolved.adapter,
     })
   }
 
-  // grok / codex: convert Messages ↔ Chat Completions via existing adapters
+  // grok / codex / custom-openai: convert Messages ↔ Chat Completions via existing adapters
   return dispatchAnthropicViaOpenAI(c.env, {
     userId,
     apiKeyId,
-    provider: parsed.provider,
-    rawModel: parsed.raw,
-    upstreamModel: parsed.upstreamModel,
+    provider: resolved.provider,
+    adapter: resolved.adapter,
+    rawModel: resolved.raw,
+    upstreamModel: resolved.upstreamModel,
     body,
     affinity,
   })
@@ -104,8 +105,8 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const parsed = parseAnthropicModel(modelRaw)
-  if (!parsed) {
+  const resolved = await resolveModel(c.env, userId, modelRaw)
+  if (!resolved) {
     return c.json(
       {
         type: "error",
@@ -118,13 +119,20 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     )
   }
 
-  const rejection = countTokensProviderError(parsed.provider)
-  if (rejection) return c.json(rejection, 400)
+  // Builtins keep the exact prior provider-identity check (and its test);
+  // custom providers are rejected the same way, by adapter capability —
+  // custom anthropic-format has countTokens, custom openai-format does not.
+  if (resolved.isBuiltin) {
+    const rejection = countTokensProviderError(resolved.provider as ProviderId)
+    if (rejection) return c.json(rejection, 400)
+  } else if (!resolved.adapter.countTokens) {
+    return c.json(COUNT_TOKENS_UNSUPPORTED, 400)
+  }
 
   // Native passthrough only, same as /v1/messages: normalize model to bare
   // upstream id, forward anthropic-beta/anthropic-version if the client sent
   // them.
-  const upstreamBody = { ...body, model: parsed.upstreamModel }
+  const upstreamBody = { ...body, model: resolved.upstreamModel }
   const headers = new Headers()
   const beta = c.req.header("anthropic-beta")
   const ver = c.req.header("anthropic-version")
@@ -136,10 +144,20 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     apiKeyId,
     body: upstreamBody,
     headers,
-    model: parsed.raw,
+    model: resolved.raw,
+    provider: resolved.provider,
+    adapter: resolved.adapter,
     endpoint: "count_tokens",
   })
 })
+
+const COUNT_TOKENS_UNSUPPORTED = {
+  type: "error",
+  error: {
+    type: "invalid_request_error",
+    message: "count_tokens is only supported for claude-code models",
+  },
+} as const
 
 /**
  * count_tokens has no grok/codex Chat Completions equivalent to convert to —
@@ -147,11 +165,5 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
  */
 export function countTokensProviderError(provider: ProviderId): Record<string, unknown> | null {
   if (provider === "claude-code") return null
-  return {
-    type: "error",
-    error: {
-      type: "invalid_request_error",
-      message: "count_tokens is only supported for claude-code models",
-    },
-  }
+  return COUNT_TOKENS_UNSUPPORTED
 }

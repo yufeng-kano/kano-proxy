@@ -54,8 +54,19 @@ Supported fields:
 | `reasoning_effort` | optional string (see below) |
 | `stop` | string or string[]; forwarded to `grok`, and as Anthropic `stop_sequences` to `claude-code`. Dropped for `codex` — the Responses API has no equivalent |
 | `prompt_cache_key` | optional string, official OpenAI Chat Completions field. Forwarded verbatim to `codex`'s Responses `prompt_cache_key` when non-empty (see below). **Ignored** for `grok` and `claude-code` |
-| `temperature` | **Ignored** (stripped) |
+| `temperature` | **Ignored** (stripped) for every built-in provider. A **custom openai-format** provider (see below) forwards it verbatim — it has no named handling here, so nothing strips it |
 | image parts | Vision when upstream supports |
+
+### Custom providers (`slug/upstream`, a user-defined endpoint)
+
+`model` may also be `<slug>/<upstream_id>` for a user-defined custom endpoint (`docs/providers.md`). Resolution: split on the first `/`; if the prefix is a builtin `ProviderId` use the table above; otherwise look up `custom_providers` for the **authenticated user** by that slug — a miss (unknown slug, or a slug that belongs to a different user) is the same `400 invalid_model` as an unknown builtin. Behavior on `/openai/v1/chat/completions` depends on the provider's `format`:
+
+| Custom `format` | Behavior |
+|------------------|----------|
+| `openai` | Near-passthrough to `{base_url}/chat/completions`: `model` rewritten to the bare upstream id, the rest of the client body forwarded **verbatim** — including `temperature`, `reasoning_effort` (unclamped, no provider ceiling), `response_format`, and any other field. This is a deliberate divergence from every built-in adapter. |
+| `anthropic` | Converted via the same shared OpenAI↔Anthropic converters `claude-code` uses (`openaiToAnthropicMessages` / `anthropicToOpenAIResponse`), sent to `{base_url}/v1/messages`. `reasoning_effort` is **dropped** on this surface (no `thinking`/`output_config` synthesized) — use the native `/anthropic` surface for full `thinking` control. |
+
+Neither custom format supports `prompt_cache_key`. See [providers.md](./providers.md) for the full endpoint-construction, auth-header, and SSRF-guard rules.
 
 Streaming: SSE, OpenAI chunk shape, end-to-end without buffering entire completion.
 
@@ -73,7 +84,7 @@ Streaming: SSE, OpenAI chunk shape, end-to-end without buffering entire completi
 
 ### `GET /openai/v1/models`
 
-Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key owner has bound. Ids are `provider/upstream_id`. Claude Code and Grok come from live upstream `/models`. Codex returns empty (ChatGPT OAuth has no models list API — see [providers.md](./providers.md)). Empty for a provider when the user has no usable account for it.
+Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key owner has bound. Ids are `provider/upstream_id`. Claude Code and Grok come from live upstream `/models`. Codex returns empty (ChatGPT OAuth has no models list API — see [providers.md](./providers.md)). Empty for a provider when the user has no usable account for it. The user's custom providers are appended after the builtins — manual list, or live + cache + fallback for `models_mode=auto` (see [providers.md](./providers.md)).
 
 ## Anthropic surface
 
@@ -85,8 +96,10 @@ Same providers as the OpenAI surface. Model id is always `provider/upstream` (no
 |------------------|----------|
 | `claude-code` | Anthropic Messages **passthrough** to Claude Code OAuth upstream: auth inject, fixed Claude Code system prepend if missing (identical string every time), `anthropic-beta` merged, **`cache_control` never rewritten** (block- or top-level). Upstream `model` field is the bare id after the prefix. When the (patched) request body contains an `output_config` key, `effort-2025-11-24` is added to the outgoing `anthropic-beta` header automatically (deduped against client-supplied betas) so upstream honors `output_config.effort`; clients that already send that beta are not double-added. |
 | `grok` / `codex` | Convert Messages → internal Chat Completions shape → existing provider adapter → convert response/SSE back to Anthropic Messages. Streaming conversion includes **text and `tool_use`** (`input_json_delta` from OpenAI `tool_calls` argument chunks) so Claude Code / CC Switch can complete tool rounds on **grok and codex**. The codex streaming converter maps Responses events (`response.output_item.added` → tool_call header, `response.function_call_arguments.delta` → argument fragments, `response.output_item.done` as fallback when no deltas were seen) onto OpenAI `tool_calls` chunks, with `call_id` as the tool id so replayed history matches `function_call_output.call_id`. `stop_sequences` forwards as OpenAI `stop`; `system` blocks are joined with a blank line. Anthropic `cache_control` has no equivalent → **stripped on convert** (not forwarded, not reinvented as Grok sticky headers). Optional client headers `x-grok-conv-id` / `x-grok-session-id` / `x-grok-turn-idx` are forwarded on the Grok path when present; never synthesized. |
+| custom, `format=anthropic` | Native **passthrough** to `{base_url}/v1/messages`, same shape as `claude-code` (auth inject, `model` rewritten to the bare upstream id, `cache_control`/`thinking` never touched) but with **none** of the Claude-Code-OAuth specifics: no system prepend, no auto-added effort beta, no fixed base betas — `anthropic-beta` is forwarded verbatim from the client (or omitted) and `anthropic-version` defaults to `2023-06-01` only when the client sends none. |
+| custom, `format=openai` | Same conversion path as `grok`/`codex` (`cache_control` stripped, tool/vision conversion identical), landing on the custom-openai adapter's `chatCompletions()` instead of a builtin one. |
 
-`model` **must** be `provider/upstream` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`). Bare ids → `400` `invalid_model`.
+`model` **must** be `provider/upstream` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, or `<slug>/<upstream>` for a custom endpoint). Bare ids → `400` `invalid_model`. A slug that doesn't match one of the caller's own custom providers is the same `400 invalid_model` as an unknown builtin — a custom slug never resolves cross-user.
 
 Converted streams follow the Anthropic content-block contract: blocks are strictly
 sequential (one open at a time, dense ascending indices, never reopened). Because an
@@ -108,10 +121,12 @@ Parses the body the same way as `/v1/messages` — same `model` requirement, sam
 |------------------|----------|
 | `claude-code` | Passthrough to upstream `https://api.anthropic.com/v1/messages/count_tokens` with the same header construction as `/v1/messages` (OAuth bearer, `anthropic-version` default `2023-06-01`, beta header via `resolveBetaHeader`), the bare upstream model id, and the fixed Claude Code system prepend applied (idempotent — Claude Code clients already send that exact first system block). Reuses the same account pool / bench-on-401-403-429 failover loop as `/v1/messages`. Never streams — always a non-stream JSON response, returned as-is on success or upstream error. |
 | `grok` / `codex` | `400`, no upstream call. There is no Chat Completions token-counting endpoint to convert to. Envelope: `{"type":"error","error":{"type":"invalid_request_error","message":"count_tokens is only supported for claude-code models"}}`. |
+| custom, `format=anthropic` | Passthrough to `{base_url}/v1/messages/count_tokens`, same header construction (and same OAuth-specifics omissions) as that provider's `/v1/messages`. Reuses the same account pool / failover loop. |
+| custom, `format=openai` | The exact same `400` rejection as `grok`/`codex` — no Chat Completions equivalent exists for a custom openai-format endpoint either. |
 
 ### `GET /anthropic/v1/models`
 
-Same live catalog as `GET /openai/v1/models` for the key owner: all providers with usable accounts. Envelope is Anthropic-ish `{ data: [{ id, display_name, type: "model" }] }` with `id` = `provider/upstream`.
+Same live catalog as `GET /openai/v1/models` for the key owner: all providers with usable accounts, including the user's custom providers appended after the builtins. Envelope is Anthropic-ish `{ data: [{ id, display_name, type: "model" }] }` with `id` = `provider/upstream`.
 
 ### Future
 
@@ -119,10 +134,12 @@ Same host keeps `/anthropic/*` for additional Anthropic routes if needed; do not
 
 ## Model routing
 
-1. Parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id). Required on **both** surfaces.
-2. Resolve user’s pool for that provider.
-3. `acquire()` usable account; on 401/403/429 bench and try next.
-4. No usable account → error (below).
+1. Parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id, split on the **first** `/` only — an upstream id may itself contain further `/`). Required on **both** surfaces.
+2. If `provider` is a builtin `ProviderId`, use it directly. Otherwise look it up as a custom provider slug, scoped to the authenticated user (`custom_providers` table) — never resolves another user's slug.
+3. Resolve user’s pool for that provider (or custom slug).
+4. `acquire()` usable account; on 401/403/429 bench and try next.
+5. No usable account → error (below).
+6. No provider match at all (not a builtin id, not one of the caller's custom slugs) → `400 invalid_model`.
 
 ## `reasoning_effort`
 
@@ -135,10 +152,12 @@ Client field (OpenAI body; Anthropic may use same via extension or map from omit
 | grok | Top-level `reasoning_effort`; omit if unset; `none` only if model allows | `xhigh` |
 | codex | Omit field if none/unset; else Responses `reasoning: { effort, summary: "auto" }` | `xhigh` |
 | claude-code | Map to `output_config.effort`; off/`none` → thinking disabled + safe effort; **no public `thinking: adaptive` API** | `max` |
+| custom, `format=openai` | Forwarded verbatim as top-level `reasoning_effort` (part of the near-passthrough body) | **none — never clamped** |
+| custom, `format=anthropic` | **Dropped** on `/openai/v1` (no `thinking`/`output_config` synthesized); on native `/anthropic`, whatever `thinking` object the client sends goes through untouched — full control, no ceiling | n/a |
 
-**Ceiling clamp — a valid effort above a provider's ceiling is lowered to that provider's highest supported effort, never rejected.** Example: Claude Code running at `max` with sonnet/haiku remapped to `grok/...` or `codex/...` sends `xhigh` upstream instead of getting a `400`. Ceilings verified 2026-08-02: xAI documents `high` as grok-4.5's top and `xhigh` for grok-4.20-multi-agent, and live grok-4.5 accepts `xhigh` without error (reasoning tokens scale up), so grok's provider-wide ceiling is `xhigh`; codex Responses models (gpt-5.2-codex, gpt-5.1-codex-max) top out at `xhigh` — `max` exists only on non-codex GPT-5.6 models, which this adapter does not serve.
+**Ceiling clamp — a valid effort above a *builtin* provider's ceiling is lowered to that provider's highest supported effort, never rejected.** Example: Claude Code running at `max` with sonnet/haiku remapped to `grok/...` or `codex/...` sends `xhigh` upstream instead of getting a `400`. Ceilings verified 2026-08-02: xAI documents `high` as grok-4.5's top and `xhigh` for grok-4.20-multi-agent, and live grok-4.5 accepts `xhigh` without error (reasoning tokens scale up), so grok's provider-wide ceiling is `xhigh`; codex Responses models (gpt-5.2-codex, gpt-5.1-codex-max) top out at `xhigh` — `max` exists only on non-codex GPT-5.6 models, which this adapter does not serve. **Custom providers are never clamped** — there is no known upstream ceiling for an arbitrary BYO endpoint, so a custom-openai provider forwards whatever the client sent (already validated against the ladder below) as-is.
 
-Only unknown tokens (anything outside the ladder above) → `400` via `parseReasoningEffort`. Unknown model ids: pass the (clamped) effort through when possible.
+Only unknown tokens (anything outside the ladder above) → `400` via `parseReasoningEffort`, for every provider including custom ones — the ladder validation happens before routing to any adapter. Unknown model ids: pass the (clamped, for builtins) effort through when possible.
 
 **Reasoning is effort-only — `thinking.budget_tokens` is never mapped, for any provider.** A client-supplied Anthropic `thinking` object is dropped on the `grok`/`codex` conversion path (not forwarded — that converter only ever reads `reasoning_effort` / `output_config.effort`, never `thinking`) and passed through **untouched** on the native `claude-code` `/anthropic` passthrough path (the whole request body, `thinking` included, goes to Anthropic exactly as sent; this proxy does not rewrite it). The effort inputs this proxy actually reads, in priority order: (1) `reasoning_effort` — the OpenAI field, also accepted as a same-named optional field directly on an Anthropic request body; (2) if that is absent, `output_config.effort` on the Anthropic surface (`grok`/`codex` conversion only) as a fallback. Invalid `reasoning_effort` values still `400` via `parseReasoningEffort` regardless of which field supplied them.
 
@@ -150,6 +169,9 @@ Only unknown tokens (anything outside the ladder above) → `400` via `parseReas
 | `/openai/v1` → `claude-code` | **Do not add** top-level or block `cache_control` (these requests do not hit Anthropic prompt cache). |
 | `/anthropic` → `grok` / `codex` | Strip `cache_control` on convert; no Anthropic-style breakpoints upstream. |
 | `/openai/v1` or `/anthropic` → `grok` | Forward client `x-grok-conv-id` (and session/turn) when supplied; **never invent**. Prefix cache works without conv-id (see [providers.md](./providers.md)). |
+| `/anthropic` → custom, `format=anthropic` | **Strict passthrough** of all client `cache_control`, same as `claude-code` (no system prepend to keep byte-stable, though — there isn't one). |
+| `/openai/v1` → custom, `format=anthropic` | **Do not add** `cache_control` — same rule as `claude-code`. |
+| `/anthropic` → custom, `format=openai` | Strip `cache_control` on convert, same as `grok`/`codex`. |
 
 ## Errors
 

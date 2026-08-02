@@ -8,8 +8,8 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 |-------|---------|
 | `/` | Redirect to dashboard or login |
 | `/login` | Google sign-in (split brand panel + sign-in panel) |
-| `/accounts` | Provider account cards (Claude / Codex / Grok): usage bars, add/promote/remove |
-| `/models` | Catalog of `provider/model` ids; available when user has a bound account |
+| `/accounts` | Two groups: subscription pool cards (Claude / Codex / Grok — usage bars, add/promote/remove) and custom endpoint cards (user-defined BYO endpoints — status only, add/test/edit/remove) |
+| `/models` | Catalog of `provider/model` ids; available when user has a bound account. Grouped by provider, including the user's custom endpoints |
 | `/keys` | List / create / revoke API keys; show base URLs copy blocks |
 | `/usage` | Optional request log summary (no content) |
 
@@ -34,19 +34,27 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 
 ## UX rules
 
-- **Cache-first** for account lists, usage, and models: paint `sessionStorage` immediately; network only if cache older than **90s** (or user clicks Refresh).
+- **Cache-first** for account lists, usage, models, and custom providers: paint `sessionStorage` immediately; network only if cache older than **90s** (or user clicks Refresh).
 - Accounts page polls every **90s** without forcing backend cache bust; Refresh button sets `?refresh=true` (bypass server KV).
-- Backend also caches per-account usage in KV for **90s** to avoid provider 429 (see `apps/api/src/pool/usage_cache.ts`).
+- Backend also caches per-account usage in KV for **90s** to avoid provider 429 (see `apps/api/src/pool/usage_cache.ts`); custom-provider `models_mode=auto` catalog lookups use the same 90s KV cache (see [providers.md](./providers.md)).
 - On refresh failure, keep showing cache and surface a non-blocking error.
-- Never store access tokens, refresh tokens, or session secrets in local UI cache.
-- Cache keys scoped to the signed-in user id.
+- Never store access tokens, refresh tokens, session secrets, or a custom provider's API key in local UI cache — a custom provider's cached row carries only the non-secret fields the `GET /api/custom-providers` response already returns (`key_mask`, never the key).
+- Cache keys scoped to the signed-in user id. Custom providers: sessionStorage key `kano-proxy:custom-providers:{userId}`, same 90s cache-first / background-refresh convention as accounts and models.
 
 ## Account row (align lincy Proxy page)
 
-- Status dot: active / standby / benched / unusable  
-- Progress bars per usage window (5h, Week, …)  
-- Promote / remove  
-- Add account → provider-specific login UI  
+Subscription pool cards (Claude / Codex / Grok):
+
+- Status dot: active / standby / benched / unusable
+- Progress bars per usage window (5h, Week, …)
+- Promote / remove
+- Add account → provider-specific login UI
+
+Custom endpoint cards (`GET /api/custom-providers` — see [auth.md](./auth.md)), listed in their own group below the subscription cards:
+
+- Name, a format badge (`OpenAI` | `Anthropic`), a `slug/*` model-id hint so the user knows what to type as `model`, the base URL, the key mask (e.g. `sk-abc…f3a2`), and a status dot (**active** / **benched** only — no standby/unusable nuance, no usage bars: a static key has no usage window to show).
+- Row actions: **Test** (calls `POST /api/custom-providers/test` with `{id}`, shows the inline result — see below), **Edit**, **Remove** (calls `DELETE`, confirms first since it also deletes the stored key).
+- **Add endpoint** dialog: format toggle (`OpenAI` / `Anthropic`, immutable once saved); name field with a slug auto-generated from it (editable before first save, then locked — slug is immutable server-side too); base URL field with a **live preview of the resolved endpoint** as the user types (e.g. typing a base URL shows `{base}/chat/completions` for OpenAI or `{base}/v1/messages` for Anthropic, matching the literal-concatenation rule in [providers.md](./providers.md)); API key as a `type="password"` field that is **never pre-filled or echoed** — on edit, a blank field means "keep the existing key" (matches the backend's blank-means-keep contract, see [auth.md](./auth.md)); models mode toggle (auto / manual, with a textarea for manual model ids when manual); a **Test connection** button that calls `POST /api/custom-providers/test` with the in-progress form values (pre-save shape) and renders the result inline (`ok:true` + sample models, `ok:true` + "no models endpoint" note, or `ok:false` + error) without blocking Save.
 
 ## Models page
 
@@ -54,6 +62,8 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
   - Claude Code: live upstream `GET /v1/models` with OAuth
   - Grok: live upstream `GET /v1/models` with OAuth
   - Codex: no public / third-party models list → empty + links to official docs (see [providers.md](./providers.md))
+  - Custom providers: one group per user-defined endpoint (dynamic — as many groups as the user has created), sourced from the same `GET /api/models` payload; manual list or live-with-fallback depending on that provider's `models_mode` (see [providers.md](./providers.md))
+- Provider groups on this page are **dynamic**, not a fixed three — they render from whatever `providers` the `GET /api/models` response lists, so a newly-added custom endpoint appears without a UI code change.
 - Session API: `GET /api/models` (`?refresh=true` bypasses 90s KV cache)
 - Client: `GET /openai/v1/models` and `GET /anthropic/v1/models` return the same live catalog; ids are always `provider/upstream`
 - Copy model id as `provider/upstream` — works on **both** OpenAI and Anthropic bases

@@ -2,8 +2,8 @@ import { Hono } from "hono"
 import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
+import { resolveModel } from "../providers/resolve"
 import { dispatchChatCompletions } from "../proxy/dispatch"
-import { parseModelId } from "../utils/model"
 import { parseReasoningEffort } from "../utils/reasoning"
 
 export const openaiRoutes = new Hono<HonoEnv>()
@@ -38,8 +38,8 @@ openaiRoutes.post("/chat/completions", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const parsed = parseModelId(modelRaw)
-  if (!parsed) {
+  const resolved = await resolveModel(c.env, userId, modelRaw)
+  if (!resolved) {
     return c.json(
       {
         error: {
@@ -58,7 +58,9 @@ openaiRoutes.post("/chat/completions", async (c) => {
     )
   }
 
-  // temperature intentionally stripped
+  // temperature is intentionally never read into a named field below — built-in
+  // adapters build their upstream body from named fields only, so it never
+  // reaches them. It still reaches custom-openai providers via `rawBody`.
   const stopRaw = Array.isArray(body.stop)
     ? body.stop
     : typeof body.stop === "string"
@@ -81,11 +83,12 @@ openaiRoutes.post("/chat/completions", async (c) => {
   return dispatchChatCompletions(c.env, {
     userId,
     apiKeyId,
-    provider: parsed.provider,
+    provider: resolved.provider,
+    adapter: resolved.adapter,
     req: {
       model: modelRaw,
       rawModel: modelRaw,
-      upstreamModel: parsed.upstreamModel,
+      upstreamModel: resolved.upstreamModel,
       messages: (body.messages as unknown[]) ?? [],
       stream: !!body.stream,
       max_tokens: maxTokens,
@@ -100,6 +103,9 @@ openaiRoutes.post("/chat/completions", async (c) => {
         sessionId: c.req.header("x-grok-session-id"),
         turnIdx: c.req.header("x-grok-turn-idx"),
       },
+      // Raw client body for the custom-openai passthrough adapter; ignored
+      // by built-ins, which build their upstream body from named fields.
+      rawBody: body,
     },
   })
 })
