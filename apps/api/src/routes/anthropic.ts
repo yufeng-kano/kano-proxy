@@ -72,8 +72,13 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     turnIdx: c.req.header("x-grok-turn-idx") ?? undefined,
   }
 
-  if (resolved.adapter.messages) {
-    // claude-code, or a custom anthropic-format provider: native passthrough.
+  // claude-code / custom anthropic-format: native Messages passthrough.
+  // grok also exposes adapter.messages, but that path converts to Responses —
+  // not Claude-native passthrough — so the loop guard still applies below.
+  const isNativeAnthropicPassthrough =
+    !!resolved.adapter.messages && resolved.provider !== "grok"
+
+  if (isNativeAnthropicPassthrough) {
     // Only normalize model to the bare upstream id — strict cache_control
     // passthrough, do not touch other body fields.
     const upstreamBody = { ...body, model: resolved.upstreamModel }
@@ -95,10 +100,9 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     })
   }
 
-  // grok / codex / custom-openai: convert Messages ↔ Chat Completions via
-  // existing adapters. Loop guard applies only on this conversion ingress —
-  // never on the native passthrough branch above (docs/api.md "Degenerate
-  // tool-call loop guard").
+  // Conversion ingress (grok Responses / codex / custom-openai). Loop guard
+  // applies here — never on the native passthrough branch above
+  // (docs/api.md "Degenerate tool-call loop guard").
   const loop = detectAnthropicToolLoop((body.messages as unknown[]) ?? [])
   if (loop.tripped) {
     c.executionCtx.waitUntil(
@@ -119,6 +123,33 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       },
       400,
     )
+  }
+
+  // grok: Anthropic ↔ Responses (encrypted reasoning). Not Chat Completions.
+  if (resolved.provider === "grok" && resolved.adapter.messages) {
+    const upstreamBody = { ...body, model: resolved.upstreamModel }
+    const headers = new Headers()
+    // Strip any client-supplied isolation headers; only the route may set them.
+    const beta = c.req.header("anthropic-beta")
+    const ver = c.req.header("anthropic-version")
+    if (beta) headers.set("anthropic-beta", beta)
+    if (ver) headers.set("anthropic-version", ver)
+    if (affinity.convId) headers.set("x-grok-conv-id", affinity.convId)
+    if (affinity.sessionId) headers.set("x-grok-session-id", affinity.sessionId)
+    if (affinity.turnIdx) headers.set("x-grok-turn-idx", affinity.turnIdx)
+    if (apiKeyId) headers.set("x-kano-api-key-id", apiKeyId)
+    headers.set("x-kano-raw-model", resolved.raw)
+
+    return dispatchAnthropicMessages(c.env, {
+      userId,
+      apiKeyId,
+      body: upstreamBody,
+      headers,
+      model: resolved.raw,
+      provider: resolved.provider,
+      adapter: resolved.adapter,
+      waitUntil: (p) => c.executionCtx.waitUntil(p),
+    })
   }
 
   return dispatchAnthropicViaOpenAI(c.env, {

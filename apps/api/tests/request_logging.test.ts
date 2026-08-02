@@ -510,20 +510,25 @@ describe("/anthropic/v1/messages — native claude-code capture", () => {
   })
 })
 
-describe("/anthropic/v1/messages — via-OpenAI path (grok/codex/custom-openai): exactly one row", () => {
-  it("non-stream: exactly one request_logs row, with tokens from the inner OpenAI-shaped usage", async () => {
+/** Upstream Responses SSE for `/anthropic` → grok (cli-chat-proxy). */
+const GROK_RESPONSES_SSE_WITH_USAGE = [
+  'data: {"type":"response.output_text.delta","delta":"hi"}',
+  "",
+  'data: {"type":"response.completed","response":{"usage":{"input_tokens":50,"output_tokens":10}}}',
+  "",
+].join("\n")
+
+describe("/anthropic/v1/messages — grok Responses / codex conversion: exactly one row", () => {
+  it("grok non-stream: exactly one request_logs row from converted Anthropic usage", async () => {
     const db = new FakeD1()
     await seedApiKey(db, "user_1")
     await seedAccount(db, { userId: "user_1", provider: "grok" })
+    // grok Anthropic path always requests upstream stream:true and collects.
     globalThis.fetch = (async () =>
-      new Response(
-        JSON.stringify({
-          id: "x",
-          choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 50, completion_tokens: 10 },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      )) as typeof fetch
+      new Response(GROK_RESPONSES_SSE_WITH_USAGE, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      })) as typeof fetch
 
     const res = await app.request(
       "/anthropic/v1/messages",
@@ -547,11 +552,12 @@ describe("/anthropic/v1/messages — via-OpenAI path (grok/codex/custom-openai):
     expect(rows[0]).toMatchObject({ provider: "grok", prompt_tokens: 50, completion_tokens: 10 })
   })
 
-  it("streaming: exactly one request_logs row after the client-facing Anthropic stream fully drains", async () => {
+  it("grok streaming: exactly one request_logs row after the client-facing Anthropic stream fully drains", async () => {
     const db = new FakeD1()
     await seedApiKey(db, "user_1")
     await seedAccount(db, { userId: "user_1", provider: "grok" })
-    globalThis.fetch = (async () => trickleResponse(OPENAI_SSE_WITH_USAGE, "text/event-stream")) as typeof fetch
+    globalThis.fetch = (async () =>
+      trickleResponse(GROK_RESPONSES_SSE_WITH_USAGE, "text/event-stream")) as typeof fetch
 
     const res = await app.request(
       "/anthropic/v1/messages",

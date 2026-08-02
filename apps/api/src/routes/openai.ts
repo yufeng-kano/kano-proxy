@@ -73,11 +73,14 @@ openaiRoutes.post("/chat/completions", async (c) => {
     )
   }
 
-  // Loop guard applies only on the conversion ingress (grok / codex /
-  // custom-openai — any adapter with no native Anthropic `messages()`);
-  // never on claude-code / custom-anthropic (docs/api.md "Degenerate
-  // tool-call loop guard").
-  if (!resolved.adapter.messages) {
+  // Loop guard applies on conversion ingress (grok / codex / custom-openai);
+  // never on native Anthropic passthrough adapters (claude-code /
+  // custom-anthropic). grok exposes `messages()` for the /anthropic →
+  // Responses path, but /openai/v1 still uses chatCompletions — keep it
+  // guarded (docs/api.md "Degenerate tool-call loop guard").
+  const nativeAnthropicPassthrough =
+    !!resolved.adapter.messages && resolved.provider !== "grok"
+  if (!nativeAnthropicPassthrough) {
     const loop = detectOpenAIToolLoop((body.messages as unknown[]) ?? [])
     if (loop.tripped) {
       c.executionCtx.waitUntil(

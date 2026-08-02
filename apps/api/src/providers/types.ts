@@ -75,12 +75,17 @@ export type ProviderAdapter = {
     account: AcquiredAccount,
     req: ChatCompletionRequest,
   ): Promise<Response>
-  /** Optional native Anthropic Messages (claude-code and custom anthropic-format only). */
+  /**
+   * Optional Anthropic Messages entry (claude-code / custom-anthropic native
+   * passthrough, or grok Responses conversion). `extras.waitUntil` keeps KV
+   * writes alive past the Response on Workers.
+   */
   messages?(
     env: Env,
     account: AcquiredAccount,
     body: unknown,
     headers: Headers,
+    extras?: { waitUntil?: (promise: Promise<unknown>) => void },
   ): Promise<Response>
   /** Optional native Anthropic count_tokens (same providers as `messages`). Never streams. */
   countTokens?(

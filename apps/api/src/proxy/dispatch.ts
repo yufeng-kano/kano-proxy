@@ -285,7 +285,9 @@ export async function dispatchAnthropicMessages(
     }
     let refreshed = account
     if (adapter.refreshIfNeeded) refreshed = await adapter.refreshIfNeeded(env, account)
-    const res = await call(env, refreshed, opts.body, opts.headers)
+    const res = await call(env, refreshed, opts.body, opts.headers, {
+      waitUntil: opts.waitUntil,
+    })
     if (shouldBenchStatus(res.status)) {
       await benchAccount(env, opts.userId, provider, account.row.id)
       exclude.add(account.row.id)
