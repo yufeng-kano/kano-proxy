@@ -1,4 +1,4 @@
-/** PKCE S256 helpers — match lincy-agent claude_code_proxy / codex_proxy. */
+/** PKCE S256 helpers for Claude Code / Codex OAuth. */
 
 export async function buildPkcePair(): Promise<{
   codeVerifier: string

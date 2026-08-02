@@ -1,7 +1,6 @@
 /**
  * Per-account usage snapshot cache (KV).
  * Default TTL 90s — avoid hammering Claude/Codex/Grok usage endpoints (429).
- * Matches lincy proxy usage_snapshot caching; kano-proxy uses 90s as product default.
  */
 
 import type { Env } from "../env"

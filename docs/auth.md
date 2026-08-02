@@ -64,14 +64,14 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 
 ### Claude Code
 
-- **PKCE S256 required** (`code_challenge` / `code_verifier`) — same as lincy `claude_code_proxy`.
+- **PKCE S256 required** (`code_challenge` / `code_verifier`).
 - Browser authorize → user pastes `code#state` from Anthropic callback page.
 - Token exchange must send `code_verifier`.
 - Store access + refresh; multi-account pool.
 
 ### Codex
 
-- **PKCE S256 required**, plus CLI flags (`id_token_add_organizations`, `codex_cli_simplified_flow`, `originator=codex_cli_rs`) — same as lincy `codex_proxy`.
+- **PKCE S256 required**, plus CLI flags (`id_token_add_organizations`, `codex_cli_simplified_flow`, `originator=codex_cli_rs`).
 - Public OpenAI client only accepts registered redirect  
   `http://localhost:1455/auth/callback` (do **not** substitute kano domain).
 - Browser lands on that URL (connection may fail if nothing listens) — user pastes **full URL** or `code#state` into admin UI to complete.

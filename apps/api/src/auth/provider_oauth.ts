@@ -1,6 +1,5 @@
 /**
- * Provider OAuth (Claude Code / Codex) aligned with lincy-agent.
- * Both require PKCE S256.
+ * Provider OAuth (Claude Code / Codex). Both require PKCE S256.
  */
 
 import { buildPkcePair, buildStateToken } from "./pkce"
@@ -13,7 +12,7 @@ export const CLAUDE_OAUTH = {
   scope: "org:create_api_key user:profile user:inference",
 } as const
 
-/** Must match the public Codex CLI OAuth client registration (lincy default). */
+/** Must match the public Codex CLI OAuth client registration. */
 export const CODEX_OAUTH = {
   clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
   authorizeUrl: "https://auth.openai.com/oauth/authorize",
@@ -100,7 +99,7 @@ export async function beginCodexAuthorization(clientId?: string): Promise<{
   const { codeVerifier, codeChallenge } = await buildPkcePair()
   const oauthState = buildStateToken()
   const cid = clientId || CODEX_OAUTH.clientId
-  // Match lincy: extra Codex CLI flags + PKCE
+  // Extra Codex CLI flags + PKCE
   const params = new URLSearchParams({
     response_type: "code",
     client_id: cid,

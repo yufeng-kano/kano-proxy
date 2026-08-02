@@ -14,7 +14,7 @@ Timeouts: do not permanently shrink the pool on transport timeout alone when avo
 
 ## Claude Code
 
-- Upstream: Anthropic Messages + OAuth usage/profile endpoints (see lincy-agent `docs/dev/provider-api-spec.md`).
+- Upstream: Anthropic Messages + OAuth usage/profile endpoints.
 - Required system line for OAuth CLI-compat (prepend if absent, fixed string).
 - Usage: 5h, 7d, scoped weekly.
 - **Surfaces:** both `/openai/v1` and `/anthropic` with model `claude-code/<upstream_id>`.
@@ -28,7 +28,7 @@ Timeouts: do not permanently shrink the pool on transport timeout alone when avo
 
 ## Codex
 
-- Upstream: ChatGPT `codex/responses` (reverse-engineered; headers from lincy).
+- Upstream: ChatGPT `codex/responses` (reverse-engineered; CLI-compatible headers).
 - **Surfaces:** both `/openai/v1` and `/anthropic` with model `codex/<upstream_id>`.
 - OpenAI surface: Chat Completions ↔ Responses SSE.
 - Anthropic surface: Messages ↔ Chat Completions (strip `cache_control`) ↔ Responses SSE.
@@ -43,12 +43,12 @@ Timeouts: do not permanently shrink the pool on transport timeout alone when avo
 - **Upstream failure events (`response.failed` / `error`):** treated as a hard failure, never a fabricated success. Streaming (`codexSseToOpenAIStream`): a single OpenAI-shaped error line replaces the rest of the turn and the stream ends there — no `finish_reason` chunk, no `[DONE]`. Non-stream (`collectCodexSse`): the adapter returns `502` with `{"error":{"message","type":"upstream_error"}}` instead of a `200` completion built from a partial/empty turn. On the `/anthropic` surface (`openaiSseToAnthropicStream`), the same failure becomes an Anthropic `event: error` and the stream ends there too — see [api.md](./api.md).
 - **Models:** ChatGPT OAuth has **no** public `/models` endpoint. Platform `GET api.openai.com/v1/models` rejects these tokens (`api.model.read` missing). There is also **no trusted third-party API** that returns per-account Codex OAuth inventory. kano-proxy returns an **empty** list (no hard-coded catalog). Admin UI links official docs: [OpenAI models](https://developers.openai.com/api/docs/models), [ChatGPT / Codex models](https://learn.chatgpt.com/docs/models). Clients may still send a model id if a Codex account is bound; unknown/unsupported ids fail at upstream.
 - Usage: dynamic windows (label 5h / Week / Nd) from `/codex/usage` (alias `/wham/usage`).
-- Usage fetch: CLI `User-Agent: codex_cli_rs/0.144.3`. chatgpt.com edge **403 bot-challenges by TLS/client fingerprint, not headers** (verified 2026-08-01: same headers/IP → stdlib urllib 401 JSON passes the wall, curl and workerd `fetch` get 403 HTML). lincy passes only because Python urllib's fingerprint is allowed; a Worker cannot change its `fetch` fingerprint, so header tuning cannot fix this. When blocked, account stays **active/standby** (not unusable); UI omits usage bars (chat still works).
+- Usage fetch: CLI `User-Agent: codex_cli_rs/0.144.3`. chatgpt.com edge **403 bot-challenges by TLS/client fingerprint, not headers** (verified 2026-08-01: same headers/IP → stdlib urllib 401 JSON passes the wall, curl and workerd `fetch` get 403 HTML). A Worker cannot change its `fetch` fingerprint, so header tuning cannot fix this. When blocked, account stays **active/standby** (not unusable); UI omits usage bars (chat still works).
 
 ## Grok
 
 - Upstream: `api.x.ai` OpenAI-compatible Chat Completions with SuperGrok OAuth.
-- Multi-account pool (product requirement; not limited to lincy’s single file).
+- Multi-account pool (product requirement).
 - **Surfaces:** both `/openai/v1` and `/anthropic` with model `grok/<upstream_id>`.
 - OpenAI surface: near-passthrough Chat Completions.
 - Anthropic surface: Messages ↔ Chat Completions (strip `cache_control`; no invented sticky ids).

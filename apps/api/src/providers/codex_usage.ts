@@ -4,14 +4,10 @@
  * chatgpt.com edge bot-challenges /codex/usage by TLS/client fingerprint,
  * not headers. Verified 2026-08-01 with identical headers + IP + fake token:
  * stdlib urllib → 401 JSON (passes the wall), curl and workerd fetch() →
- * 403 HTML challenge. lincy passes only because Python urllib's fingerprint
- * is allowed; a Worker cannot change its fetch() fingerprint, so header
- * tuning cannot fix this — expect edgeBlocked from Workers until the edge
- * rules change. Failure is non-fatal for the account pool (chat still works;
- * /codex/responses is not bot-walled).
- *
- * @see lincy-agent docs/dev/provider-api-spec.md Codex usage endpoint
- * @see lincy-agent src/codex_proxy/service.py _sync_usage_get
+ * 403 HTML challenge. A Worker cannot change its fetch() fingerprint, so
+ * header tuning cannot fix this — expect edgeBlocked from Workers until the
+ * edge rules change. Failure is non-fatal for the account pool (chat still
+ * works; /codex/responses is not bot-walled).
  */
 
 export const CODEX_CLI_UA = "codex_cli_rs/0.144.3"

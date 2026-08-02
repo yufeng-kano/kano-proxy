@@ -72,7 +72,7 @@ Route `/dashboard`; signed-in `/` redirects here (nav order: Dashboard, Accounts
 
 `series[]` carries a per-model dimension so the grouped and per-model-curve views need no second request. Each point is one `(bucket, provider, model)` group: `bucket`, `provider`, `model`, `requests`, `prompt_tokens`, `completion_tokens`, `cache_read_input_tokens`, `cache_known_requests`. Sparse — only groups with at least one row; the client zero-fills the bucket grid and folds the model tail into "Other". Bucket-level totals are the client-side sum over a bucket's model points, not a separate field.
 
-## Account row (align lincy Proxy page)
+## Account row
 
 Subscription pool cards (Claude / Codex / Grok):
 

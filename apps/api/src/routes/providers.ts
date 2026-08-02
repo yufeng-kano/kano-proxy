@@ -276,8 +276,8 @@ providerRoutes.post("/:provider/login", async (c) => {
   }
 
   if (provider === "codex") {
-    // Public Codex client only accepts redirect_uri=http://localhost:1455/auth/callback
-    // (lincy). Browser will fail to connect there — copy the full URL from the address bar
+    // Public Codex client only accepts redirect_uri=http://localhost:1455/auth/callback.
+    // Browser will fail to connect there — copy the full URL from the address bar
     // (or code#state) and paste back into complete.
     const { authorizationUrl, pending } = await beginCodexAuthorization(c.env.CODEX_OAUTH_CLIENT_ID)
     await c.env.DB.prepare(
