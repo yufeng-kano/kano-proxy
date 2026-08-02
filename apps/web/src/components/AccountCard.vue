@@ -25,7 +25,7 @@ const displayName = computed(() => {
     (typeof meta.display_name === "string" && meta.display_name) ||
     (typeof meta.plan_type === "string" && meta.plan_type) ||
     null
-  // Prefer email, then username/display, then stored label (should already be email after OAuth)
+  // Prefer email (Claude Code / Grok now fallback to displayName), then username, then label
   if (email) return email
   if (username && username !== "claude" && username !== "codex" && username !== "grok") {
     return username

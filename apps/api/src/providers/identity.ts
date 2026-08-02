@@ -16,9 +16,10 @@ export async function fetchClaudeIdentity(accessToken: string): Promise<{
     const json = (await res.json()) as {
       account?: { email?: string; display_name?: string }
     }
+    const displayName = json.account?.display_name ?? null
     return {
-      email: json.account?.email ?? null,
-      displayName: json.account?.display_name ?? null,
+      email: displayName || json.account?.email ?? null,
+      displayName: displayName,
     }
   } catch {
     return { email: null, displayName: null }
@@ -67,9 +68,10 @@ export async function fetchGrokIdentity(accessToken: string): Promise<{
       username?: string
       preferred_username?: string
     }
+    const displayName = json.name ?? json.username ?? json.preferred_username ?? null
     return {
-      email: json.email ?? null,
-      displayName: json.name ?? json.username ?? json.preferred_username ?? null,
+      email: displayName || json.email ?? null,
+      displayName: displayName,
     }
   } catch {
     return { email: null, displayName: null }

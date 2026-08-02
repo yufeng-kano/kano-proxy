@@ -39,7 +39,7 @@ async function onLogout() {
             class="avatar"
             referrerpolicy="no-referrer"
           />
-          <span class="user-label">{{ user?.email ?? user?.name }}</span>
+          <span class="user-label">{{ user?.email || user?.name || "Account" }}</span>
           <button type="button" class="btn btn-ghost btn-sm" @click="onLogout">
             Sign out
           </button>
