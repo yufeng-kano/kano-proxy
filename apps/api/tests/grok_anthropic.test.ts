@@ -345,6 +345,73 @@ describe("grokResponsesSseToAnthropicStream", () => {
     expect(out).toContain('"text":"answer"')
   })
 
+  it("defers function_call until reasoning.done so the final signature is kept", async () => {
+    // Reproduces Claude Code fork/subagent failure: cli-chat-proxy often emits
+    // function_call before reasoning.output_item.done. Closing thinking early
+    // either drops the signature or emits the preliminary blob; the child then
+    // replays it and xAI returns "Could not decode the compaction blob".
+    const encPre = fakeGrokEncryptedContent(31)
+    const encFinal = fakeGrokEncryptedContent(32)
+    const stream = grokResponsesSseToAnthropicStream(
+      sse(
+        {
+          type: "response.output_item.added",
+          item: { type: "reasoning", encrypted_content: encPre },
+        },
+        {
+          type: "response.reasoning_summary_text.delta",
+          delta: "spawn worker",
+        },
+        {
+          type: "response.output_item.added",
+          item: {
+            type: "function_call",
+            id: "fc_1",
+            call_id: "call_1",
+            name: "Agent",
+          },
+        },
+        {
+          type: "response.function_call_arguments.delta",
+          item_id: "fc_1",
+          delta: '{"prompt":"explore"}',
+        },
+        {
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            id: "fc_1",
+            call_id: "call_1",
+            name: "Agent",
+            arguments: '{"prompt":"explore"}',
+          },
+        },
+        {
+          type: "response.output_item.done",
+          item: {
+            type: "reasoning",
+            encrypted_content: encFinal,
+            summary: [{ type: "summary_text", text: "" }],
+          },
+        },
+        {
+          type: "response.completed",
+          response: { usage: { input_tokens: 10, output_tokens: 20 } },
+        },
+      ),
+      "grok/grok-4.5",
+    )
+    const out = await readSse(stream)
+    const sigIdx = out.indexOf(`"signature":"${encFinal}"`)
+    const toolIdx = out.indexOf('"type":"tool_use"')
+    expect(sigIdx).toBeGreaterThan(-1)
+    expect(toolIdx).toBeGreaterThan(-1)
+    expect(sigIdx).toBeLessThan(toolIdx)
+    expect(out).not.toContain(encPre)
+    expect(out).toContain('"name":"Agent"')
+    expect(out).toContain('"stop_reason":"tool_use"')
+  })
+
   it("suppresses thinking blocks when thinkingMode=disabled", async () => {
     const stream = grokResponsesSseToAnthropicStream(
       sse(

@@ -10,6 +10,12 @@ import {
   readGrokReasoningReplay,
   writeGrokReasoningReplay,
 } from "./grok_reasoning_cache"
+import {
+  affinityPresent,
+  isGrokOpaqueDecodeFailure,
+  stripPromptCacheKey,
+  stripResponsesOpaqueState,
+} from "./grok_reasoning_recovery"
 
 const XAI_API = "https://api.x.ai/v1"
 const CLI_CHAT_PROXY = "https://cli-chat-proxy.grok.com/v1"
@@ -270,20 +276,83 @@ export const grokAdapter: ProviderAdapter = {
     }
 
     const stream = !!reqBody.stream
-    const res = await fetch(`${CLI_CHAT_PROXY}/responses`, {
-      method: "POST",
-      headers: grokResponsesHeaders(acc.credential.access_token, affinity),
-      body: JSON.stringify(converted.body),
-    })
-
-    if (!res.ok) {
-      const t = await res.text()
-      return new Response(t, {
-        status: res.status,
-        headers: {
-          "content-type": res.headers.get("content-type") || "application/json",
-        },
+    const postResponses = (
+      body: Record<string, unknown>,
+      aff: { convId?: string; sessionId?: string; turnIdx?: string } | undefined,
+    ) =>
+      fetch(`${CLI_CHAT_PROXY}/responses`, {
+        method: "POST",
+        headers: grokResponsesHeaders(acc.credential.access_token, aff),
+        body: JSON.stringify(body),
       })
+
+    // Opaque-state decode recovery (compaction / encrypted_content 400):
+    // 1) clear KV replay for this session
+    // 2) strip reasoning.encrypted_content (+ drop compaction items), retry
+    // 3) if still decode-fail and affinity was set, drop sticky headers + prompt_cache_key
+    // On unrecovered failure, return the *original* upstream 400 body.
+    let res = await postResponses(converted.body, affinity)
+    if (!res.ok) {
+      const originalStatus = res.status
+      const originalType =
+        res.headers.get("content-type") || "application/json"
+      const originalText = await res.text()
+      let recovered: Response | null = null
+
+      if (originalStatus === 400 && isGrokOpaqueDecodeFailure(originalText)) {
+        if (apiKeyId && sessionKey) {
+          await deleteGrokReasoningReplay(
+            env,
+            apiKeyId,
+            upstreamModel,
+            sessionKey,
+          )
+        }
+
+        const stripped = stripResponsesOpaqueState(converted.body)
+        if (stripped.changed) {
+          const retry = await postResponses(stripped.body, affinity)
+          if (retry.ok) {
+            recovered = retry
+          } else {
+            const retryText = await retry.text()
+            if (
+              retry.status === 400 &&
+              isGrokOpaqueDecodeFailure(retryText) &&
+              affinityPresent(affinity) &&
+              !("previous_response_id" in stripped.body)
+            ) {
+              const stateless = stripPromptCacheKey(stripped.body)
+              const reset = await postResponses(stateless, undefined)
+              if (reset.ok) {
+                recovered = reset
+              } else {
+                await reset.text()
+              }
+            }
+          }
+        } else if (
+          affinityPresent(affinity) &&
+          !("previous_response_id" in converted.body)
+        ) {
+          // No ciphertext in the body — sticky session/cache alone may be bad.
+          const stateless = stripPromptCacheKey(converted.body)
+          const reset = await postResponses(stateless, undefined)
+          if (reset.ok) {
+            recovered = reset
+          } else {
+            await reset.text()
+          }
+        }
+      }
+
+      if (!recovered) {
+        return new Response(originalText, {
+          status: originalStatus,
+          headers: { "content-type": originalType },
+        })
+      }
+      res = recovered
     }
     if (!res.body) return res
 

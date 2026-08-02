@@ -516,6 +516,12 @@ export function grokResponsesSseToAnthropicStream(
   let encryptedContent = ""
   let thinkingSignaturePending = ""
   let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  // cli-chat-proxy often emits function_call / output_text before
+  // reasoning.output_item.done. Closing the thinking block early would either
+  // drop the final signature or emit a preliminary blob — both break the next
+  // turn (and Claude Code fork/subagent inherits that assistant message).
+  let reasoningOpen = false
+  const deferredEvents: Array<() => void> = []
 
   let liveTool: {
     itemId: string
@@ -533,6 +539,15 @@ export function grokResponsesSseToAnthropicStream(
         controller.enqueue(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
         )
+      }
+      const flushDeferred = () => {
+        const queued = deferredEvents.splice(0)
+        for (const run of queued) run()
+      }
+      /** Run now, or after the in-flight reasoning item finishes. */
+      const afterReasoning = (run: () => void) => {
+        if (reasoningOpen) deferredEvents.push(run)
+        else run()
       }
       const ensureStart = () => {
         if (started) return
@@ -701,9 +716,13 @@ export function grokResponsesSseToAnthropicStream(
         if (stopped) return
         stopped = true
         ensureStart()
+        // Settle any in-flight reasoning first so deferred tool/text blocks
+        // still follow a signature_delta when upstream omitted .done.
+        closeThinking()
+        reasoningOpen = false
+        flushDeferred()
         closeText()
         closeTool()
-        closeThinking()
         flushPendingThinking()
         if (nextBlockIndex === 0) {
           emitEvent("content_block_start", {
@@ -782,13 +801,16 @@ export function grokResponsesSseToAnthropicStream(
               ) {
                 appendThinking(ev.delta)
               } else if (ev.type === "response.output_text.delta" && ev.delta) {
-                appendText(ev.delta)
+                const text = ev.delta
+                afterReasoning(() => appendText(text))
               } else if (
                 ev.type === "response.output_item.added" &&
                 ev.item?.type === "reasoning"
               ) {
+                reasoningOpen = true
                 // Pre-content encrypted snapshot — keep for fallback only;
-                // final value arrives on output_item.done.
+                // final value arrives on output_item.done. Do not close the
+                // thinking block until then (see afterReasoning).
                 if (
                   typeof ev.item.encrypted_content === "string" &&
                   isValidGrokEncryptedContent(ev.item.encrypted_content)
@@ -825,61 +847,72 @@ export function grokResponsesSseToAnthropicStream(
                   openThinking()
                 }
                 closeThinking()
+                reasoningOpen = false
+                flushDeferred()
               } else if (
                 ev.type === "response.output_item.added" &&
                 ev.item?.type === "function_call"
               ) {
-                const itemId = ev.item.id || ev.item.call_id || `item_${nextBlockIndex}`
-                if (!liveTool || liveTool.itemId !== itemId) {
-                  if (liveTool) closeTool()
-                  openTool(
-                    itemId,
-                    ev.item.call_id || itemId,
-                    ev.item.name || "unknown",
-                  )
-                }
+                const itemId =
+                  ev.item.id || ev.item.call_id || `item_${nextBlockIndex}`
+                const callId = ev.item.call_id || itemId
+                const name = ev.item.name || "unknown"
+                afterReasoning(() => {
+                  if (!liveTool || liveTool.itemId !== itemId) {
+                    if (liveTool) closeTool()
+                    openTool(itemId, callId, name)
+                  }
+                })
               } else if (ev.type === "response.function_call_arguments.delta") {
                 const itemId = ev.item_id
                 const delta = ev.delta ?? ""
                 if (!itemId || !delta) continue
-                if (liveTool && liveTool.itemId === itemId) {
-                  liveTool.sawArgs = true
-                  emitEvent("content_block_delta", {
-                    type: "content_block_delta",
-                    index: liveTool.blockIndex,
-                    delta: { type: "input_json_delta", partial_json: delta },
-                  })
-                } else {
-                  pendingArgs.set(
-                    itemId,
-                    (pendingArgs.get(itemId) ?? "") + delta,
-                  )
-                }
+                afterReasoning(() => {
+                  if (liveTool && liveTool.itemId === itemId) {
+                    liveTool.sawArgs = true
+                    emitEvent("content_block_delta", {
+                      type: "content_block_delta",
+                      index: liveTool.blockIndex,
+                      delta: { type: "input_json_delta", partial_json: delta },
+                    })
+                  } else {
+                    pendingArgs.set(
+                      itemId,
+                      (pendingArgs.get(itemId) ?? "") + delta,
+                    )
+                  }
+                })
               } else if (
                 ev.type === "response.output_item.done" &&
                 ev.item?.type === "function_call"
               ) {
                 const itemId = ev.item.id || ev.item.call_id || ""
-                if (!liveTool || liveTool.itemId !== itemId) {
-                  if (liveTool) closeTool()
-                  openTool(
-                    itemId || `item_${nextBlockIndex}`,
-                    ev.item.call_id || itemId || `call_${nextBlockIndex}`,
-                    ev.item.name || "unknown",
-                  )
-                }
-                if (liveTool && !liveTool.sawArgs && ev.item.arguments) {
-                  liveTool.sawArgs = true
-                  emitEvent("content_block_delta", {
-                    type: "content_block_delta",
-                    index: liveTool.blockIndex,
-                    delta: {
-                      type: "input_json_delta",
-                      partial_json: ev.item.arguments,
-                    },
-                  })
-                }
-                closeTool()
+                const callId =
+                  ev.item.call_id || itemId || `call_${nextBlockIndex}`
+                const name = ev.item.name || "unknown"
+                const args = ev.item.arguments
+                afterReasoning(() => {
+                  if (!liveTool || liveTool.itemId !== itemId) {
+                    if (liveTool) closeTool()
+                    openTool(
+                      itemId || `item_${nextBlockIndex}`,
+                      callId,
+                      name,
+                    )
+                  }
+                  if (liveTool && !liveTool.sawArgs && args) {
+                    liveTool.sawArgs = true
+                    emitEvent("content_block_delta", {
+                      type: "content_block_delta",
+                      index: liveTool.blockIndex,
+                      delta: {
+                        type: "input_json_delta",
+                        partial_json: args,
+                      },
+                    })
+                  }
+                  closeTool()
+                })
               } else if (
                 ev.type === "response.completed" ||
                 ev.type === "response.done"

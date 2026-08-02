@@ -71,6 +71,10 @@ OpenAI-surface details: without `include_reasoning`, Chat Completions returns on
 
 Anthropic-surface details (Claude Code / CC Switch): Responses `reasoning.encrypted_content` maps to `thinking.signature` (stream: `signature_delta`). Summary/text when present maps to `thinking` / `thinking_delta`. On a later turn, a validated assistant `thinking.signature` is replayed as a Responses `input` item `{type:"reasoning", encrypted_content}` — this proxy never invents Claude-native signatures. A session-scoped KV replay cache (keyed by API key id + **upstream model** + client `x-grok-conv-id` / `x-grok-session-id`, never cross-user/model) can re-inject the last turn's encrypted reasoning when the client omits the signature but continues the same session — see [providers.md](./providers.md). Upstream EOF without `response.completed` surfaces as Anthropic `event: error`, not a fabricated successful turn.
 
+**Opaque decode recovery.** If cli-chat-proxy returns HTTP 400 with `Could not decode the compaction blob` or `Could not decrypt the provided encrypted_content`, the adapter clears the session replay cache, strips `reasoning.encrypted_content` (and any `compaction` input items), and retries once on the same account. If that still fails and the client sent sticky `x-grok-*` ids, it retries once more without those headers / `prompt_cache_key` (never when `previous_response_id` is set). Unrecovered failures return the original upstream 400.
+
+**Thinking + tool_use ordering.** Upstream may emit `function_call` / `output_text` before `reasoning.output_item.done`. The SSE converter holds those events until the reasoning item finishes so `signature_delta` carries the final `encrypted_content` and still precedes `tool_use`. Closing thinking early (or emitting the preliminary blob from `output_item.added`) corrupts the assistant message that Claude Code fork/subagent workers inherit, which then fails the next turn with the compaction-blob 400 above.
+
 **Thinking / effort on `/anthropic` → `grok`.** Honored (not ignored):
 
 | Client signal | Upstream effect |
