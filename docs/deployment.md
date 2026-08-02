@@ -117,8 +117,10 @@ Local dev keeps using `wrangler.toml` + `.dev.vars` (`pnpm --filter api dev`).
 
 ```bash
 pnpm --filter web build
-npx wrangler pages deploy apps/web/dist --project-name=kano-proxy
+npx wrangler pages deploy apps/web/dist --project-name=kano-proxy --branch=main
 ```
+
+`--branch` must equal the Pages project's **production branch** (`main`), or the upload becomes a Preview deployment and the production domain keeps serving the old build. This matters especially in CI, where a release checkout is a detached HEAD and wrangler would otherwise infer branch `HEAD`.
 
 Production builds leave `VITE_API_ORIGIN` unset (same-origin to Worker routes on the same host).
 

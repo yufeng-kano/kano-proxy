@@ -134,4 +134,8 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: pnpm exec wrangler pages deploy ../web/dist --project-name=kano-proxy --commit-dirty=true
+        # --branch must match the Pages project's production branch: release
+        # events check out a tag (detached HEAD), so without it wrangler infers
+        # branch "HEAD" and the upload lands as a Preview deployment instead of
+        # Production.
+        run: pnpm exec wrangler pages deploy ../web/dist --project-name=kano-proxy --branch=main --commit-dirty=true
