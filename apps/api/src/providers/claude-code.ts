@@ -197,12 +197,6 @@ export const claudeCodeAdapter: ProviderAdapter = {
   async chatCompletions(env, account, req) {
     const acc = await refreshClaude(env, account)
     const mapped = mapReasoning("claude-code", req.reasoning_effort)
-    if (mapped.error) {
-      return Response.json(
-        { error: { message: mapped.error, code: "invalid_reasoning" } },
-        { status: 400 },
-      )
-    }
     const anthropicBody = openaiToAnthropicMessages({
       model: req.upstreamModel,
       messages: req.messages,

@@ -76,9 +76,9 @@ describe("mapReasoning", () => {
     })
   })
 
-  it("errors on codex max", () => {
+  it("clamps codex max to its ceiling xhigh", () => {
     expect(mapReasoning("codex", "max")).toEqual({
-      error: "codex does not support reasoning_effort=max",
+      reasoning: { effort: "xhigh", summary: "auto" },
     })
   })
 
@@ -88,9 +88,17 @@ describe("mapReasoning", () => {
     expect(mapReasoning("grok", "xhigh")).toEqual({ reasoning_effort: "xhigh" })
   })
 
-  it("errors on grok max", () => {
-    expect(mapReasoning("grok", "max")).toEqual({
-      error: "grok does not support reasoning_effort=max",
+  it("clamps grok max to its ceiling xhigh", () => {
+    expect(mapReasoning("grok", "max")).toEqual({ reasoning_effort: "xhigh" })
+  })
+
+  it("leaves efforts at or below the ceiling unclamped", () => {
+    expect(mapReasoning("grok", "high")).toEqual({ reasoning_effort: "high" })
+    expect(mapReasoning("codex", "xhigh")).toEqual({
+      reasoning: { effort: "xhigh", summary: "auto" },
+    })
+    expect(mapReasoning("claude-code", "max")).toEqual({
+      output_config: { effort: "max" },
     })
   })
 })

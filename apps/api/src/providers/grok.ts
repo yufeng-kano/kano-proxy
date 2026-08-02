@@ -111,12 +111,6 @@ export const grokAdapter: ProviderAdapter = {
   async chatCompletions(env, account, req) {
     const acc = await refreshGrok(env, account)
     const mapped = mapReasoning("grok", req.reasoning_effort)
-    if (mapped.error) {
-      return Response.json(
-        { error: { message: mapped.error, code: "invalid_reasoning" } },
-        { status: 400 },
-      )
-    }
 
     const body: Record<string, unknown> = {
       model: req.upstreamModel,

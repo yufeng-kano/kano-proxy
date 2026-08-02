@@ -17,6 +17,24 @@ export function parseReasoningEffort(v: unknown): ReasoningEffort | undefined | 
   return ALL.includes(s) ? s : "invalid"
 }
 
+/**
+ * Highest effort each provider's API accepts; efforts above it clamp down
+ * instead of erroring. Verified 2026-08-02: xAI tops out at `xhigh`
+ * (docs.x.ai: grok-4.5 high / grok-4.20-multi-agent xhigh; live grok-4.5
+ * accepts xhigh) and codex Responses models top out at `xhigh` (`max` is
+ * only a non-codex GPT-5.6 value). See docs/api.md.
+ */
+const CEILING: Record<ProviderId, ReasoningEffort> = {
+  grok: "xhigh",
+  codex: "xhigh",
+  "claude-code": "max",
+}
+
+function clampToCeiling(provider: ProviderId, effort: ReasoningEffort): ReasoningEffort {
+  const cap = CEILING[provider]
+  return ALL.indexOf(effort) > ALL.indexOf(cap) ? cap : effort
+}
+
 /** Map client reasoning_effort to provider-specific payload fragments. */
 export function mapReasoning(
   provider: ProviderId,
@@ -29,24 +47,22 @@ export function mapReasoning(
   // Claude Messages
   output_config?: { effort: string }
   thinking?: { type: "disabled" }
-  error?: string
 } {
   if (effort === undefined) return {}
+  const capped = clampToCeiling(provider, effort)
 
   if (provider === "grok") {
-    if (effort === "max") return { error: "grok does not support reasoning_effort=max" }
-    return { reasoning_effort: effort }
+    return { reasoning_effort: capped }
   }
 
   if (provider === "codex") {
-    if (effort === "none") return {}
-    if (effort === "max") return { error: "codex does not support reasoning_effort=max" }
-    return { reasoning: { effort, summary: "auto" } }
+    if (capped === "none") return {}
+    return { reasoning: { effort: capped, summary: "auto" } }
   }
 
   // claude-code: effort-only public API; map none → disabled thinking + low effort
-  if (effort === "none") {
+  if (capped === "none") {
     return { thinking: { type: "disabled" }, output_config: { effort: "low" } }
   }
-  return { output_config: { effort } }
+  return { output_config: { effort: capped } }
 }

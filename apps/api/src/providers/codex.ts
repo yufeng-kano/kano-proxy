@@ -87,12 +87,6 @@ export const codexAdapter: ProviderAdapter = {
   async chatCompletions(env, account, req) {
     const acc = await refreshCodex(env, account)
     const mapped = mapReasoning("codex", req.reasoning_effort)
-    if (mapped.error) {
-      return Response.json(
-        { error: { message: mapped.error, code: "invalid_reasoning" } },
-        { status: 400 },
-      )
-    }
     const chatgptAccountId =
       acc.credential.account_id || accountIdFromJwt(acc.credential.access_token) || ""
 

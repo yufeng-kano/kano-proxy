@@ -130,13 +130,15 @@ Client field (OpenAI body; Anthropic may use same via extension or map from omit
 
 `none` | `low` | `medium` | `high` | `xhigh` | `max` | omit
 
-| Provider | Mapping |
-|----------|---------|
-| grok | Top-level `reasoning_effort`; omit if unset; `none` only if model allows |
-| codex | Omit field if none/unset; else Responses `reasoning: { effort, summary: "auto" }` |
-| claude-code | Map to `output_config.effort`; off/`none` → thinking disabled + safe effort; **no public `thinking: adaptive` API** |
+| Provider | Mapping | Ceiling |
+|----------|---------|---------|
+| grok | Top-level `reasoning_effort`; omit if unset; `none` only if model allows | `xhigh` |
+| codex | Omit field if none/unset; else Responses `reasoning: { effort, summary: "auto" }` | `xhigh` |
+| claude-code | Map to `output_config.effort`; off/`none` → thinking disabled + safe effort; **no public `thinking: adaptive` API** | `max` |
 
-Invalid combo for known models → `400`. Unknown model ids: pass effort through when possible.
+**Ceiling clamp — a valid effort above a provider's ceiling is lowered to that provider's highest supported effort, never rejected.** Example: Claude Code running at `max` with sonnet/haiku remapped to `grok/...` or `codex/...` sends `xhigh` upstream instead of getting a `400`. Ceilings verified 2026-08-02: xAI documents `high` as grok-4.5's top and `xhigh` for grok-4.20-multi-agent, and live grok-4.5 accepts `xhigh` without error (reasoning tokens scale up), so grok's provider-wide ceiling is `xhigh`; codex Responses models (gpt-5.2-codex, gpt-5.1-codex-max) top out at `xhigh` — `max` exists only on non-codex GPT-5.6 models, which this adapter does not serve.
+
+Only unknown tokens (anything outside the ladder above) → `400` via `parseReasoningEffort`. Unknown model ids: pass the (clamped) effort through when possible.
 
 **Reasoning is effort-only — `thinking.budget_tokens` is never mapped, for any provider.** A client-supplied Anthropic `thinking` object is dropped on the `grok`/`codex` conversion path (not forwarded — that converter only ever reads `reasoning_effort` / `output_config.effort`, never `thinking`) and passed through **untouched** on the native `claude-code` `/anthropic` passthrough path (the whole request body, `thinking` included, goes to Anthropic exactly as sent; this proxy does not rewrite it). The effort inputs this proxy actually reads, in priority order: (1) `reasoning_effort` — the OpenAI field, also accepted as a same-named optional field directly on an Anthropic request body; (2) if that is absent, `output_config.effort` on the Anthropic surface (`grok`/`codex` conversion only) as a fallback. Invalid `reasoning_effort` values still `400` via `parseReasoningEffort` regardless of which field supplied them.
 
