@@ -54,11 +54,21 @@ export type LoginStart = {
   interval?: number
 }
 
-export const PROVIDERS: { id: ProviderId; name: string; blurb: string }[] = [
-  { id: "claude-code", name: "Claude Code", blurb: "Anthropic subscription OAuth" },
-  { id: "codex", name: "Codex", blurb: "ChatGPT / Codex OAuth" },
-  { id: "grok", name: "Grok", blurb: "xAI SuperGrok device code" },
+/**
+ * The builtin provider pools, in display order — the single source of truth
+ * for Providers, Models, and the login brand panel.
+ *
+ * Names and descriptions are **not** here: they are user-facing copy and live
+ * in the message catalog under `provider.<id>.name` / `provider.<id>.blurb`
+ * (see docs/i18n.md). This list carries only the wire ids and their order.
+ */
+export const PROVIDERS: { id: ProviderId }[] = [
+  { id: "claude-code" },
+  { id: "codex" },
+  { id: "grok" },
 ]
+
+export const PROVIDER_IDS: ProviderId[] = PROVIDERS.map((p) => p.id)
 
 export type CatalogModel = {
   id: string

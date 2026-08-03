@@ -1,10 +1,51 @@
 <script setup lang="ts">
+/**
+ * The one surface a signed-out visitor sees.
+ *
+ * Two columns: a brand panel that says what this is, and the sign-in panel.
+ * The brand panel is deliberately dark in **both** themes — the single
+ * documented exception to the token palette (docs/admin-ui.md § Theming), so it
+ * carries its own local `--brand-*` values rather than `--surface`.
+ *
+ * The Google button is the other prescribed surface: white background,
+ * `#dadce0` border, the official four-color mark inlined as SVG (never a remote
+ * asset), and Google's own dark variant. Those values are Google's to set, not
+ * ours to tokenize.
+ */
 import { useAuth } from "@/composables/useAuth"
+import Banner from "@/components/ui/Banner.vue"
 import { SITE } from "@/config/site"
-import { PROVIDERS } from "@/types"
+import { useI18n } from "@/i18n"
+import type { MessageKey } from "@/i18n"
+import { PROVIDERS, type ProviderId } from "@/types"
 
+const { t } = useI18n()
 const { goLogin, error } = useAuth()
-const year = new Date().getFullYear()
+
+/**
+ * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
+ * ids. An explicit map rather than a template literal: `` `provider.${id}.name` ``
+ * widens to `string` and would not typecheck against `MessageKey`, so a
+ * renamed key has to fail the build here.
+ */
+const NAME_KEY: Record<ProviderId, MessageKey> = {
+  "claude-code": "provider.claude-code.name",
+  codex: "provider.codex.name",
+  grok: "provider.grok.name",
+}
+
+const BLURB_KEY: Record<ProviderId, MessageKey> = {
+  "claude-code": "provider.claude-code.blurb",
+  codex: "provider.codex.blurb",
+  grok: "provider.grok.blurb",
+}
+
+/**
+ * Computed at render so it never goes stale. A string, not a number: the
+ * interpolator runs numbers through `Intl.NumberFormat`, which would print the
+ * year with a thousands separator.
+ */
+const year = String(new Date().getFullYear())
 </script>
 
 <template>
@@ -12,23 +53,19 @@ const year = new Date().getFullYear()
     <aside class="login-brand">
       <div class="login-brand-inner">
         <div class="login-logo">
-          <span class="login-mark">k</span>
+          <span class="login-mark" aria-hidden="true">k</span>
           <span class="login-wordmark">{{ SITE.name }}</span>
         </div>
 
         <div class="login-pitch">
-          <h2>One base URL for every coding agent.</h2>
-          <p>
-            Bind your Claude Code, Codex, and Grok subscriptions to a private
-            pool, then point any OpenAI- or Anthropic-compatible client at a
-            single endpoint.
-          </p>
+          <h2>{{ t("login.pitch.title") }}</h2>
+          <p>{{ t("login.pitch.body") }}</p>
         </div>
 
         <ul class="login-providers">
           <li v-for="p in PROVIDERS" :key="p.id">
-            <span class="login-provider-name">{{ p.name }}</span>
-            <span class="login-provider-blurb">{{ p.blurb }}</span>
+            <span class="login-provider-name">{{ t(NAME_KEY[p.id]) }}</span>
+            <span class="login-provider-blurb">{{ t(BLURB_KEY[p.id]) }}</span>
           </li>
         </ul>
       </div>
@@ -36,8 +73,8 @@ const year = new Date().getFullYear()
 
     <main class="login-panel">
       <div class="login-form">
-        <h1>Sign in</h1>
-        <p class="login-lede">Continue to your account pool.</p>
+        <h1>{{ t("login.signIn") }}</h1>
+        <p class="login-lede">{{ t("login.lede") }}</p>
 
         <button type="button" class="btn-google" @click="goLogin">
           <svg
@@ -63,14 +100,16 @@ const year = new Date().getFullYear()
               d="M9 3.5795c1.3214 0 2.5077.4541 3.4405 1.346l2.5813-2.5814C13.4632.8918 11.426 0 9 0 5.4818 0 2.4382 2.0168.9573 4.9582L3.964 7.29C4.6718 5.1627 6.6559 3.5795 9 3.5795z"
             />
           </svg>
-          <span>Continue with Google</span>
+          <span>{{ t("login.google") }}</span>
         </button>
 
-        <p v-if="error" class="banner error login-error">{{ error }}</p>
+        <div v-if="error" class="login-error">
+          <Banner tone="error">{{ t("login.error") }}</Banner>
+        </div>
       </div>
 
       <footer class="login-footer">
-        <span>© {{ year }} {{ SITE.name }}</span>
+        <span>{{ t("login.copyright", { year, name: SITE.name }) }}</span>
         <a
           v-if="SITE.contactEmail"
           class="login-contact"
@@ -83,9 +122,8 @@ const year = new Date().getFullYear()
   </div>
 </template>
 
-<!-- Global: the login route is full-bleed, so the page background must match the
-     sign-in panel. Otherwise the reserved scrollbar gutter (`scrollbar-gutter:
-     stable` in styles.css) shows a stripe of --bg down the right edge. -->
+<!-- Global: the login route is full-bleed, so the document background must
+     match the sign-in panel rather than the app's --bg. -->
 <style>
 html:has(.login-page),
 body:has(.login-page) {
@@ -94,8 +132,14 @@ body:has(.login-page) {
 </style>
 
 <style scoped>
+/*
+ * The document itself no longer scrolls (`html, body { overflow: hidden }` in
+ * styles.css), so this page is its own scroll container: it fills the viewport
+ * exactly and takes the overflow when a short window can't hold the panel.
+ */
 .login-page {
-  min-height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
 }
@@ -112,7 +156,7 @@ body:has(.login-page) {
   overflow: hidden;
   display: flex;
   align-items: center;
-  padding: 56px 56px 56px 64px;
+  padding: var(--space-12);
   color: var(--brand-text);
   background:
     radial-gradient(
@@ -147,10 +191,11 @@ body:has(.login-page) {
   pointer-events: none;
 }
 
+/* A column measure, not spacing — same class as CopyField's label track. */
 .login-brand-inner {
   position: relative;
   display: grid;
-  gap: 40px;
+  gap: var(--space-10);
   width: min(460px, 100%);
   margin-left: auto;
 }
@@ -158,51 +203,50 @@ body:has(.login-page) {
 .login-logo {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .login-mark {
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
-  background: var(--brand-text);
-  color: var(--brand-bg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.04em;
+  width: var(--space-10);
+  height: var(--space-10);
+  border-radius: var(--radius);
+  background: var(--brand-text);
+  color: var(--brand-bg);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-tighter);
 }
 
 .login-wordmark {
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
 }
 
 .login-pitch h2 {
-  margin: 0 0 14px;
-  font-size: 32px;
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-2xl);
   line-height: 1.18;
-  font-weight: 600;
-  letter-spacing: -0.035em;
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tighter);
   text-wrap: balance;
 }
 
 .login-pitch p {
   margin: 0;
   max-width: 42ch;
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.65;
   color: var(--brand-muted);
 }
 
 .login-providers {
   display: grid;
-  gap: 1px;
   margin: 0;
-  padding: 20px 0 0;
+  padding: var(--space-5) 0 0;
   list-style: none;
   border-top: 1px solid var(--brand-line);
 }
@@ -210,19 +254,20 @@ body:has(.login-page) {
 .login-providers li {
   display: flex;
   align-items: baseline;
-  gap: 10px;
-  padding: 7px 0;
-  font-size: 13px;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  font-size: var(--text-sm);
 }
 
+/* A label track, so the blurbs line up regardless of name length. */
 .login-provider-name {
   min-width: 106px;
-  font-weight: 550;
+  font-weight: var(--weight-medium);
 }
 
 .login-provider-blurb {
   color: var(--brand-muted);
-  font-size: 12.5px;
+  font-size: var(--text-xs);
 }
 
 /* ---- Sign-in panel ---- */
@@ -232,7 +277,7 @@ body:has(.login-page) {
      to the bottom edge like a normal site footer. */
   display: grid;
   grid-template-rows: 1fr auto;
-  padding: 48px 64px 28px;
+  padding: var(--space-12) var(--space-12) var(--space-8);
   background: var(--surface);
 }
 
@@ -242,19 +287,21 @@ body:has(.login-page) {
 }
 
 .login-form h1 {
-  margin: 0 0 6px;
-  font-size: 26px;
-  font-weight: 600;
-  letter-spacing: -0.035em;
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tighter);
 }
 
 .login-lede {
-  margin: 0 0 28px;
+  margin: 0 0 var(--space-6);
   color: var(--muted);
-  font-size: 14px;
+  font-size: var(--text-base);
 }
 
-/* Google Sign-In branding: white surface, #dadce0 border, four-color mark. */
+/* Google Sign-In branding: white surface, #dadce0 border, four-color mark.
+   These are Google's prescribed values, not this app's palette — the one place
+   besides the brand panel where a literal color is correct. */
 .btn-google {
   --g-bg: #ffffff;
   --g-border: #dadce0;
@@ -265,28 +312,26 @@ body:has(.login-page) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
   border: 1px solid var(--g-border);
   border-radius: var(--radius-sm);
   background: var(--g-bg);
   color: var(--g-text);
-  font-size: 14px;
-  font-weight: 500;
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
   cursor: pointer;
-  transition: background 0.12s ease, box-shadow 0.12s ease;
+  transition:
+    background var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
 }
 
 .btn-google:hover {
   background: var(--g-hover);
-  box-shadow: 0 1px 3px rgb(0 0 0 / 12%);
+  box-shadow: var(--shadow);
 }
 
-.btn-google:focus-visible {
-  outline: 2px solid #4285f4;
-  outline-offset: 2px;
-}
-
+/* 18px is the mark's own size in Google's spec, like any other icon dimension. */
 .btn-google-mark {
   width: 18px;
   height: 18px;
@@ -294,7 +339,7 @@ body:has(.login-page) {
 }
 
 .login-error {
-  margin: 16px 0 0;
+  margin-top: var(--space-4);
 }
 
 .login-footer {
@@ -302,30 +347,24 @@ body:has(.login-page) {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 6px 20px;
-  padding-top: 18px;
+  gap: var(--space-2) var(--space-5);
+  padding-top: var(--space-5);
   border-top: 1px solid var(--border);
   /* --muted, not --faint: --faint only reaches 2.56:1 on --surface in light
-     mode, below the WCAG AA floor for this 12.5px copy. */
+     mode, below the WCAG AA floor for copy this small. */
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: var(--text-xs);
 }
 
 .login-contact {
   color: var(--muted);
-  transition: color 0.12s ease;
+  transition: color var(--duration-fast) var(--ease);
 }
 
 .login-contact:hover {
   color: var(--text);
   text-decoration: underline;
   text-underline-offset: 3px;
-}
-
-.login-contact:focus-visible {
-  outline: 2px solid var(--ring-border);
-  outline-offset: 3px;
-  border-radius: 2px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -344,18 +383,18 @@ body:has(.login-page) {
 
 /* ---- Responsive ---- */
 
-/* Two columns still fit, but 64px gutters start crowding the copy. */
+/* Two columns still fit, but the full gutters start crowding the copy. */
 @media (max-width: 1080px) {
   .login-brand {
-    padding: 48px 36px 48px 40px;
+    padding: var(--space-10);
   }
 
   .login-panel {
-    padding: 40px 40px 28px;
+    padding: var(--space-10) var(--space-10) var(--space-8);
   }
 
   .login-pitch h2 {
-    font-size: 27px;
+    font-size: var(--text-xl);
   }
 }
 
@@ -368,7 +407,7 @@ body:has(.login-page) {
   }
 
   .login-brand {
-    padding: 32px 24px;
+    padding: var(--space-8) var(--space-6);
   }
 
   .login-brand::before {
@@ -378,22 +417,18 @@ body:has(.login-page) {
   .login-brand-inner {
     width: 100%;
     margin-left: 0;
-    gap: 24px;
-  }
-
-  .login-pitch h2 {
-    font-size: 24px;
+    gap: var(--space-6);
   }
 
   .login-providers {
-    padding-top: 16px;
+    padding-top: var(--space-4);
   }
 
   /* Single column: form sits at the top of the panel, footer keeps its own
      width so its rule lines up with the sign-in block above it. */
   .login-panel {
     justify-items: center;
-    padding: 44px 24px 28px;
+    padding: var(--space-10) var(--space-6) var(--space-8);
   }
 
   .login-form {
@@ -407,14 +442,22 @@ body:has(.login-page) {
 
 @media (max-width: 560px) {
   .login-pitch h2 {
-    font-size: 21px;
+    font-size: var(--text-lg);
+  }
+
+  .login-brand {
+    padding: var(--space-6) var(--space-4);
+  }
+
+  .login-panel {
+    padding: var(--space-8) var(--space-4) var(--space-6);
   }
 }
 
 @media (max-width: 480px) {
   .login-providers li {
     flex-direction: column;
-    gap: 1px;
+    gap: 0;
   }
 
   .login-provider-name {

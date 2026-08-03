@@ -28,11 +28,13 @@ GOOGLE_REDIRECT_URI=http://127.0.0.1:8787/api/auth/callback
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/api/auth/login` | Redirect to Google |
-| GET | `/api/auth/callback` | Exchange code, create session |
+| GET | `/api/auth/callback` | Exchange code, create session, 302 to `APP_URL/` |
 | POST | `/api/auth/logout` | Clear session |
 | GET | `/api/auth/me` | Current user profile |
 
 Anyone with a Google account may register on first login (insert user row).
+
+The callback redirects to the SPA root (`APP_URL/`), not to a specific page: landing on bare `/` is what lets the app restore the route the user was last on instead of dropping everyone on one fixed page (see [admin-ui.md](./admin-ui.md) § View preferences). Never leave the user on the Worker root — that is an API, not a UI.
 
 ## CORS
 

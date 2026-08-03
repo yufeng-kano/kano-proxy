@@ -35,8 +35,12 @@ authRoutes.get("/callback", async (c) => {
     return new Response(null, {
       status: 302,
       headers: {
-        // Admin SPA lives on APP_URL (Vite in local, Pages in prod). Never leave users on the Worker root.
-        location: `${app}/accounts`,
+        // Admin SPA lives on APP_URL (Vite in local, Pages in prod). Never
+        // leave users on the Worker root. Bare "/" rather than a page path:
+        // the SPA's own boot decides where to land, which is what restores the
+        // route the user was last on instead of always dropping them on one
+        // fixed page (see docs/admin-ui.md § View preferences).
+        location: `${app}/`,
         "set-cookie": cookie,
       },
     })

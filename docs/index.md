@@ -12,7 +12,8 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [database.md](./database.md) | D1 schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, failover, usage windows, adapters |
 | [codex-relay.md](./codex-relay.md) | **Approved exception to Cloudflare-only.** Codex egress relay on Cloud Run: design, IAM auth, cost, deploy |
-| [admin-ui.md](./admin-ui.md) | Web UI pages and cache-first metadata UX |
+| [admin-ui.md](./admin-ui.md) | Web UI: shell layout, pages, responsive rules, cache-first UX |
+| [i18n.md](./i18n.md) | Message catalog, translation runtime, copy voice |
 | [changelog.md](./changelog.md) | Release notes from GitHub, running version, caching + sanitization |
 | [project-structure.md](./project-structure.md) | Monorepo layout and module boundaries |
 | [deployment.md](./deployment.md) | Domains, DNS, Wrangler, secrets, local dev, release CI |

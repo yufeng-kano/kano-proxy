@@ -6,7 +6,7 @@ import {
   readUsageSummaryCache,
   writeUsageSummaryCache,
 } from "@/services/cache"
-import { getDashboardPrefs, setDashboardPrefs } from "@/services/prefs"
+import { getOverviewPrefs, setOverviewPrefs } from "@/services/prefs"
 import type { UsageDays, UsageSummary } from "@/types"
 
 type UsageState = {
@@ -40,7 +40,7 @@ export function useUsage() {
   const userId = ref<string | null>(null)
   // Seeded from the persisted view preference so a reopened tab reloads the
   // range the user last picked, not the 7d default.
-  const days = ref<UsageDays>(getDashboardPrefs().days)
+  const days = ref<UsageDays>(getOverviewPrefs().days)
 
   function setUserId(id: string | null) {
     userId.value = id
@@ -99,7 +99,7 @@ export function useUsage() {
   function setDays(next: UsageDays) {
     if (days.value === next) return
     days.value = next
-    setDashboardPrefs({ days: next })
+    setOverviewPrefs({ days: next })
     void loadDays(next)
   }
 

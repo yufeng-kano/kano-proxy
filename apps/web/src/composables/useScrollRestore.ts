@@ -1,25 +1,22 @@
 /**
- * Cross-session scroll restore for one page.
+ * Scroll persistence for one page.
  *
- * The router's own `scrollBehavior` covers in-session back/forward. This
- * covers the other case: the user closes the tab mid-page and comes back
- * later. That needs the offset in localStorage (services/prefs.ts) *and* a
- * later restore moment — a data-driven page is a few hundred pixels tall
- * until its fetch resolves, so scrolling on mount would clamp to the top and
- * silently lose the position.
+ * The shell is a fixed frame: only its content region scrolls, so `window`
+ * never moves and `window.scrollY` is always 0. Everything here therefore
+ * targets that element, published by AppShell through
+ * `services/scrollRegion.ts`.
  *
- * Hence `markReady()`: the page calls it once its content has painted, and
- * only then is the offset applied. See docs/admin-ui.md § View preferences.
+ * Restore also needs a later moment than mount. A data-driven page is a few
+ * hundred pixels tall until its fetch resolves, so applying the offset on
+ * mount would clamp to the top and silently lose the position — hence
+ * `markReady()`, which the page calls once its content has painted. See
+ * docs/admin-ui.md § View preferences.
  */
 
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 import { useRoute } from "vue-router"
 import { getScroll, setScroll } from "@/services/prefs"
-
-/** Ignore restores for a page that never actually got tall enough to hold the offset. */
-function canScrollTo(offset: number): boolean {
-  return document.documentElement.scrollHeight - window.innerHeight >= offset - 1
-}
+import { getScrollRegion } from "@/services/scrollRegion"
 
 export function useScrollRestore() {
   const route = useRoute()
@@ -27,6 +24,7 @@ export function useScrollRestore() {
   /** Set once the offset has been applied — or abandoned. Restore is a one-shot. */
   const settled = ref(false)
   let saveTimer: number | null = null
+  let region: HTMLElement | null = null
 
   function persist() {
     if (saveTimer !== null) return
@@ -34,7 +32,7 @@ export function useScrollRestore() {
     // means a read-modify-write of the whole prefs blob.
     saveTimer = window.setTimeout(() => {
       saveTimer = null
-      setScroll(path, window.scrollY)
+      if (region) setScroll(path, region.scrollTop)
     }, 250)
   }
 
@@ -48,23 +46,24 @@ export function useScrollRestore() {
   }
 
   onMounted(() => {
-    window.addEventListener("scroll", onUserScroll, { passive: true })
+    region = getScrollRegion()
+    region?.addEventListener("scroll", onUserScroll, { passive: true })
   })
 
   onBeforeUnmount(() => {
-    window.removeEventListener("scroll", onUserScroll)
+    region?.removeEventListener("scroll", onUserScroll)
     if (saveTimer !== null) {
       window.clearTimeout(saveTimer)
       // Flush rather than drop: leaving the page is exactly when the last
       // position matters.
-      setScroll(path, window.scrollY)
+      if (region) setScroll(path, region.scrollTop)
     }
   })
 
   /**
    * Call once the page's own content has rendered (data loaded, cards laid
    * out). Applies the saved offset if the user has not already scrolled and
-   * the document is genuinely tall enough for it.
+   * the region is genuinely tall enough for it.
    */
   async function markReady() {
     if (settled.value) return
@@ -72,7 +71,10 @@ export function useScrollRestore() {
     settled.value = true
     if (offset <= 0) return
     await nextTick()
-    if (canScrollTo(offset)) window.scrollTo({ top: offset, behavior: "auto" })
+    const el = region ?? getScrollRegion()
+    if (!el) return
+    // Ignore a restore for a page that never got tall enough to hold it.
+    if (el.scrollHeight - el.clientHeight >= offset - 1) el.scrollTop = offset
   }
 
   return { markReady }

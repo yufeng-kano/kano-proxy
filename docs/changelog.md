@@ -10,7 +10,7 @@ There is no hand-maintained `CHANGELOG.md` and no changelog table in D1. The rel
 |---------|---------|
 | `GET /api/changelog` | Session-auth JSON: running version, latest published version, update flag, sanitized release list |
 | `/changelog` (web) | One card per release, newest first; the running version is marked |
-| Topbar badge | Running version on every signed-in page; a dot appears when a newer release exists |
+| Sidebar badge | Running version on every signed-in page; a dot appears when a newer release exists |
 
 ## Data flow
 
@@ -41,7 +41,7 @@ Use the **named** import, not `import pkg from`. esbuild tree-shakes the named f
 
 `GITHUB_REPO` is public information and belongs in the committed `[vars]`. `GITHUB_TOKEN` is a secret and must never be committed — see [deployment.md](./deployment.md).
 
-A missing or misconfigured `GITHUB_REPO` degrades gracefully: the endpoint still returns the running version so the topbar badge keeps working, with an error field and an empty release list.
+A missing or misconfigured `GITHUB_REPO` degrades gracefully: the endpoint still returns the running version so the sidebar version badge keeps working, with an error field and an empty release list.
 
 ## Caching and rate limits
 

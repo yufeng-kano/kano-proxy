@@ -1,5 +1,20 @@
+/**
+ * Design tokens and the small set of genuinely global rules.
+ *
+ * Everything visual is a token: color, spacing, radius, type, motion. A raw
+ * hex, a raw `padding: 13px`, or a raw `font-size: 15px` inside a component is
+ * the same class of bug — it escapes the scale and drifts.
+ *
+ * Component styles live with their components (`components/ui/*.vue`). This
+ * file holds only what has no component to belong to: the token blocks, the
+ * document reset, and the two utilities (`.sr-only`, `.mono`) that any of them
+ * may need.
+ */
+
 :root {
   color-scheme: light dark;
+
+  /* --- Color: surfaces and text ---------------------------------------- */
   --bg: #f4f4f5;
   --surface: #ffffff;
   --surface-2: #fafafa;
@@ -18,6 +33,8 @@
   --accent-hover: #27272a;
   --hover: #f4f4f5;
   --topbar-bg: rgb(255 255 255 / 92%);
+
+  /* --- Color: status --------------------------------------------------- */
   --danger: #b91c1c;
   --danger-bg: #fef2f2;
   --danger-border: #fecaca;
@@ -33,9 +50,11 @@
   --bar-fill: #27272a;
   --bar-high: #b45309;
   --bar-full: #b91c1c;
-  /* Dashboard chart series (Dashboard page, docs/admin-ui.md). Categorical
-     identity colors, not status — kept out of the ok/warn/danger hue family
-     on purpose so a chart segment never reads as a severity signal.
+
+  /* --- Color: charts ---------------------------------------------------
+     Categorical identity colors, not status — kept out of the ok/warn/danger
+     hue family on purpose so a chart segment never reads as a severity
+     signal.
      --chart-input / --chart-input-soft are the same blue hue at two
      lightness steps (an ordinal pair: cached input tokens vs uncached),
      --chart-completion is a separate magenta hue for completion tokens.
@@ -77,14 +96,77 @@
   --series-5: #e87ba4;
   --series-6: #008300;
   --series-other: #8b8b95;
+
+  /* --- Color: interaction ---------------------------------------------- */
   /* Focus indicator — needs 3:1 against --surface per WCAG 1.4.11. */
   --ring-border: #71717a;
   --ring: 0 0 0 3px rgb(24 24 27 / 6%);
   --overlay: rgb(0 0 0 / 35%);
   --shadow: 0 1px 2px rgb(0 0 0 / 4%), 0 4px 12px rgb(0 0 0 / 4%);
   --shadow-lg: 0 16px 40px rgb(0 0 0 / 12%);
-  --radius: 10px;
+
+  /* --- Spacing ---------------------------------------------------------
+     A 4px base. Component padding, gaps, and margins pick from here so
+     density is tuned in one place instead of drifting per component. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* --- Radius ----------------------------------------------------------- */
+  --radius-xs: 4px;
   --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+
+  /* --- Type ------------------------------------------------------------
+     A dense-UI scale: 11px is the smallest thing that ships (uppercase
+     table headers and badges only), 13px is body, and the display sizes
+     are reserved for stat values and page titles. */
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 26px;
+  --text-2xl: 34px;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* Negative tracking on display sizes only — it hurts legibility at 13px. */
+  --tracking-tight: -0.02em;
+  --tracking-tighter: -0.03em;
+  --tracking-wide: 0.04em;
+
+  /* --- Motion ----------------------------------------------------------
+     Hover/press use --duration-fast; a panel entering uses --ease-enter at
+     --duration-slow and leaving uses --ease-exit at --duration (asymmetric on
+     purpose: an entrance should be seen, an exit should get out of the way).
+     Never transition `all` — name the properties. */
+  --ease: cubic-bezier(0.72, 0, 0.16, 1);
+  --ease-enter: cubic-bezier(0.24, 1, 0.32, 1);
+  --ease-exit: cubic-bezier(0.64, 0, 0.8, 0);
+  --duration-fast: 120ms;
+  --duration: 160ms;
+  --duration-slow: 240ms;
+
+  /* --- Layout ----------------------------------------------------------- */
+  --sidebar-width: 248px;
+  --header-height: 56px;
+  /* Content measure. Wide enough for a 7-column table, narrow enough that a
+     paragraph never runs the full width of an ultrawide display. */
+  --content-max: 1360px;
+
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -142,6 +224,8 @@
   }
 }
 
+/* --- Document ---------------------------------------------------------- */
+
 *,
 *::before,
 *::after {
@@ -151,24 +235,29 @@
 html,
 body {
   margin: 0;
-  min-height: 100%;
+  /* The shell is a fixed frame: the document itself never scrolls, only the
+     content region inside it does. Locking the height here is what keeps the
+     sidebar and page header put — and it also removes the reserved-gutter
+     problem the old scrolling document had. */
+  height: 100%;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
+  font-size: var(--text-base);
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* Keep centered layout width identical between short and long pages
-   on platforms with classic (space-taking) scrollbars. */
-html {
-  scrollbar-gutter: stable;
+#app {
+  height: 100%;
 }
 
 button,
 input,
-textarea {
+textarea,
+select {
   font: inherit;
   color: inherit;
 }
@@ -178,96 +267,46 @@ a {
   text-decoration: none;
 }
 
-#app,
-.app-root {
-  min-height: 100vh;
+/* One focus convention for the whole app: a 2px ring that clears 3:1 on any
+   surface (WCAG 1.4.11), never removed, never replaced per component. */
+:focus-visible {
+  outline: 2px solid var(--ring-border);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
 }
 
-/* Top bar */
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  background: var(--topbar-bg);
-  border-bottom: 1px solid var(--border);
-  backdrop-filter: blur(10px);
+/* Scrollbars inside the shell: thin and quiet, but always present so a
+   scrollable region announces itself. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
 
-.topbar-inner {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 0 20px;
-  height: 56px;
-  display: flex;
-  align-items: center;
-  gap: 24px;
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.brand-mark {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  background: var(--accent);
-  color: var(--accent-fg);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  font-weight: 700;
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-full);
 }
 
-.brand-name {
-  font-size: 14px;
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+  background-clip: content-box;
 }
 
-/**
- * Running version, linking to /changelog. Deliberately quiet — it is ambient
- * context, not navigation, so it reads as a label until hovered.
- */
-.version-badge {
-  position: relative;
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: 2px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: var(--hover);
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 550;
-  font-family: var(--mono);
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-  text-decoration: none;
-  transition: color 0.12s ease, background 0.12s ease;
-}
-
-.version-badge:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-/* Never color-only: an update also changes the hover title and adds the dot. */
-.version-badge.has-update {
-  color: var(--text-secondary);
-}
-
-.update-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-}
+/* --- Global utilities --------------------------------------------------
+   The only two that earn a global: `.sr-only` is needed by components that
+   have no stylesheet of their own (inline SVG in particular), and `.mono` is
+   the app's one typographic mode switch. */
 
 .sr-only {
   position: absolute;
@@ -281,611 +320,24 @@ a {
   border: 0;
 }
 
-.nav {
-  display: flex;
-  gap: 4px;
-  flex: 1;
-}
-
-.nav-link {
-  padding: 6px 12px;
-  border-radius: var(--radius-sm);
-  color: var(--text-secondary);
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.nav-link:hover {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.nav-link.router-link-active {
-  background: var(--hover);
-  color: var(--text);
-}
-
-.user-slot {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-
-.avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 999px;
-  object-fit: cover;
-  border: 1px solid var(--border);
-}
-
-.user-label {
-  color: var(--text-secondary);
-  font-size: 13px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.main {
-  max-width: 1100px;
-  margin: 0 auto;
-  padding: 28px 20px 64px;
-}
-
-.main-bare {
-  max-width: none;
-  padding: 0;
-  min-height: 100vh;
-}
-
-/* Typography helpers */
-.page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
-}
-
-.page-title {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
-}
-
-.page-sub {
-  margin: 4px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.muted {
-  color: var(--muted);
-}
-
-.faint {
-  color: var(--faint);
-}
-
 .mono {
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: 0.95em;
+  font-variant-ligatures: none;
 }
 
-/* Buttons */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  padding: 8px 14px;
-  font-weight: 500;
-  font-size: 13px;
-  white-space: nowrap;
-  cursor: pointer;
-  background: var(--accent);
-  color: var(--accent-fg);
-  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
-}
-
-.btn:hover:not(:disabled) {
-  background: var(--accent-hover);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-secondary {
-  background: var(--surface);
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: var(--surface-2);
-}
-
-.btn-ghost {
-  background: transparent;
-  color: var(--text-secondary);
-  border-color: transparent;
-  padding: 6px 10px;
-}
-
-.btn-ghost:hover:not(:disabled) {
-  background: var(--surface-2);
-  color: var(--text);
-}
-
-.btn-danger {
-  background: var(--surface);
-  color: var(--danger);
-  border-color: var(--danger-border);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: var(--danger-bg);
-}
-
-.btn-sm {
-  padding: 5px 10px;
-  font-size: 12.5px;
-}
-
-/* Cards / panels */
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-}
-
-.card-pad {
-  padding: 16px 18px;
-}
-
-.section-grid {
-  display: grid;
-  gap: 20px;
-}
-
-/* Single-column grid stacks: pin the track to the container width so long
-   unbroken content (emails, urls, keys, error blobs) cannot inflate it and
-   get clipped by card overflow. */
-.section-grid,
-.stack,
-.provider-body,
-.account-row,
-.usage-list,
-.field,
-.dialog {
-  grid-template-columns: minmax(0, 1fr);
-}
-
-.provider-card {
-  overflow: hidden;
-}
-
-.provider-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 16px 18px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-2);
-}
-
-.provider-title {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-
-.provider-blurb {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.provider-body {
-  padding: 12px 14px 14px;
-  display: grid;
-  gap: 10px;
-}
-
-/* Account row */
-.account-row {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 12px 14px;
-  background: var(--surface);
-  display: grid;
-  gap: 10px;
-}
-
-.account-top {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px 12px;
-}
-
-.account-meta {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.account-name {
-  font-weight: 550;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.account-plan {
-  font-size: 11.5px;
-  color: var(--muted);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.account-actions {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
-  margin-left: auto;
-}
-
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  flex-shrink: 0;
-  background: var(--faint);
-}
-
-.status-dot.active {
-  background: var(--ok);
-  box-shadow: var(--ok-ring);
-}
-
-.status-dot.standby {
-  background: var(--standby);
-}
-
-.status-dot.benched {
-  background: var(--warn);
-}
-
-.status-dot.unusable {
-  background: var(--danger);
-}
-
-.status-pill {
-  flex-shrink: 0;
-  font-size: 11px;
-  font-weight: 550;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-  color: var(--muted);
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: var(--hover);
-}
-
-/* Usage bars */
-.usage-list {
-  display: grid;
-  gap: 8px;
-}
-
-.usage-row {
-  display: grid;
-  grid-template-columns: 56px minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-}
-
-.usage-label {
-  color: var(--text-secondary);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.usage-track {
-  height: 6px;
-  border-radius: 999px;
-  background: var(--bar-track);
-  overflow: hidden;
-}
-
-.usage-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--bar-fill);
-  transition: width 0.25s ease;
-}
-
-.usage-fill.mid {
-  background: var(--bar-high);
-}
-
-.usage-fill.high {
-  background: var(--bar-full);
-}
-
-.usage-pct {
+/* Numbers that sit in a column must not jitter between values. */
+.tabular {
   font-variant-numeric: tabular-nums;
-  font-size: 12px;
-  color: var(--text-secondary);
-  min-width: 40px;
-  text-align: right;
 }
 
-.usage-reset {
-  grid-column: 1 / -1;
-  margin-top: -4px;
-  font-size: 11px;
-  color: var(--faint);
-}
-
-/* Forms */
-.field {
-  display: grid;
-  gap: 6px;
-}
-
-.field label {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--text-secondary);
-}
-
-.input {
-  width: 100%;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  background: var(--surface);
-  outline: none;
-}
-
-.input:focus {
-  border-color: var(--ring-border);
-  box-shadow: var(--ring);
-}
-
-.textarea {
-  min-height: 72px;
-  resize: vertical;
-  font-family: var(--mono);
-  font-size: 12.5px;
-}
-
-/* Alerts */
-.banner {
-  border-radius: var(--radius-sm);
-  padding: 10px 12px;
-  font-size: 13px;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
-}
-
-.banner.error {
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-  color: var(--danger);
-}
-
-.banner.warn {
-  background: var(--warn-bg);
-  border-color: var(--warn-border);
-  color: var(--warn);
-}
-
-.banner.ok {
-  background: var(--ok-bg);
-  border-color: var(--ok-border);
-  color: var(--ok);
-}
-
-/* Keys */
-.table-scroll {
-  overflow-x: auto;
-}
-
-.key-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.key-table th,
-.key-table td {
-  text-align: left;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
-}
-
-.key-table td:first-child {
-  overflow-wrap: anywhere;
-}
-
-.key-table th {
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-  color: var(--muted);
-  font-weight: 600;
-  background: var(--surface-2);
-}
-
-.key-table tr:last-child td {
-  border-bottom: none;
-}
-
-.copy-block {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-}
-
-.copy-block .label {
-  color: var(--muted);
-  font-size: 12px;
-  min-width: 72px;
-}
-
-.copy-block code {
-  flex: 1;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Modal / dialog */
-.overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--overlay);
-  z-index: 40;
-  display: grid;
-  place-items: center;
-  padding: 20px;
-}
-
-.dialog {
-  width: min(440px, 100%);
-  background: var(--surface);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  box-shadow: var(--shadow-lg);
-  padding: 20px;
-  display: grid;
-  gap: 14px;
-}
-
-.dialog h2 {
-  margin: 0;
-  font-size: 16px;
-  letter-spacing: -0.02em;
-}
-
-.dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.empty {
-  padding: 20px 12px;
-  text-align: center;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.center-state {
-  min-height: 40vh;
-  display: grid;
-  place-items: center;
-}
-
-.row-gap {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-.stack {
-  display: grid;
-  gap: 12px;
-}
-
-.hr {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 4px 0;
-}
-
-@media (max-width: 720px) {
-  .user-label {
-    display: none;
-  }
-
-  .page-header {
-    flex-direction: column;
-  }
-
-  .usage-row {
-    grid-template-columns: 48px minmax(0, 1fr) auto;
-  }
-
-  .key-table th,
-  .key-table td {
-    padding: 10px;
-  }
-
-  .key-table th:nth-child(3),
-  .key-table td:nth-child(3) {
-    display: none;
-  }
-}
-
-@media (max-width: 640px) {
-  .topbar-inner {
-    gap: 12px;
-    padding: 0 14px;
-  }
-
-  .brand-name {
-    display: none;
-  }
-
-  /* Same reason as .brand-name: the nav needs the width more than the topbar
-     needs the version. It is still on /changelog. */
-  .version-badge {
-    display: none;
-  }
-
-  .nav {
-    gap: 2px;
-  }
-
-  .nav-link {
-    padding: 6px 8px;
-  }
-}
-
-@media (max-width: 480px) {
-  .key-table th:nth-child(4),
-  .key-table td:nth-child(4) {
-    display: none;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

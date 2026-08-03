@@ -2,8 +2,30 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover so the mobile drawer and bottom sheet can reach
+         the screen edges; their own safe-area insets keep content clear of
+         the notch and home indicator. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- Repeats SITE.name from src/config/site.ts: the static shell renders
+         before the app boots, so this cannot read from it. Keep the two in
+         sync when renaming. -->
     <title>Kano Proxy</title>
+    <!-- The shell paints its own surfaces, but this covers the instant before
+         the bundle runs — without it a dark-mode load flashes white. -->
+    <meta name="color-scheme" content="light dark" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #f4f4f5;
+      }
+      @media (prefers-color-scheme: dark) {
+        html,
+        body {
+          background: #09090b;
+        }
+      }
+    </style>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23111111'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-size='16' font-family='system-ui' fill='%23f5f5f5'%3Ek%3C/text%3E%3C/svg%3E" />
   </head>
   <body>

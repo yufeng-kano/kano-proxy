@@ -1,92 +1,44 @@
 <script setup lang="ts">
-import { computed, watch } from "vue"
-import { useRoute, useRouter } from "vue-router"
+/**
+ * Root: picks between the signed-in shell and the bare login surface, and
+ * shows nothing but a quiet loader while the session is still resolving.
+ *
+ * Everything else lives in AppShell or a page — this file stays a switch.
+ */
+import { computed } from "vue"
+import { useRoute } from "vue-router"
+import AppShell from "@/components/ui/AppShell.vue"
+import Spinner from "@/components/ui/Spinner.vue"
 import { useAuth } from "@/composables/useAuth"
-import { useChangelog } from "@/composables/useChangelog"
-import { SITE } from "@/config/site"
+import { useI18n } from "@/i18n"
 
 const route = useRoute()
-const router = useRouter()
-const { user, loading, logout, isAuthenticated } = useAuth()
-const { data: changelog, setUserId, load: loadChangelog } = useChangelog()
+const { t } = useI18n()
+const { loading, isAuthenticated } = useAuth()
 
-const showShell = computed(
-  () => isAuthenticated.value && route.name !== "login",
-)
-
-/** Blank until the first load resolves, so the topbar never shows a wrong version. */
-const version = computed(() => changelog.value?.current ?? "")
-/** Server-computed — a local build ahead of the newest release is not an update. */
-const updateAvailable = computed(() => changelog.value?.updateAvailable === true)
-
-// The badge is part of the signed-in shell, so it loads once the session is
-// known rather than on mount. The composable dedupes against the Changelog
-// page's own load when both mount on the same tick.
-watch(
-  () => (showShell.value ? (user.value?.id ?? null) : null),
-  (id) => {
-    setUserId(id)
-    if (id) void loadChangelog()
-  },
-  { immediate: true },
-)
-
-async function onLogout() {
-  await logout()
-  await router.push({ name: "login" })
-}
+const showShell = computed(() => isAuthenticated.value && route.name !== "login")
+/** Session unresolved and not on login: the router is still deciding where to go. */
+const showBoot = computed(() => loading.value && !showShell.value && route.name !== "login")
 </script>
 
 <template>
-  <div class="app-root">
-    <header v-if="showShell" class="topbar">
-      <div class="topbar-inner">
-        <div class="brand">
-          <span class="brand-mark">k</span>
-          <span class="brand-name">{{ SITE.name }}</span>
-          <RouterLink
-            v-if="version"
-            to="/changelog"
-            class="version-badge"
-            :class="{ 'has-update': updateAvailable }"
-            :title="
-              updateAvailable
-                ? `Running v${version} — a newer release is available`
-                : `Running v${version} — what's new`
-            "
-          >
-            v{{ version }}
-            <span v-if="updateAvailable" class="update-dot" aria-hidden="true"></span>
-            <span v-if="updateAvailable" class="sr-only">update available</span>
-          </RouterLink>
-        </div>
-        <nav class="nav">
-          <RouterLink to="/dashboard" class="nav-link">Dashboard</RouterLink>
-          <RouterLink to="/accounts" class="nav-link">Accounts</RouterLink>
-          <RouterLink to="/models" class="nav-link">Models</RouterLink>
-          <RouterLink to="/keys" class="nav-link">Keys</RouterLink>
-        </nav>
-        <div class="user-slot">
-          <img
-            v-if="user?.picture_url"
-            :src="user.picture_url"
-            alt=""
-            class="avatar"
-            referrerpolicy="no-referrer"
-          />
-          <span class="user-label">{{ user?.email || user?.name || "Account" }}</span>
-          <button type="button" class="btn btn-ghost btn-sm" @click="onLogout">
-            Sign out
-          </button>
-        </div>
-      </div>
-    </header>
+  <AppShell v-if="showShell">
+    <RouterView />
+  </AppShell>
 
-    <main class="main" :class="{ 'main-bare': !showShell }">
-      <div v-if="loading && !showShell && route.name !== 'login'" class="center-state">
-        <p class="muted">Loading…</p>
-      </div>
-      <RouterView v-else />
-    </main>
+  <div v-else-if="showBoot" class="boot" role="status" aria-live="polite">
+    <Spinner :size="18" />
+    <span class="sr-only">{{ t("app.loading") }}</span>
   </div>
+
+  <RouterView v-else />
 </template>
+
+<style scoped>
+.boot {
+  display: grid;
+  place-items: center;
+  height: 100dvh;
+  color: var(--muted);
+}
+</style>

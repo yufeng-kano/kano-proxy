@@ -41,7 +41,9 @@ kano-proxy/
       src/
         pages/
         components/
+          ui/            # shared primitives (shell, header, table, modal…)
         composables/
+        i18n/            # message catalog + translation runtime
         services/
         types/
       package.json

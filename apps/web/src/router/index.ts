@@ -5,26 +5,27 @@ import { readPrefs, setLastPath } from "@/services/prefs"
 /**
  * Paths the app itself lands on rather than the user choosing them — a
  * restore onto one of these would be a no-op at best and a redirect loop at
- * worst, so they are never recorded as "where the user was".
+ * worst, so they are never recorded as "where the user was". The legacy
+ * aliases are here too: restoring `/accounts` would only bounce to
+ * `/providers`, so the canonical path is what gets stored.
  */
-const NON_RESTORABLE = new Set(["/", "/login"])
+const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts"])
 
 const router = createRouter({
   history: createWebHistory(),
   /**
-   * Back/forward keeps the browser's own remembered offset; a fresh
-   * navigation starts at the top. The cross-session restore is a separate
-   * mechanism (see the afterEach below and useScrollRestore) — it only
-   * applies to the boot-time landing, and only after that page's data has
-   * painted, since the document is too short to scroll before then.
+   * The shell's content region is the scroll container, not the document, so
+   * the router's own scroll handling has nothing to move here. In-session
+   * back/forward and the cross-session restore are both handled by
+   * useScrollRestore against that element.
    */
-  scrollBehavior(_to, _from, savedPosition) {
-    return savedPosition ?? { top: 0 }
+  scrollBehavior() {
+    return false
   },
   routes: [
     {
       path: "/",
-      redirect: "/dashboard",
+      redirect: "/overview",
     },
     {
       path: "/login",
@@ -33,14 +34,14 @@ const router = createRouter({
       meta: { public: true },
     },
     {
-      path: "/dashboard",
-      name: "dashboard",
-      component: () => import("@/pages/DashboardPage.vue"),
+      path: "/overview",
+      name: "overview",
+      component: () => import("@/pages/OverviewPage.vue"),
     },
     {
-      path: "/accounts",
-      name: "accounts",
-      component: () => import("@/pages/AccountsPage.vue"),
+      path: "/providers",
+      name: "providers",
+      component: () => import("@/pages/ProvidersPage.vue"),
     },
     {
       path: "/keys",
@@ -57,9 +58,13 @@ const router = createRouter({
       name: "changelog",
       component: () => import("@/pages/ChangelogPage.vue"),
     },
+    // Pre-2.0 paths. A bookmark or a persisted last-route from an older build
+    // must land on the renamed page, not fall through the catch-all.
+    { path: "/dashboard", redirect: "/overview" },
+    { path: "/accounts", redirect: "/providers" },
     {
       path: "/:pathMatch(.*)*",
-      redirect: "/dashboard",
+      redirect: "/overview",
     },
   ],
 })
@@ -73,10 +78,10 @@ let isBootNavigation = true
 
 /**
  * The URL the browser actually loaded, captured before any redirect rewrites
- * it. The guard below can't read this off `to`: "/" redirects to /dashboard
- * *before* the guard runs, so by then a bare "/" and an explicit
- * "/dashboard" look identical — and replaying a stored route over an
- * explicit /dashboard would mean the user can never navigate there.
+ * it. The guard below can't read this off `to`: "/" redirects to /overview
+ * *before* the guard runs, so by then a bare "/" and an explicit "/overview"
+ * look identical — and replaying a stored route over an explicit /overview
+ * would mean the user can never navigate there.
  */
 const entryPath = typeof window === "undefined" ? "/" : window.location.pathname
 
@@ -88,7 +93,7 @@ router.beforeEach(async (to) => {
 
   if (to.meta.public) {
     if (isAuthenticated.value && to.name === "login") {
-      return { name: "accounts" }
+      return { name: "overview" }
     }
     return true
   }
@@ -99,7 +104,7 @@ router.beforeEach(async (to) => {
 
   // Restore the last visited page — but only when the browser landed on the
   // bare app root, never when the user typed or bookmarked a specific URL
-  // (including /dashboard itself). Runs after the auth check above, so a
+  // (including /overview itself). Runs after the auth check above, so a
   // persisted path can't skip login; and `resolve().matched` keeps a route
   // deleted since it was stored from 404ing the boot.
   if (isBoot && entryPath === "/" && !to.query.redirect) {

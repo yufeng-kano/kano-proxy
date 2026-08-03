@@ -4,10 +4,10 @@
  * `localStorage`, like services/cache.ts — but a separate module on purpose.
  * That one holds server payloads: user-id-scoped, wrapped in versioned data
  * envelopes, swept on logout. This one holds only enum-ish UI choices and
- * integers — last route, scroll offsets, the dashboard's range / chart view /
- * table toggle — under a single unscoped key that survives sign-out, so a
- * reopened tab lands where the user left off (see docs/admin-ui.md
- * § View preferences).
+ * integers — last route, scroll offsets, the Overview range / chart view /
+ * table toggle, the Models provider filter — under a single unscoped key that
+ * survives sign-out, so a reopened tab lands where the user left off (see
+ * docs/admin-ui.md § View preferences).
  *
  * Nothing user-identifying goes in here: no tokens, no session state, no
  * email, no server response. That is why it needs neither the user-id scoping
@@ -30,15 +30,19 @@ const CHART_VIEWS: ChartView[] = ["tokens", "cache-rate"]
 const USAGE_DAYS: UsageDays[] = [1, 7, 30]
 
 export type Prefs = {
-  /** Router path to restore on next boot, e.g. "/dashboard". */
+  /** Router path to restore on next boot, e.g. "/overview". */
   lastPath: string | null
-  /** Scroll offset in px, keyed by router path. */
+  /** Scroll offset of the shell's content region, in px, keyed by router path. */
   scroll: Record<string, number>
-  dashboard: {
+  overview: {
     days: UsageDays
     chartView: ChartView
     /** Chart card's chart-vs-table toggle. */
     showTable: boolean
+  }
+  models: {
+    /** Provider group the Models page is filtered to; null = all. Free-form because a custom endpoint's slug is user-defined. */
+    provider: string | null
   }
 }
 
@@ -46,7 +50,8 @@ function defaults(): Prefs {
   return {
     lastPath: null,
     scroll: {},
-    dashboard: { days: 7, chartView: "tokens", showTable: false },
+    overview: { days: 7, chartView: "tokens", showTable: false },
+    models: { provider: null },
   }
 }
 
@@ -77,13 +82,23 @@ function parse(raw: string): Prefs {
   }
   base.scroll = readScroll(parsed.scroll)
 
-  if (isRecord(parsed.dashboard)) {
-    const { days, chartView, showTable } = parsed.dashboard
-    if (USAGE_DAYS.includes(days as UsageDays)) base.dashboard.days = days as UsageDays
+  if (isRecord(parsed.overview)) {
+    const { days, chartView, showTable } = parsed.overview
+    if (USAGE_DAYS.includes(days as UsageDays)) base.overview.days = days as UsageDays
     if (CHART_VIEWS.includes(chartView as ChartView)) {
-      base.dashboard.chartView = chartView as ChartView
+      base.overview.chartView = chartView as ChartView
     }
-    if (typeof showTable === "boolean") base.dashboard.showTable = showTable
+    if (typeof showTable === "boolean") base.overview.showTable = showTable
+  }
+
+  if (isRecord(parsed.models)) {
+    const { provider } = parsed.models
+    // A slug is user-defined, so there is no enum to check against — only a
+    // shape and a length bound. A provider deleted since this was written
+    // resolves to "all" at the page, not to an empty catalog.
+    if (typeof provider === "string" && provider.length > 0 && provider.length <= 64) {
+      base.models.provider = provider
+    }
   }
   return base
 }
@@ -139,18 +154,26 @@ export function getScroll(path: string): number {
   return readPrefs().scroll[path] ?? 0
 }
 
-export function setDashboardPrefs(patch: Partial<Prefs["dashboard"]>): void {
-  patchPrefs((p) => ({ ...p, dashboard: { ...p.dashboard, ...patch } }))
+export function setOverviewPrefs(patch: Partial<Prefs["overview"]>): void {
+  patchPrefs((p) => ({ ...p, overview: { ...p.overview, ...patch } }))
 }
 
-export function getDashboardPrefs(): Prefs["dashboard"] {
-  return readPrefs().dashboard
+export function getOverviewPrefs(): Prefs["overview"] {
+  return readPrefs().overview
+}
+
+export function setModelsPrefs(patch: Partial<Prefs["models"]>): void {
+  patchPrefs((p) => ({ ...p, models: { ...p.models, ...patch } }))
+}
+
+export function getModelsPrefs(): Prefs["models"] {
+  return readPrefs().models
 }
 
 /**
- * Clears persisted view state on sign-out. The dashboard's own view choices
- * (range / chart view) are impersonal and survive — but the last route and
- * its scroll offsets say where *that* user was, so they go.
+ * Clears persisted view state on sign-out. The impersonal view choices
+ * (Overview range / chart view, Models filter) survive — but the last route
+ * and its scroll offsets say where *that* user was, so they go.
  */
 export function clearNavigationPrefs(): void {
   patchPrefs((p) => ({ ...p, lastPath: null, scroll: {} }))
