@@ -43,9 +43,10 @@ export function useAccounts() {
 
   /**
    * Cache-first load.
-   * - Always paint sessionStorage cache immediately when present.
+   * - Always paint localStorage cache immediately when present.
    * - Network fetch only if cache missing/stale (>90s) or opts.refresh.
-   * - Manual refresh passes refresh=true to API (bypass backend KV too).
+   * - Manual refresh passes refresh=true to API (forces network; the server
+   *   fetches usage live — there is no backend usage KV cache).
    */
   async function loadProvider(
     provider: ProviderId,
@@ -74,7 +75,8 @@ export function useAccounts() {
     state.refreshing = true
     state.error = null
     try {
-      // Only ask backend to skip KV when user explicitly refreshes
+      // refresh=true only when the user explicitly refreshes; usage is
+      // fetched live server-side either way.
       const data = await listAccounts(provider, { refresh: force })
       state.data = data
       state.fromCache = false

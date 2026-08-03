@@ -100,7 +100,7 @@ describe("listModelsForUser — custom providers", () => {
     expect(ids).toEqual(["auto-ep/live-model"])
   })
 
-  it("auto mode caches the live result for the 90s window (no second fetch)", async () => {
+  it("auto mode caches the live result for the 1h window (no second fetch)", async () => {
     const db = new FakeD1()
     await seedProvider(db, { slug: "cached-ep", format: "openai", modelsMode: "auto" })
     let calls = 0

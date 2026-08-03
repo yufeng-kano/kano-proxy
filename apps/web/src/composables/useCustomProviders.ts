@@ -40,7 +40,7 @@ export function useCustomProviders() {
 
   /**
    * Cache-first load.
-   * - Always paint sessionStorage cache immediately when present.
+   * - Always paint localStorage cache immediately when present.
    * - Network fetch only if cache missing/stale (>90s) or opts.refresh.
    * - Manual refresh (opts.refresh) also bypasses server-side caching upstream.
    */

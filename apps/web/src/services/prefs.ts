@@ -1,17 +1,18 @@
 /**
  * View preferences — what the *user picked*, persisted across tab closes.
  *
- * Deliberately `localStorage`, unlike services/cache.ts: that module holds
- * server payloads and lives in sessionStorage so it dies with the tab. This
- * one holds only enum-ish UI choices and integers — last route, scroll
- * offsets, the dashboard's range / chart view / table toggle — so it survives
- * a browser restart, which is the whole point (see docs/admin-ui.md
+ * `localStorage`, like services/cache.ts — but a separate module on purpose.
+ * That one holds server payloads: user-id-scoped, wrapped in versioned data
+ * envelopes, swept on logout. This one holds only enum-ish UI choices and
+ * integers — last route, scroll offsets, the dashboard's range / chart view /
+ * table toggle — under a single unscoped key that survives sign-out, so a
+ * reopened tab lands where the user left off (see docs/admin-ui.md
  * § View preferences).
  *
  * Nothing user-identifying goes in here: no tokens, no session state, no
- * email, no server response. That is also why it is not user-id scoped the
- * way the sessionStorage caches are — there is nothing here to leak between
- * two people on one machine beyond a route name.
+ * email, no server response. That is why it needs neither the user-id scoping
+ * nor the logout sweep the data caches get — there is nothing here to leak
+ * between two people on one machine beyond a route name.
  *
  * Every read is validated against the current allowed values and falls back
  * to the default, so a stale schema, a removed route, or a hand-edited blob

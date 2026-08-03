@@ -24,7 +24,6 @@ import {
   fetchGrokIdentity,
   pickAccountLabel,
 } from "../providers/identity"
-import { readUsageCache, writeUsageCache } from "../pool/usage_cache"
 import { encryptJson } from "../crypto/token_crypto"
 import { isProviderId, type ProviderId } from "../env"
 import { isBenched } from "../pool/bench"
@@ -53,8 +52,7 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   const provider = parseProvider(c.req.param("provider"))
   if (!provider) return c.json({ error: "invalid provider" }, 400)
 
-  // ?refresh=true bypasses 90s KV usage cache (manual refresh). Default hits cache.
-  const force = c.req.query("refresh") === "true"
+  // Usage is always fetched live; the admin UI's localStorage cache-first (90s TTL + 90s poll) provides rate protection.
   const rows = await listAccounts(c.env.DB, user.id, provider)
   const adapter = getAdapter(provider)
   const accounts = []
@@ -77,76 +75,49 @@ providerRoutes.get("/:provider/accounts", async (c) => {
 
     if (adapter.fetchUsage) {
       try {
-        const cached = force
-          ? null
-          : await readUsageCache(c.env, user.id, provider, row.id)
-        if (cached) {
-          usage = { windows: cached.windows }
-          accountMeta = { ...accountMeta, ...cached.account }
-          // Keep upstream stale flag from when the snap was fetched (not "from cache")
-          stale = cached.stale
-          error = cached.error
-          if (
-            status !== "benched" &&
-            error &&
-            !cached.windows.length &&
-            !cached.edgeBlocked &&
-            /401|invalid.?token|unauthorized/i.test(error)
-          ) {
-            status = "unusable"
-          }
-        } else {
-          const cred = await decryptJson<StoredCredential>(
-            c.env.TOKEN_ENCRYPTION_KEY,
-            row.encrypted_payload,
-          )
-          const snap = await adapter.fetchUsage(c.env, { row, credential: cred })
-          usage = { windows: snap.windows }
-          accountMeta = { ...accountMeta, ...snap.account }
-          stale = !!snap.stale
-          error = snap.error ?? null
-          await writeUsageCache(c.env, user.id, provider, row.id, {
-            windows: snap.windows,
-            account: snap.account,
-            stale: !!snap.stale,
-            error: snap.error ?? null,
-            edgeBlocked: snap.edgeBlocked,
+        const cred = await decryptJson<StoredCredential>(
+          c.env.TOKEN_ENCRYPTION_KEY,
+          row.encrypted_payload,
+        )
+        const snap = await adapter.fetchUsage(c.env, { row, credential: cred })
+        usage = { windows: snap.windows }
+        accountMeta = { ...accountMeta, ...snap.account }
+        stale = !!snap.stale
+        error = snap.error ?? null
+        // Usage 403 bot-wall must NOT mark the account unusable — chat can still work.
+        if (
+          status !== "benched" &&
+          error &&
+          !snap.windows.length &&
+          !snap.edgeBlocked &&
+          /401|invalid.?token|unauthorized/i.test(error)
+        ) {
+          status = "unusable"
+        }
+        // Prefer upstream email / username as stable pool label
+        const email =
+          typeof snap.account.email === "string" ? snap.account.email : null
+        const display =
+          typeof snap.account.display_name === "string"
+            ? snap.account.display_name
+            : typeof snap.account.username === "string"
+              ? snap.account.username
+              : null
+        const better = pickAccountLabel({
+          email,
+          displayName: display,
+          fallback: row.label || row.id,
+        })
+        if (better && better !== row.label) {
+          row.label = better
+          await updateAccountIdentity(c.env.DB, row.id, {
+            label: better,
+            accountMetaJson: JSON.stringify(accountMeta),
           })
-          // Usage 403 bot-wall must NOT mark the account unusable — chat can still work.
-          if (
-            status !== "benched" &&
-            error &&
-            !snap.windows.length &&
-            !snap.edgeBlocked &&
-            /401|invalid.?token|unauthorized/i.test(error)
-          ) {
-            status = "unusable"
-          }
-          // Prefer upstream email / username as stable pool label
-          const email =
-            typeof snap.account.email === "string" ? snap.account.email : null
-          const display =
-            typeof snap.account.display_name === "string"
-              ? snap.account.display_name
-              : typeof snap.account.username === "string"
-                ? snap.account.username
-                : null
-          const better = pickAccountLabel({
-            email,
-            displayName: display,
-            fallback: row.label || row.id,
+        } else if (accountMeta) {
+          await updateAccountIdentity(c.env.DB, row.id, {
+            accountMetaJson: JSON.stringify(accountMeta),
           })
-          if (better && better !== row.label) {
-            row.label = better
-            await updateAccountIdentity(c.env.DB, row.id, {
-              label: better,
-              accountMetaJson: JSON.stringify(accountMeta),
-            })
-          } else if (accountMeta) {
-            await updateAccountIdentity(c.env.DB, row.id, {
-              accountMetaJson: JSON.stringify(accountMeta),
-            })
-          }
         }
       } catch (e) {
         error = e instanceof Error ? e.message : "usage failed"

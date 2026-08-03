@@ -72,7 +72,7 @@ export function useChangelog() {
 
   /**
    * Cache-first load.
-   * - Always paint sessionStorage cache immediately when present.
+   * - Always paint localStorage cache immediately when present.
    * - Network fetch only if cache missing/stale (>1h) or opts.refresh.
    * - `opts.refresh` also bypasses the server's own 1h freshness window.
    */

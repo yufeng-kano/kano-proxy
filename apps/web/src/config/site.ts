@@ -14,7 +14,7 @@ export const SITE = {
    * shell renders before the app boots — keep the two in sync when renaming.
    *
    * Not a rename target: the `sk-kano-proxy-` API key prefix and the
-   * `kano-proxy:*` sessionStorage keys are wire/storage identifiers.
+   * `kano-proxy:*` browser-storage keys are wire/storage identifiers.
    */
   name: "Kano Proxy",
   /** Empty when VITE_CONTACT_EMAIL is unset — callers must omit the link. */

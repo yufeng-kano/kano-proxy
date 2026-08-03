@@ -15,7 +15,7 @@ There is no hand-maintained `CHANGELOG.md` and no changelog table in D1. The rel
 ## Data flow
 
 ```
-GitHub Releases API ──► Worker (KV cache + sanitize) ──► Web (sessionStorage cache-first)
+GitHub Releases API ──► Worker (KV cache + sanitize) ──► Web (localStorage cache-first)
 ```
 
 ## Running version
@@ -54,7 +54,7 @@ Two time constants, one KV entry:
 | KV `expirationTtl` | 7 days | How long the entry survives |
 | `fetchedAt` freshness window | 1 hour | When a refetch is attempted |
 
-The KV key is **global** (`changelog:v1`), deliberately **not** user-scoped like `models:v1:<userId>:…` or `usage:v1:<userId>:…`. Release notes are identical for every operator; a per-user key would multiply GitHub calls by the number of signed-in users and exhaust the quota. Global key ⇒ at most one upstream call per hour for the whole deployment.
+The KV key is **global** (`changelog:v1`), deliberately **not** user-scoped like `models:v1:<userId>:…`. Release notes are identical for every operator; a per-user key would multiply GitHub calls by the number of signed-in users and exhaust the quota. Global key ⇒ at most one upstream call per hour for the whole deployment.
 
 `?refresh=true` bypasses the freshness window (same convention as `/api/models`), but still writes back to the shared entry.
 
@@ -62,7 +62,7 @@ The KV key is **global** (`changelog:v1`), deliberately **not** user-scoped like
 
 When a refetch fails, this endpoint returns the **last good data** with `stale: true` rather than an error.
 
-Every other cache in this codebase (`pool/usage_cache.ts`, `catalog/models.ts`) treats an expired entry as a miss and surfaces upstream errors. Changelog differs on purpose: **stale release notes are harmless, stale usage numbers are misleading**. It also means a quota exhausted by a co-tenant IP degrades to slightly-old notes instead of a broken page.
+The other KV cache in this codebase (`catalog/models.ts`) treats an expired entry as a miss and surfaces upstream errors. Changelog differs on purpose: **stale release notes are harmless, stale usage numbers are misleading**. It also means a quota exhausted by a co-tenant IP degrades to slightly-old notes instead of a broken page.
 
 ## HTML sanitization
 
@@ -81,6 +81,6 @@ Strategy is **escape-then-allowlist**: escape everything, then re-emit only tags
 
 ## Web caching
 
-`sessionStorage` under `kano-proxy:changelog`, cache-first like every other page: paint cache, refresh in the background, keep cache and show a non-blocking error on failure. TTL is **1 hour** here rather than the 90s used for accounts/models/usage — release notes change on deploy, not continuously.
+`localStorage` under `kano-proxy:changelog`, cache-first like every other page: paint cache, refresh in the background, keep cache and show a non-blocking error on failure. TTL is **1 hour** here rather than the 90s used for accounts/models/usage — release notes change on deploy, not continuously.
 
 Unlike the other cached domains this key carries **no user id** (the data is identical for everyone and contains nothing user-identifying), so the logout sweep clears it unconditionally.

@@ -36,7 +36,12 @@ export type ProviderModelsSection = {
   cached: boolean
 }
 
-const MODELS_CACHE_TTL_SECONDS = 90
+/**
+ * Keep this one-hour KV cache (unlike the removed per-account usage cache):
+ * client-facing GET /openai/v1/models and GET /anthropic/v1/models are called
+ * by API clients with no frontend cache. `?refresh=true` still bypasses it.
+ */
+const MODELS_CACHE_TTL_SECONDS = 3600
 
 /** `provider` is a builtin `ProviderId` or a custom provider's slug. */
 function modelsCacheKey(userId: string, provider: string): string {

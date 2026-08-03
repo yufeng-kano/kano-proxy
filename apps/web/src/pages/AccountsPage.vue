@@ -27,9 +27,9 @@ let pollTimer: number | undefined
 onMounted(async () => {
   setUserId(user.value?.id ?? null)
   customProviders.setUserId(user.value?.id ?? null)
-  // Cache-first: paint sessionStorage, network only if >90s stale
+  // Cache-first: paint localStorage, network only if >90s stale
   await Promise.all([loadAll(), customProviders.load()])
-  // Background poll every 90s (same as usage cache TTL) — no force, so server KV also helps
+  // Background poll every 90s (same as the local cache TTL) — no force
   pollTimer = window.setInterval(() => {
     void loadAll()
     void customProviders.load()
@@ -42,7 +42,7 @@ onUnmounted(() => {
 
 async function refreshAll() {
   actionError.value = null
-  // Manual: bypass frontend + backend 90s caches
+  // Manual: skip the local cache and force a network fetch
   await Promise.all([loadAll({ refresh: true }), customProviders.load({ refresh: true })])
 }
 
@@ -119,7 +119,7 @@ async function onAdded(provider: ProviderId) {
         <h1 class="page-title">Accounts</h1>
         <p class="page-sub">
           Upstream pools for Claude Code, Codex, and Grok. Usage is cache-first
-          (sessionStorage + server 90s) to avoid 429.
+          (local 90s cache + 90s poll) to avoid 429.
         </p>
       </div>
       <button type="button" class="btn btn-secondary" @click="refreshAll">

@@ -1,13 +1,13 @@
 /**
  * Release-notes cache (KV).
  *
- * Two knobs, deliberately different from the 90s per-account caches:
+ * Two knobs, deliberately different from the 1h catalog cache:
  *   - entries live 7 days, so a failed refetch always has something to fall
  *     back on (see the stale-serve note in docs/changelog.md)
  *   - a refetch is only attempted once the entry is an hour old
  *
- * The key is **global** — no user id, unlike `usage:v1:<userId>:…` and
- * `models:v1:<userId>:…`. Release notes are identical for every operator, and
+ * The key is **global** — no user id, unlike the user-scoped catalog cache.
+ * Release notes are identical for every operator, and
  * a per-user key would multiply GitHub calls by the number of signed-in users
  * against a 60/hr unauthenticated budget.
  */

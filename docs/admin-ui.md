@@ -31,25 +31,26 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 - Auth errors render in-panel via the shared `.banner.error` style.
 - Site footer pinned to the bottom of the sign-in panel: `© <year> <site name>` on the left, contact `mailto:` link on the right. The year is computed at render (`new Date().getFullYear()`) so it never goes stale.
 - Footer values come from `apps/web/src/config/site.ts`. The contact address is deploy-specific and read from **`VITE_CONTACT_EMAIL`** (`.env.development` locally, `.env.production` or a Pages build-environment variable for deploys). There is **no fallback address** — when the variable is unset `contactEmail` is empty and the footer link is not rendered, so a stale default can never ship. Do not hardcode a contact address in a component.
-- `SITE.name` in the same file is the display brand for every user-facing surface: login wordmark, footer copyright, and the signed-in topbar. `index.html` repeats it in `<title>` because the static shell renders before the app boots — keep those two in sync when renaming. The `sk-kano-proxy-` API key prefix and the `kano-proxy:*` sessionStorage keys are wire/storage identifiers and are **not** renamed with the brand.
+- `SITE.name` in the same file is the display brand for every user-facing surface: login wordmark, footer copyright, and the signed-in topbar. `index.html` repeats it in `<title>` because the static shell renders before the app boots — keep those two in sync when renaming. The `sk-kano-proxy-` API key prefix and the `kano-proxy:*` browser-storage keys are wire/storage identifiers and are **not** renamed with the brand.
 - Login-specific CSS lives in `LoginPage.vue` `<style scoped>`, not in `styles.css`. The one non-scoped rule there (`html:has(.login-page)`) exists so the reserved scrollbar gutter matches the panel instead of showing a stripe of `--bg`.
 
 ## UX rules
 
-- **Cache-first** for account lists, usage, models, and custom providers: paint `sessionStorage` immediately; network only if cache older than **90s** (or user clicks Refresh).
-- Accounts page polls every **90s** without forcing backend cache bust; Refresh button sets `?refresh=true` (bypass server KV).
-- Backend also caches per-account usage in KV for **90s** to avoid provider 429 (see `apps/api/src/pool/usage_cache.ts`); custom-provider `models_mode=auto` catalog lookups use the same 90s KV cache (see [providers.md](./providers.md)).
+- **Cache-first** for account lists, usage, models, and custom providers: paint the `localStorage` cache immediately (even if stale); network only if cache older than **90s** (or user clicks Refresh).
+- Server-data caches live in **`localStorage`**, not sessionStorage, so a reopened tab or browser restart paints the last known data instantly instead of an empty page, and multiple tabs share one cache instead of each re-fetching. Each entry is a versioned envelope `{ v, savedAt, data }`; a bumped `CACHE_SCHEMA_VERSION` or malformed blob reads as a miss, never as trusted data.
+- Accounts page polls every **90s**; Refresh button sets `?refresh=true` (bypasses the server-side models KV cache; usage is always fetched live server-side).
+- Server-side KV caching is deliberately minimal (KV free-tier writes are the scarce resource): **per-account usage has no KV layer** — `GET /api/providers/{provider}/accounts` fetches upstream usage live on every call, and upstream-429 protection comes from the frontend's 90s localStorage TTL + 90s poll interval being the only callers. The **models catalog keeps its KV cache at a 1h TTL** because the client-facing `GET /openai/v1/models` / `GET /anthropic/v1/models` are hit by API clients that have no frontend cache (see [providers.md](./providers.md)).
 - On refresh failure, keep showing cache and surface a non-blocking error.
-- Never store access tokens, refresh tokens, session secrets, or a custom provider's API key in local UI cache — a custom provider's cached row carries only the non-secret fields the `GET /api/custom-providers` response already returns (`key_mask`, never the key).
-- Cache keys scoped to the signed-in user id. Custom providers: sessionStorage key `kano-proxy:custom-providers:{userId}`, same 90s cache-first / background-refresh convention as accounts and models. Usage summary: `kano-proxy:usage:{userId}:{days}`.
+- Never store access tokens, refresh tokens, session secrets, or a custom provider's API key in local UI cache — a custom provider's cached row carries only the non-secret fields the `GET /api/custom-providers` response already returns (`key_mask`, never the key). This bar matters more now that the cache persists on disk across restarts: what *is* cached (account emails/labels, usage percentages, model ids, key masks) is non-secret display data, cleared by the logout sweep.
+- Cache keys scoped to the signed-in user id. Custom providers: localStorage key `kano-proxy:custom-providers:{userId}`, same 90s cache-first / background-refresh convention as accounts and models. Usage summary: `kano-proxy:usage:{userId}:{days}`.
 - **Changelog is the one exception to both rules above**: TTL is **1 hour** (release notes change on deploy, not continuously) and the key `kano-proxy:changelog` carries **no user id** — the data is identical for every operator and holds nothing user-identifying. The logout sweep still clears it. See [changelog.md](./changelog.md).
 
 ### View preferences (`localStorage`)
 
-Server **data** stays in `sessionStorage` (cleared when the tab closes); **view preferences** — what the user picked, not what the server said — persist in `localStorage` under a single `kano-proxy:prefs` key so a reopened tab lands where the user left off.
+Server **data** caches (above) and **view preferences** — what the user picked, not what the server said — both persist in `localStorage`, but stay separate modules: data entries are user-id-scoped versioned envelopes swept on logout, while preferences live under a single `kano-proxy:prefs` key that survives logout so a reopened tab lands where the user left off.
 
 - Stored: last visited route path, per-route scroll offset, the Dashboard's range (24h/7d/30d) and chart view (tokens / cache-rate), and the chart-vs-table toggle.
-- **Never** stores tokens, session state, emails, or any server payload — only enum-ish UI choices and integers. Unlike the sessionStorage caches it is therefore **not** user-id scoped: it holds nothing user-identifying, and a shared machine reveals only a route name.
+- **Never** stores tokens, session state, emails, or any server payload — only enum-ish UI choices and integers. Unlike the server-data caches it is therefore **not** user-id scoped and **not** swept on logout: it holds nothing user-identifying, and a shared machine reveals only a route name.
 - Every read is validated against the current allowed values and falls back to the default on anything unexpected (stale schema, hand-edited storage, removed route). A malformed blob is discarded, never trusted.
 - Restore-on-boot only replays a route the router still knows and the signed-in user may see; the auth guard runs unchanged, so a persisted path never bypasses login.
 - Scroll restore waits for the page's first data paint, then sets the offset once; a user scroll during restore cancels it rather than fighting the user.
@@ -65,7 +66,7 @@ Route `/dashboard`; signed-in `/` redirects here (nav order: Dashboard, Accounts
   - **Tokens** (default): **grouped** columns — within each time bucket, one column per model, ordered by the model's range-total tokens desc (same order as the per-model table). A column is one solid fill in the model's own color: hue here does **identity**, so the uncached / cached / completion split moves to the tooltip and the table rather than being double-encoded into the same mark. Models past the categorical cap fold into a single **Other** column rather than growing the palette.
   - **Cache rate curve**: one 2px line per model of that bucket's cache hit rate (Σ`cache_read_input_tokens` / Σ`prompt_tokens` within the bucket), on a fixed 0–100% y-axis. Buckets with no cache-known request are gaps in the line, not zeros — an unreported bucket is not a 0% bucket.
 - Both views are hand-rolled inline SVG — **no charting dependency**; colors/typography from `styles.css` tokens only, legible in both themes. Model identity uses the categorical series tokens (`--series-1..6` + `--series-other`), assigned by the model's rank in the range totals so a model keeps its color across buckets. Every view ships a legend, a hover/focus tooltip, and a **Show as table** twin so identity and values are never color-only.
-- Cache-first like every other page: sessionStorage key above, 90s TTL, paint-then-background-refresh, keep cache + non-blocking error on failure. Server side reads D1 directly (no KV layer — the query is cheap and per-user).
+- Cache-first like every other page: localStorage key above, 90s TTL, paint-then-background-refresh, keep cache + non-blocking error on failure. Server side reads D1 directly (no KV layer — the query is cheap and per-user).
 - Requests without usage data (`NULL` token fields — see [database.md](./database.md)) count toward request/error totals but are skipped by token/cache aggregates; the UI surfaces that coverage rather than hiding it.
 
 ### Series shape
@@ -95,7 +96,7 @@ Custom endpoint cards (`GET /api/custom-providers` — see [auth.md](./auth.md))
   - Codex: no public / third-party models list → empty + links to official docs (see [providers.md](./providers.md))
   - Custom providers: one group per user-defined endpoint (dynamic — as many groups as the user has created), sourced from the same `GET /api/models` payload; manual list or live-with-fallback depending on that provider's `models_mode` (see [providers.md](./providers.md))
 - Provider groups on this page are **dynamic**, not a fixed three — they render from whatever `providers` the `GET /api/models` response lists, so a newly-added custom endpoint appears without a UI code change.
-- Session API: `GET /api/models` (`?refresh=true` bypasses 90s KV cache)
+- Session API: `GET /api/models` (`?refresh=true` bypasses the 1h server KV cache)
 - Client: `GET /openai/v1/models` and `GET /anthropic/v1/models` return the same live catalog; ids are always `provider/upstream`
 - Copy model id as `provider/upstream` — works on **both** OpenAI and Anthropic bases
 
