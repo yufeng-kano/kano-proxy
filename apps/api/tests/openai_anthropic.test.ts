@@ -1820,6 +1820,57 @@ describe("openaiToAnthropicMessages: temperature clamp / top_p passthrough", () 
   })
 })
 
+describe("openaiToAnthropicMessages: sampling vs thinking", () => {
+  const base = {
+    model: "m",
+    max_tokens: 10,
+    messages: [{ role: "user", content: "x" }],
+  }
+
+  it("drops temperature when an effort turned thinking on", () => {
+    // `mapReasoning` emits output_config for any claude-code effort, so this
+    // is the shape every /openai/v1 → claude-code request with an effort has.
+    const body = openaiToAnthropicMessages({
+      ...base,
+      temperature: 0.5,
+      output_config: { effort: "high" },
+    })
+    expect("temperature" in body).toBe(false)
+  })
+
+  it("keeps temperature when thinking is explicitly disabled", () => {
+    const body = openaiToAnthropicMessages({
+      ...base,
+      temperature: 0.5,
+      thinking: { type: "disabled" },
+      output_config: { effort: "low" },
+    })
+    expect(body.temperature).toBe(0.5)
+  })
+
+  it("drops an out-of-range top_p under thinking but keeps one within [0.95, 1]", () => {
+    const low = openaiToAnthropicMessages({
+      ...base,
+      top_p: 0.5,
+      output_config: { effort: "high" },
+    })
+    expect("top_p" in low).toBe(false)
+
+    const allowed = openaiToAnthropicMessages({
+      ...base,
+      top_p: 0.97,
+      output_config: { effort: "high" },
+    })
+    expect(allowed.top_p).toBe(0.97)
+  })
+
+  it("leaves sampling untouched when there is no thinking config at all", () => {
+    const body = openaiToAnthropicMessages({ ...base, temperature: 0.5, top_p: 0.5 })
+    expect(body.temperature).toBe(0.5)
+    expect(body.top_p).toBe(0.5)
+  })
+})
+
 describe("anthropicToOpenAIChatRequest: thinking → reasoning_content round-trip", () => {
   it("concatenates thinking blocks (in order) into reasoning_content on the assistant message", () => {
     const out = anthropicToOpenAIChatRequest({

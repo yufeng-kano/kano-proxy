@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest"
-import { claudeCodeAdapter, betaHeaders, resolveBetaHeader } from "../src/providers/claude-code"
+import {
+  claudeCodeAdapter,
+  betaHeaders,
+  CLAUDE_CLIENT_FINGERPRINT,
+  resolveBetaHeader,
+} from "../src/providers/claude-code"
 import type { Env } from "../src/env"
 import type { AcquiredAccount } from "../src/pool/acquire"
 
@@ -419,5 +424,73 @@ describe("claudeCodeAdapter.fetchUsage — window mapping and the utilization sc
     stubFetch({}, {}, { usageStatus: 429 })
     const result = await claudeCodeAdapter.fetchUsage!({} as unknown as Env, usageAccount)
     expect(result).toEqual({ windows: [], account: {}, stale: true, error: "usage 429" })
+  })
+})
+
+describe("claude-code client fingerprint", () => {
+  const account = {
+    row: { id: "acc_1" },
+    credential: { access_token: "tok" },
+  } as never
+
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  async function capture(run: () => Promise<unknown>) {
+    let headers: Headers | undefined
+    globalThis.fetch = (async (_u: string, init?: RequestInit) => {
+      headers = new Headers(init?.headers)
+      return new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    }) as typeof fetch
+    await run()
+    return headers!
+  }
+
+  it("sends the CLI fingerprint on the native /anthropic passthrough", async () => {
+    const headers = await capture(() =>
+      claudeCodeAdapter.messages!(
+        {} as never,
+        account,
+        { model: "m", messages: [] },
+        new Headers(),
+      ),
+    )
+    expect(headers.get("user-agent")).toBe(CLAUDE_CLIENT_FINGERPRINT["user-agent"])
+    expect(headers.get("x-stainless-os")).toBe("MacOS")
+    expect(headers.get("x-stainless-arch")).toBe("arm64")
+  })
+
+  it("prefers the real client's own fingerprint when it sent one", async () => {
+    const headers = await capture(() =>
+      claudeCodeAdapter.messages!(
+        {} as never,
+        account,
+        { model: "m", messages: [] },
+        new Headers({
+          "user-agent": "claude-cli/9.9.9 (external, vscode)",
+          "x-stainless-os": "Linux",
+        }),
+      ),
+    )
+    expect(headers.get("user-agent")).toBe("claude-cli/9.9.9 (external, vscode)")
+    expect(headers.get("x-stainless-os")).toBe("Linux")
+    // Unsent fields still fall back to the baseline.
+    expect(headers.get("x-stainless-arch")).toBe("arm64")
+  })
+
+  it("sends the fallback fingerprint on the /openai/v1 conversion surface", async () => {
+    const headers = await capture(() =>
+      claudeCodeAdapter.chatCompletions(
+        {} as never,
+        account,
+        { upstreamModel: "m", messages: [], rawBody: {} } as never,
+      ),
+    )
+    expect(headers.get("user-agent")).toBe(CLAUDE_CLIENT_FINGERPRINT["user-agent"])
   })
 })

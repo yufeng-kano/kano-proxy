@@ -12,6 +12,33 @@ const REQUIRED_SYSTEM =
 
 const DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
+/**
+ * Claude Code CLI client fingerprint. The OAuth upstream expects requests to
+ * look like the CLI that owns these tokens; sending workerd's default
+ * `User-Agent` (or none) is the same bot-wall exposure that already bites the
+ * codex path. A real client's own values are forwarded when it sends them —
+ * these are only the fallback for surfaces with no client headers to relay.
+ */
+export const CLAUDE_CLIENT_FINGERPRINT: Record<string, string> = {
+  "user-agent": "claude-cli/2.1.63 (external, cli)",
+  "x-stainless-package-version": "0.74.0",
+  "x-stainless-runtime-version": "v24.3.0",
+  "x-stainless-os": "MacOS",
+  "x-stainless-arch": "arm64",
+}
+
+/**
+ * The fingerprint, preferring whatever the client already sent for each field
+ * so a genuine Claude Code client keeps its own identity end to end.
+ */
+function clientFingerprint(headers?: Headers): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [name, fallback] of Object.entries(CLAUDE_CLIENT_FINGERPRINT)) {
+    out[name] = headers?.get(name)?.trim() || fallback
+  }
+  return out
+}
+
 function clientId(env: Env): string {
   return env.CLAUDE_CODE_OAUTH_CLIENT_ID || DEFAULT_CLIENT_ID
 }
@@ -157,6 +184,7 @@ async function forwardToAnthropic(
       "content-type": "application/json",
       "anthropic-version": headers.get("anthropic-version") || "2023-06-01",
       "anthropic-beta": resolveBetaHeader({ clientBeta, hasOutputConfig }),
+      ...clientFingerprint(headers),
     },
     body: JSON.stringify(patched),
   })
@@ -177,6 +205,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
           authorization: `Bearer ${acc.credential.access_token}`,
           "anthropic-version": "2023-06-01",
           "anthropic-beta": "oauth-2025-04-20",
+          ...clientFingerprint(),
         },
       })
       if (!res.ok) {
@@ -240,6 +269,9 @@ export const claudeCodeAdapter: ProviderAdapter = {
         "content-type": "application/json",
         "anthropic-version": "2023-06-01",
         "anthropic-beta": betaHeaders([...CONVERSION_BETAS, EFFORT_BETA].join(",")),
+        // No client headers to relay on this surface — the proxy authors the
+        // whole upstream request, so the fallback fingerprint is all there is.
+        ...clientFingerprint(),
       },
       body: JSON.stringify(withSystem),
     })
@@ -275,6 +307,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
       authorization: `Bearer ${acc.credential.access_token}`,
       "anthropic-beta": "oauth-2025-04-20",
       "anthropic-version": "2023-06-01",
+      ...clientFingerprint(),
     }
     const [usageRes, profileRes] = await Promise.all([
       fetch(`${ANTHROPIC_API}/api/oauth/usage`, { headers }),

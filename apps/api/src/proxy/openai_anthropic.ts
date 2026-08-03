@@ -1002,11 +1002,23 @@ export function openaiToAnthropicMessages(input: {
     messages,
     stream: !!input.stream,
   }
+  // Sampling is constrained once thinking is on, and this surface always turns
+  // a client effort into `output_config` (see `mapReasoning`) — so forwarding a
+  // plain `temperature` + effort request would 400 on a combination the client
+  // never asked for. Anthropic's rule: `temperature`/`top_k` are incompatible
+  // with thinking, `top_p` only within [0.95, 1]. Thinking counts as on unless
+  // explicitly disabled — an absent `thinking` alongside an `output_config`
+  // effort still means thinking upstream. Dropped rather than clamped: quietly
+  // retuning someone's sampling is worse than honoring the real constraint.
+  const thinking =
+    input.thinking?.type !== "disabled" && (!!input.thinking || !!input.output_config)
   // OpenAI's client-facing temperature range is 0–2; Anthropic caps at 1.
-  if (typeof input.temperature === "number") {
+  if (typeof input.temperature === "number" && !thinking) {
     body.temperature = Math.max(0, Math.min(1, input.temperature))
   }
-  if (typeof input.top_p === "number") body.top_p = input.top_p
+  if (typeof input.top_p === "number" && (!thinking || (input.top_p >= 0.95 && input.top_p <= 1))) {
+    body.top_p = input.top_p
+  }
   if (systemParts.length === 1 && systemParts[0]!.type === "text") {
     body.system = systemParts[0]!.text
   } else if (systemParts.length) {

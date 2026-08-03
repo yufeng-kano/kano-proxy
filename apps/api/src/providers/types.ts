@@ -70,11 +70,20 @@ export type UpstreamModel = {
 export type ProviderAdapter = {
   /** Builtin `ProviderId`, or a custom provider's slug for BYO adapters. */
   id: string
-  /** Forward OpenAI-shaped chat completion using acquired credential. */
+  /**
+   * Forward OpenAI-shaped chat completion using acquired credential.
+   * `extras` mirrors `messages()`: `apiKeyId` scopes per-caller KV state and
+   * `waitUntil` keeps those writes alive past the Response on Workers. Both
+   * are optional — an adapter that keeps no state ignores them.
+   */
   chatCompletions(
     env: Env,
     account: AcquiredAccount,
     req: ChatCompletionRequest,
+    extras?: {
+      apiKeyId?: string | null
+      waitUntil?: (promise: Promise<unknown>) => void
+    },
   ): Promise<Response>
   /**
    * Optional Anthropic Messages entry (claude-code / custom-anthropic native

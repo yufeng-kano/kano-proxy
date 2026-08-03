@@ -158,7 +158,10 @@ export async function dispatchChatCompletions(
     if (adapter.refreshIfNeeded) {
       refreshed = await adapter.refreshIfNeeded(env, account)
     }
-    const res = await adapter.chatCompletions(env, refreshed, opts.req)
+    const res = await adapter.chatCompletions(env, refreshed, opts.req, {
+      apiKeyId: opts.apiKeyId,
+      waitUntil: opts.waitUntil,
+    })
     if (shouldBenchStatus(res.status)) {
       await benchAccount(env, opts.userId, opts.provider, account.row.id)
       exclude.add(account.row.id)

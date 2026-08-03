@@ -2,11 +2,16 @@ import type { Env } from "../env"
 import type { AcquiredAccount } from "../pool/acquire"
 import { saveCredential } from "../pool/acquire"
 import { mapReasoning } from "../utils/reasoning"
+import type { CodexReasoningReplayItem } from "./codex_reasoning_cache"
 import type { ChatCompletionRequest, ProviderAdapter, UsageWindow } from "./types"
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token"
 const CODEX_BASE = "https://chatgpt.com/backend-api"
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
+export const CODEX_USER_AGENT =
+  "codex-tui/0.146.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.146.0)"
+export const CODEX_ORIGINATOR = "codex-tui"
 
 function clientId(env: Env): string {
   return env.CODEX_OAUTH_CLIENT_ID || DEFAULT_CLIENT_ID
@@ -76,32 +81,62 @@ export const codexAdapter: ProviderAdapter = {
     return refreshCodex(env, account)
   },
 
-  /**
-   * ChatGPT OAuth has no public models list (Platform /v1/models rejects these
-   * tokens). Do not invent a catalog — UI points at official docs instead.
-   */
-  async listModels(_env, _account) {
-    return { models: [], error: null }
+  async listModels(env, account) {
+    const acc = await refreshCodex(env, account)
+    const chatgptAccountId =
+      acc.credential.account_id || accountIdFromJwt(acc.credential.access_token) || ""
+    const { fetchCodexModels } = await import("./codex_models")
+    return fetchCodexModels(acc.credential.access_token, chatgptAccountId)
   },
 
-  async chatCompletions(env, account, req) {
+  async chatCompletions(env, account, req, extras) {
     const acc = await refreshCodex(env, account)
     const mapped = mapReasoning("codex", req.reasoning_effort)
     const chatgptAccountId =
       acc.credential.account_id || accountIdFromJwt(acc.credential.access_token) || ""
 
-    const body = buildCodexRequestBody(req, mapped.reasoning)
+    const {
+      codexReasoningReplaySessionKey,
+      readCodexReasoningReplay,
+      writeCodexReasoningReplay,
+      deleteCodexReasoningReplay,
+      hashAssistantText,
+    } = await import("./codex_reasoning_cache")
+    const apiKeyId = extras?.apiKeyId ?? ""
+    const sessionKey = codexReasoningReplaySessionKey(req.affinity)
+    const replayScoped = !!apiKeyId && !!sessionKey
+
+    const body = await buildCodexRequestBody(req, mapped.reasoning)
+
+    // Re-inject the previous turn's reasoning items. `store: false` means the
+    // upstream keeps nothing, and neither wire format the client speaks can
+    // carry an opaque Responses reasoning item — so without this the model
+    // re-reasons from scratch every tool round. Only replay when the previous
+    // assistant text still matches what produced them; a mismatch means the
+    // client edited history and the items no longer belong to this turn.
+    if (replayScoped) {
+      const cached = await readCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey!)
+      if (cached) {
+        const priorText = lastAssistantText(req.messages)
+        if (priorText && (await hashAssistantText(priorText)) === cached.assistant_text_hash) {
+          body.input = mergeCodexReplayItems(body.input, cached.items)
+        }
+      }
+    }
+    const headers: Record<string, string> = {
+      authorization: `Bearer ${acc.credential.access_token}`,
+      "user-agent": CODEX_USER_AGENT,
+      originator: CODEX_ORIGINATOR,
+      connection: "Keep-Alive",
+      session_id: req.affinity?.sessionId || req.affinity?.convId || crypto.randomUUID(),
+      "content-type": "application/json",
+      accept: "text/event-stream",
+    }
+    if (chatgptAccountId) headers["chatgpt-account-id"] = chatgptAccountId
 
     const res = await fetch(`${CODEX_BASE}/codex/responses`, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${acc.credential.access_token}`,
-        "chatgpt-account-id": chatgptAccountId,
-        "OpenAI-Beta": "responses=experimental",
-        originator: "codex_cli_rs",
-        "content-type": "application/json",
-        accept: "text/event-stream",
-      },
+      headers,
       body: JSON.stringify(body),
     })
 
@@ -113,10 +148,34 @@ export const codexAdapter: ProviderAdapter = {
       })
     }
 
+    // Persist this turn's reasoning for the next one. A completed turn with
+    // nothing replayable clears the entry rather than leaving a stale one that
+    // would be re-injected against a conversation that has moved on.
+    const schedule = (p: Promise<unknown>) => {
+      if (extras?.waitUntil) extras.waitUntil(p)
+      else void p
+    }
+    const onReplayItems = replayScoped
+      ? (items: CodexReasoningReplayItem[], assistantText: string) => {
+          if (items.length === 0) {
+            schedule(deleteCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey!))
+            return
+          }
+          schedule(
+            hashAssistantText(assistantText).then((assistant_text_hash) =>
+              writeCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey!, {
+                items,
+                assistant_text_hash,
+              }),
+            ),
+          )
+        }
+      : undefined
+
     if (req.stream) {
       if (!res.body) return res
       const { codexSseToOpenAIStream } = await import("../proxy/codex_openai")
-      return new Response(codexSseToOpenAIStream(res.body, req.upstreamModel), {
+      return new Response(codexSseToOpenAIStream(res.body, req.upstreamModel, { onReplayItems }), {
         status: 200,
         headers: {
           "content-type": "text/event-stream; charset=utf-8",
@@ -128,7 +187,7 @@ export const codexAdapter: ProviderAdapter = {
     // Non-stream: consume SSE and build one completion
     if (!res.body) return res
     const { collectCodexSse } = await import("../proxy/codex_openai")
-    const openai = await collectCodexSse(res.body, req.upstreamModel)
+    const openai = await collectCodexSse(res.body, req.upstreamModel, { onReplayItems })
     if ("error" in openai) {
       // response.failed / error mid-turn: never fabricate a 200 completion.
       return Response.json(openai, { status: 502 })
@@ -176,25 +235,48 @@ export const codexAdapter: ProviderAdapter = {
  * unit-testable directly. `reasoning` is passed in already mapped (the
  * adapter resolves/validates `reasoning_effort` before calling this).
  */
-export function buildCodexRequestBody(
-  req: Pick<
-    ChatCompletionRequest,
-    "upstreamModel" | "messages" | "tools" | "tool_choice" | "response_format" | "prompt_cache_key"
-  >,
+type CodexRequestBodyInput = Pick<
+  ChatCompletionRequest,
+  "upstreamModel" | "messages" | "tools" | "tool_choice" | "response_format" | "prompt_cache_key"
+> & {
+  /** Kept only when it is the one service tier the Responses backend accepts. */
+  service_tier?: unknown
+  /** The route retains the raw client body; read only service_tier from it. */
+  rawBody?: Record<string, unknown>
+}
+
+function codexServiceTier(req: CodexRequestBodyInput): unknown {
+  if (req.service_tier !== undefined) return req.service_tier
+  return req.rawBody?.service_tier
+}
+
+export async function buildCodexRequestBody(
+  req: CodexRequestBodyInput,
   reasoning?: { effort: string; summary: "auto" },
-): Record<string, unknown> {
+): Promise<Record<string, unknown>> {
   const instructions = extractSystemInstructions(req.messages)
+  // System messages are hoisted into `instructions`; filter them before the
+  // input mapper so its defensive system→developer branch cannot duplicate
+  // the top-level instructions item.
+  const inputMessages = req.messages.filter((message) => {
+    if (!message || typeof message !== "object") return true
+    return String((message as { role?: unknown }).role ?? "") !== "system"
+  })
   // `tools: []` counts as no tools — upstream may reject tool_choice without tools.
   const hasTools = Array.isArray(req.tools) && req.tools.length > 0
   const body: Record<string, unknown> = {
     model: req.upstreamModel,
-    input: openaiMessagesToCodexInput(req.messages),
+    input: await openaiMessagesToCodexInput(inputMessages),
     stream: true, // codex backend is SSE-oriented
     store: false,
+    include: ["reasoning.encrypted_content"],
   }
   if (instructions) body.instructions = instructions
   if (reasoning) body.reasoning = reasoning
-  if (hasTools) body.tools = mapTools(req.tools)
+  if (hasTools) {
+    body.tools = mapTools(req.tools)
+    body.parallel_tool_calls = true
+  }
   const toolChoice = mapCodexToolChoice(req.tool_choice, hasTools)
   if (toolChoice !== undefined) body.tool_choice = toolChoice
   if (req.response_format) {
@@ -214,7 +296,45 @@ export function buildCodexRequestBody(
     }
   }
   if (req.prompt_cache_key) body.prompt_cache_key = req.prompt_cache_key
-  return body
+  const serviceTier = codexServiceTier(req)
+  if (serviceTier !== undefined) body.service_tier = serviceTier
+  return stripRejectedCodexFields(body)
+}
+
+const CODEX_REJECTED_BODY_FIELDS = [
+  "max_output_tokens",
+  "max_completion_tokens",
+  "temperature",
+  "top_p",
+  "truncation",
+  "user",
+  "previous_response_id",
+  "generate",
+  "prompt_cache_retention",
+  "safety_identifier",
+  "stream_options",
+] as const
+
+/** Remove fields rejected by `/codex/responses`, without touching valid fields. */
+function stripRejectedCodexFields(body: Record<string, unknown>): Record<string, unknown> {
+  const cleaned = { ...body }
+  for (const field of CODEX_REJECTED_BODY_FIELDS) delete cleaned[field]
+  if (cleaned.service_tier !== "priority") delete cleaned.service_tier
+  return cleaned
+}
+
+/**
+ * Responses rejects a `call_id` over 64 chars, and Claude Code emits tool ids
+ * long enough to hit that. Shorten to a 64-char prefix plus a hash suffix,
+ * matching the reference proxy so a `function_call` and its
+ * `function_call_output` still resolve to the same id.
+ */
+async function shortenCodexCallId(id: unknown): Promise<unknown> {
+  if (typeof id !== "string" || id.length <= 64) return id
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(id))
+  const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")
+  const suffix = `_${hex.slice(0, 16)}`
+  return id.slice(0, 64 - suffix.length) + suffix
 }
 
 /**
@@ -242,11 +362,20 @@ function mapCodexToolChoice(toolChoice: unknown, hasTools: boolean): unknown {
  * they become the top-level Responses `instructions` field (see
  * `extractSystemInstructions`), not fake `role: "user"` input items.
  */
-function openaiMessagesToCodexInput(messages: unknown[]): unknown[] {
+async function openaiMessagesToCodexInput(messages: unknown[]): Promise<unknown[]> {
   const input: unknown[] = []
   for (const m of messages as Array<Record<string, unknown>>) {
     const role = String(m.role ?? "")
-    if (role === "system") continue
+    if (role === "system") {
+      // The normal builder hoists system messages into top-level instructions
+      // before calling this mapper. Keep this defensive path Responses-valid if
+      // a system item reaches the input mapper from another caller.
+      input.push({
+        role: "developer",
+        content: contentToCodex(m.content),
+      })
+      continue
+    }
     if (role === "user") {
       input.push({
         role: "user",
@@ -270,7 +399,7 @@ function openaiMessagesToCodexInput(messages: unknown[]): unknown[] {
           const fn = tc.function as { name?: string; arguments?: string }
           input.push({
             type: "function_call",
-            call_id: tc.id,
+            call_id: await shortenCodexCallId(tc.id),
             name: fn?.name,
             arguments: fn?.arguments ?? "{}",
           })
@@ -281,12 +410,80 @@ function openaiMessagesToCodexInput(messages: unknown[]): unknown[] {
     if (role === "tool") {
       input.push({
         type: "function_call_output",
-        call_id: m.tool_call_id,
+        call_id: await shortenCodexCallId(m.tool_call_id),
         output: contentText(m.content),
       })
     }
   }
   return input
+}
+
+/**
+ * Text of the most recent assistant message, used to confirm cached reasoning
+ * items still belong to this conversation before replaying them. Scans past
+ * whatever trails it (the new user turn, tool results), matching the grok
+ * cache's `lastAssistantTextFromAnthropicMessages`. An empty result — a
+ * tool-only turn — refuses the match rather than sharing one hash across
+ * every such turn.
+ */
+export function lastAssistantText(messages: unknown[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i] as Record<string, unknown> | null
+    if (!m || typeof m !== "object") continue
+    if (String(m.role ?? "") !== "assistant") continue
+    return contentText(m.content)
+  }
+  return ""
+}
+
+/**
+ * Splice cached reasoning items into the Responses `input` ahead of the turn
+ * they belong to, skipping anything the client already replayed itself.
+ * Blind prepending would double up `function_call` items whenever the client
+ * echoes its own tool history (Claude Code does), which upstream rejects.
+ */
+export function mergeCodexReplayItems(input: unknown, cachedItems: unknown[]): unknown[] {
+  const items = Array.isArray(input) ? (input as Array<Record<string, unknown>>) : []
+  if (!Array.isArray(cachedItems) || cachedItems.length === 0) return items
+
+  const existingCallIds = new Set<string>()
+  let hasReasoning = false
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue
+    const type = String(item.type ?? "")
+    if (type === "reasoning") hasReasoning = true
+    if (type === "function_call" || type === "custom_tool_call") {
+      const id = typeof item.call_id === "string" ? item.call_id : ""
+      if (id) existingCallIds.add(id)
+    }
+  }
+
+  const replay: unknown[] = []
+  for (const raw of cachedItems) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue
+    const item = raw as Record<string, unknown>
+    const type = String(item.type ?? "")
+    // The client already carries its own reasoning — ours would conflict.
+    if (type === "reasoning" && hasReasoning) continue
+    if (type === "function_call" || type === "custom_tool_call") {
+      const id = typeof item.call_id === "string" ? item.call_id : ""
+      if (id && existingCallIds.has(id)) continue
+    }
+    replay.push(item)
+  }
+  if (replay.length === 0) return items
+
+  // Anchor before the first tool result: that is where the prior assistant
+  // turn ended, so its reasoning must sit ahead of the results it produced.
+  const anchor = items.findIndex(
+    (i) =>
+      i &&
+      typeof i === "object" &&
+      (String(i.type ?? "") === "function_call_output" ||
+        String(i.type ?? "") === "custom_tool_call_output"),
+  )
+  if (anchor < 0) return [...items, ...replay]
+  return [...items.slice(0, anchor), ...replay, ...items.slice(anchor)]
 }
 
 /** Join every `role: "system"` message's text, in order, with a blank line. */

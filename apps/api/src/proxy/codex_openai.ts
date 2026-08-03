@@ -1,5 +1,7 @@
 /** Codex Responses SSE → OpenAI Chat Completions. */
 
+import type { CodexReasoningReplayItem } from "../providers/codex_reasoning_cache"
+
 type CodexEvent = {
   type?: string
   delta?: string
@@ -12,6 +14,7 @@ type CodexEvent = {
     arguments?: string
   }
   response?: {
+    output?: unknown[]
     usage?: {
       input_tokens?: number
       output_tokens?: number
@@ -24,6 +27,77 @@ type CodexEvent = {
   message?: string
 }
 
+export type CodexReplayItemsCallback = (
+  items: CodexReasoningReplayItem[],
+  assistantText: string,
+) => void
+
+export type CodexSseOptions = {
+  /** Called once for a successful completed turn, without buffering the stream. */
+  onReplayItems?: CodexReplayItemsCallback
+}
+
+/** Pick the opaque replayable Responses output items, preserving upstream order. */
+export function extractCodexReplayItems(output: unknown): CodexReasoningReplayItem[] {
+  if (!Array.isArray(output)) return []
+  const items: CodexReasoningReplayItem[] = []
+  for (const item of output) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue
+    const type = (item as { type?: unknown }).type
+    if (
+      type === "reasoning" ||
+      type === "function_call" ||
+      type === "custom_tool_call"
+    ) {
+      items.push(item as CodexReasoningReplayItem)
+    }
+  }
+  return items
+}
+
+function assistantTextFromOutput(output: unknown): string {
+  if (!Array.isArray(output)) return ""
+  let trailing = ""
+  for (const item of output) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue
+    const record = item as {
+      type?: unknown
+      role?: unknown
+      content?: unknown
+    }
+    if (record.type !== "message" || record.role !== "assistant") continue
+    if (typeof record.content === "string") {
+      trailing = record.content
+      continue
+    }
+    if (!Array.isArray(record.content)) continue
+    const text: string[] = []
+    for (const part of record.content) {
+      if (part === null || typeof part !== "object" || Array.isArray(part)) continue
+      const value = part as { type?: unknown; text?: unknown }
+      if (value.type === "output_text" && typeof value.text === "string") {
+        text.push(value.text)
+      }
+    }
+    if (text.length) trailing = text.join("")
+  }
+  return trailing
+}
+
+function replayItemsFromEvent(
+  ev: CodexEvent,
+  assistantText: string,
+  opts: CodexSseOptions | undefined,
+): void {
+  if (!opts?.onReplayItems) return
+  const text = assistantText || assistantTextFromOutput(ev.response?.output)
+  try {
+    opts.onReplayItems(extractCodexReplayItems(ev.response?.output), text)
+  } catch {
+    /* A replay tap must never break the upstream response. */
+  }
+}
+
 /** `ev.response?.error?.message`, `ev.error?.message`, `ev.message`, then a fallback. */
 function codexErrorMessage(ev: CodexEvent): string {
   return (
@@ -34,6 +108,7 @@ function codexErrorMessage(ev: CodexEvent): string {
 export function codexSseToOpenAIStream(
   body: ReadableStream<Uint8Array>,
   model: string,
+  opts?: CodexSseOptions,
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder()
   const encoder = new TextEncoder()
@@ -41,6 +116,8 @@ export function codexSseToOpenAIStream(
   const id = `chatcmpl_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`
   let sentRole = false
   let finished = false
+  let completed = false
+  let assistantText = ""
   let sawToolCall = false
   let nextToolIndex = 0
   /** Responses item id → chat tool_calls index + whether any args streamed. */
@@ -48,6 +125,11 @@ export function codexSseToOpenAIStream(
   /** Argument deltas that arrived before their item's `added` event. */
   const pendingArgs = new Map<string, string>()
 
+  const captureCompleted = (ev: CodexEvent) => {
+    if (completed) return
+    completed = true
+    replayItemsFromEvent(ev, assistantText, opts)
+  }
   return new ReadableStream({
     async start(controller) {
       const reader = body.getReader()
@@ -152,6 +234,7 @@ export function codexSseToOpenAIStream(
                 if (!text) continue
                 ensureRole()
                 if (ev.type === "response.output_text.delta") {
+                  assistantText += text
                   chunk({ delta: { content: text } })
                 } else {
                   // De-facto extension field (DeepSeek/OpenRouter convention);
@@ -214,6 +297,7 @@ export function codexSseToOpenAIStream(
                 ev.type === "response.completed" ||
                 ev.type === "response.done"
               ) {
+                captureCompleted(ev)
                 const u = ev.response?.usage
                 finish(
                   u
@@ -258,12 +342,14 @@ export type CodexUpstreamError = { error: { message: string; type: "upstream_err
 export async function collectCodexSse(
   body: ReadableStream<Uint8Array>,
   model: string,
+  opts?: CodexSseOptions,
 ): Promise<Record<string, unknown> | CodexUpstreamError> {
   const decoder = new TextDecoder()
   const reader = body.getReader()
   let buffer = ""
   let text = ""
   let reasoningText = ""
+  let completed = false
   let usage:
     | {
         input_tokens?: number
@@ -307,11 +393,12 @@ export async function collectCodexSse(
             },
           })
         }
-        if (
-          (ev.type === "response.completed" || ev.type === "response.done") &&
-          ev.response?.usage
-        ) {
-          usage = ev.response.usage
+        if (ev.type === "response.completed" || ev.type === "response.done") {
+          if (!completed) {
+            completed = true
+            replayItemsFromEvent(ev, text, opts)
+          }
+          if (ev.response?.usage) usage = ev.response.usage
         }
       } catch {
         /* */
