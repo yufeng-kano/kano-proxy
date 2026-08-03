@@ -1,13 +1,15 @@
 /**
  * Codex subscription usage fetch.
  *
- * chatgpt.com edge bot-challenges /codex/usage by TLS/client fingerprint,
- * not headers. Verified 2026-08-01 with identical headers + IP + fake token:
- * stdlib urllib → 401 JSON (passes the wall), curl and workerd fetch() →
- * 403 HTML challenge. A Worker cannot change its fetch() fingerprint, so
- * header tuning cannot fix this — expect edgeBlocked from Workers until the
- * edge rules change. Failure is non-fatal for the account pool (chat still
- * works; /codex/responses is not bot-walled).
+ * chatgpt.com 403s this endpoint from a Worker, but NOT by TLS fingerprint —
+ * an earlier version of this comment said so and was wrong on both counts
+ * (it also claimed curl is blocked; curl passes). Measured 2026-08-03 from a
+ * residential IP with plain curl and a fake token: the request succeeds (401
+ * JSON) until `CF-Worker` or `CF-Connecting-IP` is present, at which point it
+ * is 403 HTML — any value, empty included. Cloudflare adds both to every
+ * outbound fetch(), so no header tuning here can avoid it, and the same rule
+ * blocks /codex/responses too (chat does NOT still work — the old comment's
+ * last line was wrong as well). Full evidence table in docs/providers.md.
  */
 
 export const CODEX_CLI_UA = "codex_cli_rs/0.144.3"
