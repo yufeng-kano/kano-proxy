@@ -370,16 +370,51 @@ describe("claudeCodeAdapter.fetchUsage — window mapping and the utilization sc
     ])
   })
 
+  it("REGRESSION: a weekly_scoped limit carries its percent as `percent`, not `utilization` — reading the wrong field rendered the scoped row as '—' in the UI while its label and reset time showed correctly", async () => {
+    // Shape copied from a real /api/oauth/usage response.
+    stubFetch({
+      limits: [
+        {
+          kind: "session",
+          group: "session",
+          percent: 22,
+          resets_at: "2026-08-05T00:00:00Z",
+          scope: null,
+        },
+        {
+          kind: "weekly_all",
+          group: "weekly",
+          percent: 62,
+          resets_at: "2026-08-05T00:00:00Z",
+          scope: null,
+        },
+        {
+          kind: "weekly_scoped",
+          group: "weekly",
+          percent: 59,
+          severity: "normal",
+          resets_at: "2026-08-05T00:00:00Z",
+          scope: { model: { id: null, display_name: "Fable" } },
+          is_active: false,
+        },
+      ],
+    })
+    const result = await claudeCodeAdapter.fetchUsage!({} as unknown as Env, usageAccount)
+    expect(result.windows).toEqual([
+      { label: "Fable", utilization: 59, resets_at: "2026-08-05T00:00:00Z" },
+    ])
+  })
+
   it("a weekly_scoped limit maps to a window labeled from scope.model.display_name; non-weekly_scoped entries are ignored", async () => {
     stubFetch({
       limits: [
         {
           kind: "weekly_scoped",
-          utilization: 42,
+          percent: 42,
           resets_at: "2026-08-05T00:00:00Z",
           scope: { model: { display_name: "Claude Opus 5" } },
         },
-        { kind: "something_else", utilization: 99 },
+        { kind: "something_else", percent: 99 },
       ],
     })
     const result = await claudeCodeAdapter.fetchUsage!({} as unknown as Env, usageAccount)
@@ -389,9 +424,15 @@ describe("claudeCodeAdapter.fetchUsage — window mapping and the utilization sc
   })
 
   it("a weekly_scoped limit with no scope.model.display_name falls back to the label 'scoped'", async () => {
-    stubFetch({ limits: [{ kind: "weekly_scoped", utilization: 5 }] })
+    stubFetch({ limits: [{ kind: "weekly_scoped", percent: 5 }] })
     const result = await claudeCodeAdapter.fetchUsage!({} as unknown as Env, usageAccount)
     expect(result.windows).toEqual([{ label: "scoped", utilization: 5, resets_at: null }])
+  })
+
+  it("a weekly_scoped limit with neither percent nor utilization maps to null, not 0", async () => {
+    stubFetch({ limits: [{ kind: "weekly_scoped", scope: { model: { display_name: "Fable" } } }] })
+    const result = await claudeCodeAdapter.fetchUsage!({} as unknown as Env, usageAccount)
+    expect(result.windows).toEqual([{ label: "Fable", utilization: null, resets_at: null }])
   })
 
   it("account meta comes from the profile response: email, plan_type from organization.organization_type, rate_limit_tier", async () => {

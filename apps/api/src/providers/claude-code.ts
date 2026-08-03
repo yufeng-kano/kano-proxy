@@ -347,9 +347,12 @@ export const claudeCodeAdapter: ProviderAdapter = {
       for (const lim of limits) {
         if (lim.kind === "weekly_scoped") {
           const scope = lim.scope as { model?: { display_name?: string } } | undefined
+          // Entries in `limits[]` carry the percent as `percent`, while the top-level
+          // `five_hour`/`seven_day` objects call the same number `utilization`.
+          const pct = (lim.percent as number) ?? (lim.utilization as number) ?? null
           windows.push({
             label: scope?.model?.display_name || "scoped",
-            utilization: (lim.utilization as number) ?? null,
+            utilization: pct,
             resets_at: (lim.resets_at as string) ?? null,
           })
         }
