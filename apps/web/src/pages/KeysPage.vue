@@ -263,14 +263,21 @@ async function onRevoke(key: ApiKey) {
 
 <style scoped>
 /*
- * The page fills the content region exactly, so the key list can bound itself
- * and scroll inside its own card instead of growing the page. The subtracted
- * values are the region's own padding tokens, mirrored per breakpoint below.
+ * The page fills the content region exactly, which is what gives
+ * `AppCard fill` a bounded box to scroll the key list inside of instead of
+ * growing the page (docs/admin-ui.md § Anti-scroll rules).
+ *
+ * Every value here is AppShell's own, inherited rather than restated: it owns
+ * the padding and knows how much chrome sits above this region, and a second
+ * copy would drift the first time only one of them changed breakpoint.
  */
 .page {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--space-6) - var(--space-12));
+  height: calc(
+    100dvh - var(--page-chrome, 0px) - var(--page-top, var(--space-6)) -
+      var(--page-bottom, var(--space-12))
+  );
 }
 
 .page-alert {
@@ -319,14 +326,11 @@ async function onRevoke(key: ApiKey) {
   font-weight: var(--weight-semibold);
 }
 
+/* Explicit, not inherited: Banner sets its tone color on everything inside,
+   and the note is supporting copy rather than part of the success message. */
 .fresh-note {
   color: var(--text-secondary);
   font-size: var(--text-xs);
-}
-
-/* Banner's tone color must not bleed into the copy field's own surface. */
-.fresh-body :deep(.copy) {
-  color: var(--text);
 }
 
 /* --- List --------------------------------------------------------------- */
@@ -415,18 +419,7 @@ async function onRevoke(key: ApiKey) {
   width: 85%;
 }
 
-@media (max-width: 1080px) {
-  /* The mobile bar above the content region takes its height out too. */
-  .page {
-    height: calc(100dvh - var(--header-height) - var(--space-6) - var(--space-12));
-  }
-}
-
 @media (max-width: 640px) {
-  .page {
-    height: calc(100dvh - var(--header-height) - var(--space-4) - var(--space-10));
-  }
-
   .create {
     flex-wrap: wrap;
   }

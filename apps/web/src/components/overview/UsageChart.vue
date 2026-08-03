@@ -132,24 +132,36 @@ watch(() => props.view, () => (hoveredIndex.value = null))
 // ---------------------------------------------------------------------------
 // Measured viewBox — one unit is one CSS pixel, so the plot fills its fixed
 // height exactly instead of being scaled to fit an assumed aspect ratio.
+//
+// The observed element is the component root, which is mounted in both views:
+// observing the plot itself would go stale while the table twin is showing and
+// come back wrong the moment the user switches back.
 // ---------------------------------------------------------------------------
-const plot = ref<HTMLElement | null>(null)
-const measuredW = ref(0)
+const root = ref<HTMLElement | null>(null)
+const availableW = ref(0)
 let resizeObserver: ResizeObserver | undefined
 
 onMounted(() => {
-  const el = plot.value
-  if (!el || typeof ResizeObserver === "undefined") return
+  const el = root.value
+  if (!el) return
+  availableW.value = el.clientWidth
+  if (typeof ResizeObserver === "undefined") return
   resizeObserver = new ResizeObserver(() => {
-    measuredW.value = el.clientWidth
+    availableW.value = el.clientWidth
   })
   resizeObserver.observe(el)
-  measuredW.value = el.clientWidth
 })
 
 onBeforeUnmount(() => resizeObserver?.disconnect())
 
-const plotW = computed(() => Math.max(measuredW.value || FALLBACK_PLOT_W, chartMinWidth.value))
+/**
+ * Mirrors what the plot element actually resolves to: the available width,
+ * raised by its `min-width` floor. Keeping the two in step is what makes
+ * `preserveAspectRatio="none"` a no-op rather than a stretch.
+ */
+const plotW = computed(() =>
+  Math.max(availableW.value || FALLBACK_PLOT_W, chartMinWidth.value),
+)
 const innerW = computed(() => Math.max(1, plotW.value - MARGIN.left - MARGIN.right))
 
 // ---------------------------------------------------------------------------
@@ -617,17 +629,21 @@ function rowKey(row: GroupGeom): string {
 </script>
 
 <template>
-  <DataTable
-    v-if="showTable"
-    :columns="tableColumns"
-    :rows="groupGeom"
-    :row-key="rowKey"
-    :caption="chartTitle"
-  />
+  <div ref="root" class="chart">
+    <!-- The table twin gets the plot's own height and scrolls inside it, so
+         toggling chart/table never resizes the card around it. DataTable's
+         sticky header is what keeps the columns readable through that scroll. -->
+    <div v-if="showTable" class="chart-table">
+      <DataTable
+        :columns="tableColumns"
+        :rows="groupGeom"
+        :row-key="rowKey"
+        :caption="chartTitle"
+      />
+    </div>
 
-  <div v-else class="chart">
-    <div class="chart-scroll">
-      <div ref="plot" class="chart-plot" :style="{ '--plot-min': `${chartMinWidth}px` }">
+    <div v-else class="chart-scroll">
+      <div class="chart-plot" :style="{ '--plot-min': `${chartMinWidth}px` }">
         <ChartTooltip
           v-if="hoveredBucket"
           :x="tooltipX"
@@ -638,16 +654,16 @@ function rowKey(row: GroupGeom): string {
           :empty="isRateView ? t('overview.chart.noCacheData') : t('overview.chart.emptyBucket')"
         />
 
-        <svg
-          class="chart-svg"
-          :viewBox="`0 0 ${plotW} ${PLOT_H}`"
-          preserveAspectRatio="none"
-        >
+        <!-- `preserveAspectRatio="none"` is safe *because* the viewBox is
+             measured: one unit is one CSS pixel, so there is nothing to
+             stretch. It is what stops the browser letterboxing the plot into
+             the fixed height. -->
+        <svg class="chart-svg" :viewBox="`0 0 ${plotW} ${PLOT_H}`" preserveAspectRatio="none">
           <title>{{ chartTitle }}</title>
           <desc>{{ chartDesc }}</desc>
 
-          <!-- Horizontal grid only: vertical rules would compete with the bars
-               they sit behind, and there are no axis lines or tick marks. -->
+          <!-- Horizontal grid only, no axis lines and no tick marks: vertical
+               rules would compete with the bars standing on them. -->
           <template v-if="!isRateView">
             <line
               v-for="tick in yTicks"
@@ -746,7 +762,7 @@ function rowKey(row: GroupGeom): string {
             :width="group.hitWidth"
             :height="innerH"
             tabindex="0"
-            role="img"
+            role="group"
             :aria-label="bucketAriaLabel(group)"
             @pointerenter="hoveredIndex = i"
             @pointerleave="hoveredIndex = null"
@@ -767,11 +783,13 @@ function rowKey(row: GroupGeom): string {
       </div>
     </div>
 
-    <p v-if="isRateView && !rateHasAnyPoint" class="chart-note">
+    <p v-if="!showTable && isRateView && !rateHasAnyPoint" class="chart-note">
       {{ t("overview.chart.noCacheData") }}
     </p>
 
-    <ul class="legend">
+    <!-- The legend rides both views: it is the non-color half of model
+         identity, so it must not disappear with the marks it names. -->
+    <ul v-if="!showTable" class="legend">
       <li v-for="s in modelSeries" :key="s.key" class="legend-item">
         <span class="legend-swatch" :style="{ '--swatch': s.color }" />
         <span class="mono">{{ s.label }}</span>
@@ -781,7 +799,13 @@ function rowKey(row: GroupGeom): string {
 </template>
 
 <style scoped>
+/* One height for the whole component, shared by the plot, the table twin, and
+   the page's loading placeholder. Fixed on purpose: an aspect-ratio chart in a
+   region this wide keeps growing until it owns the viewport, and the toggle
+   between chart and table must not resize the card around it. */
 .chart {
+  --plot-height: 260px;
+
   display: flex;
   flex-direction: column;
 }
@@ -796,9 +820,14 @@ function rowKey(row: GroupGeom): string {
 .chart-plot {
   position: relative;
   min-width: var(--plot-min);
-  /* Fixed, never an aspect ratio: a ratio-driven chart in a wide region grows
-     until it owns the viewport. */
-  height: 260px;
+  height: var(--plot-height);
+}
+
+/* A 31-row twin scrolls inside the same box the plot occupies. DataTable's
+   sticky header keeps the columns readable through it. */
+.chart-table {
+  height: var(--plot-height);
+  overflow: auto;
 }
 
 .chart-svg {

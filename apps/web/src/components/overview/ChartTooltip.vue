@@ -25,7 +25,7 @@ export type TooltipRow = {
 
 <script setup lang="ts">
 defineProps<{
-  /** Bucket centre as a percentage of the plot's width; the tooltip centres on it. */
+  /** Bucket centre in plot pixels; the tooltip centres itself on it. */
   x: number
   title: string
   rows: TooltipRow[]
@@ -39,7 +39,7 @@ defineProps<{
 </script>
 
 <template>
-  <div class="tooltip" :style="{ '--tip-x': `${x}%` }">
+  <div class="tooltip" :style="{ '--tip-x': `${x}px` }">
     <p class="tooltip-title">{{ title }}</p>
 
     <p v-if="!rows.length && empty" class="tooltip-empty">{{ empty }}</p>

@@ -36,6 +36,7 @@ The signed-in app is a **fixed frame, not a scrolling document**. `AppShell.vue`
 - **Active nav item** is marked by a filled pill **and** a step up in font weight — never color alone. The fill on its own is a ~2% luminance delta; the weight is what makes it read.
 - **Page header** is sticky at the top of the content region and holds the page title, its primary actions, and (where a page has sections) the section nav. It is the same component on every page.
 - The content region is the scroll container, so `window.scrollY` is meaningless here; scroll restore listens on that element (see [View preferences](#view-preferences-localstorage)).
+- `AppShell` publishes its own metrics as inherited custom properties — `--page-top`, `--page-bottom`, `--page-gutter`, and `--page-chrome` (the shell chrome above the region: 0 on desktop, the mobile bar below the shell breakpoint). A page that sizes itself to the viewport, or a header that cancels the gutter to bleed its blur, **reads those** rather than restating the values. A second copy drifts the first time only one of them changes at a breakpoint.
 
 ### Anti-scroll rules
 

@@ -133,12 +133,18 @@ body:has(.login-page) {
 
 <style scoped>
 /*
- * The document itself no longer scrolls (`html, body { overflow: hidden }` in
- * styles.css), so this page is its own scroll container: it fills the viewport
- * exactly and takes the overflow when a short window can't hold the panel.
+ * The document itself no longer scrolls (`html, body { height: 100%; overflow:
+ * hidden }` in styles.css), so this page is its own scroll container: it fills
+ * the frame exactly and takes the overflow itself when a short window — a
+ * laptop at 600px tall, a phone in landscape — can't hold the panel.
+ *
+ * `100%` of the locked chain (html → body → #app, all 100%) rather than
+ * `100dvh`: where mobile browser chrome makes the two disagree, a dvh taller
+ * than the body would put the footer under `body`'s `overflow: hidden` with no
+ * scroll that can reach it.
  */
 .login-page {
-  height: 100dvh;
+  height: 100%;
   overflow-y: auto;
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);

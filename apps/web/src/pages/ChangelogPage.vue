@@ -134,8 +134,11 @@ function onRefresh() {
                 >
                   {{ release.tag }}
                 </a>
+                <!-- "Current" is enough beside the tag it sits on; read out of
+                     context it is not, hence the spelled-out twin. -->
                 <Badge v-if="isCurrent(release.tag)" tone="accent">
-                  {{ t("changelog.currentShort") }}
+                  <span aria-hidden="true">{{ t("changelog.currentShort") }}</span>
+                  <span class="sr-only">{{ t("changelog.current") }}</span>
                 </Badge>
               </div>
               <time class="release-date" :datetime="release.published_at">
@@ -160,12 +163,16 @@ function onRefresh() {
 </template>
 
 <style scoped>
-/* 72ch is the reading measure at --text-sm; the cap is on the column, not the
-   cards, so every card lines up on both edges. */
+/*
+ * A reading column, not the page width. 72ch is the measure the *prose* wants;
+ * the card's own padding is added on top so the cap describes the text rather
+ * than the box around it. The cap sits on the column so every card lines up on
+ * both edges.
+ */
 .column {
   display: grid;
   gap: var(--space-4);
-  max-width: 72ch;
+  max-width: calc(72ch + var(--space-5) * 2);
 }
 
 .release-head {

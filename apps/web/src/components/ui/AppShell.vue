@@ -522,10 +522,16 @@ async function onSignOut() {
 .content-inner {
   --page-gutter: var(--space-8);
   --page-top: var(--space-6);
+  --page-bottom: var(--space-12);
+  /* Height the shell's own chrome takes out of the viewport above this
+     region. Zero on desktop; the mobile bar below the shell breakpoint. A page
+     sizing itself to the viewport subtracts this rather than hardcoding a
+     breakpoint-dependent guess. */
+  --page-chrome: 0px;
 
   max-width: var(--content-max);
   margin: 0 auto;
-  padding: var(--page-top) var(--page-gutter) var(--space-12);
+  padding: var(--page-top) var(--page-gutter) var(--page-bottom);
 }
 
 /* --- Responsive --------------------------------------------------------- */
@@ -539,6 +545,12 @@ async function onSignOut() {
 @media (max-width: 1080px) {
   .shell {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The mobile bar appears at this breakpoint and eats into the height a
+     viewport-sized page can claim. */
+  .content-inner {
+    --page-chrome: var(--header-height);
   }
 
   .scrim {
@@ -656,8 +668,7 @@ async function onSignOut() {
   .content-inner {
     --page-gutter: var(--space-4);
     --page-top: var(--space-4);
-
-    padding-bottom: var(--space-10);
+    --page-bottom: var(--space-10);
   }
 }
 </style>

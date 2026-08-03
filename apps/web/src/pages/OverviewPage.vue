@@ -246,7 +246,7 @@ function coverageNote(row: ModelUsageRow): string | null {
         />
       </div>
 
-      <AppCard v-if="isEmpty" class="empty-card">
+      <AppCard v-if="isEmpty">
         <EmptyState :title="t('overview.empty.title')" :body="t('overview.empty.body')">
           <template #action>
             <AppButton variant="primary" to="/keys">
@@ -284,29 +284,32 @@ function coverageNote(row: ModelUsageRow): string | null {
           </div>
         </AppCard>
 
-        <AppCard
-          fill
-          flush
-          :title="t('overview.models.title')"
-          :subtitle="t('overview.models.subtitle')"
-        >
-          <DataTable
-            v-if="modelRows.length"
-            :columns="modelColumns"
-            :rows="modelRows"
-            :row-key="modelRowKey"
-            :caption="t('overview.models.title')"
+        <div class="models-slot">
+          <AppCard
+            fill
+            flush
+            class="models-card"
+            :title="t('overview.models.title')"
+            :subtitle="t('overview.models.subtitle')"
           >
-            <template #cell-model="{ row }">
-              <span class="mono model-id">{{ row.model }}</span>
-            </template>
-            <template #cell-cacheRate="{ row }">
-              <span class="tabular">{{ format.percent(row.cache_rate) }}</span>
-              <span v-if="coverageNote(row)" class="coverage">{{ coverageNote(row) }}</span>
-            </template>
-          </DataTable>
-          <EmptyState v-else compact :title="t('overview.models.empty')" />
-        </AppCard>
+            <DataTable
+              v-if="modelRows.length"
+              :columns="modelColumns"
+              :rows="modelRows"
+              :row-key="modelRowKey"
+              :caption="t('overview.models.title')"
+            >
+              <template #cell-model="{ row }">
+                <span class="mono model-id">{{ row.model }}</span>
+              </template>
+              <template #cell-cacheRate="{ row }">
+                <span class="tabular">{{ format.percent(row.cache_rate) }}</span>
+                <span v-if="coverageNote(row)" class="coverage">{{ coverageNote(row) }}</span>
+              </template>
+            </DataTable>
+            <EmptyState v-else compact :title="t('overview.models.empty')" />
+          </AppCard>
+        </div>
       </div>
     </div>
   </div>
@@ -364,9 +367,24 @@ function coverageNote(row: ModelUsageRow): string | null {
 @container (min-width: 1200px) {
   .panels {
     grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
-    /* Both cards share one row height, which is what gives `fill` a bounded
-       box to scroll the table inside of. */
-    align-items: stretch;
+  }
+
+  /* The row must be as tall as the *chart*, not as tall as the model list —
+     otherwise a 40-model range sets the row height and pushes the page past
+     the fold, which is exactly what this page exists not to do. Taking the
+     breakdown out of flow makes its slot contribute nothing; the slot then
+     stretches to the chart's height and the card fills it, which is what
+     finally gives `fill` a bounded body to scroll the table inside.
+     (`.region` is a container-query container, so it is already a containing
+     block for absolutes — the slot's own `relative` is what keeps the card
+     anchored to its column rather than to the whole region.) */
+  .models-slot {
+    position: relative;
+  }
+
+  .models-card {
+    position: absolute;
+    inset: 0;
   }
 }
 

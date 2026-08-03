@@ -228,6 +228,11 @@ const tabs = computed<SectionItem[]>(() => [
   ...searched.value.map((g) => ({ id: g.key, label: g.name, count: g.models.length })),
 ])
 
+/** Names the panel after the tab that opened it — the tabs carry no ids to point at. */
+const activeLabel = computed(
+  () => tabs.value.find((tab) => tab.id === activeTab.value)?.label ?? t("models.all"),
+)
+
 const showSkeleton = computed(() => loading.value && models.value.length === 0)
 const noResults = computed(() => hasQuery.value && shownCount.value === 0)
 /**
@@ -356,7 +361,16 @@ async function copyId(id: string) {
       </template>
     </Banner>
 
-    <AppCard fill flush class="catalog">
+    <!-- The panel the tabs point at: SectionNav's `aria-controls` is
+         `panel-<id>`, and only the selected one is ever in the DOM. -->
+    <AppCard
+      fill
+      flush
+      class="catalog"
+      :id="`panel-${activeTab}`"
+      role="tabpanel"
+      :aria-label="activeLabel"
+    >
       <!-- Skeletons are decoration; the status beside them is what a screen
            reader gets. -->
       <div v-if="showSkeleton" class="skeletons">
@@ -437,15 +451,21 @@ async function copyId(id: string) {
 
 <style scoped>
 /*
- * The page is exactly the content region minus its padding, so the catalog
- * card can bound itself and scroll internally instead of growing the page
- * (docs/admin-ui.md § Anti-scroll rules). The subtracted values are the
- * region's own padding tokens, mirrored per breakpoint below.
+ * The page is exactly the content region minus its padding, which is what
+ * gives `AppCard fill` a bounded box to scroll the catalog inside of instead
+ * of growing the page (docs/admin-ui.md § Anti-scroll rules).
+ *
+ * Every value here is AppShell's own, inherited rather than restated: it owns
+ * the padding and knows how much chrome sits above this region, and a second
+ * copy would drift the first time only one of them changed breakpoint.
  */
 .page {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--space-6) - var(--space-12));
+  height: calc(
+    100dvh - var(--page-chrome, 0px) - var(--page-top, var(--space-6)) -
+      var(--page-bottom, var(--space-12))
+  );
 }
 
 .page-alert {
@@ -467,20 +487,46 @@ async function copyId(id: string) {
 
 /* --- Groups ------------------------------------------------------------- */
 
+/*
+ * On the "All" tab the groups stack inside one scroll region, so each group's
+ * head sticks: scrolled deep into a long catalog, "which provider is this id
+ * from" stays answerable without scrolling back up. Each head is bounded by its
+ * own section, so the next group's head pushes the previous one out.
+ *
+ * A declared height rather than a content-driven one, because the table header
+ * below has to park under it exactly — a measured offset is the only way two
+ * sticky bars stack without overlapping.
+ */
+.group {
+  --group-head-height: 40px;
+}
+
 .group + .group {
   border-top: 1px solid var(--border);
 }
 
 .group-head {
+  position: sticky;
+  top: 0;
+  /* Above DataTable's own sticky header (z-index 1), which parks beneath it. */
+  z-index: 2;
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--space-2);
-  flex-wrap: wrap;
-  padding: var(--space-4) var(--space-4) var(--space-3);
+  height: var(--group-head-height);
+  padding: 0 var(--space-4);
+  /* Opaque, not translucent: rows scrolling under a semi-transparent bar smear
+     into the label. */
+  background: var(--surface);
+}
+
+.group :deep(.table th) {
+  top: var(--group-head-height);
 }
 
 .group-name {
   margin: 0;
+  flex-shrink: 0;
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
@@ -497,12 +543,14 @@ async function copyId(id: string) {
 
 .group-count {
   margin-left: auto;
+  flex-shrink: 0;
+  padding-left: var(--space-2);
   color: var(--faint);
   font-size: var(--text-2xs);
 }
 
 .group-alert {
-  padding: 0 var(--space-4) var(--space-3);
+  padding: var(--space-2) var(--space-4) var(--space-3);
 }
 
 /* --- Rows --------------------------------------------------------------- */
@@ -551,18 +599,7 @@ async function copyId(id: string) {
   width: 55%;
 }
 
-@media (max-width: 1080px) {
-  /* The mobile bar above the content region takes its height out too. */
-  .page {
-    height: calc(100dvh - var(--header-height) - var(--space-6) - var(--space-12));
-  }
-}
-
 @media (max-width: 640px) {
-  .page {
-    height: calc(100dvh - var(--header-height) - var(--space-4) - var(--space-10));
-  }
-
   .search {
     max-width: none;
   }

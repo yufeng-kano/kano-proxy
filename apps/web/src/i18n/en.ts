@@ -287,6 +287,9 @@ export const en = {
   "changelog.title": "What's new",
   "changelog.subtitle": "Every release, newest first",
   "changelog.currentShort": "Current",
+  /* Long form of the badge above, rendered sr-only: a screen reader listing
+     tags out of context gets "Current" with nothing to be current *of*. */
+  "changelog.current": "You're on this version",
   "changelog.updateAvailable": "{version} is available",
   "changelog.noNotes": "No notes for this release.",
   "changelog.empty.title": "No releases yet",
