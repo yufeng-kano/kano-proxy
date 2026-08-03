@@ -17,7 +17,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [project-structure.md](./project-structure.md) | Monorepo layout and module boundaries |
 | [deployment.md](./deployment.md) | Domains, DNS, Wrangler, secrets, local dev, release CI |
 | [logging.md](./logging.md) | What is logged (no content) |
-| [testing.md](./testing.md) | Test strategy and commands |
+| [testing.md](./testing.md) | Test strategy, cost-safety rules, commands |
 
 ## Stack (fixed)
 

@@ -1,5 +1,9 @@
 # Testing
 
+## Cost safety (hard rule)
+
+Real upstream traffic is real money. **Never** debug, reproduce, bisect, or benchmark by sending real requests through the deployed proxy or directly to paid upstreams — verification is unit tests with stubbed `fetch`. A live smoke test requires the operator's explicit per-instance approval and must be minimal (tiny prompt, `max_tokens` ≤ 32, no long-context/`[1M]` variants, never in a loop or size sweep). For production failures, use free evidence first: `request_logs` in D1 (`wrangler d1 execute --remote`), `wrangler tail`, Cloudflare dashboards.
+
 ## Layers
 
 1. **Unit** — pure adapters (OpenAI↔Anthropic mapping, reasoning_effort map, model parse, key hash).

@@ -5,130 +5,49 @@ alwaysApply: true
 
 # kano-proxy
 
-Canonical project rules. Cursor / Agents / Claude entrypoints symlink to this file.
+Canonical project rules (`.rule`; Cursor / AGENTS.md / CLAUDE.md symlink here). This file keeps only the guardrails — `docs/` is the source of truth for details.
 
-## Docs, artifacts, and secrets
+## Docs first
 
-### Documentation
+- Before non-trivial work, read `docs/index.md` and the linked docs matching the task.
+- Feature/schema/behavior changes: update `docs/` first, then implement (small obvious fixes exempt). Keep `docs/index.md` paths and summaries in sync.
+- If a request conflicts with docs, state the conflict and wait for docs or an explicit user override.
 
-- Before non-trivial work, read `docs/index.md` (when it exists) and any linked docs that match the task.
-- `docs/` is the source of truth for requirements, API behavior, data models, and deploy steps.
-- For feature or schema changes: update `docs/` first, then implement. Small fixes (typos, formatting, obvious bugs) do not require a docs change first.
-- When adding, moving, deleting, or renaming docs, update `docs/index.md` paths and summaries.
-- If a user request conflicts with docs, state the conflict and wait for docs (or explicit user override) before changing behavior.
+## Secrets and private context
 
-### Build artifacts and `.gitignore`
+- Never commit secrets (API tokens, upstream LLM keys, OAuth client secrets, session/cookie secrets). Real values live in `.dev.vars` / `wrangler secret` / CI secret stores; tracked files and docs use placeholders like `<upstream-api-key>`. Never print secret values — only whether one exists. If unsure whether a value is secret, treat it as secret.
+- `.local/` (gitignored; committed template `.local.example/`) holds private ops context: real DNS, hostnames, route bind order, deploy notes. Read it before deploy/DNS/production work and prefer its facts; never copy its contents into tracked files, commits, or PR text. No tokens in `.local/` either. If it's missing, use placeholders and ask the user for private values.
+- Committed `apps/api/wrangler.toml` keeps placeholder D1/KV ids and local `APP_URL`; real production ids/hosts go only in gitignored `wrangler.production.toml`. Deploy/migrate/secret with `--config wrangler.production.toml`.
 
-- Confirm compile/tool outputs are gitignored (`node_modules/`, `dist/`, `.wrangler/`, `coverage/`, `.vite/`, `*.tsbuildinfo`, `.local/`, etc.).
-- Do not delete ignored artifacts just to clean `git status`.
-- Delete artifacts only when the user asks, they cause errors, or a clean rebuild must be verified; explain why first.
-- New tools that create local outputs must update `.gitignore`.
+## Stack
 
-### Local agent data (`.local/`)
+- Cloudflare by default: Workers (API/proxy, TypeScript), Pages (Vue 3 + Vite + TypeScript web), D1, KV, Durable Objects only if coordination requires. Single approved exception: Codex egress relay on Cloud Run (`docs/codex-relay.md`). Any other non-Cloudflare service or new primary language requires a docs rationale first.
+- Environments: local + production only. No staging without explicit user approval and a docs update.
+- D1 schema changes only via Wrangler migrations under `apps/api/migrations/`, docs (`docs/database.md`) updated first; never edit production schema in the Dashboard.
+- Monorepo layout and module boundaries: `docs/project-structure.md`. Domains, DNS, Wrangler, release CI: `docs/deployment.md` (tracked docs keep placeholders; real DNS lives in `.local/dns.md`).
+- Releases: production deploys happen only by publishing a GitHub Release — never auto-deploy from push to `main` or PRs. SemVer: tag `vX.Y.Z` must match root `package.json` `"version"`, bumped + committed + pushed before tagging; default bump is minor. Full flow: `docs/deployment.md`.
 
-- **`.local/`** at the repo root is **gitignored** private operator/agent context (not open-source): real DNS, production hostname, zone notes, Worker route bind order, deploy checklist progress, Cloudflare account labels.
-- **Template (committed):** `.local.example/`. First-time setup: `cp -R .local.example .local`, then fill in real values under `.local/` only.
-- Before deploy, DNS, custom domain, or production bootstrap work: **read `.local/` when it exists** (e.g. `dns.md`, `deploy-notes.md`) and prefer those facts over inventing hostnames.
-- **Never commit** `.local/`, never copy real hostnames/DNS/account ids from it into `docs/`, source, commits, PR text, or public examples. Public docs keep placeholders such as `<your-domain>`.
-- Prefer structured markdown under `.local/` (see `.local.example/`). Do not use `.local/` as a dump for API tokens or OAuth client secrets — those stay in `.dev.vars` / `wrangler secret` / CI secret stores.
-- If `.local/` is missing, continue with placeholders and ask the user for private values rather than writing them into tracked files.
-- **Production Wrangler config:** committed `apps/api/wrangler.toml` must keep **placeholder** D1/KV ids and local `APP_URL`. Real production ids + production host vars go only in gitignored `apps/api/wrangler.production.toml` (from `wrangler.production.example.toml`). Never commit production resource UUIDs or live hostnames into tracked wrangler/docs for this open-source repo. Deploy/migrate/secret with `--config wrangler.production.toml`.
+## Proxy guardrails
 
-### Secrets
+- Preserve end-to-end streaming (SSE/chunked); never buffer a whole upstream stream in memory.
+- Clients authenticate with project-issued API keys or sessions — upstream provider keys stay in secrets and never reach clients.
+- Rate limits and usage accounting fail closed for abuse but must not crash the Worker or wipe unrelated state.
+- Do not log full prompts, completions, or secrets by default (`docs/logging.md`).
+- No password login — admin sign-in is Google OIDC; API keys stored hashed at rest (`docs/auth.md`). API behavior, failover, pools: `docs/api.md`, `docs/providers.md`. Admin UI cache-first rules: `docs/admin-ui.md`.
 
-- Never commit secrets: API tokens, upstream LLM keys, OAuth client secrets, private keys, cookie/session secrets, or personal credentials.
-- Committed examples and docs may only use placeholders such as `<upstream-api-key>`, `<google-client-id>`.
-- Real secrets live in gitignored files (`.dev.vars`, `.env.local`, **not** casually in git history) or Cloudflare / CI secret stores. Private non-secret ops context (DNS, hostnames) lives in **`.local/`**.
-- Read secrets from env or bindings; never hardcode them in source, docs, fixtures, or scripts.
-- Do not print secret values in replies, logs, or command summaries—only whether a key exists. Same for raw private DNS/hostname tables from `.local/` unless the user is actively doing deploy work and needs them.
-- If unsure whether a value is secret, treat it as secret unless the user says it may be committed.
+## Cost safety — real upstream traffic is real money
 
-## Cloudflare stack and project structure
+- **Never** debug, reproduce, bisect, or benchmark by sending real requests through the deployed proxy or directly to paid upstreams; every such request bills the operator, and large-context probes against premium models cost dollars each. Verification is unit tests with stubbed `fetch`.
+- A live smoke test needs the user's explicit per-instance approval and must be minimal: tiny prompt, `max_tokens` ≤ 32, no long-context/`[1M]` variants, never in a loop or size sweep.
+- For production failures use free evidence first: `request_logs` in D1 (`wrangler d1 execute --remote`), `wrangler tail`, Cloudflare dashboards. Do not generate traffic to make logs appear.
+- Treat paid upstream credit balances like production data: exhausting them is an outage.
 
-### Platform
+## Real data only
 
-- Default stack is Cloudflare only: Workers (API/proxy), Pages (web), D1 (relational data), KV (rate limits/cache), Durable Objects when strong consistency or coordination is required, R2 only if docs call for object storage (e.g. export/logs).
-- Environments: local development and production only. No staging env, staging domain, or staging D1/KV/R2 unless the user explicitly approves and `docs/` is updated.
-- Prefer Cloudflare-recommended patterns and what is written in `docs/`.
-- Non-Cloudflare services require a docs update covering reason, risk, and alternatives before implementation.
+- Never fabricate product data (models, accounts, usage, keys, profiles). Frontend renders only what the backend returns (empty is fine); backend never hard-codes model ids, emails, or usage as if live — source from upstream APIs or D1 rows created by real flows. If a live source is missing, return empty/`available: false` and document the gap.
+- Allowed exceptions: unit-test fixtures/mocks in `tests/`, docs examples with explicit placeholders, pure UI chrome. Treat existing hard-coded product lists as debt: replace when touching that area.
 
-### Domains and deploy
+## Misc
 
-- Web on Pages; API/proxy on Workers. Same-hostname routing (e.g. Pages at apex, Worker on `/v1/*` or `/api/*`) must be documented in `docs/deployment.md` using **placeholders** only.
-- Create correct DNS records before attaching custom domains; do not leave pending hostnames and fix DNS later.
-- Record **real** DNS type, target, proxy status, and bind order in **`.local/dns.md`** (gitignored). Do not put production hostnames or live DNS tables into tracked `docs/` unless the user explicitly wants them public.
-- Before deploy: run the project's local verify/test/build or preview steps. Commands belong in package scripts or `docs/`, not undocumented one-offs.
-
-### Releases, versioning, and CI deploy
-
-- **Production deploys are release-driven**, not every commit. Publishing a GitHub Release runs `.github/workflows/release-deploy.yml` (test → typecheck → build → D1 migrate remote → Worker deploy → Pages deploy). Manual re-run: `workflow_dispatch`.
-- **Versioning is SemVer** `MAJOR.MINOR.PATCH`, tags **`vMAJOR.MINOR.PATCH`** (e.g. `v1.2.0`). Root **`package.json` `"version"`** must match (no leading `v`, e.g. `"1.2.0"`).
-- **Every version bump must simultaneously:** (1) update root `package.json` `"version"`, (2) **git commit**, (3) **git push** to origin, (4) create tag + GitHub Release on that commit. Never tag/release without the package.json bump committed and pushed.
-- **Default bump is minor:** treat the next release as **`x.(y+1).0`** (patch resets to `0`). Example: last tag `v1.2.3` → default next `v1.3.0`. Agents helping cut a release should propose this bump unless the user specifies otherwise.
-- **Major (`(x+1).0.0`)** only for breaking API/product changes the user acknowledges. **Patch (`x.y.(z+1)`)** only when the user asks for a fix-only release (no feature bump).
-- Do not auto-deploy from push to `main` or from PRs. PRs may get verify-only CI later; production stays on Release publish.
-- CI must **not** commit production ids: the workflow builds a temporary `wrangler.production.toml` from GitHub Secrets / Variables (see `docs/deployment.md`). Worker app secrets (`GOOGLE_*`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`) remain in Cloudflare secret store—not re-uploaded on every release unless the operator deliberately rotates them.
-- Never put `CLOUDFLARE_API_TOKEN` or production resource UUIDs into the repo; only GitHub Secrets / gitignored `.local/`.
-
-### Data
-
-- D1 schema is managed only via Wrangler migrations under `apps/api/migrations/` (or the path named in docs). Do not change production schema in the Dashboard.
-- Before schema changes: update `docs/database.md`, then add a migration; apply with `wrangler d1 migrations create/apply/list`.
-
-### Languages and apps
-
-- API/proxy: TypeScript on Cloudflare Workers.
-- Web: Vue.js + Vite + TypeScript on Cloudflare Pages.
-- Prefer TypeScript for tests, tooling, and config when practical. Plain JS only when a tool or platform requires it.
-- Do not introduce Rust, Go, Python, or other primary languages in API/web without a docs rationale.
-- Scaffold with official tools (`npm create cloudflare`, `npm create vite`, etc.) unless docs record why a manual layout is required.
-
-### Architecture
-
-- Follow the monorepo layout in `docs/project-structure.md` once it exists; keep modules with clear boundaries.
-- Entry files wire routes and dependencies; put logic in focused modules (`routes/`, `auth/`, `proxy/`, `services/`, `http/`, `utils/`, etc.).
-- Vue: split into `layouts/`, `views/`, `components/`, `composables/`, `services/`, `types/`, `utils/`; keep `App.vue` thin.
-- Do not add packages or abstractions without a clear ownership and test approach. Prefer refactoring a bad structure (docs first if behavior/architecture changes) over stacking patches.
-
-## LLM API proxy
-
-### Proxy behavior
-
-- Primary product is an LLM API proxy (prefer OpenAI-compatible routes such as `/v1/chat/completions`) plus a small admin/web UI.
-- Preserve end-to-end streaming (SSE / chunked responses). Do not buffer an entire upstream stream in memory when proxying chat completions.
-- Upstream provider keys stay in Cloudflare secrets / `.dev.vars` only. Clients authenticate with project-issued keys or sessions—never with upstream keys.
-- Prefer multi-upstream failover (primary → backup providers) and short timeouts so one provider outage does not take down the service.
-- Rate limits and usage accounting must fail closed for abuse (reject over-quota) but must not crash the Worker or wipe unrelated state.
-- Do not log full prompts, completions, or secrets by default; if auditing is required, document retention and redaction in `docs/` first.
-
-### Cost safety — real upstream traffic is real money
-
-- **Never** debug, reproduce, bisect, or benchmark by sending real requests through the deployed proxy (or directly to paid upstreams). Every such request bills the operator's provider account; large-context probes against premium models cost dollars *each*. Verification is unit tests with stubbed `fetch` — free and deterministic.
-- A live smoke test is allowed only with the user's **explicit per-instance approval**, and must be the smallest possible request: tiny prompt, `max_tokens` ≤ 32, no long-context/`[1M]` variants, never in a loop or size sweep.
-- For "why did it fail in production" questions, use free evidence first: `request_logs` in D1 (`wrangler d1 execute --remote`), `wrangler tail`, Cloudflare dashboards. Do not generate traffic to make logs appear.
-- Agents must treat paid upstream credit balances like production data: exhausting them is an outage (the pool 402-benches and clients hard-fail).
-
-### Auth
-
-- No password-based login for the admin/web UI.
-- Use OIDC (e.g. Google) for operator/admin sign-in; details (callback, session cookie, CSRF) live in `docs/auth.md`.
-- Client access to the proxy uses issued API keys (or another scheme defined in docs), stored hashed at rest when persisted in D1.
-
-### Admin UI UX
-
-- Cache-first is for admin metadata only (account display, issued key list metadata, usage summaries)—not for proxying LLM traffic.
-- If cache exists, show it first, then refresh in the background; on refresh failure, keep showing cache and surface a non-blocking error/retry.
-- Never put access tokens, refresh tokens, or session secrets in local UI cache.
-- Cache keys must be scoped to the signed-in user.
-
-### Naming
-
-- Fix clear typos or non-idiomatic names in code identifiers and filenames when touching that code; tell the user what was renamed. Do not rename user-facing product strings or deliberate spellings without asking.
-
-## Real data only (no fake data)
-
-- **Do not invent product data.** Lists and UI that represent real system state (models, accounts, usage, keys, profiles, plans, etc.) must come from live APIs, D1, or upstream provider responses—not hard-coded catalogs, dummy rows, or placeholder business content in app source.
-- **Frontend:** do not ship static fake arrays for models/accounts/usage/keys. Render only what the backend returns (empty list is fine if the API returns empty).
-- **Backend:** do not hard-code model IDs, account emails, usage percentages, or similar as if they were live. Prefer upstream endpoints (e.g. provider `/v1/models`, OAuth usage/profile) or persisted D1 rows created by real user/provider flows.
-- **Allowed exceptions:** unit-test fixtures and mocks in `tests/`; docs/examples with explicit placeholders; pure UI chrome (labels, empty-state copy). If a live source is missing, return empty/`available: false` and document the gap—do not fabricate a convincing list.
-- When existing code uses hard-coded product lists, treat that as debt: replace with API-sourced data when touching that area (or when the user asks).
+- Build/tool outputs stay gitignored; new tools with local outputs must update `.gitignore`. Do not delete ignored artifacts just to clean `git status` — only when asked, on errors, or for a verified clean rebuild (explain first).
+- Fix clear typos in code identifiers/filenames when touching that code and report the rename; do not rename user-facing strings or deliberate spellings without asking.
