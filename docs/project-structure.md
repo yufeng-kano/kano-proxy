@@ -29,6 +29,14 @@ kano-proxy/
       wrangler.production.example.toml
       wrangler.production.toml      # gitignored: real D1/KV + prod host
       package.json
+    relay/               # Codex egress relay — Deno on Cloud Run (the one approved
+                          #   non-Cloudflare piece; see docs/codex-relay.md).
+                          #   No package.json on purpose: not a pnpm workspace member.
+      main.ts            # Deno.serve entry (PORT, upstream base)
+      relay.ts           # handler factory: allowlist, pipe, markers
+      relay_test.ts
+      deno.json          # tasks: test / check / start
+      Dockerfile
     web/                 # Vue + Vite → Pages
       src/
         pages/
@@ -54,4 +62,5 @@ kano-proxy/
 - `providers/*` — upstream transport + usage + OAuth specifics. The two custom-endpoint adapters are factories (`createCustomOpenAIAdapter(row)` / `createCustomAnthropicAdapter(row)`), built fresh per request from a `custom_providers` D1 row — never added to the static builtin registry in `providers/index.ts`.
 - `proxy/*` — format conversion and streaming.
 - `pool/*` — provider-agnostic selection/bench.
+- `apps/relay` — dumb byte pipe only: no auth logic (Cloud Run IAM fronts it), no state, no format awareness, no credentials at rest. Anything smarter belongs in the Worker.
 - Vue: thin `App.vue`; logic in composables/services.

@@ -33,9 +33,14 @@ CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 # Releases source for the changelog feature (public info) — forks point this at their own repo.
 GITHUB_REPO = "yufeng-kano/kano-proxy"
 
+# Optional codex egress relay (docs/codex-relay.md): set CODEX_RELAY_URL in
+# wrangler.production.toml [vars] (or .dev.vars locally) and pair it with the
+# CODEX_RELAY_SA_KEY secret. Both unset = relay off (codex 403s direct).
+
 # Secrets via .dev.vars / wrangler secret (never commit):
 # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, TOKEN_ENCRYPTION_KEY
 # GITHUB_TOKEN (optional — raises the GitHub rate limit from 60/hr to 5000/hr)
+# CODEX_RELAY_SA_KEY (optional — GCP SA JSON for the codex relay)
 
 # Daily retention sweep (request_logs / sessions / oauth_login_states) — see docs/logging.md.
 [triggers]

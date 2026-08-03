@@ -12,6 +12,9 @@
  * last line was wrong as well). Full evidence table in docs/providers.md.
  */
 
+import type { CodexUpstream } from "./codex_relay"
+import { relayFetch } from "./codex_relay"
+
 export const CODEX_CLI_UA = "codex_cli_rs/0.144.3"
 const CODEX_BASE = "https://chatgpt.com/backend-api"
 
@@ -59,6 +62,7 @@ export function codexUsageHeaders(accessToken: string, accountId: string): Recor
 export async function fetchCodexUsageJson(
   accessToken: string,
   accountId: string,
+  upstream?: CodexUpstream,
 ): Promise<CodexUsageResult> {
   if (!accountId) {
     return {
@@ -70,17 +74,21 @@ export async function fetchCodexUsageJson(
     }
   }
 
+  const base = upstream?.base ?? CODEX_BASE
   const paths = ["/codex/usage", "/wham/usage"]
   let lastStatus = 0
   let lastBody = ""
 
   for (const path of paths) {
     try {
-      const res = await fetch(`${CODEX_BASE}${path}`, {
+      const init: RequestInit = {
         method: "GET",
         headers: codexUsageHeaders(accessToken, accountId),
         redirect: "follow",
-      })
+      }
+      const res = upstream
+        ? await relayFetch(upstream, `${base}${path}`, init)
+        : await fetch(`${base}${path}`, init)
       lastStatus = res.status
       const text = await res.text()
       lastBody = text.slice(0, 200)

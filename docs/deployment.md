@@ -82,6 +82,7 @@ Public vars (Dashboard or wrangler production vars) — **not** the local defaul
 ```text
 APP_URL=https://<your-domain>
 GOOGLE_REDIRECT_URI=https://<your-domain>/api/auth/callback
+CODEX_RELAY_URL=https://<relay>.run.app   # optional — codex egress relay (docs/codex-relay.md); unset = relay off
 ```
 
 Secrets via `wrangler secret put` (never commit):
@@ -91,6 +92,7 @@ GOOGLE_CLIENT_ID
 GOOGLE_CLIENT_SECRET
 SESSION_SECRET
 TOKEN_ENCRYPTION_KEY
+CODEX_RELAY_SA_KEY   # optional — GCP SA JSON key for the codex relay (docs/codex-relay.md)
 ```
 
 Optional overrides:
@@ -165,6 +167,66 @@ A `VITE_*` variable set in the Cloudflare Pages build environment **overrides** 
 | Admin UI | `https://<your-domain>/` |
 | OpenAI | `https://<your-domain>/openai/v1` |
 | Anthropic | `https://<your-domain>/anthropic` |
+
+## Codex egress relay (Cloud Run)
+
+Design and rationale: [codex-relay.md](./codex-relay.md). The relay is the one approved non-Cloudflare component. **Deploys are manual** — release CI never touches it. Real project id / region / service URL go in gitignored `.local/relay.md`; placeholders only here.
+
+### GCP one-time setup
+
+```bash
+gcloud auth login
+gcloud projects create <gcp-project-id>
+gcloud billing projects link <gcp-project-id> --billing-account=<billing-account-id>
+gcloud config set project <gcp-project-id>
+gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
+gcloud iam service-accounts create kano-relay-invoker --display-name="kano-proxy relay invoker"
+```
+
+### Deploy / update the relay
+
+```bash
+cd apps/relay
+deno task test && deno task check
+gcloud run deploy kano-codex-relay --source . --region us-central1 \
+  --no-allow-unauthenticated --timeout=3600 --min-instances=0 --max-instances=10 \
+  --concurrency=1 --cpu=0.25 --memory=256Mi
+gcloud run services add-iam-policy-binding kano-codex-relay --region=us-central1 \
+  --member="serviceAccount:kano-relay-invoker@<gcp-project-id>.iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+```
+
+(`--concurrency=1` is forced: Cloud Run rejects fractional CPU with concurrency > 1 (`Total cpu < 1 is not supported with concurrency > 1`, measured 2026-08-03), and 0.25 vCPU billing beats 1 vCPU shared — see [codex-relay.md](./codex-relay.md#cloud-run-configuration-and-cost). With instance-per-stream, `--max-instances` is the concurrent-codex-stream ceiling; requests past it get a marker-less 429 that the Worker guard converts to a non-benching 502.)
+
+### Wire the Worker to it
+
+```bash
+# SA key → Cloudflare secret (never commit the JSON; delete the local file after)
+gcloud iam service-accounts keys create relay-invoker.json \
+  --iam-account=kano-relay-invoker@<gcp-project-id>.iam.gserviceaccount.com
+cd apps/api
+pnpm exec wrangler secret put CODEX_RELAY_SA_KEY --config wrangler.production.toml < relay-invoker.json
+rm relay-invoker.json
+```
+
+- `CODEX_RELAY_URL` (the service's `https://….run.app` origin) goes in `wrangler.production.toml` `[vars]` **and** in the GitHub repository variable `CODEX_RELAY_URL` so release CI keeps it (see the CI section). Leave both unset to disable the relay — codex then 403s direct, as before the relay existed.
+- Local dev (optional): put both values in `apps/api/.dev.vars` to exercise the relay from `wrangler dev`.
+- Key rotation: create a new key, `wrangler secret put` again, delete the old key in GCP. No relay redeploy.
+
+### Spike check (free)
+
+After deploy, verify egress with a **deliberately fake** upstream token. Expected: `401` + JSON (the wall would be `403` + HTML). Sending `CF-Worker` manually proves the allowlist drops it:
+
+```bash
+curl -sS -D - -o /dev/null -X POST \
+  -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Authorization: Bearer fake-spike-token" \
+  -H "content-type: application/json" \
+  -H "CF-Worker: spike-test" -H "CF-Connecting-IP: 1.2.3.4" \
+  "https://<relay>.run.app/backend-api/codex/responses" -d '{"model":"gpt-5"}'
+```
+
+Never spike with a real token or a real prompt (cost-safety rule in `CLAUDE.md`).
 
 ## Local development
 
@@ -281,6 +343,7 @@ gh release create v1.0.1 --generate-notes
 | Variable | Purpose |
 |----------|---------|
 | `APP_URL` | Production origin, e.g. `https://<your-domain>` (no trailing slash). Workflow sets `GOOGLE_REDIRECT_URI` to `$APP_URL/api/auth/callback`. |
+| `CODEX_RELAY_URL` | **Optional.** Codex egress relay origin (`https://….run.app`, [codex-relay.md](./codex-relay.md)). Empty/unset omits the var from the generated config (relay off). |
 
 Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`) are **not** set by CI on each release; configure once with `wrangler secret put --config wrangler.production.toml`.
 

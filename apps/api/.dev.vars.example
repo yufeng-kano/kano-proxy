@@ -6,3 +6,6 @@ TOKEN_ENCRYPTION_KEY=<32-byte-base64-key>
 # CLAUDE_CODE_OAUTH_CLIENT_ID=
 # CODEX_OAUTH_CLIENT_ID=
 # GROK_OAUTH_CLIENT_ID=
+# Optional codex egress relay (docs/codex-relay.md) — both required to enable:
+# CODEX_RELAY_URL=
+# CODEX_RELAY_SA_KEY=

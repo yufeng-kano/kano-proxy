@@ -9,6 +9,9 @@
 #   CF_KV_CACHE_ID
 # Required repository variable (public):
 #   APP_URL                — e.g. https://kano-proxy.example.com
+# Optional repository variable:
+#   CODEX_RELAY_URL        — codex egress relay origin (docs/codex-relay.md);
+#                            empty/unset omits the var (relay off)
 # Worker app secrets (GOOGLE_*, SESSION_SECRET, TOKEN_ENCRYPTION_KEY) stay in
 # Cloudflare via `wrangler secret put` and are not re-uploaded here.
 
@@ -114,6 +117,7 @@ jobs:
           CF_KV_BENCH_ID: ${{ secrets.CF_KV_BENCH_ID }}
           CF_KV_CACHE_ID: ${{ secrets.CF_KV_CACHE_ID }}
           APP_URL: ${{ vars.APP_URL }}
+          CODEX_RELAY_URL: ${{ vars.CODEX_RELAY_URL }}
         run: python3 scripts/ci/write-production-wrangler.py
       - name: Migrate D1 (remote)
         working-directory: apps/api

@@ -1,0 +1,13 @@
+# What `gcloud run deploy --source .` uploads for the Cloud Build context.
+# Same syntax as .gitignore. See: gcloud topic gcloudignore
+#
+# Dockerfile is NOT excluded here — Cloud Build needs it to build the image.
+
+.gcloudignore
+.git
+.gitignore
+
+# Tests never ship in the built image.
+relay_test.ts
+
+.DS_Store

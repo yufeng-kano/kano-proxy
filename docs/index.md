@@ -11,7 +11,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [auth.md](./auth.md) | Google OIDC admin, client API keys, OAuth account binding |
 | [database.md](./database.md) | D1 schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, failover, usage windows, adapters |
-| [codex-relay-proposal.md](./codex-relay-proposal.md) | **Proposed, not approved.** Why codex is blocked from Workers and what an egress relay would cost |
+| [codex-relay.md](./codex-relay.md) | **Approved exception to Cloudflare-only.** Codex egress relay on Cloud Run: design, IAM auth, cost, deploy |
 | [admin-ui.md](./admin-ui.md) | Web UI pages and cache-first metadata UX |
 | [changelog.md](./changelog.md) | Release notes from GitHub, running version, caching + sanitization |
 | [project-structure.md](./project-structure.md) | Monorepo layout and module boundaries |
@@ -24,6 +24,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 - **API / proxy:** Cloudflare Workers (TypeScript)
 - **Web:** Vue 3 + Vite + TypeScript on Cloudflare Pages
 - **Data:** D1 (relational), KV (rate-limit / bench / short cache), Durable Objects only if pool coordination requires it
+- **Codex egress relay:** Deno container on Google Cloud Run (us-central1) — the single approved non-Cloudflare component; see [codex-relay.md](./codex-relay.md)
 - **Envs:** local + production only
 
 ## Product one-liner

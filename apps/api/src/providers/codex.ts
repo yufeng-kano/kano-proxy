@@ -6,7 +6,6 @@ import type { CodexReasoningReplayItem } from "./codex_reasoning_cache"
 import type { ChatCompletionRequest, ProviderAdapter, UsageWindow } from "./types"
 
 const TOKEN_URL = "https://auth.openai.com/oauth/token"
-const CODEX_BASE = "https://chatgpt.com/backend-api"
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 export const CODEX_USER_AGENT =
@@ -86,7 +85,8 @@ export const codexAdapter: ProviderAdapter = {
     const chatgptAccountId =
       acc.credential.account_id || accountIdFromJwt(acc.credential.access_token) || ""
     const { fetchCodexModels } = await import("./codex_models")
-    return fetchCodexModels(acc.credential.access_token, chatgptAccountId)
+    const { codexUpstream } = await import("./codex_relay")
+    return fetchCodexModels(acc.credential.access_token, chatgptAccountId, codexUpstream(env))
   },
 
   async chatCompletions(env, account, req, extras) {
@@ -134,7 +134,9 @@ export const codexAdapter: ProviderAdapter = {
     }
     if (chatgptAccountId) headers["chatgpt-account-id"] = chatgptAccountId
 
-    const res = await fetch(`${CODEX_BASE}/codex/responses`, {
+    const { codexUpstream, relayFetch } = await import("./codex_relay")
+    const upstream = codexUpstream(env)
+    const res = await relayFetch(upstream, `${upstream.base}/codex/responses`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -200,7 +202,12 @@ export const codexAdapter: ProviderAdapter = {
     const chatgptAccountId =
       acc.credential.account_id || accountIdFromJwt(acc.credential.access_token) || ""
     const { fetchCodexUsageJson, windowsFromCodexPayload } = await import("./codex_usage")
-    const result = await fetchCodexUsageJson(acc.credential.access_token, chatgptAccountId)
+    const { codexUpstream } = await import("./codex_relay")
+    const result = await fetchCodexUsageJson(
+      acc.credential.access_token,
+      chatgptAccountId,
+      codexUpstream(env),
+    )
 
     if (result.ok && result.payload) {
       const windows: UsageWindow[] = windowsFromCodexPayload(result.payload)

@@ -5,6 +5,7 @@ Required env:
   CF_D1_DATABASE_ID, CF_KV_BENCH_ID, CF_KV_CACHE_ID, APP_URL
 Optional env:
   GITHUB_REPO (defaults to yufeng-kano/kano-proxy)
+  CODEX_RELAY_URL (codex egress relay origin; empty = var omitted, relay off)
 """
 
 from __future__ import annotations
@@ -31,6 +32,10 @@ def main() -> None:
     cache = require("CF_KV_CACHE_ID")
     # Optional — not in require(): CI must not fail for a missing optional var.
     repo = os.environ.get("GITHUB_REPO", "yufeng-kano/kano-proxy").strip()
+    relay = os.environ.get("CODEX_RELAY_URL", "").strip().rstrip("/")
+    if relay and not relay.startswith("https://"):
+        raise SystemExit("CODEX_RELAY_URL must start with https:// when set")
+    relay_line = f'CODEX_RELAY_URL = "{relay}"\n' if relay else ""
 
     root = Path(__file__).resolve().parents[2]
     path = root / "apps" / "api" / "wrangler.production.toml"
@@ -59,7 +64,7 @@ APP_URL = "{app}"
 GOOGLE_REDIRECT_URI = "{app}/api/auth/callback"
 CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 GITHUB_REPO = "{repo}"
-
+{relay_line}
 [triggers]
 crons = ["17 3 * * *"]
 

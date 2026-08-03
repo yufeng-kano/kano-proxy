@@ -5,8 +5,9 @@
 1. **Unit** — pure adapters (OpenAI↔Anthropic mapping, reasoning_effort map, model parse, key hash).
 2. **Pool** — acquire/bench/promote with mocked KV/D1.
 3. **Route** — Workers + `cloudflare:test` or miniflare-style where available; mock upstream fetch.
-4. **Manual / local wrangler** — `wrangler dev` + curl OpenAI/Anthropic smoke.
-5. **No real secrets in CI** — fixtures only.
+4. **Relay** — `apps/relay` Deno tests: header allowlist (CF-* never forwarded), streaming no-buffer proof, path/method fault contract. Stubbed fetch only.
+5. **Manual / local wrangler** — `wrangler dev` + curl OpenAI/Anthropic smoke.
+6. **No real secrets in CI** — fixtures only.
 
 ## Commands
 
@@ -14,6 +15,7 @@
 pnpm test
 pnpm --filter api test
 pnpm --filter api test:watch
+cd apps/relay && deno task test   # egress relay (Deno — not part of pnpm test)
 ```
 
 ## Coding-agent smoke (manual)

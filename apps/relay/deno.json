@@ -1,0 +1,7 @@
+{
+  "tasks": {
+    "start": "deno run --allow-net --allow-env main.ts",
+    "test": "deno test",
+    "check": "deno check main.ts relay.ts relay_test.ts"
+  }
+}

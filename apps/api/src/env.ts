@@ -12,6 +12,9 @@ export type Env = {
   CLAUDE_CODE_OAUTH_CLIENT_ID?: string
   CODEX_OAUTH_CLIENT_ID?: string
   GROK_OAUTH_CLIENT_ID?: string
+  /** Codex egress relay (docs/codex-relay.md) — both required to enable; either missing means direct to chatgpt.com. */
+  CODEX_RELAY_URL?: string
+  CODEX_RELAY_SA_KEY?: string
   REQUEST_LOG_RETENTION_DAYS?: string
   GITHUB_REPO?: string
   GITHUB_TOKEN?: string

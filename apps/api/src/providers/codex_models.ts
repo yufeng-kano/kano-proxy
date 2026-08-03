@@ -1,6 +1,9 @@
+import type { CodexUpstream } from "./codex_relay"
+import { relayFetch } from "./codex_relay"
 import type { UpstreamModel } from "./types"
 
-export const CODEX_MODELS_ENDPOINT = "https://chatgpt.com/backend-api/codex/models"
+const DIRECT_UPSTREAM_BASE = "https://chatgpt.com/backend-api"
+export const CODEX_MODELS_ENDPOINT = `${DIRECT_UPSTREAM_BASE}/codex/models`
 export const CODEX_CLIENT_VERSION = "0.144.1"
 export const CODEX_USER_AGENT =
   "codex_cli_rs/0.144.1 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
@@ -70,8 +73,9 @@ function failureReason(error: unknown): string {
 export async function fetchCodexModels(
   accessToken: string,
   accountId: string,
+  upstream?: CodexUpstream,
 ): Promise<{ models: UpstreamModel[]; error: string | null }> {
-  const primaryUrl = `${CODEX_MODELS_ENDPOINT}?client_version=${encodeURIComponent(CODEX_CLIENT_VERSION)}`
+  const primaryUrl = `${upstream?.base ?? DIRECT_UPSTREAM_BASE}/codex/models?client_version=${encodeURIComponent(CODEX_CLIENT_VERSION)}`
   const sources = [primaryUrl, ...CODEX_MODEL_MIRROR_URLS]
   let lastError = "models fetch failed"
 
@@ -83,7 +87,10 @@ export async function fetchCodexModels(
       }
       if (index === 0) init.headers = primaryHeaders(accessToken, accountId)
 
-      const response = await fetch(url, init)
+      // Only the live endpoint goes through the relay — the mirror fallbacks
+      // are public GitHub/CDN URLs, never routed through codex egress.
+      const response =
+        index === 0 && upstream ? await relayFetch(upstream, url, init) : await fetch(url, init)
       if (!response.ok) {
         lastError = `models ${response.status}`
         continue
