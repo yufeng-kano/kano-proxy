@@ -11,6 +11,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [auth.md](./auth.md) | Google OIDC admin, client API keys, OAuth account binding |
 | [database.md](./database.md) | D1 schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, failover, usage windows, adapters |
+| [codex-relay-proposal.md](./codex-relay-proposal.md) | **Proposed, not approved.** Why codex is blocked from Workers and what an egress relay would cost |
 | [admin-ui.md](./admin-ui.md) | Web UI pages and cache-first metadata UX |
 | [changelog.md](./changelog.md) | Release notes from GitHub, running version, caching + sanitization |
 | [project-structure.md](./project-structure.md) | Monorepo layout and module boundaries |
