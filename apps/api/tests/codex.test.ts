@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { buildCodexRequestBody } from "../src/providers/codex"
+import { windowsFromCodexPayload } from "../src/providers/codex_usage"
 import { anthropicToOpenAIChatRequest } from "../src/proxy/openai_anthropic"
 
 describe("buildCodexRequestBody", () => {
@@ -269,5 +270,113 @@ describe("codex ignores reasoning_content on replayed history", () => {
       role: "assistant",
       content: [{ type: "output_text", text: "here is the answer" }],
     })
+  })
+})
+
+/**
+ * Regression coverage for the `UsageWindow.utilization` scale contract
+ * (percent 0–100, never a 0–1 fraction — see `UsageWindow` in
+ * src/providers/types.ts). The admin UI once showed 100% for an account
+ * actually at 1% because a frontend heuristic rescaled any value <= 1; that
+ * heuristic is gone, so this locks the adapter's window-mapping in place.
+ * `windowsFromCodexPayload` is a pure function — no fetch stubbing needed.
+ */
+describe("windowsFromCodexPayload — window mapping and the utilization scale contract", () => {
+  it("REGRESSION: used_percent = 1 (meaning 1%) must produce utilization === 1 exactly — this is the exact value that a removed frontend heuristic once rescaled to 100%", () => {
+    const windows = windowsFromCodexPayload({
+      rate_limit: {
+        primary_window: { used_percent: 1, limit_window_seconds: 18000, reset_at: 1_780_000_000 },
+      },
+    })
+    expect(windows[0]!.utilization).toBe(1)
+  })
+
+  it("a mid-range percent (73) passes through unchanged", () => {
+    const windows = windowsFromCodexPayload({
+      rate_limit: { primary_window: { used_percent: 73, limit_window_seconds: 18000 } },
+    })
+    expect(windows[0]!.utilization).toBe(73)
+  })
+
+  it("100 (fully used) passes through unchanged", () => {
+    const windows = windowsFromCodexPayload({
+      rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 604800 } },
+    })
+    expect(windows[0]!.utilization).toBe(100)
+  })
+
+  it("a window with no used_percent maps to utilization: null, not 0", () => {
+    const windows = windowsFromCodexPayload({
+      rate_limit: { primary_window: { limit_window_seconds: 18000 } },
+    })
+    expect(windows[0]!.utilization).toBeNull()
+  })
+
+  it("reset_at (unix seconds) converts to an ISO string; a window with no reset_at maps resets_at to null", () => {
+    const windows = windowsFromCodexPayload({
+      rate_limit: {
+        primary_window: { used_percent: 10, limit_window_seconds: 18000, reset_at: 1_735_689_600 },
+        secondary_window: { used_percent: 20, limit_window_seconds: 604800 },
+      },
+    })
+    expect(windows[0]!.resets_at).toBe(new Date(1_735_689_600 * 1000).toISOString())
+    expect(windows[1]!.resets_at).toBeNull()
+  })
+
+  it("labels derive from limit_window_seconds: 604800 -> Week, 18000 -> 5h, whole hour/day values, unknown -> Ns, absent -> 'window'", () => {
+    expect(
+      windowsFromCodexPayload({
+        rate_limit: { primary_window: { used_percent: 1, limit_window_seconds: 604800 } },
+      })[0]!.label,
+    ).toBe("Week")
+    expect(
+      windowsFromCodexPayload({
+        rate_limit: { primary_window: { used_percent: 1, limit_window_seconds: 18000 } },
+      })[0]!.label,
+    ).toBe("5h")
+    expect(
+      windowsFromCodexPayload({
+        rate_limit: { primary_window: { used_percent: 1, limit_window_seconds: 3600 } },
+      })[0]!.label,
+    ).toBe("1h")
+    expect(
+      windowsFromCodexPayload({
+        rate_limit: { primary_window: { used_percent: 1, limit_window_seconds: 172800 } },
+      })[0]!.label,
+    ).toBe("2d")
+    expect(
+      windowsFromCodexPayload({
+        rate_limit: { primary_window: { used_percent: 1, limit_window_seconds: 7777 } },
+      })[0]!.label,
+    ).toBe("7777s")
+    expect(
+      windowsFromCodexPayload({ rate_limit: { primary_window: { used_percent: 1 } } })[0]!.label,
+    ).toBe("window")
+  })
+
+  it("both primary_window and secondary_window map to two windows, in order", () => {
+    const windows = windowsFromCodexPayload({
+      rate_limit: {
+        primary_window: { used_percent: 5, limit_window_seconds: 18000 },
+        secondary_window: { used_percent: 6, limit_window_seconds: 604800 },
+      },
+    })
+    expect(windows).toHaveLength(2)
+    expect(windows[0]).toMatchObject({ label: "5h", utilization: 5 })
+    expect(windows[1]).toMatchObject({ label: "Week", utilization: 6 })
+  })
+
+  it("no rate_limit at all maps to an empty windows array", () => {
+    expect(windowsFromCodexPayload({})).toEqual([])
+  })
+
+  it("an explicit null window (e.g. secondary_window: null) is skipped, not crashed on", () => {
+    const windows = windowsFromCodexPayload({
+      rate_limit: {
+        primary_window: { used_percent: 1, limit_window_seconds: 18000 },
+        secondary_window: null,
+      },
+    })
+    expect(windows).toHaveLength(1)
   })
 })

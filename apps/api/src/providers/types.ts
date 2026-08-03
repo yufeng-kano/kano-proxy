@@ -4,6 +4,7 @@ import type { ReasoningEffort } from "../utils/reasoning"
 
 export type UsageWindow = {
   label: string
+  /** Percent used, 0–100 (not a 0–1 fraction). Adapters normalize to this. */
   utilization: number | null
   resets_at: string | null
 }

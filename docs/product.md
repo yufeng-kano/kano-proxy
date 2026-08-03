@@ -36,7 +36,7 @@
 | `codex` | ChatGPT Codex backend | Browser OAuth (public redirect or paste) | Multi-account |
 | `grok` | xAI Chat Completions via SuperGrok OAuth | Device code (and future ingest methods) | Multi-account |
 
-Token **acquisition methods may differ**; once stored, pool semantics are the same: priority, acquire, bench on 401/403/429, promote, remove.
+Token **acquisition methods may differ**; once stored, pool semantics are the same: priority, acquire, bench on 401/402/403/429, promote, remove.
 
 ### Custom endpoints (user-defined)
 

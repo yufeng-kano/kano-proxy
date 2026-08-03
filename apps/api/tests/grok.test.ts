@@ -219,3 +219,92 @@ describe("grokAdapter.messages — Anthropic → Responses", () => {
     expect(body!.reasoning).toBeUndefined()
   })
 })
+
+/**
+ * Regression coverage for the `UsageWindow.utilization` scale contract
+ * (percent 0–100, never a 0–1 fraction — see `UsageWindow` in
+ * src/providers/types.ts). The admin UI once showed 100% for an account
+ * actually at 1% because a frontend heuristic rescaled any value <= 1; that
+ * heuristic is gone, so this locks the adapter's window-mapping in place.
+ */
+describe("grokAdapter.fetchUsage — window mapping and the utilization scale contract", () => {
+  // Module-level afterEach above already restores globalThis.fetch.
+
+  /** Stubs the two sequential GETs fetchUsage makes: /v1/user then /v1/billing?format=credits. */
+  function stubFetch(
+    billBody: unknown,
+    opts?: { billStatus?: number; userBody?: unknown; userStatus?: number },
+  ): void {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes("/v1/user")) {
+        return new Response(JSON.stringify(opts?.userBody ?? { userId: "u_1" }), {
+          status: opts?.userStatus ?? 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      if (url.includes("/v1/billing")) {
+        return new Response(JSON.stringify(billBody), {
+          status: opts?.billStatus ?? 200,
+          headers: { "content-type": "application/json" },
+        })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+  }
+
+  it("REGRESSION: creditUsagePercent = 1 (meaning 1%) must produce utilization === 1 exactly — this is the exact value that a removed frontend heuristic once rescaled to 100%", async () => {
+    stubFetch({ config: { creditUsagePercent: 1, currentPeriod: { end: "2026-08-10T00:00:00Z" } } })
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    expect(result.windows).toEqual([
+      { label: "Week", utilization: 1, resets_at: "2026-08-10T00:00:00Z" },
+    ])
+  })
+
+  it("a mid-range percent (73) passes through unchanged", async () => {
+    stubFetch({ config: { creditUsagePercent: 73 } })
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    expect(result.windows[0]).toMatchObject({ utilization: 73 })
+  })
+
+  it("100 (fully used) passes through unchanged", async () => {
+    stubFetch({ config: { creditUsagePercent: 100 } })
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    expect(result.windows[0]).toMatchObject({ utilization: 100 })
+  })
+
+  it("missing creditUsagePercent maps to utilization: null, not 0", async () => {
+    stubFetch({ config: {} })
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    expect(result.windows).toEqual([{ label: "Week", utilization: null, resets_at: null }])
+  })
+
+  it("resets_at comes from config.currentPeriod.end; missing end maps to null", async () => {
+    stubFetch({ config: { creditUsagePercent: 5 } })
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    expect(result.windows[0]!.resets_at).toBeNull()
+  })
+
+  it("account meta: email from the credential, plan_type from subscriptionTier", async () => {
+    stubFetch({ config: { creditUsagePercent: 5 }, subscriptionTier: "SuperGrok" })
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    // The shared `account` fixture's credential carries no email.
+    expect(result.account).toEqual({ email: null, plan_type: "SuperGrok" })
+  })
+
+  it("a non-OK billing response returns stale: true with the documented error string and empty windows", async () => {
+    stubFetch({}, { billStatus: 503 })
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    expect(result.stale).toBe(true)
+    expect(result.error).toBe("billing 503")
+    expect(result.windows).toEqual([])
+  })
+
+  it("a thrown network error is caught: stale: true with the exception message, empty windows/account", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("network down")
+    }) as typeof fetch
+    const result = await grokAdapter.fetchUsage!(mockEnv(), account)
+    expect(result).toEqual({ windows: [], account: {}, stale: true, error: "network down" })
+  })
+})

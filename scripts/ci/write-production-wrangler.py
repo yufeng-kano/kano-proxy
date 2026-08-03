@@ -62,6 +62,12 @@ GITHUB_REPO = "{repo}"
 
 [triggers]
 crons = ["17 3 * * *"]
+
+[observability]
+enabled = true
+
+[limits]
+cpu_ms = 15000
 """
     path.write_text(content)
     print(f"wrote {path.relative_to(root)} (resource ids not logged)", file=sys.stderr)

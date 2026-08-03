@@ -5,6 +5,8 @@ import {
   shouldBenchStatus,
   type AcquiredAccount,
 } from "../pool/acquire"
+import { earliestBenchExpiry } from "../pool/bench"
+import { listAccounts } from "../db/accounts"
 import { getAdapter } from "../providers"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import { logRequest } from "../logging/request_log"
@@ -50,6 +52,24 @@ function streamCloseErrorCode(reason: StreamCloseReason, complete: boolean): str
   return "incomplete_stream"
 }
 
+/** `Retry-After` header value (integer seconds, minimum 1) from a future epoch-ms bench-expiry. */
+function retryAfterSeconds(untilMs: number): number {
+  return Math.max(1, Math.ceil((untilMs - Date.now()) / 1000))
+}
+
+/**
+ * Shared "pool unavailable" 503 for both surfaces — same envelope shape
+ * either dispatch function already returned before `Retry-After` existed,
+ * now with the header attached whenever the earliest bench expiry across
+ * the affected accounts is known (docs/api.md "Errors"): the whole bound
+ * pool is benched right now, or the 8-attempt failover loop exhausted it.
+ */
+function upstreamUnavailableResponse(body: Record<string, unknown>, untilMs: number | null): Response {
+  const init: ResponseInit = { status: 503 }
+  if (untilMs !== null) init.headers = { "retry-after": String(retryAfterSeconds(untilMs)) }
+  return Response.json(body, init)
+}
+
 export async function dispatchChatCompletions(
   env: Env,
   opts: {
@@ -88,24 +108,49 @@ export async function dispatchChatCompletions(
         })
         return lastResponse
       }
+      // Distinguish "never bound" (fatal, 400) from "bound but every one is
+      // benched or undecryptable right now" (transient, 503 + Retry-After)
+      // — docs/api.md "Errors".
+      const boundAccounts = await listAccounts(env.DB, opts.userId, opts.provider)
+      if (boundAccounts.length === 0) {
+        await logRequest(env, {
+          userId: opts.userId,
+          apiKeyId: opts.apiKeyId,
+          provider: opts.provider,
+          model: opts.req.rawModel,
+          statusCode: 400,
+          latencyMs: Date.now() - started,
+          errorCode: "no_upstream_account",
+        })
+        return Response.json(
+          {
+            error: {
+              message: `No usable ${opts.provider} account for this user`,
+              type: "invalid_request_error",
+              code: "no_upstream_account",
+            },
+          },
+          { status: 400 },
+        )
+      }
+      const untilMs = await earliestBenchExpiry(
+        env,
+        opts.userId,
+        opts.provider,
+        boundAccounts.map((a) => a.id),
+      )
       await logRequest(env, {
         userId: opts.userId,
         apiKeyId: opts.apiKeyId,
         provider: opts.provider,
         model: opts.req.rawModel,
-        statusCode: 400,
+        statusCode: 503,
         latencyMs: Date.now() - started,
-        errorCode: "no_upstream_account",
+        errorCode: "upstream_unavailable",
       })
-      return Response.json(
-        {
-          error: {
-            message: `No usable ${opts.provider} account for this user`,
-            type: "invalid_request_error",
-            code: "no_upstream_account",
-          },
-        },
-        { status: 400 },
+      return upstreamUnavailableResponse(
+        { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
+        untilMs,
       )
     }
     used = account
@@ -187,6 +232,10 @@ export async function dispatchChatCompletions(
     })
   }
 
+  // The loop itself benched every account it tried (each `continue` above
+  // only follows a bench), so `exclude` is exactly that set — no extra D1
+  // round-trip needed to compute Retry-After here.
+  const untilMs = await earliestBenchExpiry(env, opts.userId, opts.provider, [...exclude])
   await logRequest(env, {
     userId: opts.userId,
     apiKeyId: opts.apiKeyId,
@@ -196,14 +245,9 @@ export async function dispatchChatCompletions(
     latencyMs: Date.now() - started,
     errorCode: "upstream_unavailable",
   })
-  return Response.json(
-    {
-      error: {
-        message: "All upstream accounts unavailable",
-        code: "upstream_unavailable",
-      },
-    },
-    { status: 503 },
+  return upstreamUnavailableResponse(
+    { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
+    untilMs,
   )
 }
 
@@ -263,24 +307,47 @@ export async function dispatchAnthropicMessages(
         })
         return last
       }
+      // Same 400-vs-503 split as dispatchChatCompletions above.
+      const boundAccounts = await listAccounts(env.DB, opts.userId, provider)
+      if (boundAccounts.length === 0) {
+        await logRequest(env, {
+          userId: opts.userId,
+          apiKeyId: opts.apiKeyId,
+          provider,
+          model: opts.model,
+          statusCode: 400,
+          latencyMs: Date.now() - started,
+          errorCode: "no_upstream_account",
+        })
+        return Response.json(
+          {
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: `No usable ${provider} account`,
+            },
+          },
+          { status: 400 },
+        )
+      }
+      const untilMs = await earliestBenchExpiry(
+        env,
+        opts.userId,
+        provider,
+        boundAccounts.map((a) => a.id),
+      )
       await logRequest(env, {
         userId: opts.userId,
         apiKeyId: opts.apiKeyId,
         provider,
         model: opts.model,
-        statusCode: 400,
+        statusCode: 503,
         latencyMs: Date.now() - started,
-        errorCode: "no_upstream_account",
+        errorCode: "upstream_unavailable",
       })
-      return Response.json(
-        {
-          type: "error",
-          error: {
-            type: "invalid_request_error",
-            message: `No usable ${provider} account`,
-          },
-        },
-        { status: 400 },
+      return upstreamUnavailableResponse(
+        { type: "error", error: { type: "api_error", message: "upstream_unavailable" } },
+        untilMs,
       )
     }
     let refreshed = account
@@ -363,9 +430,11 @@ export async function dispatchAnthropicMessages(
     })
     return res
   }
-  return Response.json(
+  // Same "loop benched exactly `exclude`" reasoning as dispatchChatCompletions.
+  const untilMs = await earliestBenchExpiry(env, opts.userId, provider, [...exclude])
+  return upstreamUnavailableResponse(
     { type: "error", error: { type: "api_error", message: "upstream_unavailable" } },
-    { status: 503 },
+    untilMs,
   )
 }
 

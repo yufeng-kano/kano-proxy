@@ -54,13 +54,27 @@ async function refreshClaude(
 
 const EFFORT_BETA = "effort-2025-11-24"
 
+// The only two betas the Claude Code OAuth upstream requires to accept a
+// request at all. Always first, in this order, on every native-passthrough
+// and conversion-path request.
+const REQUIRED_BETAS = ["oauth-2025-04-20", "claude-code-20250219"]
+
+// Feature betas the `/openai/v1` conversion path opts into unconditionally,
+// since there the proxy authors the upstream Anthropic request itself and
+// has no client beta header to be faithful to. NOT used by the native
+// passthrough — see `resolveBetaHeader`.
+const CONVERSION_BETAS = [
+  "interleaved-thinking-2025-05-14",
+  "fine-grained-tool-streaming-2025-05-14",
+]
+
+/**
+ * Builds an `anthropic-beta` header value: `REQUIRED_BETAS` first, then each
+ * comma-separated entry of `extra` in order, deduped against the required
+ * pair and against earlier entries in `extra` itself.
+ */
 export function betaHeaders(extra?: string | null): string {
-  const base = [
-    "oauth-2025-04-20",
-    "claude-code-20250219",
-    "interleaved-thinking-2025-05-14",
-    "fine-grained-tool-streaming-2025-05-14",
-  ]
+  const base = [...REQUIRED_BETAS]
   if (extra) {
     for (const p of extra.split(",")) {
       const t = p.trim()
@@ -71,11 +85,17 @@ export function betaHeaders(extra?: string | null): string {
 }
 
 /**
- * anthropic-beta header for the native /anthropic passthrough. A client body
- * carrying `output_config` needs the effort beta upstream, or Anthropic
- * rejects/ignores `output_config` — add it automatically, deduped the same
- * way client-supplied extras are (so a client that already sent it is not
- * doubled).
+ * anthropic-beta header for the native /anthropic passthrough — faithful,
+ * not opinionated: the two OAuth-required betas, then the client's own
+ * `anthropic-beta` list verbatim (deduped, client order preserved). Feature
+ * betas such as `interleaved-thinking-2025-05-14` /
+ * `fine-grained-tool-streaming-2025-05-14` are never force-added here —
+ * whether they're on is the client's choice, so proxied model behavior
+ * matches a direct Anthropic connection. The one exception:
+ * `effort-2025-11-24` is still added automatically when the (patched) body
+ * carries `output_config`, since Anthropic needs that beta to honor
+ * `output_config.effort` — deduped the same way client-supplied extras are,
+ * so a client that already sends it is not doubled.
  */
 export function resolveBetaHeader(opts: {
   clientBeta?: string | null
@@ -219,7 +239,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
         authorization: `Bearer ${acc.credential.access_token}`,
         "content-type": "application/json",
         "anthropic-version": "2023-06-01",
-        "anthropic-beta": betaHeaders(EFFORT_BETA),
+        "anthropic-beta": betaHeaders([...CONVERSION_BETAS, EFFORT_BETA].join(",")),
       },
       body: JSON.stringify(withSystem),
     })

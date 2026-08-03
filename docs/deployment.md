@@ -71,6 +71,10 @@ cp wrangler.production.example.toml wrangler.production.toml
 
 Every Wrangler config (committed `wrangler.toml`, the production example, the CI-generated production config) carries the same `[triggers] crons` block for the daily retention sweep (see [logging.md](./logging.md)). If your `wrangler.production.toml` predates it, copy the `[triggers]` block from `wrangler.production.example.toml` — a deploy from a config without it silently drops the cron.
 
+The same three configs also carry `[limits] cpu_ms = 15000` — a per-invocation CPU ceiling that bounds runaway-billing risk (an infinite-loop bug or abusive request errors out at 15s of CPU instead of billing the platform maximum). **Requires Workers Paid**: a Free-plan deploy rejects the `[limits]` block, so delete it if running this project on Free (Free enforces its own ~10ms budget, which long SSE streams exceed — see the observability note below). The value is sized from production measurements: the heaviest legitimate request observed (48s stream, ~5.4k output tokens) accrued 1.3s of CPU; an extrapolated worst case (~32k-token output) stays under ~8s; raise the ceiling if Workers Logs ever shows `exceededCpu` on legitimate traffic.
+
+The same three configs also carry `[observability] enabled = true` (Workers Logs / invocation logs). This is the only place resource-limit kills are visible: a request killed for exceeding CPU/memory (Cloudflare error 1102, tail outcome `exceededCpu`/`exceededMemory`) loses its `waitUntil` work, so its `request_logs` row is never written — D1 shows a *gap*, not an error. Workers Logs records the invocation outcome platform-side, so those kills (and any other invisible failure) can be diagnosed after the fact instead of only while a `wrangler tail` happens to be attached. Query them in Dashboard → Workers → kano-proxy → Logs. Volume guard: unauthenticated 401 floods count too — investigate any client hammering the endpoints, since log events are the billable unit past the included allotment.
+
 ### Vars vs secrets
 
 Public vars (Dashboard or wrangler production vars) — **not** the local defaults in `wrangler.toml`:

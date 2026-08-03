@@ -40,3 +40,15 @@ GITHUB_REPO = "yufeng-kano/kano-proxy"
 # Daily retention sweep (request_logs / sessions / oauth_login_states) — see docs/logging.md.
 [triggers]
 crons = ["17 3 * * *"]
+
+# Workers Logs — the only place CPU/memory kills (error 1102) are visible:
+# a killed request loses its waitUntil, so request_logs gets no row. See
+# docs/deployment.md.
+[observability]
+enabled = true
+
+# Per-invocation CPU ceiling — bounds runaway-billing risk. Requires Workers
+# Paid; delete this block on the Free plan (deploys reject it there). See
+# docs/deployment.md for how the value was sized.
+[limits]
+cpu_ms = 15000

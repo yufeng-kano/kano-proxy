@@ -7,9 +7,8 @@ const props = defineProps<{ window: UsageWindow }>()
 const pct = computed(() => {
   const u = props.window.utilization
   if (u == null || Number.isNaN(u)) return null
-  // API may send 0–1 or 0–100
-  const n = u <= 1 ? u * 100 : u
-  return Math.max(0, Math.min(100, Math.round(n)))
+  // Always a percent (0–100), never a 0–1 fraction — see UsageWindow in the API.
+  return Math.max(0, Math.min(100, Math.round(u)))
 })
 
 const fillClass = computed(() => {

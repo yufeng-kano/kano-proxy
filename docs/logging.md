@@ -12,8 +12,8 @@
 
 | Code | Meaning |
 |------|---------|
-| `no_upstream_account` | No usable account for the resolved provider (pool empty, or every account removed) |
-| `upstream_unavailable` | Every account in the pool benched/failing — attempts exhausted (503) |
+| `no_upstream_account` | No account **bound** for the resolved provider (pool empty, or every account removed) — 400, retrying can never help |
+| `upstream_unavailable` | Accounts exist but none usable — every bound account benched at request start, or the failover loop exhausted its attempts (503, `Retry-After` = seconds until earliest bench expiry when known) |
 | `upstream_error` | Upstream returned a non-2xx after retries/failover, or every account got benched and there was a prior upstream response to fall back to |
 | `invalid_model` | Authenticated request; `model` did not resolve to a builtin provider or one of the caller's own custom provider slugs (400, pre-dispatch) |
 | `loop_detected` | Degenerate tool-call loop guard tripped on a grok/codex/custom-openai conversion request (400, pre-dispatch) — see [api.md](./api.md) |

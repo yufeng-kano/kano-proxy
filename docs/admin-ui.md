@@ -77,7 +77,7 @@ Route `/dashboard`; signed-in `/` redirects here (nav order: Dashboard, Accounts
 Subscription pool cards (Claude / Codex / Grok):
 
 - Status dot: active / standby / benched / unusable
-- Progress bars per usage window (5h, Week, …)
+- Progress bars per usage window (5h, Week, …). `utilization` is always a **percent (0–100)**, never a 0–1 fraction — adapters normalize upstream values to that scale, so the bar renders it directly (clamped and rounded) with no rescaling heuristic.
 - Promote / remove
 - Add account → provider-specific login UI
 

@@ -135,7 +135,7 @@ Same providers as the OpenAI surface. Model id is always `provider/upstream` (no
 
 | `model` provider | Behavior |
 |------------------|----------|
-| `claude-code` | Anthropic Messages **passthrough** to Claude Code OAuth upstream: auth inject, fixed Claude Code system prepend if missing (identical string every time), `anthropic-beta` merged, **`cache_control` never rewritten** (block- or top-level). Upstream `model` field is the bare id after the prefix. When the (patched) request body contains an `output_config` key, `effort-2025-11-24` is added to the outgoing `anthropic-beta` header automatically (deduped against client-supplied betas) so upstream honors `output_config.effort`; clients that already send that beta are not double-added. |
+| `claude-code` | Anthropic Messages **passthrough** to Claude Code OAuth upstream: auth inject, fixed Claude Code system prepend if missing (identical string every time), `anthropic-beta` = the client's list **verbatim** plus only the two OAuth-required betas (see [providers.md](./providers.md) "Base betas"), **`cache_control` never rewritten** (block- or top-level). Upstream `model` field is the bare id after the prefix. When the (patched) request body contains an `output_config` key, `effort-2025-11-24` is added to the outgoing `anthropic-beta` header automatically (deduped against client-supplied betas) so upstream honors `output_config.effort`; clients that already send that beta are not double-added. |
 | `grok` | Anthropic Messages → xAI **Responses** (`cli-chat-proxy.grok.com/v1/responses`) → Anthropic Messages. Streaming conversion includes **text, signed `thinking`, and `tool_use`**. `thinking.signature` ↔ Responses `reasoning.encrypted_content`; stream emits `signature_delta`. Tools / vision / `output_format.json_schema` convert; **`stop_sequences` is dropped** (Responses has no Chat Completions `stop` equivalent — same as codex). Anthropic `cache_control` stripped. Optional client headers `x-grok-conv-id` / `x-grok-session-id` / `x-grok-turn-idx` forwarded when present; never synthesized. Thinking/effort rules and the reasoning replay cache: see "Grok reasoning" above and [providers.md](./providers.md). The degenerate tool-call loop guard still applies (this is a conversion path, not Claude-native passthrough). |
 | `codex` | Convert Messages → internal Chat Completions shape → existing provider adapter → convert response/SSE back to Anthropic Messages. Streaming conversion includes **text and `tool_use`** (`input_json_delta` from OpenAI `tool_calls` argument chunks) so Claude Code / CC Switch can complete tool rounds. The codex streaming converter maps Responses events (`response.output_item.added` → tool_call header, `response.function_call_arguments.delta` → argument fragments, `response.output_item.done` as fallback when no deltas were seen) onto OpenAI `tool_calls` chunks, with `call_id` as the tool id so replayed history matches `function_call_output.call_id`. `stop_sequences` forwards as OpenAI `stop`; `system` blocks are joined with a blank line. Anthropic `cache_control` has no equivalent → **stripped on convert**. |
 | custom, `format=anthropic` | Native **passthrough** to `{base_url}/v1/messages`, same shape as `claude-code` (auth inject, `model` rewritten to the bare upstream id, `cache_control`/`thinking` never touched) but with **none** of the Claude-Code-OAuth specifics: no system prepend, no auto-added effort beta, no fixed base betas — `anthropic-beta` is forwarded verbatim from the client (or omitted) and `anthropic-version` defaults to `2023-06-01` only when the client sends none. |
@@ -166,7 +166,7 @@ Parses the body the same way as `/v1/messages` — same `model` requirement, sam
 
 | `model` provider | Behavior |
 |------------------|----------|
-| `claude-code` | Passthrough to upstream `https://api.anthropic.com/v1/messages/count_tokens` with the same header construction as `/v1/messages` (OAuth bearer, `anthropic-version` default `2023-06-01`, beta header via `resolveBetaHeader`), the bare upstream model id, and the fixed Claude Code system prepend applied (idempotent — Claude Code clients already send that exact first system block). Reuses the same account pool / bench-on-401-403-429 failover loop as `/v1/messages`. Never streams — always a non-stream JSON response, returned as-is on success or upstream error. |
+| `claude-code` | Passthrough to upstream `https://api.anthropic.com/v1/messages/count_tokens` with the same header construction as `/v1/messages` (OAuth bearer, `anthropic-version` default `2023-06-01`, beta header via `resolveBetaHeader`), the bare upstream model id, and the fixed Claude Code system prepend applied (idempotent — Claude Code clients already send that exact first system block). Reuses the same account pool / bench-on-401/402/403/429 failover loop as `/v1/messages`. Never streams — always a non-stream JSON response, returned as-is on success or upstream error. |
 | `grok` / `codex` | `400`, no upstream call. There is no Chat Completions token-counting endpoint to convert to. Envelope: `{"type":"error","error":{"type":"invalid_request_error","message":"count_tokens is only supported for claude-code models"}}`. |
 | custom, `format=anthropic` | Passthrough to `{base_url}/v1/messages/count_tokens`, same header construction (and same OAuth-specifics omissions) as that provider's `/v1/messages`. Reuses the same account pool / failover loop. |
 | custom, `format=openai` | The exact same `400` rejection as `grok`/`codex` — no Chat Completions equivalent exists for a custom openai-format endpoint either. |
@@ -184,7 +184,7 @@ Same host keeps `/anthropic/*` for additional Anthropic routes if needed; do not
 1. Parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id, split on the **first** `/` only — an upstream id may itself contain further `/`). Required on **both** surfaces.
 2. If `provider` is a builtin `ProviderId`, use it directly. Otherwise look it up as a custom provider slug, scoped to the authenticated user (`custom_providers` table) — never resolves another user's slug.
 3. Resolve user’s pool for that provider (or custom slug).
-4. `acquire()` usable account; on 401/403/429 bench and try next.
+4. `acquire()` usable account; on 401/402/403/429 bench and try next (402 = billing/credit exhaustion — e.g. OpenRouter's `402 Insufficient credits` — the account is unusable until topped up, so retrying it per-request just burns a failing upstream round-trip).
 5. No usable account → error (below).
 6. No provider match at all (not a builtin id, not one of the caller's custom slugs) → `400 invalid_model`.
 
@@ -262,19 +262,21 @@ JSON error objects; OpenAI-ish or Anthropic-ish envelope depending on surface.
 |-----------|------|-----------------|
 | Missing/invalid API key | 401 | `invalid_api_key` |
 | Model string invalid | 400 | `invalid_model` |
-| No account for provider | 400 | `no_upstream_account` |
-| All accounts benched / unavailable | 503 | `upstream_unavailable` (+ `Retry-After` when known) |
+| No account **bound** for provider | 400 | `no_upstream_account` |
+| All bound accounts benched / unavailable | 503 | `upstream_unavailable` (+ `Retry-After` when known) |
 | Upstream 4xx/5xx after retries | pass through status when possible | `upstream_error` |
 | Reasoning rejected | 400 | `invalid_reasoning` |
 | Degenerate tool-call loop (conversion path only — see above) | 400 | `loop_detected` |
 
 Auth failures (missing/invalid API key) are envelope-shaped per **surface**, matched on request path prefix rather than on provider: `/anthropic/*` gets the Anthropic shape `{"type":"error","error":{"type":"authentication_error","message":"Missing API key"|"Invalid API key"}}`; every other path (including `/openai/*`) keeps the OpenAI shape shown in the table above.
 
+`400 no_upstream_account` is reserved for the *unbound* case: the user has **zero** accounts for the resolved provider, so retrying can never help. When accounts exist but none is usable *right now* (every one benched — e.g. the pool's single account just got benched for its 300s cooldown), the response is `503 upstream_unavailable` with `Retry-After` set to the seconds until the earliest bench expiry (min 1) when known — a transient error agent clients retry instead of treating as fatal. If the failover loop itself exhausted the pool mid-request and an upstream response exists, that upstream status passes through instead (`upstream_error`).
+
 Authenticated pre-dispatch failures (invalid model, no upstream account, loop-guard trip) are all logged as one `request_logs` row via `waitUntil`, same as a real dispatch; unauthenticated 401s are never logged — see [logging.md](./logging.md).
 
 ## Rate limits
 
-No platform per-key quota. Upstream rate limits apply; pool benches on 401/403/429.
+No platform per-key quota. Upstream rate limits apply; pool benches on 401/402/403/429.
 
 ## Changelog (admin)
 

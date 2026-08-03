@@ -19,7 +19,14 @@ export type AcquiredAccount = {
   credential: StoredCredential
 }
 
-const FAILOVER_STATUS = new Set([401, 403, 429])
+/**
+ * Statuses that bench an account and fail over to the next one in the pool:
+ * 401/403 (auth), 429 (rate limit), 402 (billing/credit exhaustion — e.g.
+ * OpenRouter's `402 Insufficient credits`; the account is unusable until
+ * topped up, so retrying it per-request just burns a failing upstream
+ * round-trip). See docs/api.md "Model routing".
+ */
+const FAILOVER_STATUS = new Set([401, 402, 403, 429])
 
 export function shouldBenchStatus(status: number): boolean {
   return FAILOVER_STATUS.has(status)

@@ -101,6 +101,13 @@ Canonical project rules. Cursor / Agents / Claude entrypoints symlink to this fi
 - Rate limits and usage accounting must fail closed for abuse (reject over-quota) but must not crash the Worker or wipe unrelated state.
 - Do not log full prompts, completions, or secrets by default; if auditing is required, document retention and redaction in `docs/` first.
 
+### Cost safety — real upstream traffic is real money
+
+- **Never** debug, reproduce, bisect, or benchmark by sending real requests through the deployed proxy (or directly to paid upstreams). Every such request bills the operator's provider account; large-context probes against premium models cost dollars *each*. Verification is unit tests with stubbed `fetch` — free and deterministic.
+- A live smoke test is allowed only with the user's **explicit per-instance approval**, and must be the smallest possible request: tiny prompt, `max_tokens` ≤ 32, no long-context/`[1M]` variants, never in a loop or size sweep.
+- For "why did it fail in production" questions, use free evidence first: `request_logs` in D1 (`wrangler d1 execute --remote`), `wrangler tail`, Cloudflare dashboards. Do not generate traffic to make logs appear.
+- Agents must treat paid upstream credit balances like production data: exhausting them is an outage (the pool 402-benches and clients hard-fail).
+
 ### Auth
 
 - No password-based login for the admin/web UI.
