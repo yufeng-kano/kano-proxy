@@ -210,8 +210,20 @@ function coverageNote(row: ModelUsageRow): string | null {
       </template>
     </PageHeader>
 
+    <!-- Non-blocking: whatever was cached stays on screen underneath, and the
+         banner offers the one control that can fix it. Named in the user's
+         terms rather than echoing the transport's error — there is nothing
+         actionable in a status code here, unlike a custom endpoint's own
+         upstream message, which the user needs verbatim to fix their config. -->
     <div v-if="error" class="page-alert">
-      <Banner tone="warn">{{ error }}</Banner>
+      <Banner tone="warn">
+        {{ t("overview.error.load") }}
+        <template #actions>
+          <AppButton size="sm" variant="ghost" :loading="manualRefreshing" @click="onRefresh">
+            {{ t("action.retry") }}
+          </AppButton>
+        </template>
+      </Banner>
     </div>
 
     <!-- The container the tiles size against: the content region's width, not
@@ -307,7 +319,14 @@ function coverageNote(row: ModelUsageRow): string | null {
                 <span v-if="coverageNote(row)" class="coverage">{{ coverageNote(row) }}</span>
               </template>
             </DataTable>
-            <EmptyState v-else compact :title="t('overview.models.empty')" />
+            <!-- Only once the range has actually resolved: before that, "no
+                 model activity" is a claim the page cannot yet make. -->
+            <EmptyState
+              v-else-if="summary"
+              compact
+              :title="t('overview.models.empty')"
+            />
+            <span v-else class="sr-only" role="status">{{ t("app.loading") }}</span>
           </AppCard>
         </div>
       </div>
@@ -331,32 +350,47 @@ function coverageNote(row: ModelUsageRow): string | null {
   min-width: 0;
 }
 
+/* 5 across → 3 → 2 as the *content region* narrows. Container queries, not
+   media queries: the sidebar collapsing to a drawer at 1080px changes this
+   region's width without changing the viewport's, and a media query would
+   keep sizing the tiles for a sidebar that is no longer there. */
 .tiles {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
 }
 
-/* The hero spans two columns until the grid itself is only two wide. */
-.tile-hero {
-  grid-column: span 2;
-}
-
-@container (min-width: 640px) {
+@container (min-width: 620px) {
   .tiles {
+    /* 3 wide: the hero takes a full row of its own rather than leaving a
+       ragged hole beside it. */
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .tile-hero {
+    grid-column: 1 / -1;
   }
 }
 
 @container (min-width: 960px) {
   .tiles {
-    /* 5 tiles across 6 tracks — the hero takes the extra one. */
+    /* 5 tiles over 6 tracks — the hero is the one that takes two. */
     grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .tile-hero {
+    grid-column: span 2;
   }
 }
 
 /* Chart beside breakdown. The chart column takes the slack; the breakdown is
-   capped so a wide display does not hand it space the chart needs more. */
+   capped so a wide display does not hand it room the chart wants more.
+
+   A viewport media query here, unlike the tiles above, and deliberately: the
+   split is specified against the viewport (docs/admin-ui.md § Responsive), and
+   at the 1440px target the content region is ~1128px wide — a *container*
+   query at 1200px would never fire there and would stack the two cards on
+   exactly the viewport this page is measured against. */
 .panels {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -364,7 +398,7 @@ function coverageNote(row: ModelUsageRow): string | null {
   min-width: 0;
 }
 
-@container (min-width: 1200px) {
+@media (min-width: 1200px) {
   .panels {
     grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
   }
@@ -388,12 +422,8 @@ function coverageNote(row: ModelUsageRow): string | null {
   }
 }
 
-.empty-card {
-  min-height: 0;
-}
-
-/* Matches UsageChart's plot height, so switching from placeholder to chart
-   does not shift the page. */
+/* Matches UsageChart's plot height, so the card is the same size before and
+   after the first paint — no shift when the data lands. */
 .chart-placeholder {
   height: 260px;
 }

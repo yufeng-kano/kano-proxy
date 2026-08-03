@@ -121,6 +121,7 @@ export const en = {
   "overview.models.cacheRate": "Cache rate",
   "overview.models.coverage": "on {known} of {total}",
   "overview.models.empty": "No model activity in this range",
+  "overview.error.load": "Couldn't load your usage",
 
   // --- Providers ----------------------------------------------------------
   "providers.title": "Providers",
