@@ -37,9 +37,10 @@ export const CACHE_TTL_MS = 90_000
 /**
  * Envelope version. Bump whenever a cached payload's shape changes: every
  * entry written by an older build then reads as a miss instead of feeding a
- * stale shape into the UI.
+ * stale shape into the UI. v2: usage summaries and keys grew cost/spend
+ * fields (docs/pricing.md).
  */
-const CACHE_SCHEMA_VERSION = 1
+const CACHE_SCHEMA_VERSION = 2
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

@@ -6,6 +6,11 @@
  * Sticky is the point. The controls a page is operated by (range picker,
  * search, Create) must be reachable at any scroll depth, so they live here
  * rather than in the content that scrolls away.
+ *
+ * Chrome, not a surface (docs/admin-ui.md § Layout): one compact title row
+ * with the subtitle inline beside it, and a background that is the page bg
+ * blurred — a stuck header reads as the page fading out under the controls,
+ * never as a white slab sitting on it.
  */
 defineProps<{
   title: string
@@ -61,38 +66,47 @@ defineSlots<{
   position: sticky;
   top: 0;
   z-index: 10;
-  margin: calc(var(--top) * -1) 0 var(--space-6);
+  margin: calc(var(--top) * -1) 0 var(--space-5);
   padding: var(--top) 0 0;
   background: var(--topbar-bg);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
 }
 
+/* Title and subtitle share one baseline row: the header is a strip of
+   chrome, and two stacked text rows are what made it read as a block. */
 .row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
   flex-wrap: wrap;
-  padding-bottom: var(--space-4);
+  padding-bottom: var(--space-3);
 }
 
 .heading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
   min-width: 0;
+  flex-wrap: wrap;
 }
 
 .title {
   margin: 0;
-  font-size: var(--text-lg);
+  font-size: var(--text-md);
   font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-tighter);
-  line-height: 1.2;
+  letter-spacing: var(--tracking-tight);
+  line-height: 1.3;
 }
 
 .subtitle {
-  margin: var(--space-1) 0 0;
+  margin: 0;
   color: var(--muted);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .actions {
@@ -111,14 +125,6 @@ defineSlots<{
 @media (max-width: 640px) {
   .page-header {
     margin-bottom: var(--space-4);
-  }
-
-  .row {
-    padding-bottom: var(--space-3);
-  }
-
-  .title {
-    font-size: var(--text-md);
   }
 
   /* The subtitle is context, not instruction — on a phone the vertical space

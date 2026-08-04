@@ -185,6 +185,22 @@ function makeFormatters() {
         maximumFractionDigits: Math.abs(n) < 10_000 ? 1 : 2,
       }).format(n)
     },
+    /**
+     * USD estimate: "$34.89". Sub-cent amounts keep enough precision to not
+     * render a real cost as "$0.00" ("$0.0042"); null is an em dash, never a
+     * fabricated zero (docs/pricing.md).
+     */
+    currency(usd: number | null | undefined): string {
+      if (usd == null || Number.isNaN(usd)) return EM_DASH
+      const abs = Math.abs(usd)
+      const digits = abs > 0 && abs < 0.01 ? 4 : 2
+      return new Intl.NumberFormat(tag(), {
+        style: "currency",
+        currency: "USD",
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      }).format(usd)
+    },
     /** Ratio 0..1 as a percent: 0.734 → "73.4%". */
     percent(ratio: number | null | undefined, digits = 1): string {
       if (ratio == null || Number.isNaN(ratio)) return EM_DASH

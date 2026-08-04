@@ -271,6 +271,7 @@ JSON error objects; OpenAI-ish or Anthropic-ish envelope depending on surface.
 | Upstream 4xx/5xx after retries | pass through status when possible | `upstream_error` |
 | Reasoning rejected | 400 | `invalid_reasoning` |
 | Degenerate tool-call loop (conversion path only — see above) | 400 | `loop_detected` |
+| Key's spend limit reached ([pricing.md](./pricing.md)) | 429 | `spend_limit_exceeded` (Anthropic surface: `rate_limit_error` type) |
 
 Auth failures (missing/invalid API key) are envelope-shaped per **surface**, matched on request path prefix rather than on provider: `/anthropic/*` gets the Anthropic shape `{"type":"error","error":{"type":"authentication_error","message":"Missing API key"|"Invalid API key"}}`; every other path (including `/openai/*`) keeps the OpenAI shape shown in the table above.
 
@@ -280,7 +281,7 @@ Authenticated pre-dispatch failures (invalid model, no upstream account, loop-gu
 
 ## Rate limits
 
-No platform per-key quota. Upstream rate limits apply; pool benches on 401/402/403/429.
+No platform per-request rate limit. Upstream rate limits apply; pool benches on 401/402/403/429. A key with a configured **spend limit** gets 429 `spend_limit_exceeded` once its window's estimated spend reaches the ceiling — see [pricing.md](./pricing.md). The check is pre-dispatch and never counts a 429'd request itself as spend.
 
 ## Changelog (admin)
 

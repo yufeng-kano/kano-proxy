@@ -36,6 +36,11 @@ Migrations live in `apps/api/migrations/` and are applied only via Wrangler.
 | key_hash | TEXT UNIQUE | |
 | created_at | TEXT | |
 | last_used_at | TEXT | nullable |
+| spend_limit | REAL | nullable; USD ceiling per window, `NULL` = unlimited ([pricing.md](./pricing.md)) |
+| spend_limit_interval | TEXT | `daily` \| `weekly` \| `monthly` \| `total`; `NOT NULL DEFAULT 'monthly'` |
+| spend_limit_include_oauth | INTEGER | 0/1, `NOT NULL DEFAULT 1`; whether builtin-provider (subscription OAuth) traffic counts toward the limit |
+
+Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 
 ### `upstream_accounts`
 
@@ -103,6 +108,7 @@ Optional cache; may also use KV with 60s TTL.
 | completion_tokens | INTEGER | nullable |
 | cache_read_input_tokens | INTEGER | nullable; input tokens served from upstream prompt cache |
 | cache_creation_input_tokens | INTEGER | nullable; Anthropic cache-write tokens (no OpenAI equivalent) |
+| cost | REAL | nullable; estimated USD cost computed at write time from the LiteLLM price table ([pricing.md](./pricing.md)); `NULL` = unpriced/unknown, never 0-as-guess |
 | error_code | TEXT | nullable |
 | created_at | TEXT | |
 
@@ -115,7 +121,7 @@ Token semantics (normalized across providers — capture matrix in [logging.md](
 - `NULL` means *unreported*, not zero: when an Anthropic-shaped `usage` is present, absent cache fields default to `0` (the API defines them); OpenAI-shaped usage stores `NULL` unless `prompt_tokens_details` (or the `cache_creation_input_tokens` extension) was actually present. Cache-rate aggregation divides only over rows where `cache_read_input_tokens IS NOT NULL`.
 - Streamed requests write their row when the stream ends (`waitUntil`), so token fields can be populated; a client that disconnects mid-stream still gets a row with whatever usage was seen by then.
 
-Cache columns added in `0003_request_log_cache_tokens.sql`. Dashboard range queries are covered by the existing `request_logs_user_created_idx` on `(user_id, created_at)` from `0001_init.sql`.
+Cache columns added in `0003_request_log_cache_tokens.sql`; `cost` and the spend-limit index `request_logs_api_key_created_idx` on `(api_key_id, created_at)` added in `0004_api_key_spend_limits.sql`. Dashboard range queries are covered by the existing `request_logs_user_created_idx` on `(user_id, created_at)` from `0001_init.sql`.
 
 Rows past the retention window (default 90 days) are deleted by the daily cron sweep, which also purges expired `sessions` and `oauth_login_states` rows — see [logging.md](./logging.md).
 

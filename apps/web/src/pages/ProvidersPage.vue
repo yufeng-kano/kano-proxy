@@ -1,20 +1,15 @@
 <script setup lang="ts">
 /**
- * Providers: one section per subscription pool plus the custom endpoints,
- * reachable from a section nav in the sticky header.
- *
- * The nav is the anti-scroll rule in practice (docs/admin-ui.md § Anti-scroll
- * rules): four stacked sections would otherwise make the last one a scroll
- * hunt. Selecting one scrolls it into the *content region* — the window never
- * scrolls in this app — and an IntersectionObserver rooted at that same region
- * keeps the nav marking wherever the user actually is.
+ * Providers: tabs in the sticky header — All, one per builtin pool, Custom —
+ * same pattern as Models (docs/admin-ui.md § Providers page). All stacks
+ * every section; a provider tab renders only that provider's card. One panel
+ * at a time, real tab semantics, no anchor-scrolling.
  *
  * Data is cache-first and silent about it: the cache paints immediately, a
  * background poll keeps it warm, and neither says a word in the UI. Only the
  * Refresh the user pressed reports progress, on the button they pressed.
  */
-import { computed, nextTick, onMounted, onUnmounted, ref } from "vue"
-import type { ComponentPublicInstance } from "vue"
+import { computed, onMounted, onUnmounted, ref } from "vue"
 import AddAccountDialog from "@/components/AddAccountDialog.vue"
 import CustomProviderDialog from "@/components/CustomProviderDialog.vue"
 import AccountCard from "@/components/providers/AccountCard.vue"
@@ -33,7 +28,7 @@ import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import { deleteCustomProvider, promoteAccount, removeAccount } from "@/services/api"
-import { getScrollRegion, scrollIntoRegion } from "@/services/scrollRegion"
+import { getProvidersPrefs, setProvidersPrefs } from "@/services/prefs"
 import { PROVIDERS, type CustomProvider, type ProviderId } from "@/types"
 
 const { t } = useI18n()
@@ -59,15 +54,10 @@ const BLURB_KEY: Record<ProviderId, MessageKey> = {
   grok: "provider.grok.blurb",
 }
 
-/** The custom endpoints section is not a `ProviderId`, so it gets its own id. */
+/** The custom-endpoints tab is not a `ProviderId`, so it gets its own id. */
 const CUSTOM = "custom"
-
-/**
- * How long a nav click owns the active marker. Smooth scrolling has no
- * completion event, and without a hold every section the scroll passes through
- * flashes active on the way to the one the user actually picked.
- */
-const CLICK_HOLD_MS = 700
+/** The "everything" tab. Underscored so it can never collide with a wire id. */
+const ALL = "__all__"
 
 const busyId = ref<string | null>(null)
 const customBusyId = ref<string | null>(null)
@@ -78,31 +68,27 @@ const addFor = ref<ProviderId | null>(null)
 const showCustomDialog = ref(false)
 const editingCustomProvider = ref<CustomProvider | null>(null)
 
-const sections = ref<HTMLElement | null>(null)
-/**
- * PageHeader's root element, reached through the component instance's `$el`.
- * Its height is what the scroll target and the observer's top margin have to
- * clear — measured rather than assumed, because the header grows a row when
- * the actions wrap on a narrow viewport.
- */
-const header = ref<ComponentPublicInstance | null>(null)
-const activeSection = ref<string>(PROVIDERS[0]?.id ?? CUSTOM)
+/** What the user last picked; resolved against the known tabs below. */
+const selected = ref<string>(getProvidersPrefs().tab ?? ALL)
 
 let pollTimer: number | undefined
-let observer: IntersectionObserver | undefined
-/** The element the scroll listener is bound to, kept for teardown. */
-let scrollRoot: HTMLElement | null = null
-/** Timestamp until which the observer defers to the last nav click. */
-let clickHoldUntil = 0
 
-const sectionIds = computed<string[]>(() => [...PROVIDERS.map((p) => p.id), CUSTOM])
+const tabIds = computed<string[]>(() => [ALL, ...PROVIDERS.map((p) => p.id), CUSTOM])
+
+/** A stored tab that no longer exists resolves to All rather than an empty page. */
+const activeTab = computed(() => (tabIds.value.includes(selected.value) ? selected.value : ALL))
 
 const navItems = computed<SectionItem[]>(() => [
+  {
+    id: ALL,
+    label: t("providers.all"),
+    // null while nothing has loaded: a "0" the app is not sure about reads as
+    // a fact, and an empty chip is more honest than a wrong one.
+    count: allCount.value,
+  },
   ...PROVIDERS.map((p) => ({
     id: p.id,
     label: t(NAME_KEY[p.id]),
-    // null while nothing has loaded: a "0" the app is not sure about reads as
-    // a fact, and an empty chip is more honest than a wrong one.
     count: byProvider[p.id].data?.accounts.length ?? null,
   })),
   {
@@ -111,6 +97,38 @@ const navItems = computed<SectionItem[]>(() => [
     count: customProviders.state.data?.length ?? null,
   },
 ])
+
+/** Sum across sections, but only once every section has actually loaded. */
+const allCount = computed<number | null>(() => {
+  let sum = 0
+  for (const p of PROVIDERS) {
+    const n = byProvider[p.id].data?.accounts.length
+    if (n == null) return null
+    sum += n
+  }
+  const custom = customProviders.state.data?.length
+  if (custom == null) return null
+  return sum + custom
+})
+
+const visibleProviders = computed<ProviderId[]>(() => {
+  if (activeTab.value === ALL) return PROVIDERS.map((p) => p.id)
+  return PROVIDERS.filter((p) => p.id === activeTab.value).map((p) => p.id)
+})
+
+const showCustomSection = computed(
+  () => activeTab.value === ALL || activeTab.value === CUSTOM,
+)
+
+/** Names the panel after the tab that opened it. */
+const activeLabel = computed(
+  () => navItems.value.find((item) => item.id === activeTab.value)?.label ?? t("providers.all"),
+)
+
+function onSelectTab(id: string) {
+  selected.value = id
+  setProvidersPrefs({ tab: id === ALL ? null : id })
+}
 
 onMounted(async () => {
   setUserId(user.value?.id ?? null)
@@ -121,95 +139,11 @@ onMounted(async () => {
     void loadAll()
     void customProviders.load()
   }, CACHE_TTL_MS)
-
-  // The shell publishes its scroll region in *its* mounted hook, which runs
-  // after this one — a tick later it is there.
-  await nextTick()
-  observeSections()
 })
 
 onUnmounted(() => {
   if (pollTimer !== undefined) window.clearInterval(pollTimer)
-  observer?.disconnect()
-  scrollRoot?.removeEventListener("scroll", onRegionScroll)
-  scrollRoot = null
 })
-
-function headerOffset(): number {
-  const el: unknown = header.value?.$el
-  return el instanceof HTMLElement ? el.offsetHeight : 0
-}
-
-function sectionEl(id: string): HTMLElement | null {
-  return sections.value?.querySelector<HTMLElement>(`[data-section="${id}"]`) ?? null
-}
-
-function goToSection(id: string) {
-  activeSection.value = id
-  clickHoldUntil = Date.now() + CLICK_HOLD_MS
-  scrollIntoRegion(sectionEl(id), headerOffset())
-}
-
-/**
- * Marks whichever section occupies the band just below the sticky header.
- * Rooted at the content region because that — not the window — is what
- * scrolls here.
- */
-function observeSections() {
-  const root = getScrollRegion()
-  if (!root || !sections.value) return
-
-  const visible = new Set<string>()
-  observer = new IntersectionObserver(
-    (entries) => {
-      for (const entry of entries) {
-        const id = entry.target instanceof HTMLElement ? entry.target.dataset.section : null
-        if (!id) continue
-        if (entry.isIntersecting) visible.add(id)
-        else visible.delete(id)
-      }
-      if (Date.now() < clickHoldUntil) return
-      // At the very bottom the last section can sit entirely below the band and
-      // match nothing — scrolled as far as it goes *is* the last section, so it
-      // wins outright rather than leaving the marker stuck one item back.
-      if (atBottom(root)) {
-        const last = sectionIds.value[sectionIds.value.length - 1]
-        if (last) activeSection.value = last
-        return
-      }
-      const first = sectionIds.value.find((id) => visible.has(id))
-      if (first) activeSection.value = first
-    },
-    {
-      root,
-      // Top: clear the header. Bottom: only the upper band counts, so the
-      // section the user is reading wins over the one merely peeking in.
-      rootMargin: `-${headerOffset()}px 0px -60% 0px`,
-      threshold: 0,
-    },
-  )
-
-  for (const el of sections.value.querySelectorAll<HTMLElement>("[data-section]")) {
-    observer.observe(el)
-  }
-
-  // The observer only fires on a crossing, and the bottom case above needs to
-  // be re-evaluated on every scroll, not just when a section enters or leaves.
-  root.addEventListener("scroll", onRegionScroll, { passive: true })
-  scrollRoot = root
-}
-
-/** Within a pixel of the end — fractional scroll heights never land exactly. */
-function atBottom(root: HTMLElement): boolean {
-  return root.scrollHeight - root.scrollTop - root.clientHeight <= 1
-}
-
-function onRegionScroll() {
-  if (!scrollRoot || Date.now() < clickHoldUntil) return
-  if (!atBottom(scrollRoot)) return
-  const last = sectionIds.value[sectionIds.value.length - 1]
-  if (last) activeSection.value = last
-}
 
 async function refreshAll() {
   actionError.value = null
@@ -289,11 +223,9 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 
 <template>
   <div>
-    <PageHeader ref="header" :title="t('providers.title')" :subtitle="t('providers.subtitle')">
+    <PageHeader :title="t('providers.title')" :subtitle="t('providers.subtitle')">
       <template #actions>
-        <!-- Icon-only: the label is a tooltip and the accessible name, so the
-             control keeps its meaning without spending header width on a word
-             that repeats on every page. -->
+        <!-- Icon-only: the label is a tooltip and the accessible name. -->
         <AppButton
           icon-only
           :label="t('action.refresh')"
@@ -305,11 +237,10 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       </template>
       <template #nav>
         <SectionNav
-          mode="anchors"
           :items="navItems"
-          :active="activeSection"
+          :active="activeTab"
           :label="t('providers.title')"
-          @select="goToSection"
+          @select="onSelectTab"
         />
       </template>
     </PageHeader>
@@ -325,28 +256,34 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       </Banner>
     </div>
 
-    <div ref="sections" class="sections">
+    <!-- The panel the tabs point at: SectionNav's aria-controls is
+         `panel-<id>`, and only the selected tab's sections are in the DOM. -->
+    <div
+      :id="`panel-${activeTab}`"
+      class="sections"
+      role="tabpanel"
+      :aria-label="activeLabel"
+    >
       <AppCard
-        v-for="p in PROVIDERS"
-        :key="p.id"
-        :data-section="p.id"
-        :title="t(NAME_KEY[p.id])"
-        :subtitle="t(BLURB_KEY[p.id])"
+        v-for="pid in visibleProviders"
+        :key="pid"
+        :title="t(NAME_KEY[pid])"
+        :subtitle="t(BLURB_KEY[pid])"
       >
         <template #actions>
-          <AppButton size="sm" @click="addFor = p.id">
+          <AppButton size="sm" @click="addFor = pid">
             {{ t("providers.addAccount") }}
           </AppButton>
         </template>
 
         <div class="section-body">
-          <Banner v-if="byProvider[p.id].error" tone="warn">
-            {{ t("providers.error.load", { provider: t(NAME_KEY[p.id]) }) }}
+          <Banner v-if="byProvider[pid].error" tone="warn">
+            {{ t("providers.error.load", { provider: t(NAME_KEY[pid]) }) }}
           </Banner>
 
           <!-- Skeletons are decoration; the status beside them is what a
                screen reader gets, same as the shell's boot loader. -->
-          <div v-if="!byProvider[p.id].data" class="skeleton-list">
+          <div v-if="!byProvider[pid].data" class="skeleton-list">
             <span class="sr-only" role="status">{{ t("app.loading") }}</span>
             <div v-for="i in 2" :key="i" class="skeleton-row" aria-hidden="true">
               <span class="skeleton skeleton-name" />
@@ -355,28 +292,28 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
             </div>
           </div>
 
-          <div v-else-if="byProvider[p.id].data!.accounts.length" class="rows">
+          <div v-else-if="byProvider[pid].data!.accounts.length" class="rows">
             <AccountCard
-              v-for="account in byProvider[p.id].data!.accounts"
+              v-for="account in byProvider[pid].data!.accounts"
               :key="account.id"
               :account="account"
               :busy="busyId === account.id"
-              @promote="onPromote(p.id, account.id)"
-              @remove="onRemove(p.id, account.id)"
+              @promote="onPromote(pid, account.id)"
+              @remove="onRemove(pid, account.id)"
             />
           </div>
 
           <EmptyState
             v-else
             compact
-            :title="t('providers.empty.title', { provider: t(NAME_KEY[p.id]) })"
-            :body="t('providers.empty.body', { provider: t(NAME_KEY[p.id]) })"
+            :title="t('providers.empty.title', { provider: t(NAME_KEY[pid]) })"
+            :body="t('providers.empty.body', { provider: t(NAME_KEY[pid]) })"
           />
         </div>
       </AppCard>
 
       <AppCard
-        :data-section="CUSTOM"
+        v-if="showCustomSection"
         :title="t('provider.custom.name')"
         :subtitle="t('provider.custom.blurb')"
       >
@@ -447,7 +384,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 
 .sections {
   display: grid;
-  gap: var(--space-6);
+  gap: var(--space-5);
 }
 
 .section-body {

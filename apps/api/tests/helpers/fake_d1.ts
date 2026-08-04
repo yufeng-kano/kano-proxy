@@ -1,12 +1,13 @@
 /**
  * Minimal in-memory D1 substitute for route/db integration tests. Supports
  * exactly the query shapes this codebase's db/* modules issue: single-table
- * SELECT/INSERT/UPDATE/DELETE with `=`, `>=`, or `<` WHERE conditions
- * (AND-joined), `SELECT COUNT(*)`, `SELECT COALESCE(MAX(col), 0)`, `UPDATE
- * ... SET col = ?` / `col = COALESCE(?, col)`, and the retention sweep's
- * batched `DELETE ... WHERE col IN (SELECT col FROM <same table> WHERE
- * <cond> LIMIT n)` shape. Not a SQL engine — anything outside these shapes
- * throws so a mismatch fails loudly instead of silently no-op.
+ * SELECT/INSERT/UPDATE/DELETE with `=`, `>=`, `<`, or `NOT IN (?, …)` WHERE
+ * conditions (AND-joined), `SELECT COUNT(*)`, `SELECT COALESCE(MAX(col), 0)`,
+ * `SELECT COALESCE(SUM(col), 0)`, `UPDATE ... SET col = ?` / `col =
+ * COALESCE(?, col)`, and the retention sweep's batched `DELETE ... WHERE col
+ * IN (SELECT col FROM <same table> WHERE <cond> LIMIT n)` shape. Not a SQL
+ * engine — anything outside these shapes throws so a mismatch fails loudly
+ * instead of silently no-op.
  */
 
 type Row = Record<string, unknown>
@@ -91,21 +92,36 @@ function splitTopLevel(s: string, sep: RegExp): string[] {
   return out
 }
 
+type WhereCond =
+  | { kind: "cmp"; col: string; op: string; paramIndex: number }
+  | { kind: "notIn"; col: string; paramStart: number; count: number }
+
 function filterRows(rows: Row[], whereClause: string | undefined, params: unknown[]): Row[] {
   if (!whereClause) return [...rows]
   const conditions = splitTopLevel(whereClause, /^\s+AND\s+/i).map((c) => c.trim())
   let pi = 0
-  const consumed = conditions.map((cond) => {
+  const consumed: WhereCond[] = conditions.map((cond) => {
     const cmp = cond.match(/^(\w+)\s*(=|>=|<)\s*\?$/)
-    if (cmp) return { col: cmp[1]!, op: cmp[2]!, paramIndex: pi++ }
+    if (cmp) return { kind: "cmp", col: cmp[1]!, op: cmp[2]!, paramIndex: pi++ }
+    const notIn = cond.match(/^(\w+)\s+NOT IN\s*\(([?,\s]+)\)$/i)
+    if (notIn) {
+      const count = (notIn[2]!.match(/\?/g) || []).length
+      const start = pi
+      pi += count
+      return { kind: "notIn", col: notIn[1]!, paramStart: start, count }
+    }
     throw new Error(`FakeD1: unsupported WHERE condition: ${cond}`)
   })
   return rows.filter((row) =>
-    consumed.every(({ col, op, paramIndex }) => {
-      const actual = row[col] as string | number
-      const expected = params[paramIndex] as string | number
-      if (op === ">=") return actual >= expected
-      if (op === "<") return actual < expected
+    consumed.every((c) => {
+      if (c.kind === "notIn") {
+        const excluded = params.slice(c.paramStart, c.paramStart + c.count)
+        return !excluded.includes(row[c.col])
+      }
+      const actual = row[c.col] as string | number
+      const expected = params[c.paramIndex] as string | number
+      if (c.op === ">=") return actual >= expected
+      if (c.op === "<") return actual < expected
       return actual === expected
     }),
   )
@@ -157,6 +173,16 @@ function execute(
     const rows = filterRows(db.rows(m[2]!), m[3], params)
     const max = rows.reduce((acc, r) => Math.max(acc, Number(r[col] ?? 0)), 0)
     return { rows: [{ m: max }] }
+  }
+
+  // SUM over nullable columns: SQL's SUM skips NULLs, COALESCE floors "no
+  // rows at all" to 0 — mirror both.
+  m = sql.match(/^SELECT COALESCE\(SUM\((\w+)\),\s*0\)\s*as s FROM (\w+)(?:\s+WHERE\s+(.+))?$/i)
+  if (m) {
+    const col = m[1]!
+    const rows = filterRows(db.rows(m[2]!), m[3], params)
+    const sum = rows.reduce((acc, r) => acc + (r[col] == null ? 0 : Number(r[col])), 0)
+    return { rows: [{ s: sum }] }
   }
 
   m = sql.match(/^SELECT .+? FROM (\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER BY\s+(.+))?$/i)

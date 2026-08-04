@@ -12,7 +12,7 @@
  * `label` (which becomes both the accessible name and the tooltip), never in
  * the glyph — so this is unconditionally `aria-hidden`.
  */
-defineProps<{ name: "refresh" | "copy" | "check" }>()
+defineProps<{ name: "refresh" | "copy" | "check" | "edit" | "expand" | "plus" }>()
 </script>
 
 <template>
@@ -38,6 +38,25 @@ defineProps<{ name: "refresh" | "copy" | "check" }>()
     <template v-else-if="name === 'copy'">
       <rect x="5.75" y="5.75" width="8.5" height="8.5" rx="1.75" />
       <path d="M10.25 3.75A1.75 1.75 0 008.5 2H3.75A1.75 1.75 0 002 3.75V8.5c0 .966.784 1.75 1.75 1.75" />
+    </template>
+
+    <!-- Edit: a pencil over its edit line — the gate in front of row actions. -->
+    <template v-else-if="name === 'edit'">
+      <path d="M11.1 2.6a1.6 1.6 0 012.3 2.3L6 12.3l-3 .7.7-3z" />
+      <path d="M9.5 4.2l2.3 2.3" />
+    </template>
+
+    <!-- Expand: two outward corner arrows — opens a card's detail view. -->
+    <template v-else-if="name === 'expand'">
+      <path d="M9.5 2.5H13.5V6.5" />
+      <path d="M13.5 2.5L9 7" />
+      <path d="M6.5 13.5H2.5V9.5" />
+      <path d="M2.5 13.5L7 9" />
+    </template>
+
+    <!-- Plus: create. -->
+    <template v-else-if="name === 'plus'">
+      <path d="M8 3v10M3 8h10" />
     </template>
 
     <!-- Check: the confirmation the copy swaps to. -->

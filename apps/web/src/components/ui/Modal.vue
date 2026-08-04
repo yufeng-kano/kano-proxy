@@ -13,7 +13,7 @@
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "@/i18n"
 
-withDefaults(defineProps<{ title: string; size?: "sm" | "md" }>(), { size: "sm" })
+withDefaults(defineProps<{ title: string; size?: "sm" | "md" | "lg" }>(), { size: "sm" })
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -148,6 +148,11 @@ onBeforeUnmount(() => {
   max-width: 620px;
 }
 
+/* Chart + table detail views — wide enough for a 31-bucket plot. */
+.panel.lg {
+  max-width: 880px;
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -225,7 +230,8 @@ onBeforeUnmount(() => {
 
   .panel,
   .panel.sm,
-  .panel.md {
+  .panel.md,
+  .panel.lg {
     max-width: none;
     /* `dvh`, not `vh`: the dynamic viewport shrinks when the on-screen
        keyboard opens, so a focused field stays above it instead of being

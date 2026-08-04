@@ -32,7 +32,10 @@
   --accent-fg: #fafafa;
   --accent-hover: #27272a;
   --hover: #f4f4f5;
-  --topbar-bg: rgb(255 255 255 / 92%);
+  /* The sticky page header's wash — a translucent tint of --bg, not of
+     --surface, so a stuck header reads as the page fading out under the
+     controls rather than a white card slab (docs/admin-ui.md § Layout). */
+  --topbar-bg: rgb(244 244 245 / 88%);
 
   /* --- Color: status --------------------------------------------------- */
   --danger: #b91c1c;

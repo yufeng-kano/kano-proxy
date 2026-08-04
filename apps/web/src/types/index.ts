@@ -33,12 +33,29 @@ export type AccountsResponse = {
   error: string | null
 }
 
+/** Reset window for a key's spend limit (docs/pricing.md). */
+export type SpendLimitInterval = "daily" | "weekly" | "monthly" | "total"
+
+export const SPEND_LIMIT_INTERVALS: SpendLimitInterval[] = [
+  "daily",
+  "weekly",
+  "monthly",
+  "total",
+]
+
 export type ApiKey = {
   id: string
   name: string
   key_prefix: string
   created_at: string
   last_used_at: string | null
+  /** USD ceiling per window; null = unlimited. */
+  spend_limit: number | null
+  spend_limit_interval: SpendLimitInterval
+  /** Whether subscription (OAuth) traffic counts toward the limit. */
+  spend_limit_include_oauth: boolean
+  /** Estimated USD spent in the current window — GET /api/keys only; null when unreadable. */
+  window_spend?: number | null
 }
 
 export type CreatedKey = ApiKey & {
@@ -147,6 +164,10 @@ export type UsageTotals = {
   usage_known_requests: number
   /** Requests with non-null cache_read_input_tokens (used in cache_rate). */
   cache_known_requests: number
+  /** Estimated USD over priced rows; null when none is priced (docs/pricing.md). */
+  cost: number | null
+  /** Rows contributing to `cost` — lets the UI annotate partial coverage. */
+  cost_known_requests: number
 }
 
 /** One row of the per-model breakdown. `model` is the full "provider/upstream" id. */
@@ -162,6 +183,8 @@ export type ModelUsageRow = {
   cache_rate: number | null
   usage_known_requests: number
   cache_known_requests: number
+  cost: number | null
+  cost_known_requests: number
 }
 
 /**
@@ -181,6 +204,8 @@ export type UsageSeriesPoint = {
   cache_read_input_tokens: number
   /** Requests here with non-null cache_read_input_tokens — separates "0% cached" from "not reported". */
   cache_known_requests: number
+  /** Estimated USD over this group's priced rows; null when none is. */
+  cost: number | null
 }
 
 export type UsageSummary = {

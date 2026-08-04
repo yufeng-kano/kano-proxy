@@ -23,10 +23,10 @@ import type { UsageDays } from "@/types"
 
 const PREFS_KEY = "kano-proxy:prefs"
 
-/** Which time-series view the Dashboard chart card is showing. */
-export type ChartView = "tokens" | "cache-rate"
+/** Which sub-tab the Overview activity card is showing. */
+export type ChartView = "tokens" | "requests" | "cache" | "models"
 
-const CHART_VIEWS: ChartView[] = ["tokens", "cache-rate"]
+const CHART_VIEWS: ChartView[] = ["tokens", "requests", "cache", "models"]
 const USAGE_DAYS: UsageDays[] = [1, 7, 30]
 
 export type Prefs = {
@@ -37,12 +37,14 @@ export type Prefs = {
   overview: {
     days: UsageDays
     chartView: ChartView
-    /** Chart card's chart-vs-table toggle. */
-    showTable: boolean
   }
   models: {
     /** Provider group the Models page is filtered to; null = all. Free-form because a custom endpoint's slug is user-defined. */
     provider: string | null
+  }
+  providers: {
+    /** Provider tab the Providers page is on; null = all. Free-form like models.provider. */
+    tab: string | null
   }
 }
 
@@ -50,8 +52,9 @@ function defaults(): Prefs {
   return {
     lastPath: null,
     scroll: {},
-    overview: { days: 7, chartView: "tokens", showTable: false },
+    overview: { days: 7, chartView: "tokens" },
     models: { provider: null },
+    providers: { tab: null },
   }
 }
 
@@ -83,12 +86,14 @@ function parse(raw: string): Prefs {
   base.scroll = readScroll(parsed.scroll)
 
   if (isRecord(parsed.overview)) {
-    const { days, chartView, showTable } = parsed.overview
+    const { days, chartView } = parsed.overview
     if (USAGE_DAYS.includes(days as UsageDays)) base.overview.days = days as UsageDays
+    // The pre-2.1 "cache-rate" value (and the removed showTable flag) simply
+    // fail this check and fall back — exactly the degradation this parser
+    // promises for a stale schema.
     if (CHART_VIEWS.includes(chartView as ChartView)) {
       base.overview.chartView = chartView as ChartView
     }
-    if (typeof showTable === "boolean") base.overview.showTable = showTable
   }
 
   if (isRecord(parsed.models)) {
@@ -98,6 +103,13 @@ function parse(raw: string): Prefs {
     // resolves to "all" at the page, not to an empty catalog.
     if (typeof provider === "string" && provider.length > 0 && provider.length <= 64) {
       base.models.provider = provider
+    }
+  }
+
+  if (isRecord(parsed.providers)) {
+    const { tab } = parsed.providers
+    if (typeof tab === "string" && tab.length > 0 && tab.length <= 64) {
+      base.providers.tab = tab
     }
   }
   return base
@@ -168,6 +180,14 @@ export function setModelsPrefs(patch: Partial<Prefs["models"]>): void {
 
 export function getModelsPrefs(): Prefs["models"] {
   return readPrefs().models
+}
+
+export function setProvidersPrefs(patch: Partial<Prefs["providers"]>): void {
+  patchPrefs((p) => ({ ...p, providers: { ...p.providers, ...patch } }))
+}
+
+export function getProvidersPrefs(): Prefs["providers"] {
+  return readPrefs().providers
 }
 
 /**

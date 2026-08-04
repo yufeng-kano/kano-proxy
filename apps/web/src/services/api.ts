@@ -11,6 +11,7 @@ import type {
   LoginStart,
   ModelsResponse,
   ProviderId,
+  SpendLimitInterval,
   UsageDays,
   UsageSummary,
   User,
@@ -123,10 +124,27 @@ export async function listModels(opts?: {
 
 export type { CatalogModel }
 
-export async function createKey(name?: string): Promise<CreatedKey> {
+/** Optional per-key spend-limit fields (docs/pricing.md); `spend_limit: null` = unlimited. */
+export type KeyLimitFields = {
+  spend_limit: number | null
+  spend_limit_interval: SpendLimitInterval
+  spend_limit_include_oauth: boolean
+}
+
+export async function createKey(name?: string, limits?: KeyLimitFields): Promise<CreatedKey> {
   return request<CreatedKey>("/api/keys", {
     method: "POST",
-    body: JSON.stringify({ name: name?.trim() || "default" }),
+    body: JSON.stringify({ name: name?.trim() || "default", ...limits }),
+  })
+}
+
+export async function updateKey(
+  id: string,
+  patch: { name?: string } & Partial<KeyLimitFields>,
+): Promise<ApiKey> {
+  return request<ApiKey>(`/api/keys/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
   })
 }
 

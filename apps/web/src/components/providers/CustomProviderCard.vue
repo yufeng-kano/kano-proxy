@@ -2,12 +2,14 @@
 /**
  * One user-defined endpoint inside the custom section.
  *
- * Mirrors AccountCard's row shape so the two sections read as one page, but
- * carries a static key instead of a usage window: the details are the model
- * prefix, the base URL, and the key mask (never the key itself — see
+ * Mirrors AccountCard's row shape so the two sections read as one page — the
+ * same pencil-gated actions included (docs/admin-ui.md § Providers page) —
+ * but carries a static key instead of a usage window: the details are the
+ * model prefix, the base URL, and the key mask (never the key itself — see
  * docs/admin-ui.md § Data freshness).
  */
 import { computed, ref } from "vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -28,6 +30,8 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
+/** Pencil-gated: the row's actions render only while this is on. */
+const editing = ref(false)
 const testing = ref(false)
 const testResult = ref<CustomProviderTestResult | null>(null)
 const testError = ref<string | null>(null)
@@ -81,19 +85,37 @@ async function runTest() {
       </div>
 
       <div class="actions">
-        <AppButton size="sm" :loading="testing" :disabled="busy" @click="runTest">
-          {{ t("action.test") }}
-        </AppButton>
-        <AppButton size="sm" :disabled="busy || testing" @click="emit('edit')">
-          {{ t("action.edit") }}
-        </AppButton>
+        <template v-if="editing">
+          <AppButton size="sm" :loading="testing" :disabled="busy" @click="runTest">
+            {{ t("action.test") }}
+          </AppButton>
+          <AppButton size="sm" :disabled="busy || testing" @click="emit('edit')">
+            {{ t("action.edit") }}
+          </AppButton>
+          <AppButton
+            size="sm"
+            variant="danger"
+            :disabled="busy || testing"
+            @click="emit('remove')"
+          >
+            {{ t("action.remove") }}
+          </AppButton>
+        </template>
+        <!-- aria-pressed: the same control opens and closes the action set,
+             so it is a toggle, and its state must be audible as one. -->
         <AppButton
+          icon-only
           size="sm"
-          variant="danger"
-          :disabled="busy || testing"
-          @click="emit('remove')"
+          variant="ghost"
+          :label="
+            editing
+              ? t('providers.account.doneEditing', { name: provider.name })
+              : t('providers.account.edit', { name: provider.name })
+          "
+          :aria-pressed="editing"
+          @click="editing = !editing"
         >
-          {{ t("action.remove") }}
+          <template #icon><ActionIcon :name="editing ? 'check' : 'edit'" /></template>
         </AppButton>
       </div>
     </div>
@@ -226,7 +248,8 @@ async function runTest() {
     width: 100%;
   }
 
-  .actions :deep(.btn) {
+  /* The pencil stays square — only the labelled actions share the row. */
+  .actions :deep(.btn:not(.btn-icon)) {
     flex: 1;
   }
 

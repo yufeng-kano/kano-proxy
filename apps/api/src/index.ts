@@ -4,6 +4,7 @@ import type { HonoEnv } from "./auth/session"
 import { loadSessionUser } from "./auth/session"
 import type { Env } from "./env"
 import { runRetentionSweep } from "./maintenance/retention"
+import { ensureFreshPriceTable } from "./pricing/litellm"
 import { anthropicRoutes } from "./routes/anthropic"
 import { authRoutes } from "./routes/auth"
 import { changelogRoutes } from "./routes/changelog"
@@ -76,6 +77,9 @@ const handler: ExportedHandler<Env> = {
         console.error("[retention] sweep failed:", err)
       }),
     )
+    // Daily LiteLLM price-table refresh (docs/pricing.md) — its own failure
+    // path (refreshPriceTable never throws), kept apart from the sweep.
+    ctx.waitUntil(ensureFreshPriceTable(env))
   },
 }
 

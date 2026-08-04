@@ -3,11 +3,14 @@
  * One connected subscription account inside a provider section.
  *
  * A row rather than a card-in-a-card: the section's AppCard is already the
- * surface, so this only needs an identity line, its usage windows, and the two
- * actions. The status dot always ships its text label (docs/admin-ui.md
- * § Accessibility floor).
+ * surface, so this only needs an identity line, its usage windows, and the
+ * actions — which stay behind a pencil toggle (docs/admin-ui.md § Providers
+ * page): a resting row shows identity and status only, so Remove is never one
+ * accidental click away and a long pool is not a wall of buttons. The status
+ * dot always ships its text label (docs/admin-ui.md § Accessibility floor).
  */
-import { computed } from "vue"
+import { computed, ref } from "vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -27,6 +30,9 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+/** Pencil-gated: the row's actions render only while this is on. */
+const editing = ref(false)
 
 /**
  * Server data, not copy: an email or upstream username identifies the account
@@ -120,16 +126,34 @@ const windows = computed(() => props.account.usage?.windows ?? [])
       </div>
 
       <div class="actions">
+        <template v-if="editing">
+          <AppButton
+            v-if="account.status !== 'active'"
+            size="sm"
+            :disabled="busy"
+            @click="emit('promote')"
+          >
+            {{ t("providers.account.promote") }}
+          </AppButton>
+          <AppButton size="sm" variant="danger" :disabled="busy" @click="emit('remove')">
+            {{ t("providers.account.remove") }}
+          </AppButton>
+        </template>
+        <!-- aria-pressed: the same control opens and closes the action set,
+             so it is a toggle, and its state must be audible as one. -->
         <AppButton
-          v-if="account.status !== 'active'"
+          icon-only
           size="sm"
-          :disabled="busy"
-          @click="emit('promote')"
+          variant="ghost"
+          :label="
+            editing
+              ? t('providers.account.doneEditing', { name: displayName })
+              : t('providers.account.edit', { name: displayName })
+          "
+          :aria-pressed="editing"
+          @click="editing = !editing"
         >
-          {{ t("providers.account.promote") }}
-        </AppButton>
-        <AppButton size="sm" variant="danger" :disabled="busy" @click="emit('remove')">
-          {{ t("providers.account.remove") }}
+          <template #icon><ActionIcon :name="editing ? 'check' : 'edit'" /></template>
         </AppButton>
       </div>
     </div>
@@ -219,7 +243,8 @@ const windows = computed(() => props.account.usage?.windows ?? [])
     width: 100%;
   }
 
-  .actions :deep(.btn) {
+  /* The pencil stays square — only the labelled actions share the row. */
+  .actions :deep(.btn:not(.btn-icon)) {
     flex: 1;
   }
 }

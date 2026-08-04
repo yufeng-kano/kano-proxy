@@ -49,14 +49,16 @@ The callback redirects to the SPA root (`APP_URL/`), not to a specific page: lan
 - No TTL; delete to revoke.
 - Multiple keys per user.
 - LLM requests resolve `key → user_id` then use **that user’s** pools only.
+- Optional per-key **spend limit** (`spend_limit` USD + `spend_limit_interval` `daily|weekly|monthly|total` + `spend_limit_include_oauth`): enforced in the API-key auth middleware; at/over the window's estimated spend the LLM surfaces return **429** `spend_limit_exceeded` (Anthropic surface: `rate_limit_error`) before any upstream call. See [pricing.md](./pricing.md).
 
 ### Management routes (session required)
 
-| Method | Path |
-|--------|------|
-| GET | `/api/keys` |
-| POST | `/api/keys` |
-| DELETE | `/api/keys/:id` |
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/keys` | Each key carries its limit fields plus `window_spend` (estimated USD already spent in the current window) |
+| POST | `/api/keys` | Body `{name?, spend_limit?, spend_limit_interval?, spend_limit_include_oauth?}`; plaintext key in the response, once |
+| PATCH | `/api/keys/:id` | Update `{name?, spend_limit?, spend_limit_interval?, spend_limit_include_oauth?}`; `spend_limit: null` clears the limit |
+| DELETE | `/api/keys/:id` | Revoke |
 | GET | `/api/models` | Catalog with `available`; `?available=1` filters |
 | GET | `/api/usage/summary` | Aggregated `request_logs` for the dashboard; `?days=` 1, 7, or 30 (default 7) |
 

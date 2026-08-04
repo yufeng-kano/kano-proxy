@@ -118,6 +118,16 @@ async function drain(body: ReadableStream<Uint8Array> | null): Promise<string> {
   return out
 }
 
+/**
+ * Lets a stream-close deferred logRequest finish. The write is fired into
+ * waitUntil at close and now awaits the pricing memo/KV lookup before its
+ * INSERT, so it completes a few microtasks after `drain` resolves — one
+ * macrotask turn covers it.
+ */
+async function settleDeferredLog(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0))
+}
+
 const originalFetch = globalThis.fetch
 afterEach(() => {
   globalThis.fetch = originalFetch
@@ -281,6 +291,7 @@ describe("/openai/v1/chat/completions — streaming capture", () => {
 
     const body = await drain(res.body)
     expect(body).toContain("hi")
+    await settleDeferredLog()
 
     const rows = db.rows("request_logs")
     expect(rows).toHaveLength(1)
@@ -468,6 +479,7 @@ describe("/anthropic/v1/messages — native claude-code capture", () => {
     )
     expect(db.rows("request_logs")).toHaveLength(0)
     await drain(res.body)
+    await settleDeferredLog()
     const rows = db.rows("request_logs")
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
@@ -581,6 +593,7 @@ describe("/anthropic/v1/messages — grok Responses / codex conversion: exactly 
     const body = await drain(res.body)
     expect(body).toContain("event: message_start")
     expect(body).toContain("event: message_stop")
+    await settleDeferredLog()
 
     const rows = db.rows("request_logs")
     expect(rows).toHaveLength(1)

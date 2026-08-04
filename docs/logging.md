@@ -3,7 +3,7 @@
 ## Allowed
 
 - Auth events: login success/fail (user id / email), logout
-- Request metadata: user_id, api_key_id, provider, model, account_id, status, latency_ms, prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens, error_code
+- Request metadata: user_id, api_key_id, provider, model, account_id, status, latency_ms, prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens, cost (estimated USD, [pricing.md](./pricing.md)), error_code
 - Pool: bench, promote, remove (ids only)
 
 ## Error codes
@@ -20,6 +20,7 @@
 | `upstream_stall` | Streaming response: no upstream chunk for 120s — idle-timeout close, logged unconditionally regardless of whether a completion signal was already seen |
 | `client_abort` | Streaming response: the client cancelled before the upstream reported a completion signal |
 | `incomplete_stream` | Streaming response: the upstream connection ended — cleanly or with a transport error — before a completion signal ever arrived |
+| `spend_limit_exceeded` | Authenticated request refused pre-dispatch because the key's spend-limit window is exhausted (429, [pricing.md](./pricing.md)) |
 | `NULL` | Success, or a streamed response that reached its documented completion signal before closing |
 
 ## Pre-dispatch logging policy

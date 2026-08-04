@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest"
-import { summarizeUsageRows, usageRoutes } from "../src/routes/usage"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
+import {
+  fillEstimatedCosts,
+  filterToLiveProviders,
+  summarizeUsageRows,
+  usageRoutes,
+} from "../src/routes/usage"
 import { createSession } from "../src/auth/session"
 import type { Env } from "../src/env"
+import { _resetPricingForTests, trimLiteLLMTable } from "../src/pricing/litellm"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
 type Row = {
@@ -13,8 +19,20 @@ type Row = {
   completion_tokens: number | null
   cache_read_input_tokens: number | null
   cache_creation_input_tokens: number | null
+  cost: number | null
   created_at: string
 }
+
+// The summary route may fetch the LiteLLM table inline when KV holds none —
+// never let a unit test reach the real network.
+const originalFetch = globalThis.fetch
+beforeEach(() => {
+  _resetPricingForTests()
+  globalThis.fetch = (async () => new Response("offline", { status: 500 })) as typeof fetch
+})
+afterEach(() => {
+  globalThis.fetch = originalFetch
+})
 
 function row(overrides: Partial<Row>): Row {
   return {
@@ -26,6 +44,7 @@ function row(overrides: Partial<Row>): Row {
     completion_tokens: null,
     cache_read_input_tokens: null,
     cache_creation_input_tokens: null,
+    cost: null,
     created_at: "2026-08-02T10:00:00.000Z",
     ...overrides,
   }
@@ -146,6 +165,7 @@ describe("summarizeUsageRows", () => {
         completion_tokens: 3,
         cache_read_input_tokens: 0,
         cache_known_requests: 0,
+        cost: null,
       },
       {
         bucket: "2026-08-02T12",
@@ -156,6 +176,7 @@ describe("summarizeUsageRows", () => {
         completion_tokens: 3,
         cache_read_input_tokens: 0,
         cache_known_requests: 0,
+        cost: null,
       },
     ])
     const daily = summarizeUsageRows(rows, 7, "from") as SummaryJson
@@ -169,6 +190,7 @@ describe("summarizeUsageRows", () => {
         completion_tokens: 6,
         cache_read_input_tokens: 0,
         cache_known_requests: 0,
+        cost: null,
       },
     ])
   })
@@ -444,6 +466,7 @@ describe("GET /api/usage/summary", () => {
         completion_tokens: 40,
         cache_read_input_tokens: 20,
         cache_known_requests: 1,
+        cost: null,
       },
       {
         bucket: "2026-08-02",
@@ -454,6 +477,7 @@ describe("GET /api/usage/summary", () => {
         completion_tokens: 0,
         cache_read_input_tokens: 0,
         cache_known_requests: 0,
+        cost: null,
       },
       {
         bucket: "2026-08-03",
@@ -464,7 +488,86 @@ describe("GET /api/usage/summary", () => {
         completion_tokens: 0,
         cache_read_input_tokens: 0,
         cache_known_requests: 0,
+        cost: null,
       },
     ])
+  })
+
+  it("excludes rows from providers that no longer exist, keeps live custom slugs", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    db.seed("custom_providers", [
+      {
+        id: "cprov_1",
+        user_id: "user_1",
+        slug: "my-endpoint",
+        name: "My endpoint",
+        format: "openai",
+        base_url: "https://api.example.com/v1",
+        models_mode: "auto",
+        manual_models_json: null,
+        created_at: "2026-08-01T00:00:00.000Z",
+        updated_at: "2026-08-01T00:00:00.000Z",
+      },
+    ])
+    seedLog(db, { user_id: "user_1", provider: "claude-code", prompt_tokens: 10, completion_tokens: 1 })
+    seedLog(db, { user_id: "user_1", provider: "my-endpoint", model: "my-endpoint/x", prompt_tokens: 20, completion_tokens: 2 })
+    // A deleted endpoint's slug and an invalid-model 400's "unknown" prefix.
+    seedLog(db, { user_id: "user_1", provider: "deleted-endpoint", model: "deleted-endpoint/x" })
+    seedLog(db, { user_id: "user_1", provider: "unknown", model: "gibberish" })
+
+    const res = await usageRoutes.request("/summary?days=30", req(cookie), env)
+    const json = (await res.json()) as SummaryJson
+    expect(json.totals.requests).toBe(2)
+    expect(json.models.map((m) => m.provider).sort()).toEqual(["claude-code", "my-endpoint"])
+  })
+
+  it("computes cost totals from stored per-row costs", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    seedLog(db, { user_id: "user_1", prompt_tokens: 100, completion_tokens: 10, cost: 1.5 })
+    seedLog(db, { user_id: "user_1", prompt_tokens: 100, completion_tokens: 10, cost: 0.5 })
+    seedLog(db, { user_id: "user_1", prompt_tokens: 100, completion_tokens: 10 }) // unpriced
+
+    const res = await usageRoutes.request("/summary?days=30", req(cookie), env)
+    const json = (await res.json()) as SummaryJson
+    expect(json.totals.cost).toBeCloseTo(2.0, 9)
+    expect(json.totals.cost_known_requests).toBe(2)
+  })
+})
+
+describe("filterToLiveProviders / fillEstimatedCosts", () => {
+  it("filterToLiveProviders keeps builtins and given slugs only", () => {
+    const rows = [
+      row({ provider: "claude-code" }),
+      row({ provider: "codex" }),
+      row({ provider: "grok" }),
+      row({ provider: "live-slug" }),
+      row({ provider: "dead-slug" }),
+      row({ provider: "unknown" }),
+    ]
+    const out = filterToLiveProviders(rows, ["live-slug"])
+    expect(out.map((r) => r.provider)).toEqual(["claude-code", "codex", "grok", "live-slug"])
+  })
+
+  it("fillEstimatedCosts prices NULL-cost rows at read time and never overwrites a stored cost", () => {
+    const table = trimLiteLLMTable({
+      "claude-opus-5": { input_cost_per_token: 0.00001, output_cost_per_token: 0.00005 },
+    })
+    const rows = [
+      row({ prompt_tokens: 1000, completion_tokens: 100, cost: null }),
+      row({ prompt_tokens: 1000, completion_tokens: 100, cost: 42 }),
+      row({ model: "claude-code/unpriced-model", prompt_tokens: 1000, cost: null }),
+    ]
+    const out = fillEstimatedCosts(rows, table)
+    expect(out[0]!.cost).toBeCloseTo(1000 * 0.00001 + 100 * 0.00005, 12)
+    expect(out[1]!.cost).toBe(42)
+    expect(out[2]!.cost).toBeNull()
+    // No table at all → rows come back untouched.
+    expect(fillEstimatedCosts(rows, null)).toBe(rows)
   })
 })
