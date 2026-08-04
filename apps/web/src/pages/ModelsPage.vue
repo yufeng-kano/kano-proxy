@@ -18,6 +18,7 @@
  * them silently.
  */
 import { computed, onMounted, ref } from "vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Badge from "@/components/ui/Badge.vue"
@@ -244,10 +245,16 @@ const noModels = computed(
   () => !hasQuery.value && models.value.length === 0 && activeTab.value === ALL,
 )
 
+/**
+ * The copy column is sized to its control, not to the table's leftover width:
+ * an auto-width action column stretches to a few hundred pixels and strands
+ * its header at the opposite edge from the button it labels. Id and name then
+ * split what is left, so a long `provider/model` gets the room it needs.
+ */
 const columns = computed<Column<CatalogModel>[]>(() => [
-  { key: "id", header: t("models.column.id"), width: "46%" },
+  { key: "id", header: t("models.column.id"), width: "52%" },
   { key: "name", header: t("models.column.name"), value: (m) => m.display_name },
-  { key: "copy", header: t("action.copy") },
+  { key: "copy", header: t("action.copy"), align: "end", width: "72px" },
 ])
 
 onMounted(() => void load())
@@ -337,8 +344,16 @@ async function copyId(id: string) {
             :placeholder="t('models.searchPlaceholder')"
           />
         </label>
-        <AppButton :loading="refreshing" @click="onRefresh">
-          {{ t("action.refresh") }}
+        <!-- Icon-only: the label is a tooltip and the accessible name, so the
+             control keeps its meaning without spending header width on a word
+             that repeats on every page. -->
+        <AppButton
+          icon-only
+          :label="t('action.refresh')"
+          :loading="refreshing"
+          @click="onRefresh"
+        >
+          <template #icon><ActionIcon name="refresh" /></template>
         </AppButton>
       </template>
 
@@ -414,22 +429,34 @@ async function copyId(id: string) {
             <Banner tone="warn">{{ group.error }}</Banner>
           </div>
 
+          <!-- Click-to-copy on the row: the id *is* what this page is for, and
+               a 28px square is a small target for the only action a row has.
+               The button stays a real control, so keyboard and screen-reader
+               users are unaffected — this only widens the pointer target. -->
           <DataTable
             v-if="group.models.length"
+            row-clickable
             :columns="columns"
             :rows="group.models"
             :row-key="(m) => m.id"
             :caption="group.name"
+            @row-click="copyId($event.id)"
           >
             <template #cell-id="{ row }">
               <code class="mono model-id" :title="row.id">{{ row.id }}</code>
             </template>
             <template #cell-copy="{ row }">
-              <span class="row-action">
-                <AppButton size="sm" @click="copyId(row.id)">
-                  {{ copiedId === row.id ? t("action.copied") : t("models.copyId") }}
-                </AppButton>
-              </span>
+              <AppButton
+                size="sm"
+                variant="ghost"
+                icon-only
+                :label="copiedId === row.id ? t('action.copied') : t('models.copyId')"
+                @click.stop="copyId(row.id)"
+              >
+                <template #icon>
+                  <ActionIcon :name="copiedId === row.id ? 'check' : 'copy'" />
+                </template>
+              </AppButton>
             </template>
           </DataTable>
 
@@ -478,11 +505,19 @@ async function copyId(id: string) {
   min-height: 0;
 }
 
+/*
+ * A real `width`, not a flex basis. The actions box is sized to its content,
+ * and an `<input>`'s content contribution is its *default* ~170px regardless
+ * of any basis — so a 260px basis exceeds the box the browser just built and
+ * flex wraps Refresh onto a line of its own before shrinking can rescue it.
+ * A width feeds the intrinsic sizing instead, so the box is the field plus the
+ * button and the row stays one line.
+ */
 .search {
   display: block;
-  flex: 1 1 200px;
+  width: 260px;
+  max-width: 100%;
   min-width: 0;
-  max-width: 260px;
 }
 
 /* --- Groups ------------------------------------------------------------- */
@@ -563,9 +598,16 @@ async function copyId(id: string) {
   color: var(--text);
 }
 
-.row-action {
-  display: flex;
-  justify-content: flex-end;
+/* Quiet by default, full strength under the pointer: thirty outlined buttons
+   down a catalog is a wall of chrome competing with the ids the page is
+   actually for. Always *present* though — never revealed on hover, which would
+   read as the control having disappeared. */
+.group :deep(tbody tr .btn) {
+  color: var(--faint);
+}
+
+.group :deep(tbody tr:hover .btn) {
+  color: var(--text);
 }
 
 /* --- First paint -------------------------------------------------------- */
@@ -602,12 +644,6 @@ async function copyId(id: string) {
 @media (max-width: 640px) {
   .search {
     max-width: none;
-  }
-
-  /* The row is a card here, and its action reads as the last field rather than
-     something pinned to a column edge. */
-  .row-action {
-    justify-content: flex-start;
   }
 }
 </style>

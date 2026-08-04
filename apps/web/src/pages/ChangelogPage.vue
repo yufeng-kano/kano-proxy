@@ -14,6 +14,7 @@
  * which is what makes `v-html` here correct rather than a hole.
  */
 import { computed, onMounted } from "vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Badge from "@/components/ui/Badge.vue"
@@ -77,8 +78,16 @@ function onRefresh() {
   <div>
     <PageHeader :title="t('changelog.title')" :subtitle="t('changelog.subtitle')">
       <template #actions>
-        <AppButton :loading="refreshing" @click="onRefresh">
-          {{ t("action.refresh") }}
+        <!-- Icon-only: the label is a tooltip and the accessible name, so the
+             control keeps its meaning without spending header width on a word
+             that repeats on every page. -->
+        <AppButton
+          icon-only
+          :label="t('action.refresh')"
+          :loading="refreshing"
+          @click="onRefresh"
+        >
+          <template #icon><ActionIcon name="refresh" /></template>
         </AppButton>
       </template>
     </PageHeader>

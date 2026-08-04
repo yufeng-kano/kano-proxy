@@ -40,23 +40,29 @@ defineSlots<{
 
 <style scoped>
 /**
- * Bleeds to the content region's edges so the blur covers the full width,
- * while the inner rows keep the page's gutter. The gutter values are AppShell's
- * own, inherited rather than restated — two copies would disagree at whichever
- * breakpoint someone updated only one of them.
+ * Spans exactly the content column — the same left and right edges as the
+ * cards below it. It bleeds *upward* only: cancelling the region's top padding
+ * is what lets the blur reach the top edge once the header is stuck, with no
+ * sliver of scrolling content showing above it.
  *
- * Fallbacks make the component usable outside the shell (and keep it honest if
- * the properties are ever renamed).
+ * It deliberately does not cancel the horizontal gutter. A header running
+ * wider than the content beneath it reads as two different page widths stacked
+ * on top of each other, and its title stops lining up with the first column of
+ * the table it heads.
+ *
+ * The top value is AppShell's own, inherited rather than restated — two copies
+ * would disagree at whichever breakpoint someone updated only one of them.
+ * The fallback keeps the component usable outside the shell (and honest if the
+ * property is ever renamed).
  */
 .page-header {
-  --gutter: var(--page-gutter, var(--space-8));
   --top: var(--page-top, var(--space-6));
 
   position: sticky;
   top: 0;
   z-index: 10;
-  margin: calc(var(--top) * -1) calc(var(--gutter) * -1) var(--space-6);
-  padding: var(--top) var(--gutter) 0;
+  margin: calc(var(--top) * -1) 0 var(--space-6);
+  padding: var(--top) 0 0;
   background: var(--topbar-bg);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);

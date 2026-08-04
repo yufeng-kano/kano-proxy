@@ -56,12 +56,17 @@ const tabs = computed<SectionItem[]>(() => [
   { id: "connect", label: t("keys.tab.connect") },
 ])
 
+/**
+ * Revoke is sized to its control rather than taking the table's leftover
+ * width, which would strand its header at the far edge of the track from the
+ * button it labels.
+ */
 const columns = computed<Column<ApiKey>[]>(() => [
   { key: "name", header: t("keys.column.name"), value: (k) => k.name },
   { key: "prefix", header: t("keys.column.key") },
   { key: "created", header: t("keys.column.created") },
   { key: "lastUsed", header: t("keys.column.lastUsed") },
-  { key: "revoke", header: t("keys.revoke") },
+  { key: "revoke", header: t("keys.revoke"), align: "end", width: "112px" },
 ])
 
 onMounted(() => void load())
@@ -211,16 +216,14 @@ async function onRevoke(key: ApiKey) {
             <span v-else class="never">{{ t("state.never") }}</span>
           </template>
           <template #cell-revoke="{ row }">
-            <span class="row-action">
-              <AppButton
-                size="sm"
-                variant="danger"
-                :loading="revokingId === row.id"
-                @click="onRevoke(row)"
-              >
-                {{ t("keys.revoke") }}
-              </AppButton>
-            </span>
+            <AppButton
+              size="sm"
+              variant="danger"
+              :loading="revokingId === row.id"
+              @click="onRevoke(row)"
+            >
+              {{ t("keys.revoke") }}
+            </AppButton>
           </template>
         </DataTable>
       </AppCard>
@@ -344,11 +347,6 @@ async function onRevoke(key: ApiKey) {
   color: var(--faint);
 }
 
-.row-action {
-  display: flex;
-  justify-content: flex-end;
-}
-
 /* --- Connect ------------------------------------------------------------ */
 
 .connect {
@@ -432,12 +430,6 @@ async function onRevoke(key: ApiKey) {
   .detail {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-1);
-  }
-
-  /* The row is a card here, and its action reads as the last field rather than
-     something pinned to a column edge. */
-  .row-action {
-    justify-content: flex-start;
   }
 }
 </style>

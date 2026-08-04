@@ -163,9 +163,11 @@
   /* --- Layout ----------------------------------------------------------- */
   --sidebar-width: 248px;
   --header-height: 56px;
-  /* Content measure. Wide enough for a 7-column table, narrow enough that a
-     paragraph never runs the full width of an ultrawide display. */
-  --content-max: 1360px;
+  /* Content cap. Only there to stop a table stretching across an ultrawide
+     display — it is deliberately *not* a reading measure, so a 1440px or
+     1680px laptop uses its width instead of banding the page with empty
+     gutters. Long-form pages (Changelog) cap themselves at a real measure. */
+  --content-max: 1680px;
 
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;

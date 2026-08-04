@@ -35,8 +35,10 @@ The signed-in app is a **fixed frame, not a scrolling document**. `AppShell.vue`
 - **Sidebar** 248px, its own column, never scrolls with content: brand at the top, primary nav below it, then the Changelog link carrying the running version pinned to the bottom of the nav area, and the signed-in user with sign-out in the footer beneath.
 - **Active nav item** is marked by a filled pill **and** a step up in font weight — never color alone. The fill on its own is a ~2% luminance delta; the weight is what makes it read.
 - **Page header** is sticky at the top of the content region and holds the page title, its primary actions, and (where a page has sections) the section nav. It is the same component on every page.
+- The page header spans **exactly the content column**: it cancels the region's *top* padding so its blur reaches the top edge when stuck, but never the horizontal gutter. Its left and right edges line up with the cards below it — a header wider than the content under it reads as two different page widths stacked, which is what the gutter-bleed version looked like.
 - The content region is the scroll container, so `window.scrollY` is meaningless here; scroll restore listens on that element (see [View preferences](#view-preferences-localstorage)).
-- `AppShell` publishes its own metrics as inherited custom properties — `--page-top`, `--page-bottom`, `--page-gutter`, and `--page-chrome` (the shell chrome above the region: 0 on desktop, the mobile bar below the shell breakpoint). A page that sizes itself to the viewport, or a header that cancels the gutter to bleed its blur, **reads those** rather than restating the values. A second copy drifts the first time only one of them changes at a breakpoint.
+- `AppShell` publishes its own metrics as inherited custom properties — `--page-top`, `--page-bottom`, `--page-gutter`, and `--page-chrome` (the shell chrome above the region: 0 on desktop, the mobile bar below the shell breakpoint). A page that sizes itself to the viewport, or a header that cancels the top gutter to bleed its blur upward, **reads those** rather than restating the values. A second copy drifts the first time only one of them changes at a breakpoint.
+- `--content-max` caps the content column so a table does not stretch across an ultrawide display. It is sized to *use* a normal laptop/desktop width rather than to a comfortable reading measure — long-form pages cap themselves separately (Changelog at 72ch), so this value only has to keep dense tables usable.
 
 ### Anti-scroll rules
 
@@ -87,9 +89,13 @@ Two conventions worth stating because they are easy to violate accidentally:
 
 `apps/web/src/components/ui/` holds the shared vocabulary. Pages compose these rather than restyling their own variants:
 
-`AppShell`, `PageHeader`, `SectionNav`, `Segmented`, `StatTile`, `DataTable`, `Card`, `Modal`, `EmptyState`, `Banner`, `StatusDot`, `CopyField`, `UsageBar`, `SkeletonBlock`, `Spinner`.
+`AppShell`, `PageHeader`, `SectionNav`, `Segmented`, `StatTile`, `DataTable`, `Card`, `Modal`, `EmptyState`, `Banner`, `StatusDot`, `CopyField`, `UsageBar`, `SkeletonBlock`, `Spinner`, `NavIcon`, `ActionIcon`.
 
 `DataTable` is the one place table markup lives: it owns the sticky header, the tabular-numeral alignment, and the mobile card fallback. A page that hand-rolls a `<table>` will not get those.
+
+An **action column** (Copy, Revoke) declares an explicit `width` *and* an `align`. Without both, the column soaks up the table's leftover width and its header ends up at one edge of a 400px column with the control at the other — the header stops labelling anything.
+
+Icons are inline SVG on one 16px grid with a 1.4 stroke and round caps/joins: `NavIcon` for destinations, `ActionIcon` for controls. Both are always `aria-hidden` — an icon-only control carries its name in `AppButton`'s `label` (which becomes both `aria-label` and the tooltip), never in the glyph.
 
 Two implementation notes that are not obvious and cost real debugging time:
 
@@ -127,7 +133,7 @@ Route `/overview`; signed-in `/` redirects here. Data source: `GET /api/usage/su
 
 - Range picker (24h / 7d / 30d, `days=1|7|30`, default 7) lives in the sticky page header. Series buckets are hourly for 24h, daily otherwise (UTC bucket keys from the API, formatted client-side; missing buckets zero-filled client-side). Time runs **oldest-left → newest-right**.
 - Stat tiles: requests, tokens (input + output), **cache hit rate** (hero: Σ`cache_read_input_tokens` / Σ`prompt_tokens` over cache-known rows), errors, avg latency.
-- Below the tiles, a two-column region at ≥ 1200px: the time-series card and the per-model breakdown side by side, so neither pushes the other off-screen. Single column below that.
+- Below the tiles, a two-column region at ≥ 1200px: the time-series card and the per-model breakdown side by side, so neither pushes the other off-screen. Single column below that. At ≥ 1700px the breakdown's track widens to the table's natural width so its seven columns stop scrolling sideways — 1700 is where that stops costing the chart the wider of the two columns, which is the emphasis this page is built around.
 - Per-model breakdown: requests, input/output tokens, cache read/write, cache rate; sorted by total tokens desc, scrolling inside its own card with a sticky header. When cache data covers only part of a model's requests, the coverage is annotated instead of silently mixed.
 - **Chart switcher** — two views over the same range, one visible at a time:
   - **Tokens** (default): **grouped** columns — within each bucket, one column per model, ordered by the model's range-total tokens desc (same order as the breakdown). A column is one solid fill in the model's own color: hue does **identity**, so the uncached / cached / completion split moves to the tooltip and the table rather than being double-encoded. Models past the categorical cap fold into a single **Other** column rather than growing the palette.
@@ -165,7 +171,7 @@ Custom endpoints (`GET /api/custom-providers` — see [auth.md](./auth.md)):
 - Provider groups are **dynamic**, rendered from whatever `providers` the response lists, so a new custom endpoint appears without a UI code change.
 - A search box filters across every group by model id and display name; a provider filter in the header narrows to one group. Both are client-side over already-loaded data — no request per keystroke. The active filter persists as a view preference.
 - Session API: `GET /api/models` (`?refresh=true` bypasses the 1h server KV cache). Client-facing `GET /openai/v1/models` and `GET /anthropic/v1/models` return the same live catalog; ids are always `provider/upstream`.
-- Copy model id as `provider/upstream` — works on **both** OpenAI and Anthropic bases.
+- Copy model id as `provider/upstream` — works on **both** OpenAI and Anthropic bases. The row's copy control is an icon button in a fixed-width right-aligned column, and confirms in place by swapping to a check; the whole row is also click-to-copy, so the pointer target is the row rather than a 28px square.
 
 ## Keys page
 

@@ -20,6 +20,7 @@
  */
 import { computed, onMounted, ref, watch } from "vue"
 import UsageChart from "@/components/overview/UsageChart.vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -204,8 +205,16 @@ function coverageNote(row: ModelUsageRow): string | null {
           :label="t('overview.range.label')"
           @update:model-value="onRangeChange"
         />
-        <AppButton :loading="manualRefreshing" @click="onRefresh">
-          {{ t("action.refresh") }}
+        <!-- Icon-only: the label is a tooltip and the accessible name, so the
+             control keeps its meaning without spending header width on a word
+             that repeats on every page. -->
+        <AppButton
+          icon-only
+          :label="t('action.refresh')"
+          :loading="manualRefreshing"
+          @click="onRefresh"
+        >
+          <template #icon><ActionIcon name="refresh" /></template>
         </AppButton>
       </template>
     </PageHeader>
@@ -401,6 +410,21 @@ function coverageNote(row: ModelUsageRow): string | null {
 @media (min-width: 1200px) {
   .panels {
     grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+  }
+
+  /* Seven numeric columns do not fit 420px, so the breakdown scrolls sideways
+     inside its own card — hiding exactly the columns it exists to show. Once
+     the display is wide enough to pay for it, the track widens to the table's
+     natural width instead.
+
+     1700px is where that stops costing the chart its lead: the content region
+     is then ~1388px, so a 680px breakdown still leaves the chart the larger
+     column. Widening any earlier makes the breakdown the wider of the two,
+     which is the opposite of what this page emphasizes. */
+  @media (min-width: 1700px) {
+    .panels {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 680px);
+    }
   }
 
   /* The row must be as tall as the *chart*, not as tall as the model list —

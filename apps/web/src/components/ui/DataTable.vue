@@ -25,10 +25,21 @@ export type Column<Row> = {
   header: string
   /** Right-aligned + tabular numerals. */
   numeric?: boolean
+  /**
+   * Right-aligns the header *and* the cells without the numeric treatment —
+   * for a control column (Copy, Revoke). Alignment belongs to the column, not
+   * to a wrapper each page re-invents around its own button.
+   */
+  align?: "start" | "end"
   /** Plain-text value; also the mobile card's value when no slot is given. */
   value?: (row: Row) => string
   /** Hidden on mobile cards — for columns that only add noise there. */
   hideOnMobile?: boolean
+  /**
+   * Track width. An action column needs one: without it the column takes the
+   * table's leftover width and its header ends up at the far edge of a 400px
+   * cell from the control it labels.
+   */
   width?: string
 }
 </script>
@@ -40,7 +51,15 @@ defineProps<{
   rowKey: (row: Row) => string
   /** Accessible caption. Visually hidden — the card header carries the visible title. */
   caption: string
+  /**
+   * Makes the whole row the pointer target for its primary action (Models'
+   * click-to-copy). The row action stays a real focusable control — this only
+   * widens the hit area, so keyboard and screen-reader users are unaffected.
+   */
+  rowClickable?: boolean
 }>()
+
+defineEmits<{ rowClick: [Row] }>()
 
 defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 </script>
@@ -55,7 +74,7 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
             v-for="column in columns"
             :key="column.key"
             scope="col"
-            :class="{ numeric: column.numeric }"
+            :class="{ numeric: column.numeric, end: column.align === 'end' }"
             :style="column.width ? { width: column.width } : undefined"
           >
             {{ column.header }}
@@ -63,11 +82,20 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
         </tr>
       </thead>
       <tbody>
-        <tr v-for="row in rows" :key="rowKey(row)">
+        <tr
+          v-for="row in rows"
+          :key="rowKey(row)"
+          :class="{ clickable: rowClickable }"
+          @click="rowClickable && $emit('rowClick', row)"
+        >
           <td
             v-for="column in columns"
             :key="column.key"
-            :class="{ numeric: column.numeric, 'hide-mobile': column.hideOnMobile }"
+            :class="{
+              numeric: column.numeric,
+              end: column.align === 'end',
+              'hide-mobile': column.hideOnMobile,
+            }"
             :data-label="column.header"
           >
             <slot :name="`cell-${column.key}`" :row="row">
@@ -128,9 +156,20 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
   background: var(--surface-2);
 }
 
+.table tbody tr.clickable {
+  cursor: pointer;
+}
+
 .numeric {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* Right-aligned without the numeric treatment: a control column, where
+   tabular figures would do nothing and the header has to sit over the
+   control rather than at the far edge of the track. */
+.end {
+  text-align: right;
 }
 
 /* Mobile: one card per row, each cell labelled by its column header. */
@@ -195,6 +234,12 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 
   .table td.numeric {
     text-align: right;
+  }
+
+  /* The row is a card here, so an action reads as its last field rather than
+     something pinned to a column edge that no longer exists. */
+  .table td.end {
+    text-align: left;
   }
 
   .table td.hide-mobile {

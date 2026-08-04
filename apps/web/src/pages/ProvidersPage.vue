@@ -19,6 +19,7 @@ import AddAccountDialog from "@/components/AddAccountDialog.vue"
 import CustomProviderDialog from "@/components/CustomProviderDialog.vue"
 import AccountCard from "@/components/providers/AccountCard.vue"
 import CustomProviderCard from "@/components/providers/CustomProviderCard.vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -290,8 +291,16 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
   <div>
     <PageHeader ref="header" :title="t('providers.title')" :subtitle="t('providers.subtitle')">
       <template #actions>
-        <AppButton :loading="refreshing" @click="refreshAll">
-          {{ t("action.refresh") }}
+        <!-- Icon-only: the label is a tooltip and the accessible name, so the
+             control keeps its meaning without spending header width on a word
+             that repeats on every page. -->
+        <AppButton
+          icon-only
+          :label="t('action.refresh')"
+          :loading="refreshing"
+          @click="refreshAll"
+        >
+          <template #icon><ActionIcon name="refresh" /></template>
         </AppButton>
       </template>
       <template #nav>

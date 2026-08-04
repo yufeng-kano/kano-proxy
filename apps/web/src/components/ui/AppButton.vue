@@ -195,5 +195,16 @@ const bindings = computed(() => {
   .btn-sm {
     min-height: 34px;
   }
+
+  /* An icon button is square, so growing only its height would leave it a
+     rectangle with the glyph off-center. `aspect-ratio` cannot resolve that on
+     its own once `min-height` wins, so the width grows to match. */
+  .btn-icon.btn-md {
+    width: 40px;
+  }
+
+  .btn-icon.btn-sm {
+    width: 34px;
+  }
 }
 </style>
