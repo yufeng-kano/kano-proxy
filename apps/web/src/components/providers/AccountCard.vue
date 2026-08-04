@@ -26,6 +26,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   promote: []
+  /** Carries the upstream identity: the dialog shows what a blank name falls back to. */
+  rename: [identity: string]
   remove: []
 }>()
 
@@ -42,7 +44,13 @@ const editing = ref(false)
  */
 const GENERIC_LABELS = new Set(["claude", "codex", "grok"])
 
-const displayName = computed(() => {
+/**
+ * The real account behind the row — the email/username upstream reports.
+ * `label` is only a candidate here while it is not the custom name: the API
+ * resolves that field to the custom one when set, and repeating it under the
+ * title would print the same string twice.
+ */
+const identity = computed(() => {
   const a = props.account
   const meta = a.account ?? {}
   const email =
@@ -54,11 +62,17 @@ const displayName = computed(() => {
     (typeof meta.display_name === "string" && meta.display_name) ||
     (typeof meta.plan_type === "string" && meta.plan_type) ||
     null
+  const label = a.label && a.label !== a.custom_label ? a.label : null
   if (email) return email
   if (username && !GENERIC_LABELS.has(username)) return username
-  if (a.label && !GENERIC_LABELS.has(a.label)) return a.label
-  return email || username || a.label || a.id.slice(0, 12)
+  if (label && !GENERIC_LABELS.has(label)) return label
+  return email || username || label || a.id.slice(0, 12)
 })
+
+/** A user's own name wins the title; the identity below keeps it traceable. */
+const displayName = computed(() => props.account.custom_label || identity.value)
+
+const renamed = computed(() => !!props.account.custom_label)
 
 /**
  * Prettify raw upstream plan ids for display:
@@ -113,6 +127,8 @@ const windows = computed(() => props.account.usage?.windows ?? [])
     <div class="account-head">
       <div class="identity">
         <span class="name" :title="displayName">{{ displayName }}</span>
+        <!-- A renamed row still has to answer "which account is this?". -->
+        <span v-if="renamed" class="upstream" :title="identity">{{ identity }}</span>
         <div class="tags">
           <StatusDot :status="account.status" />
           <!-- `active` *is* the account requests route through first, so this
@@ -125,18 +141,41 @@ const windows = computed(() => props.account.usage?.windows ?? [])
         </div>
       </div>
 
+      <!-- Revealed actions are icons, not labelled buttons: three labels are
+           wider than the identity they belong to, and the row wraps. Each
+           carries its name as tooltip + aria-label. -->
       <div class="actions">
         <template v-if="editing">
           <AppButton
             v-if="account.status !== 'active'"
+            icon-only
             size="sm"
+            variant="ghost"
+            :label="t('providers.account.promote')"
             :disabled="busy"
             @click="emit('promote')"
           >
-            {{ t("providers.account.promote") }}
+            <template #icon><ActionIcon name="arrow-up" /></template>
           </AppButton>
-          <AppButton size="sm" variant="danger" :disabled="busy" @click="emit('remove')">
-            {{ t("providers.account.remove") }}
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('providers.account.rename')"
+            :disabled="busy"
+            @click="emit('rename', identity)"
+          >
+            <template #icon><ActionIcon name="pencil-line" /></template>
+          </AppButton>
+          <AppButton
+            icon-only
+            size="sm"
+            variant="danger"
+            :label="t('providers.account.remove')"
+            :disabled="busy"
+            @click="emit('remove')"
+          >
+            <template #icon><ActionIcon name="trash" /></template>
           </AppButton>
         </template>
         <!-- aria-pressed: the same control opens and closes the action set,
@@ -199,8 +238,10 @@ const windows = computed(() => props.account.usage?.windows ?? [])
   gap: var(--space-2);
   min-width: 0;
   /* Grows past its content but may shrink to nothing before the actions wrap —
-     a long email must ellipsize, not push Remove off the row. */
-  flex: 1 1 200px;
+     a long email must ellipsize, not push Remove off the row. The basis is the
+     wrap threshold, not spacing: it has to clear four icon buttons plus the
+     gutters at 360px, or the flex line breaks and the actions drop below. */
+  flex: 1 1 120px;
 }
 
 .name {
@@ -211,6 +252,14 @@ const windows = computed(() => props.account.usage?.windows ?? [])
   font-weight: var(--weight-medium);
 }
 
+.upstream {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
 .tags {
   display: flex;
   align-items: center;
@@ -218,10 +267,13 @@ const windows = computed(() => props.account.usage?.windows ?? [])
   flex-wrap: wrap;
 }
 
+/* Stays on the identity row at every width, right-aligned — the pencil sits
+   vertically under the section's Add control, so a section has one column of
+   controls down its right edge (docs/admin-ui.md § Providers page). */
 .actions {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1);
   flex-shrink: 0;
 }
 
@@ -234,18 +286,5 @@ const windows = computed(() => props.account.usage?.windows ?? [])
   margin: 0;
   color: var(--faint);
   font-size: var(--text-xs);
-}
-
-@media (max-width: 640px) {
-  .actions {
-    /* Full width below the identity: at 360px the two buttons and a long email
-       cannot share a row without one of them being unreadable. */
-    width: 100%;
-  }
-
-  /* The pencil stays square — only the labelled actions share the row. */
-  .actions :deep(.btn:not(.btn-icon)) {
-    flex: 1;
-  }
 }
 </style>

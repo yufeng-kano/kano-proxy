@@ -84,21 +84,41 @@ async function runTest() {
         </div>
       </div>
 
+      <!-- Icons, not labelled buttons: three labels are wider than the name
+           they belong to, and the row wraps. Each carries its name as tooltip
+           + aria-label. -->
       <div class="actions">
         <template v-if="editing">
-          <AppButton size="sm" :loading="testing" :disabled="busy" @click="runTest">
-            {{ t("action.test") }}
-          </AppButton>
-          <AppButton size="sm" :disabled="busy || testing" @click="emit('edit')">
-            {{ t("action.edit") }}
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('action.test')"
+            :loading="testing"
+            :disabled="busy"
+            @click="runTest"
+          >
+            <template #icon><ActionIcon name="zap" /></template>
           </AppButton>
           <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('action.edit')"
+            :disabled="busy || testing"
+            @click="emit('edit')"
+          >
+            <template #icon><ActionIcon name="pencil-line" /></template>
+          </AppButton>
+          <AppButton
+            icon-only
             size="sm"
             variant="danger"
+            :label="t('action.remove')"
             :disabled="busy || testing"
             @click="emit('remove')"
           >
-            {{ t("action.remove") }}
+            <template #icon><ActionIcon name="trash" /></template>
           </AppButton>
         </template>
         <!-- aria-pressed: the same control opens and closes the action set,
@@ -175,7 +195,9 @@ async function runTest() {
   flex-direction: column;
   gap: var(--space-2);
   min-width: 0;
-  flex: 1 1 180px;
+  /* The basis is the wrap threshold, not spacing: it has to clear four icon
+     buttons plus the gutters at 360px, or the actions drop below the name. */
+  flex: 1 1 120px;
 }
 
 .name {
@@ -193,10 +215,12 @@ async function runTest() {
   flex-wrap: wrap;
 }
 
+/* Stays on the name row at every width, right-aligned — same single column of
+   controls as the account rows above (docs/admin-ui.md § Providers page). */
 .actions {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1);
   flex-shrink: 0;
 }
 
@@ -244,15 +268,6 @@ async function runTest() {
 }
 
 @media (max-width: 640px) {
-  .actions {
-    width: 100%;
-  }
-
-  /* The pencil stays square — only the labelled actions share the row. */
-  .actions :deep(.btn:not(.btn-icon)) {
-    flex: 1;
-  }
-
   /* Stacked at 360px: a fixed label column plus a base URL leaves the URL
      unreadable, and there is no hover to reveal the rest. */
   .detail {

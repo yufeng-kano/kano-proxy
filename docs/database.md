@@ -50,12 +50,15 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 | user_id | TEXT FK | |
 | provider | TEXT | builtin `claude-code` \| `codex` \| `grok`, **or** a custom provider's `slug` (see `custom_providers` below) |
 | external_account_id | TEXT | nullable; upstream account id when known (e.g. codex's ChatGPT account id) |
-| label | TEXT | email or display |
+| label | TEXT | email or display, **synced from upstream** on every accounts read — not user-editable |
+| custom_label | TEXT | nullable; the operator's own name for this account. Wins over `label` for display and is **never** overwritten by the upstream sync (`0005_account_custom_label.sql`) |
 | priority | INTEGER | higher = preferred; promote bumps |
 | encrypted_payload | TEXT | AES-GCM blob: tokens + provider fields. For a custom provider this is just `{access_token: <api key>}` |
 | account_meta_json | TEXT | email, plan, non-secret. For a custom provider: `{key_mask: "sk-abc…f3a2"}` (see [providers.md](./providers.md)) |
 | created_at | TEXT | |
 | updated_at | TEXT | |
+
+`label` and `custom_label` are two different jobs and must not be merged: `label` is a cache of upstream identity (the accounts read overwrites it whenever the upstream email/display name changes), so a rename written there survives only until the next poll. `custom_label` is user intent — set by `PATCH /api/providers/:provider/accounts/:id`, cleared by sending `null`/`""`, and read first by the display-name resolver.
 
 **There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / benched / unusable" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order plus the KV bench state (`pool/bench.ts`, `BENCH` namespace), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02.)
 

@@ -18,6 +18,7 @@ const codexAccount: AcquiredAccount = {
     provider: "codex",
     external_account_id: null,
     label: null,
+    custom_label: null,
     priority: 1,
     encrypted_payload: "",
     account_meta_json: null,

@@ -16,6 +16,7 @@ import {
   listAccounts,
   promoteAccount,
   removeAccount,
+  setAccountCustomLabel,
   updateAccountIdentity,
 } from "../db/accounts"
 import {
@@ -126,6 +127,7 @@ providerRoutes.get("/:provider/accounts", async (c) => {
     }
 
     const displayLabel =
+      row.custom_label ||
       (typeof accountMeta?.email === "string" && accountMeta.email) ||
       (typeof accountMeta?.display_name === "string" && accountMeta.display_name) ||
       (typeof accountMeta?.username === "string" && accountMeta.username) ||
@@ -137,6 +139,7 @@ providerRoutes.get("/:provider/accounts", async (c) => {
       priority: row.priority,
       status,
       label: displayLabel,
+      custom_label: row.custom_label ?? null,
       account: accountMeta,
       usage,
       error,
@@ -153,6 +156,38 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   }
 
   return c.json({ available: true, accounts, models: [], error: null })
+})
+
+providerRoutes.patch("/:provider/accounts/:id", async (c) => {
+  const user = await requireUser(c)
+  if (!user) return c.json({ error: "unauthorized" }, 401)
+
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: "invalid custom_label" }, 400)
+  }
+  const rawLabel =
+    body !== null && typeof body === "object" && "custom_label" in body
+      ? (body as { custom_label?: unknown }).custom_label
+      : undefined
+  let customLabel: string | null
+  if (rawLabel === null) {
+    customLabel = null
+  } else if (typeof rawLabel !== "string") {
+    return c.json({ error: "invalid custom_label" }, 400)
+  } else {
+    customLabel = rawLabel.trim()
+    if (!customLabel) customLabel = null
+    if (customLabel && customLabel.length > 64) {
+      return c.json({ error: "custom_label too long" }, 400)
+    }
+  }
+
+  const ok = await setAccountCustomLabel(c.env.DB, user.id, c.req.param("id"), customLabel)
+  if (!ok) return c.json({ error: "not found" }, 404)
+  return c.json({ ok: true, custom_label: customLabel })
 })
 
 providerRoutes.post("/:provider/accounts/:id/promote", async (c) => {

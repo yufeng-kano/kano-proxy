@@ -10,7 +10,9 @@
  * the one chance to copy.
  *
  * Edit is the same form without key material: rename + limit fields via
- * PATCH. Editing never re-shows a key.
+ * PATCH. Editing never re-shows a key. Revoke lives here too, in the footer —
+ * rare and irreversible, so it costs opening the key first instead of sitting
+ * one stray click from every row.
  */
 import { computed, nextTick, reactive, ref } from "vue"
 import AppButton from "@/components/ui/AppButton.vue"
@@ -21,7 +23,7 @@ import Modal from "@/components/ui/Modal.vue"
 import TextInput from "@/components/ui/TextInput.vue"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
-import { createKey, updateKey, type KeyLimitFields } from "@/services/api"
+import { createKey, revokeKey, updateKey, type KeyLimitFields } from "@/services/api"
 import {
   SPEND_LIMIT_INTERVALS,
   type ApiKey,
@@ -53,6 +55,7 @@ const form = reactive({
 })
 
 const saving = ref(false)
+const revoking = ref(false)
 const error = ref<string | null>(null)
 const fieldError = ref<string | null>(null)
 /** Create's done step — set only when the POST returned the plaintext. */
@@ -123,6 +126,22 @@ async function submit() {
     error.value = isEdit.value ? t("keys.dialog.saveFailed") : t("keys.error.create")
   } finally {
     saving.value = false
+  }
+}
+
+async function revoke() {
+  if (!props.editing || revoking.value) return
+  if (!confirm(t("keys.revokeConfirm"))) return
+  error.value = null
+  revoking.value = true
+  try {
+    await revokeKey(props.editing.id)
+    emit("saved")
+    emit("close")
+  } catch {
+    error.value = t("keys.error.revoke")
+  } finally {
+    revoking.value = false
   }
 }
 
@@ -214,10 +233,22 @@ const title = computed(() => {
         </AppButton>
       </template>
       <template v-else>
-        <AppButton variant="ghost" :disabled="saving" @click="emit('close')">
+        <!-- Edit only, and pushed to the far end of the footer: a destructive
+             action must not sit against Save where a mis-aimed click lands. -->
+        <AppButton
+          v-if="isEdit"
+          class="revoke"
+          variant="danger"
+          :loading="revoking"
+          :disabled="saving"
+          @click="revoke"
+        >
+          {{ t("keys.revoke") }}
+        </AppButton>
+        <AppButton variant="ghost" :disabled="saving || revoking" @click="emit('close')">
           {{ t("action.cancel") }}
         </AppButton>
-        <AppButton variant="primary" :loading="saving" @click="submit">
+        <AppButton variant="primary" :loading="saving" :disabled="revoking" @click="submit">
           {{ isEdit ? t("keys.dialog.save") : t("keys.create") }}
         </AppButton>
       </template>
@@ -231,6 +262,12 @@ const title = computed(() => {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+}
+
+/* The footer packs its buttons to the right; the auto margin is what separates
+   Revoke from Cancel/Save rather than a gap nobody else in the app has. */
+.revoke {
+  margin-right: auto;
 }
 
 .done-note {

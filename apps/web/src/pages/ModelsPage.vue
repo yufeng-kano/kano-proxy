@@ -640,10 +640,4 @@ async function copyId(id: string) {
 .skeleton-name {
   width: 55%;
 }
-
-@media (max-width: 640px) {
-  .search {
-    max-width: none;
-  }
-}
 </style>

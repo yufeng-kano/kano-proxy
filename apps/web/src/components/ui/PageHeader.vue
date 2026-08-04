@@ -109,11 +109,22 @@ defineSlots<{
   white-space: nowrap;
 }
 
+/*
+ * Sized to its controls at every width, never widened to fill the line
+ * (docs/admin-ui.md § Layout). The auto margin is what keeps it right-aligned
+ * on the line it wraps onto: `space-between` puts a lone item at the start, and
+ * a wrapped line is a line of one.
+ *
+ * Left shrinkable rather than pinned, because a line only ever holds this box
+ * alone by the time it is too narrow — that is the case Models' search
+ * `max-width: 100%` is written for, and it needs a box that can go under 260px
+ * to resolve against.
+ */
 .actions {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  flex-shrink: 0;
+  margin-left: auto;
   flex-wrap: wrap;
 }
 
@@ -131,10 +142,6 @@ defineSlots<{
      is worth more than the restatement. */
   .subtitle {
     display: none;
-  }
-
-  .actions {
-    width: 100%;
   }
 }
 </style>

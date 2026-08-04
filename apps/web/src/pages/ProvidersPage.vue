@@ -12,6 +12,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue"
 import AddAccountDialog from "@/components/AddAccountDialog.vue"
 import CustomProviderDialog from "@/components/CustomProviderDialog.vue"
+import RenameAccountDialog from "@/components/RenameAccountDialog.vue"
 import AccountCard from "@/components/providers/AccountCard.vue"
 import CustomProviderCard from "@/components/providers/CustomProviderCard.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
@@ -29,7 +30,7 @@ import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import { deleteCustomProvider, promoteAccount, removeAccount } from "@/services/api"
 import { getProvidersPrefs, setProvidersPrefs } from "@/services/prefs"
-import { PROVIDERS, type CustomProvider, type ProviderId } from "@/types"
+import { PROVIDERS, type CustomProvider, type ProviderAccount, type ProviderId } from "@/types"
 
 const { t } = useI18n()
 const { user } = useAuth()
@@ -67,6 +68,12 @@ const refreshing = ref(false)
 const addFor = ref<ProviderId | null>(null)
 const showCustomDialog = ref(false)
 const editingCustomProvider = ref<CustomProvider | null>(null)
+/** The row being renamed, with the upstream identity the card resolved for it. */
+const renaming = ref<{
+  provider: ProviderId
+  account: ProviderAccount
+  identity: string
+} | null>(null)
 
 /** What the user last picked; resolved against the known tabs below. */
 const selected = ref<string>(getProvidersPrefs().tab ?? ALL)
@@ -182,6 +189,10 @@ async function onRemove(provider: ProviderId, id: string) {
   }
 }
 
+async function onRenamed(provider: ProviderId) {
+  await loadProvider(provider, { refresh: true })
+}
+
 async function onAdded(provider: ProviderId) {
   addFor.value = null
   await loadProvider(provider, { refresh: true })
@@ -271,8 +282,16 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
         :subtitle="t(BLURB_KEY[pid])"
       >
         <template #actions>
-          <AppButton size="sm" @click="addFor = pid">
-            {{ t("providers.addAccount") }}
+          <!-- Icon-only ghost: this page is read far more often than it is
+               added to, so the create affordance sits at icon weight. -->
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('providers.addAccount')"
+            @click="addFor = pid"
+          >
+            <template #icon><ActionIcon name="plus" /></template>
           </AppButton>
         </template>
 
@@ -299,6 +318,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               :account="account"
               :busy="busyId === account.id"
               @promote="onPromote(pid, account.id)"
+              @rename="renaming = { provider: pid, account, identity: $event }"
               @remove="onRemove(pid, account.id)"
             />
           </div>
@@ -318,8 +338,14 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
         :subtitle="t('provider.custom.blurb')"
       >
         <template #actions>
-          <AppButton size="sm" @click="openCreateCustomDialog">
-            {{ t("custom.add") }}
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('custom.add')"
+            @click="openCreateCustomDialog"
+          >
+            <template #icon><ActionIcon name="plus" /></template>
           </AppButton>
         </template>
 
@@ -363,6 +389,15 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       :provider-name="t(NAME_KEY[addFor])"
       @close="addFor = null"
       @added="onAdded(addFor!)"
+    />
+
+    <RenameAccountDialog
+      v-if="renaming"
+      :provider="renaming.provider"
+      :account="renaming.account"
+      :identity="renaming.identity"
+      @close="renaming = null"
+      @saved="onRenamed(renaming!.provider)"
     />
 
     <CustomProviderDialog

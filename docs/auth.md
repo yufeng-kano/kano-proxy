@@ -94,11 +94,14 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 | POST | `/api/providers/:provider/login/:id/complete` |
 | GET | `/api/providers/:provider/login/:id` |
 | POST | `/api/providers/:provider/accounts/:id/promote` |
+| PATCH | `/api/providers/:provider/accounts/:id` |
 | DELETE | `/api/providers/:provider/accounts/:id` |
 | POST | `/api/providers/:provider/accounts/import` |
 | GET | `/api/providers/:provider/usage?refresh=` |
 
 `:provider` ∈ `claude-code` | `codex` | `grok`. `accounts/import` is a manual credential-ingest route (bootstrapping / tests) — same shape as a completed OAuth login, but the caller supplies `access_token` (and optional `refresh_token` / `expires_at` / `account_id` / `email` / `label`) directly instead of running the OAuth dance.
+
+`PATCH /api/providers/:provider/accounts/:id` renames an account: body `{custom_label: string | null}`, trimmed, max 64 chars, `null`/`""` clears it and falls back to the upstream identity. It touches **only** `custom_label` — never tokens, priority, or the upstream-synced `label` (see [database.md](./database.md)) — and returns `{ok: true, custom_label}`. 404 when the id is not the caller's.
 
 ## Custom endpoint keys
 

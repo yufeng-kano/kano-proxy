@@ -22,6 +22,7 @@ const account: AcquiredAccount = {
     provider: "grok",
     external_account_id: null,
     label: null,
+    custom_label: null,
     priority: 1,
     encrypted_payload: "",
     account_meta_json: null,

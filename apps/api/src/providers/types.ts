@@ -14,6 +14,7 @@ export type AccountUsageView = {
   priority: number
   status: "active" | "standby" | "benched" | "unusable"
   label: string | null
+  custom_label: string | null
   account: Record<string, unknown> | null
   usage: { windows: UsageWindow[] } | null
   error: string | null

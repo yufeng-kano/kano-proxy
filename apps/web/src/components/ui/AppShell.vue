@@ -504,12 +504,17 @@ async function onSignOut() {
 
 /* The one scrolling element in the signed-in app. `min-height: 0` is what
    lets it actually shrink inside the flex parent — without it the region
-   grows and the scrollbar never appears. */
+   grows and the scrollbar never appears.
+
+   The gutter is reserved permanently: pages differ in height, and without it
+   the content column slides sideways by the scrollbar width on every
+   navigation between one that scrolls and one that does not. */
 .content {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 /**

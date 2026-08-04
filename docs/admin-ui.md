@@ -35,9 +35,11 @@ The signed-in app is a **fixed frame, not a scrolling document**. `AppShell.vue`
 - **Sidebar** 248px, its own column, never scrolls with content: brand at the top, primary nav below it, then the Changelog link carrying the running version pinned to the bottom of the nav area, and the signed-in user with sign-out in the footer beneath.
 - **Active nav item** is marked by a filled pill **and** a step up in font weight — never color alone. The fill on its own is a ~2% luminance delta; the weight is what makes it read.
 - **Page header** is sticky at the top of the content region and holds the page title, its primary actions, and (where a page has sections) the section nav. It is the same component on every page.
+- **Header actions stay on the title row, right-aligned, at every width** — the range picker, the search field, Refresh, Create key. They never drop to a full-width row of their own beneath the title: the title row is where the page's controls live, and a phone that moves them below the heading spends a whole extra row restating the same layout. Individual controls may shrink (the search field is `max-width: 100%`), and the row may wrap internally when the controls genuinely do not fit, but the actions box itself is never widened to fill the line.
 - The page header spans **exactly the content column**: it cancels the region's *top* padding so its blur reaches the top edge when stuck, but never the horizontal gutter. Its left and right edges line up with the cards below it — a header wider than the content under it reads as two different page widths stacked, which is what the gutter-bleed version looked like.
 - The header is **chrome, not a surface**: compact (one title row at `--text-md`, subtitle beside it, tightened vertical padding), and its background is the page background (`--topbar-bg` is a translucent-blur tint of `--bg`, both themes) so a stuck header reads as the page fading out under the controls — never as a white card slab sitting on the page.
 - The content region is the scroll container, so `window.scrollY` is meaningless here; scroll restore listens on that element (see [View preferences](#view-preferences-localstorage)).
+- That region reserves its scrollbar track permanently (`scrollbar-gutter: stable`). Pages differ in height — Providers' All tab scrolls, Models' bounded card does not — and without a reserved gutter the content column shifts sideways by the scrollbar width on every such navigation, which reads as the layout jumping rather than as a scrollbar appearing.
 - `AppShell` publishes its own metrics as inherited custom properties — `--page-top`, `--page-bottom`, `--page-gutter`, and `--page-chrome` (the shell chrome above the region: 0 on desktop, the mobile bar below the shell breakpoint). A page that sizes itself to the viewport, or a header that cancels the top gutter to bleed its blur upward, **reads those** rather than restating the values. A second copy drifts the first time only one of them changes at a breakpoint.
 - `--content-max` caps the content column so a table does not stretch across an ultrawide display. It is sized to *use* a normal laptop/desktop width rather than to a comfortable reading measure — long-form pages cap themselves separately (Changelog at 72ch), so this value only has to keep dense tables usable.
 
@@ -94,9 +96,11 @@ Two conventions worth stating because they are easy to violate accidentally:
 
 `DataTable` is the one place table markup lives: it owns the sticky header, the tabular-numeral alignment, and the mobile card fallback. A page that hand-rolls a `<table>` will not get those.
 
-An **action column** (Copy, Revoke) declares an explicit `width` *and* an `align`. Without both, the column soaks up the table's leftover width and its header ends up at one edge of a 400px column with the control at the other — the header stops labelling anything.
+An **action column** (Models' Copy) declares an explicit `width` *and* an `align`. Without both, the column soaks up the table's leftover width and its header ends up at one edge of a 400px column with the control at the other — the header stops labelling anything. Prefer no action column at all where the control belongs to one field rather than to the row: Keys puts its edit pencil beside the key's name, which needs no track and no header.
 
 Icons are inline SVG on one 16px grid with a 1.4 stroke and round caps/joins: `NavIcon` for destinations, `ActionIcon` for controls. Both are always `aria-hidden` — an icon-only control carries its name in `AppButton`'s `label` (which becomes both `aria-label` and the tooltip), never in the glyph.
+
+**Icon-only buttons are `ghost`** (no border, no fill) unless they are the page's primary action. A bordered square with a glyph in it competes with the card title beside it for the same amount of attention, and a section header carrying two of them reads as a toolbar rather than as a heading with an affordance.
 
 Two implementation notes that are not obvious and cost real debugging time:
 
@@ -150,18 +154,25 @@ Route `/overview`; signed-in `/` redirects here. Data source: `GET /api/usage/su
 
 Tabs in the sticky header, same pattern as Models: **All**, one tab per builtin provider, and **Custom** — each with its connected-account count. All shows every section stacked; a provider tab shows only that provider's card. One panel at a time (real tab semantics), no anchor-scrolling.
 
-Row actions are **edit-gated**: a row shows only its identity and status by default, with a single pencil (edit) icon button; the pencil toggles that row's action buttons (Make primary / Remove; Test / Edit / Remove) into view. Destructive controls are therefore never one accidental click away, and thirty rows don't render ninety buttons.
+Each section's **Add** control is an icon-only ghost button (`plus`) in the card header — Add account / Add endpoint as its tooltip and accessible name. The page is read far more often than it is added to, so the create affordance sits at icon weight rather than as a bordered button on every section.
+
+Row actions are **edit-gated**: a row shows only its identity and status by default, with a single pencil (edit) icon button; the pencil toggles that row's actions into view. Destructive controls are therefore never one accidental click away, and thirty rows don't render ninety buttons.
+
+The pencil sits on the **identity row**, right-aligned — vertically under the section's Add control, so every section has exactly one column of controls down its right edge. The revealed actions appear in that same row to the pencil's left, in the space the identity line leaves empty, so opening a row does not reflow anything below it.
+
+Revealed actions are **icons, not labelled buttons**: at three actions per row a labelled set is wider than the identity it belongs to, and the row wraps. Each carries its name as tooltip + `aria-label`, and destructive ones stay visually distinct (`danger` tone), never distinguished by position alone.
 
 Subscription accounts (Claude / Codex / Grok):
 
 - Status dot: active / standby / benched / unusable, always paired with a text label — never color alone.
 - Progress bars per usage window (5h, Week, …). `utilization` is always a **percent (0–100)**, never a 0–1 fraction — adapters normalize upstream values to that scale, so the bar renders it directly (clamped and rounded) with no rescaling heuristic.
-- Actions (behind the pencil): Make primary / Remove. Add account → provider-specific sign-in flow in a dialog.
+- Actions (behind the pencil), as icons: **Make primary** (`arrow-up` — raises this account's priority so requests route through it first; hidden when it already is), **Rename** (`pencil-line`), **Remove** (`trash`, confirms first). Add account → provider-specific sign-in flow in a dialog.
+- **Rename** opens a small dialog writing `custom_label` via `PATCH /api/providers/:provider/accounts/:id`; blank clears it and the row falls back to the upstream email/username. A rename is display-only — it never touches which account is primary, and the upstream identity sync never overwrites it (see [database.md](./database.md)). The row shows the custom name as its title with the upstream identity beneath it, so a renamed account is still traceable to the real account it proxies.
 
 Custom endpoints (`GET /api/custom-providers` — see [auth.md](./auth.md)):
 
 - Name, a format badge (`OpenAI` | `Anthropic`), the `slug/*` model-prefix hint, the base URL, the key mask (e.g. `sk-abc…f3a2`), and a status dot (**active** / **benched** only — a static key has no usage window to show).
-- Actions (behind the pencil): **Test** (`POST /api/custom-providers/test` with `{id}`, inline result), **Edit**, **Remove** (confirms first since it also deletes the stored key).
+- Actions (behind the pencil), as icons: **Test** (`zap`, `POST /api/custom-providers/test` with `{id}`, inline result), **Edit** (`pencil-line`, opens the endpoint dialog), **Remove** (`trash`, confirms first since it also deletes the stored key). Test is not a `check` — the open gate already shows one, and two checks in a row mean two different things.
 - **Add endpoint** dialog: format toggle (immutable once saved); name with a slug auto-generated from it (editable before first save, then locked — immutable server-side too); base URL with a **live preview of the resolved endpoint** as the user types (`{base}/chat/completions` for OpenAI, `{base}/v1/messages` for Anthropic, matching the literal-concatenation rule in [providers.md](./providers.md)); API key as `type="password"`, **never pre-filled or echoed** — on edit, blank means "keep the existing key" (matches the backend's blank-means-keep contract, see [auth.md](./auth.md)); models mode toggle (auto / manual, with a textarea for manual ids); a **Test connection** button that calls the same endpoint with the in-progress form values and renders the result inline without blocking Save.
 
 ## Models page
@@ -183,8 +194,10 @@ Two tabs in the sticky header: **Keys** and **Connect** (the client setup detail
 Key creation and editing run in a **dialog**, opened from a Create key button in the page header (Keys tab only):
 
 - **Create**: name, optional spend limit (USD; empty = unlimited), reset interval (`daily`/`weekly`/`monthly`/`total`), and an include-OAuth toggle (whether subscription-provider traffic counts — see [pricing.md](./pricing.md)). On success the **same dialog** switches to a done step: the plaintext key in an emphasized copy field with the shown-once warning, dismissed with Done. The list refreshes behind it — no separate banner block above the table; the one place the plaintext ever exists is inside that dialog step.
-- **Edit** (pencil icon on each row): same form minus the key material — rename and adjust the limit fields via `PATCH /api/keys/:id`. Editing never re-shows a key.
-- The table shows each key's window spend against its limit ("$3.20 / $50.00", or just spend when unlimited) from `GET /api/keys`' `window_spend`, plus the existing name / prefix / created / last-used / revoke columns.
+- **Edit** (pencil icon, ghost, immediately right of the key's **name** rather than in a column of its own): same form minus the key material — rename and adjust the limit fields via `PATCH /api/keys/:id`. Editing never re-shows a key. The pencil belongs beside the thing it edits; parked in a trailing column it labels a 64px track two columns away from the row's subject.
+- **Revoke lives inside the edit dialog**, as a destructive action in its footer — not as a column. Revoking is rare and irreversible, so it costs one deliberate step (open the key, then confirm) instead of sitting one stray click from every row. It still confirms before firing, and closes the dialog on success.
+- Columns are **Name** (with the pencil), **Key**, **Spend**, **Last used** — four, down from seven. Created is dropped: a key's age answers nothing the last-used column doesn't answer better, and every column removed is width the spend figures get back.
+- **Spend** reads `"$3.20 / $50.00"` — spent over the window's ceiling — from `GET /api/keys`' `window_spend`. An unlimited key shows the spend alone (`"$3.20"`) with no denominator and no "No limit" annotation: the absent ceiling *is* the statement, and the extra label was a second thing to read that said nothing new.
 
 Connect shows the base URLs derived from the current deploy host (`VITE_API_ORIGIN` locally, same-origin in production) — not hard-coded:
 

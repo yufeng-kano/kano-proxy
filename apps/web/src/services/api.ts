@@ -172,6 +172,18 @@ export async function promoteAccount(
   )
 }
 
+/** Display-only rename. `null` clears it and the row falls back to the upstream identity. */
+export async function renameAccount(
+  provider: ProviderId,
+  id: string,
+  customLabel: string | null,
+): Promise<void> {
+  await request<{ ok: boolean; custom_label: string | null }>(
+    `/api/providers/${provider}/accounts/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify({ custom_label: customLabel }) },
+  )
+}
+
 export async function removeAccount(
   provider: ProviderId,
   id: string,

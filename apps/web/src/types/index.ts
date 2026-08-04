@@ -19,7 +19,10 @@ export type ProviderAccount = {
   id: string
   priority: number
   status: AccountStatus
+  /** Display name — already the custom one when the user set it. */
   label: string | null
+  /** The user's own name for this account; null = falls back to upstream identity. */
+  custom_label: string | null
   account: Record<string, unknown> | null
   usage: { windows: UsageWindow[] } | null
   error: string | null

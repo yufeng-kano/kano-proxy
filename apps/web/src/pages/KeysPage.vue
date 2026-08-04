@@ -4,7 +4,7 @@
  * stacked, so neither pushes the other off-screen (docs/admin-ui.md
  * § Anti-scroll rules).
  *
- * - **Keys** — create, edit, revoke. Creation and editing run in a dialog
+ * - **Keys** — the list. Create, edit, and revoke all run in one dialog
  *   (CreateKeyDialog); a fresh key's plaintext is shown once inside that
  *   dialog's done step and nowhere else, while the list refreshes behind it.
  * - **Connect** — the base URLs this deployment actually serves, derived from
@@ -24,7 +24,7 @@ import PageHeader from "@/components/ui/PageHeader.vue"
 import SectionNav from "@/components/ui/SectionNav.vue"
 import type { SectionItem } from "@/components/ui/SectionNav.vue"
 import { useI18n } from "@/i18n"
-import { clientBaseUrls, listKeys, revokeKey } from "@/services/api"
+import { clientBaseUrls, listKeys } from "@/services/api"
 import type { ApiKey } from "@/types"
 
 type Tab = "keys" | "connect"
@@ -44,7 +44,6 @@ const tab = ref<Tab>("keys")
 const keys = ref<ApiKey[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
-const revokingId = ref<string | null>(null)
 
 const showDialog = ref(false)
 const editingKey = ref<ApiKey | null>(null)
@@ -57,18 +56,14 @@ const tabs = computed<SectionItem[]>(() => [
 ])
 
 /**
- * Action columns (edit, revoke) size to their controls rather than taking the
- * table's leftover width, which would strand their headers at the far edge of
- * the track from the buttons they label.
+ * Four columns, no action column: the edit pencil rides beside the name it
+ * edits, and Revoke lives inside that dialog (docs/admin-ui.md § Keys page).
  */
 const columns = computed<Column<ApiKey>[]>(() => [
-  { key: "name", header: t("keys.column.name"), value: (k) => k.name },
+  { key: "name", header: t("keys.column.name") },
   { key: "prefix", header: t("keys.column.key") },
   { key: "limit", header: t("keys.column.limit"), numeric: true },
-  { key: "created", header: t("keys.column.created"), hideOnMobile: true },
   { key: "lastUsed", header: t("keys.column.lastUsed") },
-  { key: "edit", header: t("action.edit"), align: "end", width: "64px" },
-  { key: "revoke", header: t("keys.revoke"), align: "end", width: "112px" },
 ])
 
 onMounted(() => void load())
@@ -111,20 +106,6 @@ function spendCell(key: ApiKey): string {
   const spend = format.currency(key.window_spend ?? null)
   if (key.spend_limit == null) return spend
   return `${spend} / ${format.currency(key.spend_limit)}`
-}
-
-async function onRevoke(key: ApiKey) {
-  if (!confirm(t("keys.revokeConfirm"))) return
-  revokingId.value = key.id
-  error.value = null
-  try {
-    await revokeKey(key.id)
-    await load()
-  } catch {
-    error.value = t("keys.error.revoke")
-  } finally {
-    revokingId.value = null
-  }
 }
 </script>
 
@@ -192,46 +173,33 @@ async function onRevoke(key: ApiKey) {
           :row-key="(k) => k.id"
           :caption="t('keys.title')"
         >
+          <!-- The pencil belongs beside the thing it edits, not in a trailing
+               column two tracks away from the row's subject. -->
+          <template #cell-name="{ row }">
+            <span class="name-cell">
+              <span class="name">{{ row.name }}</span>
+              <AppButton
+                size="sm"
+                variant="ghost"
+                icon-only
+                :label="t('keys.editKey', { name: row.name })"
+                @click="openEdit(row)"
+              >
+                <template #icon><ActionIcon name="edit" /></template>
+              </AppButton>
+            </span>
+          </template>
           <template #cell-prefix="{ row }">
             <code class="mono">{{ row.key_prefix }}</code>
           </template>
           <template #cell-limit="{ row }">
             <span class="tabular">{{ spendCell(row) }}</span>
-            <span v-if="row.spend_limit == null" class="unlimited">
-              {{ t("keys.limit.none") }}
-            </span>
-          </template>
-          <template #cell-created="{ row }">
-            <span :title="format.dateTime(row.created_at)">
-              {{ format.date(row.created_at) }}
-            </span>
           </template>
           <template #cell-lastUsed="{ row }">
             <span v-if="row.last_used_at" :title="format.dateTime(row.last_used_at)">
               {{ format.relative(row.last_used_at) }}
             </span>
             <span v-else class="never">{{ t("state.never") }}</span>
-          </template>
-          <template #cell-edit="{ row }">
-            <AppButton
-              size="sm"
-              variant="ghost"
-              icon-only
-              :label="t('keys.editKey', { name: row.name })"
-              @click="openEdit(row)"
-            >
-              <template #icon><ActionIcon name="edit" /></template>
-            </AppButton>
-          </template>
-          <template #cell-revoke="{ row }">
-            <AppButton
-              size="sm"
-              variant="danger"
-              :loading="revokingId === row.id"
-              @click="onRevoke(row)"
-            >
-              {{ t("keys.revoke") }}
-            </AppButton>
           </template>
         </DataTable>
       </AppCard>
@@ -323,15 +291,23 @@ async function onRevoke(key: ApiKey) {
   min-height: 0;
 }
 
-.never {
-  color: var(--faint);
+/* The pencil rides with the name, so a long name ellipsizes rather than
+   pushing it out of the cell. */
+.name-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
 }
 
-.unlimited {
-  display: block;
-  margin-top: 2px;
+.name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.never {
   color: var(--faint);
-  font-size: var(--text-2xs);
 }
 
 /* --- Connect ------------------------------------------------------------ */

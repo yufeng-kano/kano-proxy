@@ -6,6 +6,7 @@ export type AccountRow = {
   provider: string
   external_account_id: string | null
   label: string | null
+  custom_label: string | null
   priority: number
   encrypted_payload: string
   account_meta_json: string | null
@@ -45,6 +46,24 @@ export async function getAccount(
       .bind(accountId, userId)
       .first<AccountRow>()) ?? null
   )
+}
+
+/** Set or clear the user-owned display name without changing upstream identity. */
+export async function setAccountCustomLabel(
+  db: D1Database,
+  userId: string,
+  accountId: string,
+  customLabel: string | null,
+): Promise<boolean> {
+  // Unlike updateAccountIdentity's COALESCE convention, null here is an
+  // explicit clear and must be written as a literal NULL.
+  const result = await db
+    .prepare(
+      `UPDATE upstream_accounts SET custom_label = ?, updated_at = ? WHERE id = ? AND user_id = ?`,
+    )
+    .bind(customLabel, nowIso(), accountId, userId)
+    .run()
+  return (result.meta.changes ?? 0) > 0
 }
 
 export async function insertAccount(
@@ -94,6 +113,7 @@ export async function insertAccount(
     provider: input.provider,
     external_account_id: input.externalAccountId ?? null,
     label: input.label ?? null,
+    custom_label: null,
     priority,
     encrypted_payload: input.encryptedPayload,
     account_meta_json: input.accountMetaJson ?? null,
