@@ -1,13 +1,14 @@
 /**
  * Minimal in-memory D1 substitute for route/db integration tests. Supports
  * exactly the query shapes this codebase's db/* modules issue: single-table
- * SELECT/INSERT/UPDATE/DELETE with `=`, `>=`, `<`, or `NOT IN (?, …)` WHERE
- * conditions (AND-joined), `SELECT COUNT(*)`, `SELECT COALESCE(MAX(col), 0)`,
- * `SELECT COALESCE(SUM(col), 0)`, `UPDATE ... SET col = ?` / `col =
- * COALESCE(?, col)`, and the retention sweep's batched `DELETE ... WHERE col
- * IN (SELECT col FROM <same table> WHERE <cond> LIMIT n)` shape. Not a SQL
- * engine — anything outside these shapes throws so a mismatch fails loudly
- * instead of silently no-op.
+ * SELECT/INSERT/UPDATE/DELETE with `=`, `>=`, `<`, `IS [NOT] NULL`, or `NOT IN
+ * (?, …)` WHERE conditions (AND-joined, with one bracketed `OR` group for the
+ * usage lock's compare-and-swap), `SELECT COUNT(*)`, `SELECT COALESCE(MAX(col),
+ * 0)`, `SELECT COALESCE(SUM(col), 0)`, `UPDATE ... SET col = ?` / `col =
+ * COALESCE(?, col)` / `col = NULL`, and the retention sweep's batched `DELETE
+ * ... WHERE col IN (SELECT col FROM <same table> WHERE <cond> LIMIT n)` shape.
+ * Not a SQL engine — anything outside these shapes throws so a mismatch fails
+ * loudly instead of silently no-op.
  */
 
 type Row = Record<string, unknown>
@@ -94,37 +95,65 @@ function splitTopLevel(s: string, sep: RegExp): string[] {
 
 type WhereCond =
   | { kind: "cmp"; col: string; op: string; paramIndex: number }
+  | { kind: "isNull"; col: string; negated: boolean }
   | { kind: "notIn"; col: string; paramStart: number; count: number }
+  | { kind: "or"; branches: WhereCond[] }
+
+/**
+ * Parses one AND-term. Bracketed alternatives (`(a IS NULL OR a < ?)` — the
+ * usage lock's compare-and-swap) recurse, so parameter positions stay in
+ * left-to-right order across the whole clause.
+ */
+function parseCond(cond: string, next: () => number): WhereCond {
+  const grouped = cond.match(/^\((.+)\)$/s)
+  if (grouped && splitTopLevel(grouped[1]!, /^\s+OR\s+/i).length > 1) {
+    return {
+      kind: "or",
+      branches: splitTopLevel(grouped[1]!, /^\s+OR\s+/i).map((b) => parseCond(b.trim(), next)),
+    }
+  }
+  const cmp = cond.match(/^(\w+)\s*(=|>=|<)\s*\?$/)
+  if (cmp) return { kind: "cmp", col: cmp[1]!, op: cmp[2]!, paramIndex: next() }
+  const isNull = cond.match(/^(\w+)\s+IS\s+(NOT\s+)?NULL$/i)
+  if (isNull) return { kind: "isNull", col: isNull[1]!, negated: !!isNull[2] }
+  const notIn = cond.match(/^(\w+)\s+NOT IN\s*\(([?,\s]+)\)$/i)
+  if (notIn) {
+    const count = (notIn[2]!.match(/\?/g) || []).length
+    const start = next()
+    for (let i = 1; i < count; i++) next()
+    return { kind: "notIn", col: notIn[1]!, paramStart: start, count }
+  }
+  throw new Error(`FakeD1: unsupported WHERE condition: ${cond}`)
+}
+
+function evalCond(c: WhereCond, row: Row, params: unknown[]): boolean {
+  if (c.kind === "or") return c.branches.some((b) => evalCond(b, row, params))
+  if (c.kind === "isNull") {
+    const isNull = row[c.col] === null || row[c.col] === undefined
+    return c.negated ? !isNull : isNull
+  }
+  if (c.kind === "notIn") {
+    const excluded = params.slice(c.paramStart, c.paramStart + c.count)
+    return !excluded.includes(row[c.col])
+  }
+  const actual = row[c.col] as string | number
+  const expected = params[c.paramIndex] as string | number
+  // SQL: any comparison against NULL is NULL, i.e. not true. Without this a
+  // JS `null < "2026-…"` would coerce to 0 and match, so a free lock would
+  // read as a broken one.
+  if (actual === null || actual === undefined) return false
+  if (c.op === ">=") return actual >= expected
+  if (c.op === "<") return actual < expected
+  return actual === expected
+}
 
 function filterRows(rows: Row[], whereClause: string | undefined, params: unknown[]): Row[] {
   if (!whereClause) return [...rows]
   const conditions = splitTopLevel(whereClause, /^\s+AND\s+/i).map((c) => c.trim())
   let pi = 0
-  const consumed: WhereCond[] = conditions.map((cond) => {
-    const cmp = cond.match(/^(\w+)\s*(=|>=|<)\s*\?$/)
-    if (cmp) return { kind: "cmp", col: cmp[1]!, op: cmp[2]!, paramIndex: pi++ }
-    const notIn = cond.match(/^(\w+)\s+NOT IN\s*\(([?,\s]+)\)$/i)
-    if (notIn) {
-      const count = (notIn[2]!.match(/\?/g) || []).length
-      const start = pi
-      pi += count
-      return { kind: "notIn", col: notIn[1]!, paramStart: start, count }
-    }
-    throw new Error(`FakeD1: unsupported WHERE condition: ${cond}`)
-  })
-  return rows.filter((row) =>
-    consumed.every((c) => {
-      if (c.kind === "notIn") {
-        const excluded = params.slice(c.paramStart, c.paramStart + c.count)
-        return !excluded.includes(row[c.col])
-      }
-      const actual = row[c.col] as string | number
-      const expected = params[c.paramIndex] as string | number
-      if (c.op === ">=") return actual >= expected
-      if (c.op === "<") return actual < expected
-      return actual === expected
-    }),
-  )
+  const next = () => pi++
+  const consumed: WhereCond[] = conditions.map((cond) => parseCond(cond, next))
+  return rows.filter((row) => consumed.every((c) => evalCond(c, row, params)))
 }
 
 function sortRows(rows: Row[], orderByClause: string): Row[] {
@@ -215,6 +244,12 @@ function execute(
         const plain = a.match(/^(\w+)\s*=\s*\?$/i)
         if (plain) {
           row[plain[1]!] = setParams[pi++]
+          continue
+        }
+        // Literal NULL consumes no parameter — the usage lock releases this way.
+        const nulled = a.match(/^(\w+)\s*=\s*NULL$/i)
+        if (nulled) {
+          row[nulled[1]!] = null
           continue
         }
         throw new Error(`FakeD1: unsupported SET assignment: ${a}`)

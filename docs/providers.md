@@ -8,9 +8,38 @@ Per `(user_id, provider)`:
 2. **Acquire** highest-priority non-benched credential (refresh if needed)  
 3. **Bench** on upstream `401` / `403` / `429` for ~300s (KV)  
 4. **Promote** / **Remove**  
-5. **Usage snapshot** — fetched live from upstream on every `GET /api/providers/{provider}/accounts` call; **no server-side KV cache** (removed to cut KV writes). Upstream-429 protection is the frontend's localStorage cache-first 90s TTL + 90s poll — the admin UI is the only caller of this endpoint.
+5. **Usage snapshot** — cached **60s server-side in D1** on the `upstream_accounts` row, behind a single-flight lock. See "Usage cache" below.
 
 Timeouts: do not permanently shrink the pool on transport timeout alone when avoidable; prefer per-request exclude + retry.
+
+## Usage cache (server-side, 60s, D1)
+
+`GET /api/providers/{provider}/accounts` used to call `fetchUsage` live for every account on every request. The only protection was the admin UI's 90s localStorage TTL + 90s poll — which is **per device**, so N signed-in devices meant N× upstream calls, against endpoints that rate-limit and bot-wall. Two devices was enough to feel it.
+
+The snapshot now lives on the account row (`usage_snapshot_json`, `usage_fetched_at`, `usage_fetching_at` — see [database.md](./database.md)), shared by every device and tab:
+
+- **Fresh** (`usage_fetched_at` within **60s**): return the stored snapshot, no upstream call. This is the only case that skips the network.
+- **Stale / missing / `?refresh=true`**: fetch upstream **synchronously** and return the fresh result. Not stale-while-revalidate — with a 90s frontend poll against a 60s TTL, *every* steady-state poll takes the stale path, so revalidate-in-background would render one cycle behind forever and a newly added account would show no usage at all until the second poll.
+- Net effect: upstream calls are capped at **1 per account per 60s** regardless of device count, and single-device freshness is unchanged from the live-fetch behavior it replaces.
+
+**Single-flight lock.** D1 has no cross-request transactions, so the lock is a conditional `UPDATE` used as a compare-and-swap — SQLite's single-statement atomicity plus `meta.changes`:
+
+```sql
+UPDATE upstream_accounts SET usage_fetching_at = ?now
+ WHERE id = ? AND (usage_fetching_at IS NULL OR usage_fetching_at < ?now_minus_30s)
+```
+
+`changes === 1` wins and calls upstream; `changes === 0` means someone else is already fetching, and that caller returns the stored snapshot rather than queueing. The `< now-30s` clause breaks a lock orphaned by a dead Worker or a hung upstream.
+
+**Release must be compare-and-release** (`WHERE id = ? AND usage_fetching_at = ?mine`), folded into the same statement that writes the snapshot. An unconditional release is a real bug, not a style point: if A hangs, the breaker lets B acquire at t+31s, and A's late unconditional release would clear *B's* lock and let C start a third concurrent fetch — exactly what the lock exists to prevent.
+
+**On upstream failure, never overwrite a good snapshot.** Release the lock and let the stored windows stand, surfacing the error alongside them; one upstream hiccup must not blank the bars. The snapshot therefore stores `error`, `stale` and `edgeBlocked` too — `status: "unusable"` is derived from all three (`routes/providers.ts`), so a cache hit that dropped them would silently flip an unusable account back to active.
+
+**Why D1 and not KV.** KV's minimum `cacheTtl` is 60s and writes propagate with eventual consistency, so a 60s refresh cadence would surface data up to ~2 minutes old — the cache would defeat the freshness it exists to protect. More decisively, **KV cannot express a compare-and-swap**, so the single-flight lock needs D1 regardless; once D1 is in the design, a second store buys nothing. (An earlier revision justified having no usage cache with "KV free-tier writes are the scarce resource". That reasoning was already stale for the reference deployment — `[limits] cpu_ms` in `wrangler.toml` requires Workers Paid, where the budget is 1M KV writes/month, not 1k/day.)
+
+**Why not a cron trigger.** Polling upstream on a schedule would run 24/7 whether or not anyone is looking, multiplying upstream calls against the same rate limits this cache exists to respect. The demand-driven model — nobody watching, nothing fetched — is the cheaper one; the frontend reinforces it by stopping its poll whenever the page is hidden ([admin-ui.md](./admin-ui.md)).
+
+Two providers make the saving concrete: grok's `fetchUsage` is two upstream calls plus a possible token refresh, and codex usage egresses through the paid Cloud Run relay ([codex-relay.md](./codex-relay.md)).
 
 ## Claude Code
 

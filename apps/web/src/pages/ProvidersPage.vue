@@ -8,6 +8,8 @@
  * Data is cache-first and silent about it: the cache paints immediately, a
  * background poll keeps it warm, and neither says a word in the UI. Only the
  * Refresh the user pressed reports progress, on the button they pressed.
+ *
+ * The poll runs only while the page is visible — see `syncToVisibility`.
  */
 import { computed, onMounted, onUnmounted, ref } from "vue"
 import AddAccountDialog from "@/components/AddAccountDialog.vue"
@@ -156,19 +158,54 @@ function onSelectTab(id: string) {
   setProvidersPrefs({ tab: id === ALL ? null : id })
 }
 
-onMounted(async () => {
+/** Cache-first: paint localStorage, network only when stale. */
+function loadEverything() {
+  return Promise.all([loadAll(), customProviders.load()])
+}
+
+/** Idempotent: a stray double-start would leak an interval nothing can clear. */
+function startPolling() {
+  stopPolling()
+  pollTimer = window.setInterval(() => void loadEverything(), CACHE_TTL_MS)
+}
+
+function stopPolling() {
+  if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  pollTimer = undefined
+}
+
+/**
+ * Polling upstream billing APIs for a page nobody is looking at is pure waste,
+ * and the browser's own timer throttling is far too generous to rely on
+ * (docs/admin-ui.md § Polling stops when the page is hidden).
+ */
+function syncToVisibility() {
+  if (document.hidden) {
+    stopPolling()
+    return
+  }
+  void loadEverything()
+  startPolling()
+}
+
+onMounted(() => {
+  // Unconditional: every cache read and write is scoped to the user id, so
+  // this has to land even when the page mounts hidden and loads nothing.
   setUserId(user.value?.id ?? null)
   customProviders.setUserId(user.value?.id ?? null)
-  // Cache-first: paint localStorage, network only when stale.
-  await Promise.all([loadAll(), customProviders.load()])
-  pollTimer = window.setInterval(() => {
-    void loadAll()
-    void customProviders.load()
-  }, CACHE_TTL_MS)
+  // `visibilitychange` only fires on a transition, so a tab born hidden never
+  // gets one — which is exactly how Firefox restores a pinned tab at startup.
+  syncToVisibility()
+  document.addEventListener("visibilitychange", syncToVisibility)
+  // A bfcache restore does not re-run onMounted; without this the page can
+  // come back visible with its poll still stopped.
+  window.addEventListener("pageshow", syncToVisibility)
 })
 
 onUnmounted(() => {
-  if (pollTimer !== undefined) window.clearInterval(pollTimer)
+  stopPolling()
+  document.removeEventListener("visibilitychange", syncToVisibility)
+  window.removeEventListener("pageshow", syncToVisibility)
 })
 
 async function refreshAll() {

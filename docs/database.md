@@ -55,6 +55,9 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 | priority | INTEGER | higher = preferred; promote bumps |
 | encrypted_payload | TEXT | AES-GCM blob: tokens + provider fields. For a custom provider this is just `{access_token: <api key>}` |
 | account_meta_json | TEXT | email, plan, non-secret. For a custom provider: `{key_mask: "sk-abc…f3a2"}` (see [providers.md](./providers.md)) |
+| usage_snapshot_json | TEXT | nullable; last successful usage read — `{windows, error, stale, edgeBlocked}` (`0006_account_usage_cache.sql`) |
+| usage_fetched_at | TEXT | nullable; when `usage_snapshot_json` was written. Drives the 60s server-side TTL |
+| usage_fetching_at | TEXT | nullable; lock holder's timestamp while an upstream fetch is in flight (`NULL` = free) |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
@@ -83,7 +86,9 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 `UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-KV-bench convention as `upstream_accounts`, over that provider's account row(s).
 
-### `usage_snapshots`
+### `usage_snapshots` — **deprecated, never used**
+
+Created by `0001_init.sql` as an "optional cache", never read or written by any code. The 60s usage cache it anticipated now lives in the `upstream_accounts` columns above; a separate table would cost one extra write per refresh and a second query per read, for nothing. Left in place rather than dropped — an empty table is free, and a `DROP TABLE` migration is a schema change with no benefit. **Do not build on it.**
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -92,8 +97,6 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 | fetched_at | TEXT | |
 | payload_json | TEXT | windows, stale flag |
 | stale | INTEGER | 0/1 |
-
-Optional cache; may also use KV with 60s TTL.
 
 ### `request_logs`
 

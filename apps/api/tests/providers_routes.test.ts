@@ -94,6 +94,27 @@ function stubClaudeUsage(email: string): void {
   }) as typeof fetch
 }
 
+/**
+ * Same as `stubClaudeUsage`, but counts usage calls — the usage cache's whole
+ * point is how many of these reach upstream. `utilization` varies per call so
+ * a cached response is distinguishable from a fresh one.
+ */
+function countingClaudeUsage(): { calls: () => number } {
+  let n = 0
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url.endsWith("/api/oauth/usage")) {
+      n++
+      return new Response(JSON.stringify({ five_hour: { utilization: n * 10 } }), { status: 200 })
+    }
+    if (url.endsWith("/api/oauth/profile")) {
+      return new Response(JSON.stringify({ account: { email: "u@example.com" } }), { status: 200 })
+    }
+    throw new Error(`unexpected fetch: ${url}`)
+  }) as typeof fetch
+  return { calls: () => n }
+}
+
 const originalFetch = globalThis.fetch
 afterEach(() => {
   globalThis.fetch = originalFetch
@@ -157,8 +178,10 @@ describe("PATCH /api/providers/:provider/accounts/:id custom_label", () => {
     stubClaudeUsage("first@example.com")
     await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
     stubClaudeUsage("changed@example.com")
+    // ?refresh=true: the identity sync under test only runs on a live fetch,
+    // and a plain second read inside 60s is served from the usage cache.
     const get = await providerRoutes.request(
-      "/claude-code/accounts",
+      "/claude-code/accounts?refresh=true",
       req("GET", cookie),
       env,
     )
@@ -291,5 +314,175 @@ describe("PATCH /api/providers/:provider/accounts/:id custom_label", () => {
       env,
     )
     expect(res.status).toBe(401)
+  })
+})
+
+/**
+ * Server-side 60s usage cache (docs/providers.md § Usage cache). The point is
+ * that N devices cost one upstream call, not N, so most of these assert on the
+ * upstream call count rather than on the response body.
+ */
+describe("GET /api/providers/:provider/accounts usage cache", () => {
+  it("serves a second read from cache without calling upstream again", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+    const usage = countingClaudeUsage()
+
+    const first = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(usage.calls()).toBe(1)
+    expect(first.accounts[0].usage.windows[0]).toMatchObject({ utilization: 10 })
+
+    // A second device polling inside the TTL must not reach upstream, and must
+    // see the same numbers the first one saw.
+    const second = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(usage.calls()).toBe(1)
+    expect(second.accounts[0].usage.windows[0]).toMatchObject({ utilization: 10 })
+  })
+
+  it("refetches once the snapshot is older than the TTL", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+    const usage = countingClaudeUsage()
+
+    await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
+    expect(usage.calls()).toBe(1)
+
+    // Age the snapshot past 60s. A stale read fetches synchronously and returns
+    // the fresh value — not the previous one with a background refresh.
+    db.rows("upstream_accounts")[0]!.usage_fetched_at = new Date(
+      Date.now() - 61_000,
+    ).toISOString()
+    const after = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(usage.calls()).toBe(2)
+    expect(after.accounts[0].usage.windows[0]).toMatchObject({ utilization: 20 })
+    expect(after.accounts[0].stale).toBe(false)
+  })
+
+  it("bypasses the cache for an explicit ?refresh=true", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+    const usage = countingClaudeUsage()
+
+    await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
+    const refreshed = await readJson(
+      await providerRoutes.request("/claude-code/accounts?refresh=true", req("GET", cookie), env),
+    )
+    expect(usage.calls()).toBe(2)
+    expect(refreshed.accounts[0].usage.windows[0]).toMatchObject({ utilization: 20 })
+  })
+
+  it("serves the stored snapshot when another request holds the lock", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+    const usage = countingClaudeUsage()
+
+    await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
+    expect(usage.calls()).toBe(1)
+
+    // Stale snapshot + a lock someone else is holding: the loser must return
+    // the old value rather than queue up a second upstream call.
+    const row = db.rows("upstream_accounts")[0]!
+    row.usage_fetched_at = new Date(Date.now() - 61_000).toISOString()
+    row.usage_fetching_at = new Date().toISOString()
+
+    const res = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(usage.calls()).toBe(1)
+    expect(res.accounts[0].usage.windows[0]).toMatchObject({ utilization: 10 })
+    expect(res.accounts[0].stale).toBe(true)
+  })
+
+  it("breaks a lock left behind by a dead request", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+    const usage = countingClaudeUsage()
+
+    // A lock older than 30s means its holder is gone; it must not wedge the
+    // account's usage forever.
+    db.rows("upstream_accounts")[0]!.usage_fetching_at = new Date(
+      Date.now() - 31_000,
+    ).toISOString()
+
+    await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
+    expect(usage.calls()).toBe(1)
+    expect(db.rows("upstream_accounts")[0]!.usage_fetching_at).toBeNull()
+  })
+
+  it("keeps the previous snapshot and releases the lock when upstream fails", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+    countingClaudeUsage()
+
+    await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
+    const stored = db.rows("upstream_accounts")[0]!.usage_snapshot_json
+    expect(stored).toBeTruthy()
+
+    db.rows("upstream_accounts")[0]!.usage_fetched_at = new Date(
+      Date.now() - 61_000,
+    ).toISOString()
+    globalThis.fetch = (async () => {
+      throw new Error("upstream down")
+    }) as typeof fetch
+
+    const res = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(res.accounts[0].error).toBe("upstream down")
+    // One hiccup must not blank the bars for every device sharing this cache,
+    // and must not leave the lock held.
+    expect(db.rows("upstream_accounts")[0]!.usage_snapshot_json).toBe(stored)
+    expect(db.rows("upstream_accounts")[0]!.usage_fetching_at).toBeNull()
+  })
+
+  it("keeps a cached unusable account unusable", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith("/api/oauth/usage")) return new Response("nope", { status: 401 })
+      if (url.endsWith("/api/oauth/profile")) return new Response("nope", { status: 401 })
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    const live = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(live.accounts[0].status).toBe("unusable")
+
+    // The snapshot stores error/edgeBlocked precisely so the cached read
+    // re-derives the same status instead of silently reporting "active".
+    const cached = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(cached.accounts[0].status).toBe("unusable")
   })
 })

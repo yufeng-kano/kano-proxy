@@ -125,14 +125,26 @@ Cache-first everywhere, and **invisible to the user** — no "cached" / "refresh
 
 - Paint the `localStorage` cache immediately (even if stale); fetch only if the cache is older than **90s**, or on an explicit user Refresh.
 - Server-data caches live in **`localStorage`**, not sessionStorage, so a reopened tab or browser restart paints the last known data instantly and multiple tabs share one cache. Each entry is a versioned envelope `{ v, savedAt, data }`; a bumped `CACHE_SCHEMA_VERSION` or malformed blob reads as a miss, never as trusted data.
-- Providers page polls every **90s**; Refresh sets `?refresh=true` (bypasses the server-side models KV cache; usage is always fetched live server-side).
-- Server-side KV caching is deliberately minimal (KV free-tier writes are the scarce resource): **per-account usage has no KV layer** — `GET /api/providers/{provider}/accounts` fetches upstream usage live on every call, and upstream-429 protection comes from the frontend's 90s localStorage TTL + 90s poll being the only callers. The **models catalog keeps its KV cache at a 1h TTL** because the client-facing `GET /openai/v1/models` / `GET /anthropic/v1/models` are hit by API clients with no frontend cache (see [providers.md](./providers.md)).
+- Providers page polls every **90s** *while visible* (see "Polling stops when the page is hidden" below); Refresh sets `?refresh=true`, which bypasses both the models KV cache and the 60s server-side usage cache.
+- **Per-account usage is cached 60s server-side in D1**, shared across every device and tab, because the localStorage TTL is per-device and N devices meant N× upstream calls (see [providers.md](./providers.md) § Usage cache). The frontend TTL is still the first line of defense — it keeps same-device tabs and rapid re-visits off the network entirely — but it is no longer the *only* one. The **models catalog keeps its KV cache at a 1h TTL** because the client-facing `GET /openai/v1/models` / `GET /anthropic/v1/models` are hit by API clients with no frontend cache.
 - On refresh failure, keep showing cache and surface a non-blocking error.
 - A background refresh shows no spinner. A *user-initiated* refresh shows progress on the control they pressed — that one is their action, so it gets feedback.
 - First load with no cache shows skeletons shaped like the content, never a bare "Loading…".
 - Never store access tokens, refresh tokens, session secrets, or a custom provider's API key in local UI cache — a cached custom-provider row carries only non-secret fields the `GET /api/custom-providers` response already returns (`key_mask`, never the key). What *is* cached (account emails/labels, usage percentages, model ids, key masks) is non-secret display data, cleared by the logout sweep.
 - Cache keys are scoped to the signed-in user id: `kano-proxy:custom-providers:{userId}`, `kano-proxy:usage:{userId}:{days}`, etc.
 - **Changelog is the one exception**: TTL is **1 hour** and the key `kano-proxy:changelog` carries **no user id** — the data is identical for every operator and holds nothing user-identifying. The logout sweep still clears it. See [changelog.md](./changelog.md).
+
+### Polling stops when the page is hidden
+
+A background poll against upstream billing APIs must not run for a page nobody is looking at. The Providers page gates its interval on the [Page Visibility API](https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API) (Baseline since 2015; identical semantics in Chrome, Firefox and Safari): `hidden` covers a background tab, a minimized window, and a screen that is off or locked.
+
+- **Hidden → `clearInterval`.** Stop entirely; do not rely on the browser's own timer throttling. Chrome's intensive throttling (1/min) needs the page hidden **>5 min** plus ≥5 chained callbacks, silence >30s and no WebRTC — before that it still checks ~1/sec; Firefox Desktop's background floor is 1s. Both are at or below a 90s poll, so throttling barely slows us down.
+- **Visible → fetch once, then restart the interval.** The one-shot catch-up is what keeps a returning user from reading a stale page; it still respects the localStorage TTL, and the 60s server cache absorbs the rest.
+- **Check `visibilityState` at mount, not just on the event.** `visibilitychange` fires only on a *transition*, so a tab born hidden never gets one. This is load-bearing for **Firefox pinned tabs**: `browser.sessionstore.restore_pinned_tabs_on_demand` defaults to `false` (ordinary tabs restore lazily, pinned ones do not), so a pinned Providers tab boots and runs JS at browser startup without ever being looked at. Event-only wiring would poll upstream forever there.
+- **Also re-check on `pageshow`.** A bfcache restore (user leaves the site, presses Back) does not re-run `onMounted`; the heap thaws with polling already stopped, and Safari's `visibilitychange`-on-restore behavior is historically unreliable. Without this the page can wedge, visible and never refreshing.
+- **Never substitute `focus`/`blur`.** MDN is explicit that they do not tell you the page is hidden — two side-by-side windows would falsely stop polling.
+- **Known and accepted:** a window fully *obscured* by another app still reports `visible` and keeps polling. Page Visibility measures browser-considered visibility, not pixels, in every browser; the tab is one Cmd+Tab from being read, so its data should be warm.
+- The OAuth dialog's device-flow poll (`AddAccountDialog.vue`) is deliberately **exempt** — the user is approving in another tab, so that page is *supposed* to be hidden while it polls.
 
 ### View preferences (`localStorage`)
 

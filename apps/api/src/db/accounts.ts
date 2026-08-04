@@ -10,6 +10,9 @@ export type AccountRow = {
   priority: number
   encrypted_payload: string
   account_meta_json: string | null
+  usage_snapshot_json: string | null
+  usage_fetched_at: string | null
+  usage_fetching_at: string | null
   created_at: string
   updated_at: string
 }
@@ -117,6 +120,9 @@ export async function insertAccount(
     priority,
     encrypted_payload: input.encryptedPayload,
     account_meta_json: input.accountMetaJson ?? null,
+    usage_snapshot_json: null,
+    usage_fetched_at: null,
+    usage_fetching_at: null,
     created_at: ts,
     updated_at: ts,
   }
@@ -149,6 +155,124 @@ export async function updateAccountPayload(
       .bind(encryptedPayload, ts, accountId)
       .run()
   }
+}
+
+/**
+ * Cached usage read for one account (docs/providers.md § Usage cache).
+ *
+ * `error` / `stale` / `edgeBlocked` are stored alongside the windows because
+ * the route derives `status: "unusable"` from all three — a cache hit that
+ * dropped them would silently flip an unusable account back to active.
+ */
+export type UsageSnapshot = {
+  windows: unknown[]
+  account?: Record<string, unknown>
+  error: string | null
+  stale: boolean
+  edgeBlocked: boolean
+}
+
+/** Server-side usage TTL: within this, a read never touches upstream. */
+export const USAGE_TTL_MS = 60_000
+
+/**
+ * How long a lock may be held before another caller may break it. Bounds the
+ * damage from a Worker that died mid-fetch or an upstream that hung, at the
+ * cost of allowing a second fetch past that point.
+ */
+const USAGE_LOCK_TTL_MS = 30_000
+
+export function isUsageFresh(row: AccountRow, now: number = Date.now()): boolean {
+  if (!row.usage_fetched_at || !row.usage_snapshot_json) return false
+  const at = Date.parse(row.usage_fetched_at)
+  return Number.isFinite(at) && now - at < USAGE_TTL_MS
+}
+
+export function readUsageSnapshot(row: AccountRow): UsageSnapshot | null {
+  if (!row.usage_snapshot_json) return null
+  try {
+    const parsed = JSON.parse(row.usage_snapshot_json) as Partial<UsageSnapshot>
+    if (!Array.isArray(parsed.windows)) return null
+    return {
+      windows: parsed.windows,
+      account: parsed.account,
+      error: parsed.error ?? null,
+      stale: !!parsed.stale,
+      edgeBlocked: !!parsed.edgeBlocked,
+    }
+  } catch {
+    // A malformed blob reads as a miss, never as trusted data.
+    return null
+  }
+}
+
+/**
+ * Single-flight lock acquire, as a compare-and-swap.
+ *
+ * D1 has no cross-request transactions, so this leans on SQLite's
+ * single-statement atomicity: the WHERE decides the winner and `meta.changes`
+ * reports it. Returns the token to release with, or `null` when another caller
+ * already holds a fresh lock.
+ */
+export async function acquireUsageLock(
+  db: D1Database,
+  accountId: string,
+): Promise<string | null> {
+  const token = nowIso()
+  const breakBefore = new Date(Date.now() - USAGE_LOCK_TTL_MS).toISOString()
+  const res = await db
+    .prepare(
+      `UPDATE upstream_accounts
+       SET usage_fetching_at = ?
+       WHERE id = ? AND (usage_fetching_at IS NULL OR usage_fetching_at < ?)`,
+    )
+    .bind(token, accountId, breakBefore)
+    .run()
+  return (res.meta.changes ?? 0) > 0 ? token : null
+}
+
+/**
+ * Write the snapshot and release the lock in one statement.
+ *
+ * The release is conditional on still holding `token` — an unconditional
+ * release is a real bug: once the stale-lock breaker has handed the lock to a
+ * second caller, a late release from the first would free the *second*
+ * caller's lock and let a third fetch start concurrently.
+ */
+export async function writeUsageSnapshot(
+  db: D1Database,
+  accountId: string,
+  token: string,
+  snapshot: UsageSnapshot,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE upstream_accounts
+       SET usage_snapshot_json = ?, usage_fetched_at = ?, usage_fetching_at = NULL
+       WHERE id = ? AND usage_fetching_at = ?`,
+    )
+    .bind(JSON.stringify(snapshot), nowIso(), accountId, token)
+    .run()
+}
+
+/**
+ * Release without writing — the upstream call failed. The previous snapshot is
+ * deliberately left intact so one hiccup does not blank the usage bars; the
+ * error travels in the response instead.
+ */
+export async function releaseUsageLock(
+  db: D1Database,
+  accountId: string,
+  token: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE upstream_accounts
+       SET usage_fetching_at = NULL
+       WHERE id = ? AND usage_fetching_at = ?`,
+    )
+    .bind(accountId, token)
+    .run()
 }
 
 /** Persist display label / meta without touching secrets. */
