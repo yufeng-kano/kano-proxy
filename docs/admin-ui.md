@@ -96,9 +96,17 @@ Two conventions worth stating because they are easy to violate accidentally:
 
 `DataTable` is the one place table markup lives: it owns the sticky header, the tabular-numeral alignment, and the mobile card fallback. A page that hand-rolls a `<table>` will not get those.
 
-An **action column** (Models' Copy) declares an explicit `width` *and* an `align`. Without both, the column soaks up the table's leftover width and its header ends up at one edge of a 400px column with the control at the other — the header stops labelling anything. Prefer no action column at all where the control belongs to one field rather than to the row: Keys puts its edit pencil beside the key's name, which needs no track and no header.
+An **action column** (Models' Copy, Keys' Edit) declares an explicit `width` *and* an `align`, and sits **last**. Without the width it soaks up the table's leftover space and its header ends up at one edge of a 400px column with the control at the other. It carries no visible header — the control already names itself — but does carry `srHeader`, rendered visually hidden, because a blank `<th>` is an unnamed column to a screen reader reading the table's structure.
+
+A row's control belongs in that trailing column rather than inline beside the field it acts on: inline, it lands at a different x-position on every row, and a column of controls that zigzags is one the eye has to search for on each row.
+
+**Numeric columns are centered**, header and cells together, with tabular numerals. Right-aligning them strands short figures a track's width from the header naming them — SPEND and MIN are much narrower than the columns they head. (For a long time this was moot: `.table th`'s `text-align: left` outweighed a bare `.numeric` selector, so every numeric header was left-aligned over right-aligned figures. Both alignments are now written as `.table th.numeric, .table td.numeric` so the column decides, not the specificity accident.)
 
 Icons are inline SVG on one 16px grid with a 1.4 stroke and round caps/joins: `NavIcon` for destinations, `ActionIcon` for controls. Both are always `aria-hidden` — an icon-only control carries its name in `AppButton`'s `label` (which becomes both `aria-label` and the tooltip), never in the glyph.
+
+`AppButton`'s `label` also applies to a **labelled** button, where it overrides the visible text as the accessible name. That is for controls whose words repeat down a list — three rows each offering "Remove" are one word to a screen reader reading them out of context, so the row's subject goes in the accessible name ("Remove {account}"). Such a name must still **contain** the visible label verbatim (WCAG 2.5.3): a voice-control user says the word they can see.
+
+**Prefer a labelled button to an icon for row actions.** An icon is right for a control that repeats on every page and is learned once (Refresh, Copy, the section gate); it is wrong for a rare, consequential action on a specific record, where a bare glyph makes the user hover to find out which one deletes their data.
 
 **Icon-only buttons are `ghost`** (no border, no fill) unless they are the page's primary action. A bordered square with a glyph in it competes with the card title beside it for the same amount of attention, and a section header carrying two of them reads as a toolbar rather than as a heading with an affordance.
 
@@ -156,25 +164,28 @@ Tabs in the sticky header, same pattern as Models: **All**, one tab per builtin 
 
 Each section's **Add** control is an icon-only ghost button (`plus`) in the card header — Add account / Add endpoint as its tooltip and accessible name. The page is read far more often than it is added to, so the create affordance sits at icon weight rather than as a bordered button on every section.
 
+**Add hides while the gate is open.** Editing the pool and adding to it are different jobs, and the open gate says which one the section is currently in; leaving a create control beside the Done toggle offers an action that has nothing to do with the mode the user just entered.
+
 Row actions are **edit-gated at the section level**: one pencil toggle in the card header, beside that section's Add control, and it reveals the actions on **every row in that section at once**. The page is for looking at pool health — a pencil repeated down each row is the same affordance restated once per account, and it is not what the rows are read for.
 
 While the gate is off, a row is identity and usage only, so destructive controls are never one accidental click away. While it is on, each row's actions occupy the blank space at its right edge, on the identity line — nothing below reflows, and the section's controls stay in one column down the right edge (Add and the gate in the header; each row's actions beneath them).
 
 The gate carries `aria-pressed` and swaps to a check while open — the same control opens and closes it, so its state has to be audible as one. It is deliberately independent of loading state: the 90s background poll must not close the actions a user is aiming at. It renders only when the section has rows, since there is nothing to reveal otherwise.
 
-Revealed actions are **icons, not labelled buttons**: at three actions per row a labelled set is wider than the identity it belongs to, and the row wraps. Each carries its name as tooltip + `aria-label`, and destructive ones stay visually distinct (`danger` tone), never distinguished by position alone.
+Revealed actions are **labelled buttons, not icons**. A row action is a rare, consequential operation on a specific account, and a bare glyph makes the user hover to find out which one removes it — a tooltip is not a label. The gate already keeps them out of the resting row, which is what buys the width to spell them out. Destructive actions stay visually distinct (`danger` tone) on top of their label, never distinguished by position alone.
 
 Subscription accounts (Claude / Codex / Grok):
 
 - Status dot: active / standby / benched / unusable, always paired with a text label — never color alone.
 - Progress bars per usage window (5h, Week, …). `utilization` is always a **percent (0–100)**, never a 0–1 fraction — adapters normalize upstream values to that scale, so the bar renders it directly (clamped and rounded) with no rescaling heuristic.
-- Actions (behind the section's gate), as icons: **Make primary** (`arrow-up` — raises this account's priority so requests route through it first; hidden when it already is), **Rename** (`pencil-line`), **Remove** (`trash`, confirms first). Add account → provider-specific sign-in flow in a dialog.
+- Actions (behind the section's gate), labelled: **Primary** (raises this account's priority so requests route through it first; hidden when it already is), **Rename**, **Remove** (`danger`, confirms first). Add account → provider-specific sign-in flow in a dialog.
+- The promote button reads **Primary**, the same word as the status badge on the row that already is one. That repetition is deliberate: the badge and the button are the two halves of one fact, so the word the user presses is the word they get back. They never appear on the same row — the button is hidden on the primary account — so the two readings cannot collide. Accessible names disambiguate anyway (`Make {name} primary`).
 - **Rename** opens a small dialog writing `custom_label` via `PATCH /api/providers/:provider/accounts/:id`; blank clears it and the row falls back to the upstream email/username. A rename is display-only — it never touches which account is primary, and the upstream identity sync never overwrites it (see [database.md](./database.md)). The row shows the custom name as its title with the upstream identity beneath it, so a renamed account is still traceable to the real account it proxies.
 
 Custom endpoints (`GET /api/custom-providers` — see [auth.md](./auth.md)):
 
 - Name, a format badge (`OpenAI` | `Anthropic`), the `slug/*` model-prefix hint, the base URL, the key mask (e.g. `sk-abc…f3a2`), and a status dot (**active** / **benched** only — a static key has no usage window to show).
-- Actions (behind the section's gate), as icons: **Test** (`zap`, `POST /api/custom-providers/test` with `{id}`, inline result), **Edit** (`pencil-line`, opens the endpoint dialog), **Remove** (`trash`, confirms first since it also deletes the stored key). Test is not a `check` — the open gate already shows one, and two checks in a row mean two different things.
+- Actions (behind the section's gate), labelled like the account rows: **Test** (`POST /api/custom-providers/test` with `{id}`, inline result), **Edit** (opens the endpoint dialog), **Remove** (`danger`, confirms first since it also deletes the stored key).
 - **Add endpoint** dialog: format toggle (immutable once saved); name with a slug auto-generated from it (editable before first save, then locked — immutable server-side too); base URL with a **live preview of the resolved endpoint** as the user types (`{base}/chat/completions` for OpenAI, `{base}/v1/messages` for Anthropic, matching the literal-concatenation rule in [providers.md](./providers.md)); API key as `type="password"`, **never pre-filled or echoed** — on edit, blank means "keep the existing key" (matches the backend's blank-means-keep contract, see [auth.md](./auth.md)); models mode toggle (auto / manual, with a textarea for manual ids); a **Test connection** button that calls the same endpoint with the in-progress form values and renders the result inline without blocking Save.
 
 ## Models page
@@ -196,10 +207,13 @@ Two tabs in the sticky header: **Keys** and **Connect** (the client setup detail
 Key creation and editing run in a **dialog**, opened from a Create key button in the page header (Keys tab only):
 
 - **Create**: name, optional spend limit (USD; empty = unlimited), reset interval (`daily`/`weekly`/`monthly`/`total`), and an include-OAuth toggle (whether subscription-provider traffic counts — see [pricing.md](./pricing.md)). On success the **same dialog** switches to a done step: the plaintext key in an emphasized copy field with the shown-once warning, dismissed with Done. The list refreshes behind it — no separate banner block above the table; the one place the plaintext ever exists is inside that dialog step.
-- **Edit** (pencil icon, ghost, immediately right of the key's **name** rather than in a column of its own): same form minus the key material — rename and adjust the limit fields via `PATCH /api/keys/:id`. Editing never re-shows a key. The pencil belongs beside the thing it edits; parked in a trailing column it labels a 64px track two columns away from the row's subject.
+- **Edit** (pencil icon, ghost) in a trailing action column at the **far right**: same form minus the key material — rename and adjust the limit fields via `PATCH /api/keys/:id`. Editing never re-shows a key. It sits at the row's end rather than beside the name, because inline it lands at a different x-position on every row (names differ in length), and a column of controls that zigzags is one the eye has to search for on each row.
 - **Revoke lives inside the edit dialog**, as a destructive action in its footer — not as a column. Revoking is rare and irreversible, so it costs one deliberate step (open the key, then confirm) instead of sitting one stray click from every row. It still confirms before firing, and closes the dialog on success.
-- Columns are **Name** (with the pencil), **Key**, **Spend**, **Last used** — four, down from seven. Created is dropped: a key's age answers nothing the last-used column doesn't answer better, and every column removed is width the spend figures get back.
+- Columns are **Name**, **Key**, **Spend**, **Last used**, then the unlabelled edit column — down from seven. Created is dropped: a key's age answers nothing the last-used column doesn't answer better, and every column removed is width the spend figures get back.
 - **Spend** reads `"$3.20 / $50.00"` — spent over the window's ceiling — from `GET /api/keys`' `window_spend`. An unlimited key shows the spend alone (`"$3.20"`) with no denominator and no "No limit" annotation: the absent ceiling *is* the statement, and the extra label was a second thing to read that said nothing new.
+- Spend is **centered under its header** like every numeric column (§ Component primitives), not stranded at the far edge of its track.
+
+**Both tabs' cards fill the content region**, so switching between them does not resize the page. Keys needs the bounded card anyway (sticky header, list scrolling inside it — § Anti-scroll rules); Connect is short and would otherwise hug its content, which made the card jump between two heights on every tab switch. A tab switch changes what is on the surface, never how big the surface is. This matches Models, whose catalog card fills the region the same way.
 
 Connect shows the base URLs derived from the current deploy host (`VITE_API_ORIGIN` locally, same-origin in production) — not hard-coded:
 

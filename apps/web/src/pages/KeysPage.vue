@@ -56,14 +56,18 @@ const tabs = computed<SectionItem[]>(() => [
 ])
 
 /**
- * Four columns, no action column: the edit pencil rides beside the name it
- * edits, and Revoke lives inside that dialog (docs/admin-ui.md § Keys page).
+ * Four data columns plus the edit control at the far right. The pencil gets a
+ * declared width and its own (unlabelled) track rather than riding beside the
+ * name: inline it lands at a different x-position on every row, and a column of
+ * controls that zigzags is one the eye has to search for. Revoke is not a
+ * column at all — it lives in the edit dialog (docs/admin-ui.md § Keys page).
  */
 const columns = computed<Column<ApiKey>[]>(() => [
   { key: "name", header: t("keys.column.name") },
   { key: "prefix", header: t("keys.column.key") },
   { key: "limit", header: t("keys.column.limit"), numeric: true },
   { key: "lastUsed", header: t("keys.column.lastUsed") },
+  { key: "edit", header: "", srHeader: t("action.edit"), align: "end", width: "56px" },
 ])
 
 onMounted(() => void load())
@@ -173,21 +177,19 @@ function spendCell(key: ApiKey): string {
           :row-key="(k) => k.id"
           :caption="t('keys.title')"
         >
-          <!-- The pencil belongs beside the thing it edits, not in a trailing
-               column two tracks away from the row's subject. -->
           <template #cell-name="{ row }">
-            <span class="name-cell">
-              <span class="name">{{ row.name }}</span>
-              <AppButton
-                size="sm"
-                variant="ghost"
-                icon-only
-                :label="t('keys.editKey', { name: row.name })"
-                @click="openEdit(row)"
-              >
-                <template #icon><ActionIcon name="edit" /></template>
-              </AppButton>
-            </span>
+            <span class="name">{{ row.name }}</span>
+          </template>
+          <template #cell-edit="{ row }">
+            <AppButton
+              size="sm"
+              variant="ghost"
+              icon-only
+              :label="t('keys.editKey', { name: row.name })"
+              @click="openEdit(row)"
+            >
+              <template #icon><ActionIcon name="edit" /></template>
+            </AppButton>
           </template>
           <template #cell-prefix="{ row }">
             <code class="mono">{{ row.key_prefix }}</code>
@@ -209,11 +211,19 @@ function spendCell(key: ApiKey): string {
     <section
       v-else
       id="panel-connect"
-      class="panel panel-scroll"
+      class="panel"
       role="tabpanel"
       :aria-label="t('keys.tab.connect')"
     >
-      <AppCard :title="t('keys.connect.title')" :subtitle="t('keys.connect.body')">
+      <!-- `fill` like the key list: Connect is short and would otherwise hug
+           its content, resizing the card on every tab switch. A tab changes
+           what is on the surface, not how big the surface is. -->
+      <AppCard
+        fill
+        class="list"
+        :title="t('keys.connect.title')"
+        :subtitle="t('keys.connect.body')"
+      >
         <div class="connect">
           <CopyField
             :label="t('keys.connect.openai')"
@@ -279,28 +289,17 @@ function spendCell(key: ApiKey): string {
   min-height: 0;
 }
 
-/* Connect is short and fixed; it only ever scrolls on a very short viewport. */
-.panel-scroll {
-  overflow-y: auto;
-}
+/* --- Cards -------------------------------------------------------------- */
 
-/* --- List --------------------------------------------------------------- */
-
+/* Both tabs' cards fill the panel, so switching tabs does not resize the page.
+   `AppCard fill` scrolls its own body, so neither panel scrolls itself. */
 .list {
   flex: 1;
   min-height: 0;
 }
 
-/* The pencil rides with the name, so a long name ellipsizes rather than
-   pushing it out of the cell. */
-.name-cell {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-width: 0;
-}
-
 .name {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

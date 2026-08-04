@@ -21,7 +21,13 @@ const props = withDefaults(
     iconOnly?: boolean
     loading?: boolean
     disabled?: boolean
-    /** Accessible name. Required when `iconOnly`; otherwise a tooltip/title. */
+    /**
+     * Accessible name. Required when `iconOnly`, where it is also the tooltip.
+     * On a labelled button it *overrides* the visible text for assistive tech —
+     * for a control whose words repeat down a list ("Remove" on every row) and
+     * need the subject spelled out. It must therefore still contain the visible
+     * label, per WCAG 2.5.3: a voice-control user says what they can see.
+     */
     label?: string
     href?: string
     to?: string
@@ -62,7 +68,7 @@ const bindings = computed(() => {
     :is="tag"
     class="btn"
     :class="[`btn-${variant}`, `btn-${size}`, { 'btn-icon': iconOnly, 'is-loading': loading }]"
-    :aria-label="iconOnly ? label : undefined"
+    :aria-label="label"
     :title="iconOnly ? label : undefined"
     :aria-busy="loading ? 'true' : undefined"
     v-bind="bindings"

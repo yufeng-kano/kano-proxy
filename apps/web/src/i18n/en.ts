@@ -44,6 +44,14 @@ export const en = {
   "action.copy": "Copy",
   "action.copied": "Copied",
   "action.dismiss": "Dismiss",
+  // Visible text for the row actions. Their accessible names name the row's
+  // subject too (`providers.account.*`, `custom.*Endpoint`) — the same three
+  // words repeat down a list, so the label alone does not say which account.
+  // Those names must contain these words verbatim (WCAG 2.5.3).
+  "action.rename": "Rename",
+  "action.remove": "Remove",
+  "action.edit": "Edit",
+  "action.test": "Test",
   "action.search": "Search",
   "action.done": "Done",
 
@@ -122,6 +130,8 @@ export const en = {
   // One gate per section, so its name is the section's — not a row's.
   "providers.section.edit": "Edit {section}",
   "providers.section.doneEditing": "Done editing {section}",
+  // Accessible names; the buttons' visible text is `providers.account.primary`
+  // and `action.rename` / `action.remove`, which these repeat verbatim.
   "providers.account.promote": "Make {name} primary",
   "providers.account.primary": "Primary",
   "providers.account.rename": "Rename {name}",

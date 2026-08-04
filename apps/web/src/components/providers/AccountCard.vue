@@ -11,7 +11,6 @@
  * click away. The status dot always ships its text label (§ Accessibility floor).
  */
 import { computed } from "vue"
-import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -142,40 +141,36 @@ const windows = computed(() => props.account.usage?.windows ?? [])
       </div>
 
       <!-- The blank space at the row's right edge, filled only while the
-           section's gate is open. Icons, not labelled buttons: three labels are
-           wider than the identity they belong to, and the row wraps. Each
-           carries its name as tooltip + aria-label. -->
+           section's gate is open. Labelled, not icons: these are rare and
+           consequential, and a glyph makes the user hover to find out which one
+           removes the account. `label` carries the account name for the
+           accessible name, since several rows show the same three words. -->
       <div v-if="editing" class="actions">
         <AppButton
           v-if="account.status !== 'active'"
-          icon-only
           size="sm"
-          variant="ghost"
           :label="t('providers.account.promote', { name: displayName })"
           :disabled="busy"
           @click="emit('promote')"
         >
-          <template #icon><ActionIcon name="arrow-up" /></template>
+          {{ t("providers.account.primary") }}
         </AppButton>
         <AppButton
-          icon-only
           size="sm"
-          variant="ghost"
           :label="t('providers.account.rename', { name: displayName })"
           :disabled="busy"
           @click="emit('rename', identity)"
         >
-          <template #icon><ActionIcon name="pencil-line" /></template>
+          {{ t("action.rename") }}
         </AppButton>
         <AppButton
-          icon-only
           size="sm"
           variant="danger"
           :label="t('providers.account.remove', { name: displayName })"
           :disabled="busy"
           @click="emit('remove')"
         >
-          <template #icon><ActionIcon name="trash" /></template>
+          {{ t("action.remove") }}
         </AppButton>
       </div>
     </div>

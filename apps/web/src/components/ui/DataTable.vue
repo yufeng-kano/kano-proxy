@@ -6,8 +6,8 @@
   1. Sticky header — the column names stay while the body scrolls inside its
      card, which is what lets a long table live in a bounded region instead of
      growing the page (docs/admin-ui.md § Anti-scroll rules).
-  2. Alignment — numeric columns are right-aligned with tabular numerals,
-     declared once per column rather than re-specified per cell.
+  2. Alignment — numeric columns are centered with tabular numerals, header and
+     cells together, declared once per column rather than re-specified per cell.
   3. Mobile — below 768px each row becomes a card of label/value pairs.
      Horizontal scroll on a phone hides exactly the columns that matter, so
      that is not the fallback.
@@ -23,11 +23,11 @@
 export type Column<Row> = {
   key: string
   header: string
-  /** Right-aligned + tabular numerals. */
+  /** Centered under its header, with tabular numerals. */
   numeric?: boolean
   /**
    * Right-aligns the header *and* the cells without the numeric treatment —
-   * for a control column (Copy, Revoke). Alignment belongs to the column, not
+   * for a control column (Copy, Edit). Alignment belongs to the column, not
    * to a wrapper each page re-invents around its own button.
    */
   align?: "start" | "end"
@@ -41,6 +41,14 @@ export type Column<Row> = {
    * cell from the control it labels.
    */
   width?: string
+  /**
+   * Accessible name for a column whose `header` is intentionally blank — an
+   * action column, where a visible word would label a control that already
+   * carries its own. A blank `<th>` is an unnamed column to a screen reader
+   * reading the table's structure, so the name is rendered visually hidden
+   * rather than omitted.
+   */
+  srHeader?: string
 }
 </script>
 
@@ -77,7 +85,10 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
             :class="{ numeric: column.numeric, end: column.align === 'end' }"
             :style="column.width ? { width: column.width } : undefined"
           >
-            {{ column.header }}
+            <span v-if="!column.header && column.srHeader" class="sr-only">
+              {{ column.srHeader }}
+            </span>
+            <template v-else>{{ column.header }}</template>
           </th>
         </tr>
       </thead>
@@ -96,7 +107,7 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
               end: column.align === 'end',
               'hide-mobile': column.hideOnMobile,
             }"
-            :data-label="column.header"
+            :data-label="column.header || column.srHeader"
           >
             <slot :name="`cell-${column.key}`" :row="row">
               {{ column.value?.(row) ?? "" }}
@@ -160,15 +171,30 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
   cursor: pointer;
 }
 
-.numeric {
-  text-align: right;
+/*
+ * Column alignment, applied to the header and its cells as one.
+ *
+ * These are written as `.table th`/`.table td` rather than bare `.numeric`
+ * because `.table th` sets `text-align: left` at specificity (0,1,1) and a bare
+ * `.numeric` is (0,1,0) — the header won, so every numeric column shipped a
+ * left-aligned header over right-aligned figures, and the two never lined up.
+ *
+ * Numbers are centered on the column rather than pushed to its edge: a header
+ * like SPEND or MIN is far narrower than the track it names, and right-aligning
+ * the figures strands them a column's width away from the word. Tabular
+ * numerals still make the digits a fixed pitch, so the values remain a scannable
+ * block; the decimal points align exactly when the values are the same width.
+ */
+.table th.numeric,
+.table td.numeric {
+  text-align: center;
   font-variant-numeric: tabular-nums;
 }
 
-/* Right-aligned without the numeric treatment: a control column, where
-   tabular figures would do nothing and the header has to sit over the
-   control rather than at the far edge of the track. */
-.end {
+/* A control column: the header sits over the control rather than at the far
+   edge of the track. */
+.table th.end,
+.table td.end {
   text-align: right;
 }
 

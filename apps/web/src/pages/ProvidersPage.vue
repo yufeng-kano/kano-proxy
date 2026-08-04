@@ -302,8 +302,11 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       >
         <template #actions>
           <!-- Icon-only ghost: this page is read far more often than it is
-               added to, so the create affordance sits at icon weight. -->
+               added to, so the create affordance sits at icon weight. Hidden
+               while the gate is open — editing the pool and adding to it are
+               different jobs, and the open gate says which one this is. -->
           <AppButton
+            v-if="!isEditing(pid)"
             icon-only
             size="sm"
             variant="ghost"
@@ -376,6 +379,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       >
         <template #actions>
           <AppButton
+            v-if="!isEditing(CUSTOM)"
             icon-only
             size="sm"
             variant="ghost"

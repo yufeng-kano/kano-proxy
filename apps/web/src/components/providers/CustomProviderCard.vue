@@ -9,7 +9,6 @@
  * docs/admin-ui.md § Data freshness).
  */
 import { computed, ref } from "vue"
-import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -85,40 +84,35 @@ async function runTest() {
       </div>
 
       <!-- The blank space at the row's right edge, filled only while the
-           section's gate is open. Icons, not labelled buttons: three labels are
-           wider than the name they belong to, and the row wraps. Each carries
-           its name as tooltip + aria-label. -->
+           section's gate is open. Labelled like the account rows above; `label`
+           carries the endpoint name for the accessible name, since several rows
+           show the same three words. -->
       <div v-if="editing" class="actions">
         <AppButton
-          icon-only
           size="sm"
-          variant="ghost"
           :label="t('custom.testEndpoint', { name: provider.name })"
           :loading="testing"
           :disabled="busy"
           @click="runTest"
         >
-          <template #icon><ActionIcon name="zap" /></template>
+          {{ t("action.test") }}
         </AppButton>
         <AppButton
-          icon-only
           size="sm"
-          variant="ghost"
           :label="t('custom.editEndpoint', { name: provider.name })"
           :disabled="busy || testing"
           @click="emit('edit')"
         >
-          <template #icon><ActionIcon name="pencil-line" /></template>
+          {{ t("action.edit") }}
         </AppButton>
         <AppButton
-          icon-only
           size="sm"
           variant="danger"
           :label="t('custom.removeEndpoint', { name: provider.name })"
           :disabled="busy || testing"
           @click="emit('remove')"
         >
-          <template #icon><ActionIcon name="trash" /></template>
+          {{ t("action.remove") }}
         </AppButton>
       </div>
     </div>

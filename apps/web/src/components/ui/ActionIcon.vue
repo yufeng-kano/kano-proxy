@@ -12,19 +12,7 @@
  * `label` (which becomes both the accessible name and the tooltip), never in
  * the glyph — so this is unconditionally `aria-hidden`.
  */
-defineProps<{
-  name:
-    | "refresh"
-    | "copy"
-    | "check"
-    | "edit"
-    | "expand"
-    | "plus"
-    | "arrow-up"
-    | "trash"
-    | "pencil-line"
-    | "zap"
-}>()
+defineProps<{ name: "refresh" | "copy" | "check" | "edit" | "expand" | "plus" }>()
 </script>
 
 <template>
@@ -69,34 +57,6 @@ defineProps<{
     <!-- Plus: create. -->
     <template v-else-if="name === 'plus'">
       <path d="M8 3v10M3 8h10" />
-    </template>
-
-    <!-- Arrow up: promote — raises an account to the front of its pool. -->
-    <template v-else-if="name === 'arrow-up'">
-      <path d="M8 13.2V3.6" />
-      <path d="M4.2 7.4L8 3.6l3.8 3.8" />
-    </template>
-
-    <!-- Trash: remove. Always paired with the danger tone — a destructive
-         action must not be told apart by its position in the row. -->
-    <template v-else-if="name === 'trash'">
-      <path d="M2.6 4.4h10.8" />
-      <path d="M4 4.4v8.2a1.4 1.4 0 001.4 1.4h5.2a1.4 1.4 0 001.4-1.4V4.4" />
-      <path d="M6.2 4.4V3.2a1.2 1.2 0 011.2-1.2h1.2a1.2 1.2 0 011.2 1.2v1.2" />
-    </template>
-
-    <!-- Pencil over a baseline: rename. Deliberately not the `edit` pencil —
-         that one is the gate in front of the row's actions, and the same glyph
-         twice in one row would mean two different things. -->
-    <template v-else-if="name === 'pencil-line'">
-      <path d="M10.35 1.8a1.35 1.35 0 011.95 1.95L6 10.05l-2.55.6.6-2.55z" />
-      <path d="M3 14h10" />
-    </template>
-
-    <!-- Zap: test a connection. Not a check — the open gate already shows one,
-         and two checks in a row would mean two different things. -->
-    <template v-else-if="name === 'zap'">
-      <path d="M8.6 2L2.6 9.2H8l-.6 4.8 6-7.2H8z" />
     </template>
 
     <!-- Check: the confirmation the copy swaps to. -->
