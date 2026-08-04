@@ -455,8 +455,11 @@ body:has(.login-page) {
     padding: var(--space-6) var(--space-4);
   }
 
+  /* Bottom pad clears the home indicator: `viewport-fit=cover` runs the page
+     under it, and the footer is the last thing in this panel. */
   .login-panel {
-    padding: var(--space-8) var(--space-4) var(--space-6);
+    padding: var(--space-8) var(--space-4)
+      calc(var(--space-6) + env(safe-area-inset-bottom, 0px));
   }
 }
 

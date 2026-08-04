@@ -530,7 +530,14 @@ async function onSignOut() {
 .content-inner {
   --page-gutter: var(--space-8);
   --page-top: var(--space-6);
-  --page-bottom: var(--space-12);
+  /* The safe-area inset lives *inside* this value rather than being applied
+     separately, so every consumer stays correct without knowing about it: the
+     padding below, and the pages that size themselves to the viewport by
+     subtracting it. `viewport-fit=cover` puts the page under the home
+     indicator, so the frame keeps its full height — shrinking it instead would
+     leave a permanent strip of bare `body` under the app — and this bottom
+     gutter is what keeps content clear of the indicator. */
+  --page-bottom: calc(var(--space-12) + env(safe-area-inset-bottom, 0px));
   /* Height the shell's own chrome takes out of the viewport above this
      region. Zero on desktop; the mobile bar below the shell breakpoint. A page
      sizing itself to the viewport subtracts this rather than hardcoding a
@@ -677,7 +684,9 @@ async function onSignOut() {
   .content-inner {
     --page-gutter: var(--space-4);
     --page-top: var(--space-4);
-    --page-bottom: var(--space-10);
+    /* Keeps the safe-area inset — this is the breakpoint that actually has
+       one, so dropping it here would undo the whole thing. */
+    --page-bottom: calc(var(--space-10) + env(safe-area-inset-bottom, 0px));
   }
 }
 </style>
