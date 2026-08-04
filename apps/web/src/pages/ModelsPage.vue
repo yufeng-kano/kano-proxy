@@ -520,6 +520,24 @@ async function copyId(id: string) {
   min-width: 0;
 }
 
+/*
+ * Narrow enough to sit beside the title on a phone rather than carrying the
+ * whole actions box onto a second row. The clamp above cannot do this on its
+ * own: in a wrapping flex row, **wrapping happens before shrinking**, so a box
+ * whose preferred width overflows moves to the next line and never gets the
+ * chance to shrink into the space it was offered.
+ *
+ * Layout arithmetic, so a raw px value rather than a spacing token: at the
+ * narrowest phone (320px, minus this breakpoint's 16px gutters) the line holds
+ * the title (~62px), two gaps, and the 40px coarse-pointer Refresh — leaving
+ * ~160px. "Search models" reads fine at that width.
+ */
+@media (max-width: 640px) {
+  .search {
+    width: 150px;
+  }
+}
+
 /* --- Groups ------------------------------------------------------------- */
 
 /*

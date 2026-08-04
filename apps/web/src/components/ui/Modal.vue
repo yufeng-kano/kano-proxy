@@ -130,6 +130,12 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   width: 100%;
+  /* Never *wider* than the overlay either. A grid child defaults to
+     `min-width: auto`, so a wide descendant (the detail modal's chart declares
+     a 420px floor) would stretch the panel past the screen and carry the close
+     button off the right edge with it — leaving the dialog undismissable by
+     tap. Wide content scrolls inside the body instead. */
+  min-width: 0;
   /* Never taller than the viewport: the body scrolls, the header and footer
      stay, so Save is always reachable without scrolling to find it. */
   max-height: min(760px, calc(100dvh - var(--space-10)));
@@ -162,8 +168,14 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--border);
 }
 
+/* Ellipsizes rather than shoving the close button out of the header — the one
+   control that must survive every title. */
 .panel-title {
   margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
@@ -196,6 +208,9 @@ onBeforeUnmount(() => {
 .panel-body {
   flex: 1;
   min-height: 0;
+  /* Same reason as the panel's own: without it a wide child sizes this box
+     rather than scrolling within it. */
+  min-width: 0;
   overflow-y: auto;
   padding: var(--space-5);
 }

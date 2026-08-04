@@ -365,8 +365,11 @@ function bucketAriaLabel(group: Group): string {
 }
 
 /* Full mode holds its width floor and scrolls sideways rather than crushing
-   a 30-day range into slivers; mini never scrolls. */
+   a 30-day range into slivers; mini never scrolls. `min-width: 0` is what
+   makes it scroll instead of grow: as a flex child it would otherwise be sized
+   by the plot's floor and pass that width up to its container. */
 .chart-scroll {
+  min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
 }
