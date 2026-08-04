@@ -156,9 +156,11 @@ Tabs in the sticky header, same pattern as Models: **All**, one tab per builtin 
 
 Each section's **Add** control is an icon-only ghost button (`plus`) in the card header — Add account / Add endpoint as its tooltip and accessible name. The page is read far more often than it is added to, so the create affordance sits at icon weight rather than as a bordered button on every section.
 
-Row actions are **edit-gated**: a row shows only its identity and status by default, with a single pencil (edit) icon button; the pencil toggles that row's actions into view. Destructive controls are therefore never one accidental click away, and thirty rows don't render ninety buttons.
+Row actions are **edit-gated at the section level**: one pencil toggle in the card header, beside that section's Add control, and it reveals the actions on **every row in that section at once**. The page is for looking at pool health — a pencil repeated down each row is the same affordance restated once per account, and it is not what the rows are read for.
 
-The pencil sits on the **identity row**, right-aligned — vertically under the section's Add control, so every section has exactly one column of controls down its right edge. The revealed actions appear in that same row to the pencil's left, in the space the identity line leaves empty, so opening a row does not reflow anything below it.
+While the gate is off, a row is identity and usage only, so destructive controls are never one accidental click away. While it is on, each row's actions occupy the blank space at its right edge, on the identity line — nothing below reflows, and the section's controls stay in one column down the right edge (Add and the gate in the header; each row's actions beneath them).
+
+The gate carries `aria-pressed` and swaps to a check while open — the same control opens and closes it, so its state has to be audible as one. It is deliberately independent of loading state: the 90s background poll must not close the actions a user is aiming at. It renders only when the section has rows, since there is nothing to reveal otherwise.
 
 Revealed actions are **icons, not labelled buttons**: at three actions per row a labelled set is wider than the identity it belongs to, and the row wraps. Each carries its name as tooltip + `aria-label`, and destructive ones stay visually distinct (`danger` tone), never distinguished by position alone.
 
@@ -166,13 +168,13 @@ Subscription accounts (Claude / Codex / Grok):
 
 - Status dot: active / standby / benched / unusable, always paired with a text label — never color alone.
 - Progress bars per usage window (5h, Week, …). `utilization` is always a **percent (0–100)**, never a 0–1 fraction — adapters normalize upstream values to that scale, so the bar renders it directly (clamped and rounded) with no rescaling heuristic.
-- Actions (behind the pencil), as icons: **Make primary** (`arrow-up` — raises this account's priority so requests route through it first; hidden when it already is), **Rename** (`pencil-line`), **Remove** (`trash`, confirms first). Add account → provider-specific sign-in flow in a dialog.
+- Actions (behind the section's gate), as icons: **Make primary** (`arrow-up` — raises this account's priority so requests route through it first; hidden when it already is), **Rename** (`pencil-line`), **Remove** (`trash`, confirms first). Add account → provider-specific sign-in flow in a dialog.
 - **Rename** opens a small dialog writing `custom_label` via `PATCH /api/providers/:provider/accounts/:id`; blank clears it and the row falls back to the upstream email/username. A rename is display-only — it never touches which account is primary, and the upstream identity sync never overwrites it (see [database.md](./database.md)). The row shows the custom name as its title with the upstream identity beneath it, so a renamed account is still traceable to the real account it proxies.
 
 Custom endpoints (`GET /api/custom-providers` — see [auth.md](./auth.md)):
 
 - Name, a format badge (`OpenAI` | `Anthropic`), the `slug/*` model-prefix hint, the base URL, the key mask (e.g. `sk-abc…f3a2`), and a status dot (**active** / **benched** only — a static key has no usage window to show).
-- Actions (behind the pencil), as icons: **Test** (`zap`, `POST /api/custom-providers/test` with `{id}`, inline result), **Edit** (`pencil-line`, opens the endpoint dialog), **Remove** (`trash`, confirms first since it also deletes the stored key). Test is not a `check` — the open gate already shows one, and two checks in a row mean two different things.
+- Actions (behind the section's gate), as icons: **Test** (`zap`, `POST /api/custom-providers/test` with `{id}`, inline result), **Edit** (`pencil-line`, opens the endpoint dialog), **Remove** (`trash`, confirms first since it also deletes the stored key). Test is not a `check` — the open gate already shows one, and two checks in a row mean two different things.
 - **Add endpoint** dialog: format toggle (immutable once saved); name with a slug auto-generated from it (editable before first save, then locked — immutable server-side too); base URL with a **live preview of the resolved endpoint** as the user types (`{base}/chat/completions` for OpenAI, `{base}/v1/messages` for Anthropic, matching the literal-concatenation rule in [providers.md](./providers.md)); API key as `type="password"`, **never pre-filled or echoed** — on edit, blank means "keep the existing key" (matches the backend's blank-means-keep contract, see [auth.md](./auth.md)); models mode toggle (auto / manual, with a textarea for manual ids); a **Test connection** button that calls the same endpoint with the in-progress form values and renders the result inline without blocking Save.
 
 ## Models page

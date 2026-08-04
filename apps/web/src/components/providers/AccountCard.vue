@@ -4,12 +4,13 @@
  *
  * A row rather than a card-in-a-card: the section's AppCard is already the
  * surface, so this only needs an identity line, its usage windows, and the
- * actions — which stay behind a pencil toggle (docs/admin-ui.md § Providers
- * page): a resting row shows identity and status only, so Remove is never one
- * accidental click away and a long pool is not a wall of buttons. The status
- * dot always ships its text label (docs/admin-ui.md § Accessibility floor).
+ * actions. Those are gated by `editing`, which the *section* owns (docs/admin-ui.md
+ * § Providers page) — one toggle in the card header opens every row at once,
+ * rather than each row carrying a pencil that restates the same affordance. A
+ * resting row is identity and usage only, so Remove is never one accidental
+ * click away. The status dot always ships its text label (§ Accessibility floor).
  */
-import { computed, ref } from "vue"
+import { computed } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
@@ -22,6 +23,8 @@ import type { ProviderAccount } from "@/types"
 const props = defineProps<{
   account: ProviderAccount
   busy?: boolean
+  /** The section's gate — the row's actions render only while this is on. */
+  editing?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -32,9 +35,6 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-
-/** Pencil-gated: the row's actions render only while this is on. */
-const editing = ref(false)
 
 /**
  * Server data, not copy: an email or upstream username identifies the account
@@ -141,58 +141,41 @@ const windows = computed(() => props.account.usage?.windows ?? [])
         </div>
       </div>
 
-      <!-- Revealed actions are icons, not labelled buttons: three labels are
+      <!-- The blank space at the row's right edge, filled only while the
+           section's gate is open. Icons, not labelled buttons: three labels are
            wider than the identity they belong to, and the row wraps. Each
            carries its name as tooltip + aria-label. -->
-      <div class="actions">
-        <template v-if="editing">
-          <AppButton
-            v-if="account.status !== 'active'"
-            icon-only
-            size="sm"
-            variant="ghost"
-            :label="t('providers.account.promote')"
-            :disabled="busy"
-            @click="emit('promote')"
-          >
-            <template #icon><ActionIcon name="arrow-up" /></template>
-          </AppButton>
-          <AppButton
-            icon-only
-            size="sm"
-            variant="ghost"
-            :label="t('providers.account.rename')"
-            :disabled="busy"
-            @click="emit('rename', identity)"
-          >
-            <template #icon><ActionIcon name="pencil-line" /></template>
-          </AppButton>
-          <AppButton
-            icon-only
-            size="sm"
-            variant="danger"
-            :label="t('providers.account.remove')"
-            :disabled="busy"
-            @click="emit('remove')"
-          >
-            <template #icon><ActionIcon name="trash" /></template>
-          </AppButton>
-        </template>
-        <!-- aria-pressed: the same control opens and closes the action set,
-             so it is a toggle, and its state must be audible as one. -->
+      <div v-if="editing" class="actions">
+        <AppButton
+          v-if="account.status !== 'active'"
+          icon-only
+          size="sm"
+          variant="ghost"
+          :label="t('providers.account.promote', { name: displayName })"
+          :disabled="busy"
+          @click="emit('promote')"
+        >
+          <template #icon><ActionIcon name="arrow-up" /></template>
+        </AppButton>
         <AppButton
           icon-only
           size="sm"
           variant="ghost"
-          :label="
-            editing
-              ? t('providers.account.doneEditing', { name: displayName })
-              : t('providers.account.edit', { name: displayName })
-          "
-          :aria-pressed="editing"
-          @click="editing = !editing"
+          :label="t('providers.account.rename', { name: displayName })"
+          :disabled="busy"
+          @click="emit('rename', identity)"
         >
-          <template #icon><ActionIcon :name="editing ? 'check' : 'edit'" /></template>
+          <template #icon><ActionIcon name="pencil-line" /></template>
+        </AppButton>
+        <AppButton
+          icon-only
+          size="sm"
+          variant="danger"
+          :label="t('providers.account.remove', { name: displayName })"
+          :disabled="busy"
+          @click="emit('remove')"
+        >
+          <template #icon><ActionIcon name="trash" /></template>
         </AppButton>
       </div>
     </div>

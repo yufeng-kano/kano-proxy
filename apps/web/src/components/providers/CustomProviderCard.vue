@@ -3,7 +3,7 @@
  * One user-defined endpoint inside the custom section.
  *
  * Mirrors AccountCard's row shape so the two sections read as one page — the
- * same pencil-gated actions included (docs/admin-ui.md § Providers page) —
+ * section-owned `editing` gate included (docs/admin-ui.md § Providers page) —
  * but carries a static key instead of a usage window: the details are the
  * model prefix, the base URL, and the key mask (never the key itself — see
  * docs/admin-ui.md § Data freshness).
@@ -21,6 +21,8 @@ import type { CustomProvider, CustomProviderTestResult } from "@/types"
 const props = defineProps<{
   provider: CustomProvider
   busy?: boolean
+  /** The section's gate — the row's actions render only while this is on. */
+  editing?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -30,8 +32,6 @@ const emit = defineEmits<{
 
 const { t } = useI18n()
 
-/** Pencil-gated: the row's actions render only while this is on. */
-const editing = ref(false)
 const testing = ref(false)
 const testResult = ref<CustomProviderTestResult | null>(null)
 const testError = ref<string | null>(null)
@@ -84,58 +84,41 @@ async function runTest() {
         </div>
       </div>
 
-      <!-- Icons, not labelled buttons: three labels are wider than the name
-           they belong to, and the row wraps. Each carries its name as tooltip
-           + aria-label. -->
-      <div class="actions">
-        <template v-if="editing">
-          <AppButton
-            icon-only
-            size="sm"
-            variant="ghost"
-            :label="t('action.test')"
-            :loading="testing"
-            :disabled="busy"
-            @click="runTest"
-          >
-            <template #icon><ActionIcon name="zap" /></template>
-          </AppButton>
-          <AppButton
-            icon-only
-            size="sm"
-            variant="ghost"
-            :label="t('action.edit')"
-            :disabled="busy || testing"
-            @click="emit('edit')"
-          >
-            <template #icon><ActionIcon name="pencil-line" /></template>
-          </AppButton>
-          <AppButton
-            icon-only
-            size="sm"
-            variant="danger"
-            :label="t('action.remove')"
-            :disabled="busy || testing"
-            @click="emit('remove')"
-          >
-            <template #icon><ActionIcon name="trash" /></template>
-          </AppButton>
-        </template>
-        <!-- aria-pressed: the same control opens and closes the action set,
-             so it is a toggle, and its state must be audible as one. -->
+      <!-- The blank space at the row's right edge, filled only while the
+           section's gate is open. Icons, not labelled buttons: three labels are
+           wider than the name they belong to, and the row wraps. Each carries
+           its name as tooltip + aria-label. -->
+      <div v-if="editing" class="actions">
         <AppButton
           icon-only
           size="sm"
           variant="ghost"
-          :label="
-            editing
-              ? t('providers.account.doneEditing', { name: provider.name })
-              : t('providers.account.edit', { name: provider.name })
-          "
-          :aria-pressed="editing"
-          @click="editing = !editing"
+          :label="t('custom.testEndpoint', { name: provider.name })"
+          :loading="testing"
+          :disabled="busy"
+          @click="runTest"
         >
-          <template #icon><ActionIcon :name="editing ? 'check' : 'edit'" /></template>
+          <template #icon><ActionIcon name="zap" /></template>
+        </AppButton>
+        <AppButton
+          icon-only
+          size="sm"
+          variant="ghost"
+          :label="t('custom.editEndpoint', { name: provider.name })"
+          :disabled="busy || testing"
+          @click="emit('edit')"
+        >
+          <template #icon><ActionIcon name="pencil-line" /></template>
+        </AppButton>
+        <AppButton
+          icon-only
+          size="sm"
+          variant="danger"
+          :label="t('custom.removeEndpoint', { name: provider.name })"
+          :disabled="busy || testing"
+          @click="emit('remove')"
+        >
+          <template #icon><ActionIcon name="trash" /></template>
         </AppButton>
       </div>
     </div>

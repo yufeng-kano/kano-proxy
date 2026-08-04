@@ -41,11 +41,8 @@ export const en = {
   "action.cancel": "Cancel",
   "action.close": "Close",
   "action.back": "Back",
-  "action.edit": "Edit",
-  "action.remove": "Remove",
   "action.copy": "Copy",
   "action.copied": "Copied",
-  "action.test": "Test",
   "action.dismiss": "Dismiss",
   "action.search": "Search",
   "action.done": "Done",
@@ -122,12 +119,13 @@ export const en = {
   "providers.all": "All",
   "providers.group.custom": "Custom",
   "providers.addAccount": "Add account",
-  "providers.account.edit": "Edit {name}",
-  "providers.account.doneEditing": "Done editing {name}",
-  "providers.account.promote": "Make primary",
+  // One gate per section, so its name is the section's — not a row's.
+  "providers.section.edit": "Edit {section}",
+  "providers.section.doneEditing": "Done editing {section}",
+  "providers.account.promote": "Make {name} primary",
   "providers.account.primary": "Primary",
-  "providers.account.rename": "Rename",
-  "providers.account.remove": "Remove",
+  "providers.account.rename": "Rename {name}",
+  "providers.account.remove": "Remove {name}",
   "providers.account.removeConfirm":
     "Remove this account? Requests will stop routing through it.",
   "providers.account.noUsage": "Usage will appear once this account is used",
@@ -186,6 +184,9 @@ export const en = {
 
   // --- Custom endpoints ---------------------------------------------------
   "custom.add": "Add endpoint",
+  "custom.testEndpoint": "Test {name}",
+  "custom.editEndpoint": "Edit {name}",
+  "custom.removeEndpoint": "Remove {name}",
   "custom.empty.title": "No custom endpoints",
   "custom.empty.body":
     "Point at any OpenAI- or Anthropic-compatible API and call it like every other model.",

@@ -75,6 +75,25 @@ const renaming = ref<{
   identity: string
 } | null>(null)
 
+/**
+ * Which sections have their row actions revealed, keyed by section id (a
+ * `ProviderId` or CUSTOM). One gate per section rather than per row
+ * (docs/admin-ui.md § Providers page); a Set because sections are independent
+ * and All shows several at once.
+ */
+const editingSections = ref(new Set<string>())
+
+function isEditing(section: string): boolean {
+  return editingSections.value.has(section)
+}
+
+function toggleEditing(section: string) {
+  // Replaced, not mutated: Vue does not track Set membership on its own.
+  const next = new Set(editingSections.value)
+  if (!next.delete(section)) next.add(section)
+  editingSections.value = next
+}
+
 /** What the user last picked; resolved against the known tabs below. */
 const selected = ref<string>(getProvidersPrefs().tab ?? ALL)
 
@@ -293,6 +312,23 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           >
             <template #icon><ActionIcon name="plus" /></template>
           </AppButton>
+          <!-- One gate for the whole section. aria-pressed: the same control
+               opens and closes it, so its state must be audible as one. -->
+          <AppButton
+            v-if="byProvider[pid].data?.accounts.length"
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="
+              isEditing(pid)
+                ? t('providers.section.doneEditing', { section: t(NAME_KEY[pid]) })
+                : t('providers.section.edit', { section: t(NAME_KEY[pid]) })
+            "
+            :aria-pressed="isEditing(pid)"
+            @click="toggleEditing(pid)"
+          >
+            <template #icon><ActionIcon :name="isEditing(pid) ? 'check' : 'edit'" /></template>
+          </AppButton>
         </template>
 
         <div class="section-body">
@@ -317,6 +353,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               :key="account.id"
               :account="account"
               :busy="busyId === account.id"
+              :editing="isEditing(pid)"
               @promote="onPromote(pid, account.id)"
               @rename="renaming = { provider: pid, account, identity: $event }"
               @remove="onRemove(pid, account.id)"
@@ -347,6 +384,21 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           >
             <template #icon><ActionIcon name="plus" /></template>
           </AppButton>
+          <AppButton
+            v-if="customProviders.state.data?.length"
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="
+              isEditing(CUSTOM)
+                ? t('providers.section.doneEditing', { section: t('provider.custom.name') })
+                : t('providers.section.edit', { section: t('provider.custom.name') })
+            "
+            :aria-pressed="isEditing(CUSTOM)"
+            @click="toggleEditing(CUSTOM)"
+          >
+            <template #icon><ActionIcon :name="isEditing(CUSTOM) ? 'check' : 'edit'" /></template>
+          </AppButton>
         </template>
 
         <div class="section-body">
@@ -368,6 +420,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               :key="provider.id"
               :provider="provider"
               :busy="customBusyId === provider.id"
+              :editing="isEditing(CUSTOM)"
               @edit="openEditCustomDialog(provider)"
               @remove="onRemoveCustomProvider(provider)"
             />
