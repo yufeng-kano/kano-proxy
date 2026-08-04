@@ -4,6 +4,8 @@ Signed-in operators see **what changed** and **which version they are running**,
 
 There is no hand-maintained `CHANGELOG.md` and no changelog table in D1. The release notes written at release time (see [deployment.md](./deployment.md) — Releases) are the single source of truth; the admin UI reads them through the Worker.
 
+Which makes those notes a **user-facing surface with no fallback**: whatever the release body says is exactly what this page shows, and an empty body renders an empty card. They are hand-written for that reason — `gh release create --generate-notes` summarizes merged pull requests, and this repo lands work as direct commits, so it yields a bare compare link. See [deployment.md](./deployment.md) § Release notes are hand-written.
+
 ## Surfaces
 
 | Surface | Content |

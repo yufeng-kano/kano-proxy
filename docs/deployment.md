@@ -312,9 +312,21 @@ A version bump is incomplete unless **all** of these land together:
 1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`).
 2. **Commit** that change with the release work (and any code/docs for the release).
 3. **Push** the commit to `origin` (`main` or the release branch).
-4. **Tag** `vMAJOR.MINOR.PATCH` on that commit and **publish a GitHub Release** (tag alone without a Release does not run deploy CI).
+4. **Write the release notes** (see below) — they are a deliverable of the release, not a formality.
+5. **Tag** `vMAJOR.MINOR.PATCH` on that commit and **publish a GitHub Release** (tag alone without a Release does not run deploy CI).
 
 Do **not** create a GitHub Release / tag without updating and pushing `package.json` first. Keep tag and `package.json` version in lockstep (`v1.0.1` ↔ `"1.0.1"`).
+
+#### Release notes are hand-written
+
+**Never cut a release with `--generate-notes` alone.** That flag builds its output from *merged pull requests*; this repo lands work as direct commits to `main`, so it has nothing to summarize and emits a bare `**Full Changelog**: …compare/…` line. A release published that way is blank on the `/changelog` page — and those notes are the **only** source that page has (no `CHANGELOG.md`, no D1 table — see [changelog.md](./changelog.md)). v2.1.0–v2.2.1 shipped blank this way and were backfilled by hand.
+
+Write the notes into a file and pass `--notes-file`. What they are for:
+
+- **Address the operator, in the product's voice** (the copy rules in [i18n.md](./i18n.md) § Copy voice apply): say what they can now do, not which module changed. The commit message is where the mechanism goes.
+- Lead with a one-line summary of the release, then group under `##` headings when there is more than a handful of items.
+- Only these tags survive sanitization: `a code em h2 h3 li p strong tt ul`. Tables and images degrade to plain text — do not reach for them.
+- A fix-only release can be a few bullets; it still needs to name the fix in terms of the symptom the user saw.
 
 ```bash
 # example: patch 1.0.0 → 1.0.1 after work is ready on main
@@ -325,8 +337,12 @@ git push origin main
 
 git tag -a v1.0.1 -m "v1.0.1"
 git push origin v1.0.1
-gh release create v1.0.1 --generate-notes
+
+# 2) write the user-facing notes, then publish with them
+gh release create v1.0.1 --title v1.0.1 --notes-file notes-v1.0.1.md
 ```
+
+Notes can be corrected after the fact with `gh release edit <tag> --notes-file <file>`; editing a release does **not** re-run the deploy workflow (it triggers on `published`, not `edited`). The `/changelog` page refetches within an hour, or immediately via its Refresh.
 
 ### Repository secrets (Settings → Secrets and variables → Actions)
 
