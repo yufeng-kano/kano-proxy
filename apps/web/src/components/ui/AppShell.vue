@@ -340,6 +340,9 @@ async function onSignOut() {
   gap: 2px;
   min-height: 0;
   overflow-y: auto;
+  /* As a drawer this sits over the content region; scrolling it to its end
+     must not chain through to the page behind. */
+  overscroll-behavior: contain;
 }
 
 .nav-item {
@@ -563,6 +566,7 @@ async function onSignOut() {
     inset: 0;
     z-index: 40;
     background: var(--overlay);
+    overscroll-behavior: contain;
     animation: fade var(--duration) var(--ease-enter);
   }
 

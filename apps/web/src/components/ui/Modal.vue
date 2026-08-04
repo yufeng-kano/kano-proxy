@@ -12,6 +12,7 @@
  */
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "@/i18n"
+import { getScrollRegion } from "@/services/scrollRegion"
 
 withDefaults(defineProps<{ title: string; size?: "sm" | "md" | "lg" }>(), { size: "sm" })
 
@@ -61,8 +62,41 @@ function onKeydown(event: KeyboardEvent) {
   }
 }
 
+/**
+ * The shell's scroll region, frozen while the dialog is open.
+ *
+ * Without this, scrolling the dialog to its end chains to the region behind it
+ * — the page scrolls to somewhere the user never chose and is still there when
+ * the dialog closes. The region's own `overscroll-behavior` does not help: that
+ * stops scroll *leaving* the region, not arriving from an overlay above it.
+ */
+let locked: HTMLElement | null = null
+let restoreOverflow = ""
+let restorePadding = ""
+
+function lockRegion() {
+  const el = getScrollRegion()
+  if (!el) return
+  // Compensate for the scrollbar the lock removes, or the content shifts
+  // sideways as the dialog opens.
+  const gap = el.offsetWidth - el.clientWidth
+  locked = el
+  restoreOverflow = el.style.overflow
+  restorePadding = el.style.paddingRight
+  el.style.overflow = "hidden"
+  if (gap > 0) el.style.paddingRight = `${gap}px`
+}
+
+function unlockRegion() {
+  if (!locked) return
+  locked.style.overflow = restoreOverflow
+  locked.style.paddingRight = restorePadding
+  locked = null
+}
+
 onMounted(async () => {
   previouslyFocused = document.activeElement as HTMLElement | null
+  lockRegion()
   await nextTick()
   // First field if there is one, else the panel — never the close button,
   // which would make Escape and Enter do the same thing on open.
@@ -71,6 +105,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unlockRegion()
   previouslyFocused?.focus?.()
 })
 </script>
@@ -123,6 +158,8 @@ onBeforeUnmount(() => {
   padding: var(--space-5);
   background: var(--overlay);
   backdrop-filter: blur(2px);
+  /* A drag on the backdrop itself must not reach the page under it either. */
+  overscroll-behavior: contain;
   animation: fade var(--duration) var(--ease-enter);
 }
 
@@ -212,6 +249,9 @@ onBeforeUnmount(() => {
      rather than scrolling within it. */
   min-width: 0;
   overflow-y: auto;
+  /* Stops a scroll that reaches this box's end from chaining to the page
+     behind the overlay — the second layer under the region lock above. */
+  overscroll-behavior: contain;
   padding: var(--space-5);
 }
 
