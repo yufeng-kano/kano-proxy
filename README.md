@@ -94,7 +94,7 @@ Pool behavior is the same once accounts are bound: priority, acquire, bench on 4
 
 ## Built for coding agents
 
-- **Streaming SSE** — no buffering of the full completion
+- **Streaming SSE** — eager commit: headers and keepalive sent immediately so long upstream prefill never trips the client timeout; no buffering of the full completion
 - **Multi-turn tools** — `tools` / `tool_choice` and tool rounds
 - **Vision** where the upstream supports it
 - **JSON / schema** `response_format` when the provider allows
