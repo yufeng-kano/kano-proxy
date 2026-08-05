@@ -18,14 +18,21 @@ export type CodexReasoningReplayEntry = {
 }
 
 
-export function codexReasoningReplaySessionKey(affinity?: {
-  convId?: string
-  sessionId?: string
-}): string | null {
+export function codexReasoningReplaySessionKey(
+  affinity?: {
+    convId?: string
+    sessionId?: string
+  },
+  promptCacheKey?: string,
+): string | null {
   const conv = affinity?.convId?.trim()
   if (conv) return conv
   const session = affinity?.sessionId?.trim()
   if (session) return session
+  // Same stability contract as the affinity headers: client-sent on
+  // /openai/v1, metadata.user_id-derived on /anthropic (docs/providers.md).
+  const key = promptCacheKey?.trim()
+  if (key) return key
   return null
 }
 

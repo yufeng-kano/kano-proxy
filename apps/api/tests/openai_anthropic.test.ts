@@ -6,8 +6,33 @@ import {
   openaiSseToAnthropicStream,
   openaiToAnthropicMessage,
   openaiToAnthropicMessages,
+  promptCacheKeyFromAnthropicMetadata,
   stripCacheControl,
 } from "../src/proxy/openai_anthropic"
+
+describe("promptCacheKeyFromAnthropicMetadata", () => {
+  it("returns the trimmed Claude Code session id", () => {
+    const id = "user_ab12_account_9f8e7d6c-1a2b-3c4d-5e6f-7a8b9c0d1e2f_session_0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e"
+    expect(promptCacheKeyFromAnthropicMetadata({ metadata: { user_id: ` ${id} ` } })).toBe(id)
+  })
+
+  it("yields undefined for missing, non-string, empty, or over-long ids", () => {
+    expect(promptCacheKeyFromAnthropicMetadata({})).toBeUndefined()
+    expect(promptCacheKeyFromAnthropicMetadata({ metadata: null })).toBeUndefined()
+    expect(promptCacheKeyFromAnthropicMetadata({ metadata: [] })).toBeUndefined()
+    expect(promptCacheKeyFromAnthropicMetadata({ metadata: {} })).toBeUndefined()
+    expect(promptCacheKeyFromAnthropicMetadata({ metadata: { user_id: 42 } })).toBeUndefined()
+    expect(promptCacheKeyFromAnthropicMetadata({ metadata: { user_id: "   " } })).toBeUndefined()
+    expect(
+      promptCacheKeyFromAnthropicMetadata({ metadata: { user_id: "x".repeat(257) } }),
+    ).toBeUndefined()
+  })
+
+  it("accepts an id at exactly the 256-char limit", () => {
+    const id = "x".repeat(256)
+    expect(promptCacheKeyFromAnthropicMetadata({ metadata: { user_id: id } })).toBe(id)
+  })
+})
 
 describe("openaiToAnthropicMessages", () => {
   it("does not invent cache_control", () => {

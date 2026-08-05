@@ -336,6 +336,61 @@ describe("dispatchAnthropicViaOpenAI — sampling passthrough", () => {
   })
 })
 
+describe("dispatchAnthropicViaOpenAI — metadata.user_id → prompt_cache_key", () => {
+  async function dispatchWith(body: Record<string, unknown>) {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "custom-openai-test" })
+    let captured: Record<string, unknown> | undefined
+    const adapter: ProviderAdapter = {
+      id: "custom-openai-test",
+      async chatCompletions(_env, _account, req) {
+        captured = req as unknown as Record<string, unknown>
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      },
+    }
+    await dispatchAnthropicViaOpenAI(buildEnv(db), {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: "custom-openai-test",
+      adapter,
+      rawModel: "custom-openai-test/some-model",
+      upstreamModel: "some-model",
+      body,
+      waitUntil: () => {},
+    })
+    return captured!
+  }
+
+  const sessionId =
+    "user_ab12_account_11111111-2222-3333-4444-555555555555_session_0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e"
+
+  it("lands in the named field but never in the converted rawBody", async () => {
+    const captured = await dispatchWith({
+      model: "some-model",
+      max_tokens: 10,
+      metadata: { user_id: sessionId },
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(captured.prompt_cache_key).toBe(sessionId)
+    const rawBody = captured.rawBody as Record<string, unknown>
+    expect("prompt_cache_key" in rawBody).toBe(false)
+  })
+
+  it("stays unset without metadata", async () => {
+    const captured = await dispatchWith({
+      model: "some-model",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hi" }],
+    })
+    expect(captured.prompt_cache_key).toBeUndefined()
+  })
+})
+
 describe("dispatchChatCompletions — 402 benches the account and fails over (Item 1)", () => {
   it("an upstream 402 (e.g. OpenRouter 'Insufficient credits') benches that account; the loop retries the next one and succeeds", async () => {
     const db = new FakeD1()

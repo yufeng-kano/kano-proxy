@@ -4,6 +4,7 @@ import {
   CODEX_ORIGINATOR,
   CODEX_USER_AGENT,
   codexAdapter,
+  codexSessionId,
   mergeCodexReplayItems,
 } from "../src/providers/codex"
 import type { Env } from "../src/env"
@@ -76,6 +77,25 @@ describe("codex upstream request headers", () => {
     expect(session.headers.get("session_id")).toBe("session-1")
     const conversation = await captureCodexRequest({ ...baseReq, affinity: { convId: "conv-2" } })
     expect(conversation.headers.get("session_id")).toBe("conv-2")
+  })
+
+  it("derives session_id from prompt_cache_key when no affinity headers exist", async () => {
+    const uuid = "0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e"
+    const claudeCode = await captureCodexRequest({
+      ...baseReq,
+      prompt_cache_key: `user_ab_account_11111111-2222-3333-4444-555555555555_session_${uuid}`,
+    })
+    expect(claudeCode.headers.get("session_id")).toBe(uuid)
+
+    const opaque = await captureCodexRequest({ ...baseReq, prompt_cache_key: "conv-key-1" })
+    expect(opaque.headers.get("session_id")).toBe("conv-key-1")
+
+    const affinityWins = await captureCodexRequest({
+      ...baseReq,
+      prompt_cache_key: "conv-key-1",
+      affinity: { sessionId: "session-9" },
+    })
+    expect(affinityWins.headers.get("session_id")).toBe("session-9")
   })
 
   it("omits an empty ChatGPT account id", async () => {
@@ -806,6 +826,31 @@ describe("codex reasoning replay wiring", () => {
     expect(store.size).toBe(0)
   })
 
+  it("scopes replay by prompt_cache_key when no affinity headers exist (the /anthropic Claude Code path)", async () => {
+    const store = new Map<string, string>()
+    const env = kvEnv(store)
+    const keyed = {
+      ...baseReq,
+      affinity: undefined,
+      prompt_cache_key: "user_ab_account_1_session_0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e",
+    }
+    await runTurn(env, keyed, [reasoningItem, { type: "message", content: [] }])
+    expect(store.size).toBe(1)
+    const sent = await runTurn(
+      env,
+      {
+        ...keyed,
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "answer" },
+          { role: "user", content: "again" },
+        ],
+      },
+      [],
+    )
+    expect(sent.input).toContainEqual(reasoningItem)
+  })
+
   it("clears a stale entry when a completed turn has nothing replayable", async () => {
     const store = new Map<string, string>()
     const env = kvEnv(store)
@@ -813,6 +858,20 @@ describe("codex reasoning replay wiring", () => {
     expect(store.size).toBe(1)
     await runTurn(env, baseReq, [{ type: "message", content: [] }])
     expect(store.size).toBe(0)
+  })
+})
+
+describe("codexSessionId", () => {
+  it("extracts the bare session uuid from a Claude Code metadata.user_id", () => {
+    const uuid = "0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e"
+    expect(codexSessionId(`user_ab_account_x_session_${uuid}`)).toBe(uuid)
+  })
+
+  it("passes any other non-empty key through and yields null for blank input", () => {
+    expect(codexSessionId("conv-key-1")).toBe("conv-key-1")
+    expect(codexSessionId("ends_session_notauuid")).toBe("ends_session_notauuid")
+    expect(codexSessionId("  ")).toBeNull()
+    expect(codexSessionId(undefined)).toBeNull()
   })
 })
 

@@ -463,8 +463,12 @@ export async function dispatchAnthropicViaOpenAI(
     waitUntil: WaitUntil
   },
 ): Promise<Response> {
-  const { anthropicToOpenAIChatRequest, openaiToAnthropicMessage, openaiSseToAnthropicStream } =
-    await import("./openai_anthropic")
+  const {
+    anthropicToOpenAIChatRequest,
+    openaiToAnthropicMessage,
+    openaiSseToAnthropicStream,
+    promptCacheKeyFromAnthropicMetadata,
+  } = await import("./openai_anthropic")
   const { parseReasoningEffort } = await import("../utils/reasoning")
 
   const converted = anthropicToOpenAIChatRequest(opts.body)
@@ -502,6 +506,9 @@ export async function dispatchAnthropicViaOpenAI(
       temperature: converted.temperature,
       top_p: converted.top_p,
       stop: converted.stop,
+      // Named field only — never added to the converted rawBody, so the
+      // custom-openai passthrough body is byte-identical to before.
+      prompt_cache_key: promptCacheKeyFromAnthropicMetadata(opts.body),
       affinity: opts.affinity,
       // OpenAI-shaped body for the custom-openai passthrough adapter; a
       // no-op for built-ins, which build their own body from named fields.

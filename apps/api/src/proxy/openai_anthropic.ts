@@ -19,6 +19,27 @@ export function stripCacheControl(value: unknown): unknown {
 }
 
 /**
+ * Anthropic `metadata.user_id` → the internal request's `prompt_cache_key`
+ * (codex-only effect; see docs/api.md "Prompt cache"). The Messages wire
+ * format has no prompt_cache_key field, but Claude Code sends a stable
+ * per-session id (`user_<hash>_account_<uuid>_session_<uuid>`) here — the
+ * per-conversation granularity the upstream cache router needs. Guard
+ * mirrors Anthropic's own metadata.user_id limit (≤ 256 chars); anything
+ * else yields undefined — a client-supplied id is translated, never invented.
+ */
+export function promptCacheKeyFromAnthropicMetadata(
+  body: Record<string, unknown>,
+): string | undefined {
+  const metadata = body.metadata
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return undefined
+  const userId = (metadata as { user_id?: unknown }).user_id
+  if (typeof userId !== "string") return undefined
+  const trimmed = userId.trim()
+  if (!trimmed || trimmed.length > 256) return undefined
+  return trimmed
+}
+
+/**
  * Anthropic Messages request → OpenAI Chat Completions fields.
  * Strips all cache_control. Does not invent affinity headers.
  */

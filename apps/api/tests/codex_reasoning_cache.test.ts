@@ -103,6 +103,13 @@ describe("codexReasoningReplaySessionKey", () => {
     expect(codexReasoningReplaySessionKey()).toBeNull()
     expect(codexReasoningReplaySessionKey({})).toBeNull()
   })
+
+  it("falls back to the prompt_cache_key after both affinity ids", () => {
+    expect(codexReasoningReplaySessionKey({ sessionId: "sess" }, "pck")).toBe("sess")
+    expect(codexReasoningReplaySessionKey({}, " pck ")).toBe("pck")
+    expect(codexReasoningReplaySessionKey(undefined, "pck")).toBe("pck")
+    expect(codexReasoningReplaySessionKey(undefined, "   ")).toBeNull()
+  })
 })
 
 describe("codex reasoning replay KV helpers", () => {

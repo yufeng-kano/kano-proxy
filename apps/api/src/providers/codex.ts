@@ -65,6 +65,22 @@ function credentialAccount(_json: unknown): string | null {
   return null
 }
 
+const SESSION_UUID_SUFFIX = /_session_([0-9a-fA-F-]{36})$/
+
+/**
+ * Stable `session_id` header value from the request's prompt_cache_key
+ * (client-sent on /openai/v1, metadata.user_id-derived on /anthropic).
+ * Claude Code's id ends in `_session_<uuid>` — send that bare UUID, matching
+ * what the Codex CLI itself puts in this header; any other non-empty key is
+ * sent as-is. The header only needs to be stable per conversation.
+ */
+export function codexSessionId(promptCacheKey?: string): string | null {
+  const key = promptCacheKey?.trim()
+  if (!key) return null
+  const uuid = SESSION_UUID_SUFFIX.exec(key)?.[1]
+  return uuid ?? key
+}
+
 function windowLabel(seconds: number | undefined): string {
   if (!seconds) return "window"
   if (seconds === 604800) return "Week"
@@ -103,7 +119,7 @@ export const codexAdapter: ProviderAdapter = {
       hashAssistantText,
     } = await import("./codex_reasoning_cache")
     const apiKeyId = extras?.apiKeyId ?? ""
-    const sessionKey = codexReasoningReplaySessionKey(req.affinity)
+    const sessionKey = codexReasoningReplaySessionKey(req.affinity, req.prompt_cache_key)
     const replayScoped = !!apiKeyId && !!sessionKey
 
     const body = await buildCodexRequestBody(req, mapped.reasoning)
@@ -128,7 +144,11 @@ export const codexAdapter: ProviderAdapter = {
       "user-agent": CODEX_USER_AGENT,
       originator: CODEX_ORIGINATOR,
       connection: "Keep-Alive",
-      session_id: req.affinity?.sessionId || req.affinity?.convId || crypto.randomUUID(),
+      session_id:
+        req.affinity?.sessionId ||
+        req.affinity?.convId ||
+        codexSessionId(req.prompt_cache_key) ||
+        crypto.randomUUID(),
       "content-type": "application/json",
       accept: "text/event-stream",
     }
