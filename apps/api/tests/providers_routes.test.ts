@@ -453,6 +453,8 @@ describe("GET /api/providers/:provider/accounts usage cache", () => {
       await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
     )
     expect(res.accounts[0].error).toBe("upstream down")
+    expect(res.accounts[0].usage.windows[0]).toMatchObject({ utilization: 10 })
+    expect(res.accounts[0].stale).toBe(true)
     // One hiccup must not blank the bars for every device sharing this cache,
     // and must not leave the lock held.
     expect(db.rows("upstream_accounts")[0]!.usage_snapshot_json).toBe(stored)

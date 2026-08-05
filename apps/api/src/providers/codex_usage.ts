@@ -75,9 +75,10 @@ export async function fetchCodexUsageJson(
   }
 
   const base = upstream?.base ?? CODEX_BASE
-  const paths = ["/codex/usage", "/wham/usage"]
+  const paths = ["/wham/usage", "/codex/usage"]
   let lastStatus = 0
   let lastBody = ""
+  let sawHtmlChallenge = false
 
   for (const path of paths) {
     try {
@@ -108,35 +109,28 @@ export async function fetchCodexUsageJson(
         }
       }
 
-      // HTML challenge / cloudflare / bot wall
+      // HTML challenge / cloudflare / bot wall. A challenged alias must not
+      // prevent the remaining alias from being tried.
       const looksHtml = /^\s*</.test(text) || /just a moment|cf-browser|challenge/i.test(text)
-      if (res.status === 403 && looksHtml) {
-        return {
-          ok: false,
-          status: 403,
-          payload: null,
-          edgeBlocked: true,
-          error: "usage edge blocked (403 bot challenge)",
-        }
-      }
-      // real auth failure
-      if (res.status === 401 || res.status === 403) {
-        // try next path first; if all fail, classify below
-        continue
-      }
+      if (res.status === 403 && looksHtml) sawHtmlChallenge = true
+      // Real auth failure or a challenged path: try the next alias first; if
+      // all fail, classify below.
+      if (res.status === 401 || res.status === 403) continue
     } catch (e) {
       lastBody = e instanceof Error ? e.message : "fetch error"
     }
   }
 
-  const edgeBlocked = lastStatus === 403
+  const edgeBlocked = lastStatus === 403 || sawHtmlChallenge
   return {
     ok: false,
     status: lastStatus,
     payload: null,
     edgeBlocked,
     error: edgeBlocked
-      ? "usage edge blocked (403)"
+      ? sawHtmlChallenge
+        ? "usage edge blocked (403 bot challenge)"
+        : "usage edge blocked (403)"
       : `usage ${lastStatus || "error"}${lastBody ? `: ${lastBody}` : ""}`,
   }
 }

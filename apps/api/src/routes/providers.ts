@@ -173,8 +173,21 @@ providerRoutes.get("/:provider/accounts", async (c) => {
         } catch (e) {
           error = e instanceof Error ? e.message : "usage failed"
           stale = true
-          // Leave the stored snapshot alone: one upstream hiccup must not blank
-          // the usage bars for every device sharing this cache.
+          // Serve the unchanged snapshot too: one upstream hiccup must not blank
+          // the usage bars for the request that encountered it.
+          const cached = readUsageSnapshot(row)
+          if (cached) {
+            usage = { windows: cached.windows }
+            accountMeta = { ...accountMeta, ...cached.account }
+            if (
+              status !== "benched" &&
+              !cached.windows.length &&
+              !cached.edgeBlocked &&
+              /401|invalid.?token|unauthorized/i.test(error)
+            ) {
+              status = "unusable"
+            }
+          }
           await releaseUsageLock(c.env.DB, row.id, lockToken)
         }
       }

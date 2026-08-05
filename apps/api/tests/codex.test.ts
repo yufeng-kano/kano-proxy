@@ -8,7 +8,7 @@ import {
 } from "../src/providers/codex"
 import type { Env } from "../src/env"
 import type { AcquiredAccount } from "../src/pool/acquire"
-import { windowsFromCodexPayload } from "../src/providers/codex_usage"
+import { fetchCodexUsageJson, windowsFromCodexPayload } from "../src/providers/codex_usage"
 import { anthropicToOpenAIChatRequest } from "../src/proxy/openai_anthropic"
 
 const codexAccount: AcquiredAccount = {
@@ -448,6 +448,98 @@ describe("codex ignores reasoning_content on replayed history", () => {
       role: "assistant",
       content: [{ type: "output_text", text: "here is the answer" }],
     })
+  })
+})
+
+/**
+ * `/codex/usage` is `403` + HTML for everyone, independent of the CF-Worker
+ * wall, while the `/wham/usage` alias passes (docs/providers.md § The
+ * chatgpt.com wall). An earlier version returned on the first challenge, so
+ * the working alias was never reached and every codex account rendered with
+ * no usage bars. Order and fallthrough are the contract here.
+ */
+describe("fetchCodexUsageJson usage aliases", () => {
+  const validUsage = {
+    rate_limit: { primary_window: { used_percent: 17, limit_window_seconds: 18000 } },
+  }
+
+  it("tries /wham/usage first and succeeds there even when /codex/usage would challenge", async () => {
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.endsWith("/wham/usage")) {
+        return new Response(JSON.stringify(validUsage), { status: 200 })
+      }
+      if (url.endsWith("/codex/usage")) {
+        return new Response("<!doctype html><title>Just a moment</title>", { status: 403 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    const result = await fetchCodexUsageJson("tok_test", "acct_test")
+
+    expect(result).toMatchObject({ ok: true, payload: validUsage })
+    expect(calls).toEqual(["https://chatgpt.com/backend-api/wham/usage"])
+  })
+
+  it("continues from a challenged /wham/usage alias to /codex/usage", async () => {
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      calls.push(url)
+      if (url.endsWith("/wham/usage")) {
+        return new Response("<!doctype html><title>Just a moment</title>", { status: 403 })
+      }
+      if (url.endsWith("/codex/usage")) {
+        return new Response(JSON.stringify(validUsage), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    const result = await fetchCodexUsageJson("tok_test", "acct_test")
+
+    expect(result).toMatchObject({ ok: true, payload: validUsage })
+    expect(calls).toEqual([
+      "https://chatgpt.com/backend-api/wham/usage",
+      "https://chatgpt.com/backend-api/codex/usage",
+    ])
+  })
+
+  it("reports edge blocked only after both aliases return HTML challenges", async () => {
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return new Response("<!doctype html><title>Just a moment</title>", { status: 403 })
+    }) as typeof fetch
+
+    const result = await fetchCodexUsageJson("tok_test", "acct_test")
+
+    expect(calls).toEqual([
+      "https://chatgpt.com/backend-api/wham/usage",
+      "https://chatgpt.com/backend-api/codex/usage",
+    ])
+    expect(result).toMatchObject({ ok: false, edgeBlocked: true })
+    expect(result.error).toMatch(/edge blocked|403 bot challenge/i)
+  })
+
+  it("returns a successful-response JSON parse failure without trying the fallback alias", async () => {
+    const calls: string[] = []
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input))
+      return new Response("not JSON", { status: 200 })
+    }) as typeof fetch
+
+    const result = await fetchCodexUsageJson("tok_test", "acct_test")
+
+    expect(result).toMatchObject({
+      ok: false,
+      status: 200,
+      payload: null,
+      edgeBlocked: false,
+      error: "usage JSON parse failed",
+    })
+    expect(calls).toEqual(["https://chatgpt.com/backend-api/wham/usage"])
   })
 })
 
