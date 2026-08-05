@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
 
@@ -59,15 +59,18 @@ jobs:
           echo "Deploying release tag: $TAG"
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9.15.0
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           # wrangler 4 requires Node.js >= 22
           node-version: 22
+          # setup-node v5+ auto-caches only for npm, and only from a
+          # `packageManager` field. This repo is pnpm, so the explicit input is
+          # what keeps the store cached — do not drop it as redundant.
           cache: pnpm
 
       - name: Install
