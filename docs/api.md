@@ -235,14 +235,40 @@ Effort inputs, in priority order where applicable: (1) `reasoning_effort` (OpenA
 
 ## Streaming
 
-Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive wrapper (`proxy/sse.ts`):
+Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive / eager-commit wrapper (`proxy/sse.ts`):
 
-- **Keepalive comments** (`: keepalive\n\n`, an SSE comment line clients ignore) fire every 30s of silence — Cloudflare's own idle-connection mitigation. This now re-arms after **every** real upstream chunk, so any silence gap anywhere in the stream gets keepalives, not just the gap before the first token (a long tool-use or reasoning turn that goes quiet mid-stream used to stop getting them after the first byte).
-- **120s upstream idle timeout.** If no real upstream chunk (keepalive comments do not count) arrives for 120s, the proxy gives up on that upstream connection: it emits one final stall frame, then ends the stream cleanly. The response's HTTP status/headers were already sent when streaming started (always `200`), so this is a mid-stream error event, not an HTTP-level error — clients treat it the same as any other mid-turn `event: error` / OpenAI error chunk from the upstream itself (see codex's "Upstream failures mid-turn" above). Frame shape is surface-specific:
+### Eager streaming commit
+
+When the client requests `stream: true` (OpenAI body field, or Anthropic Messages body field — `count_tokens` never streams), the proxy **commits the HTTP response immediately**:
+
+1. Returns `200` + `Content-Type: text/event-stream` **before** account acquire, token refresh, failover, or the upstream call.
+2. Starts **keepalive comments from second 0** (not from first upstream byte).
+3. Runs the pool/failover loop and upstream fetch **inside** the stream. Upstream TTFB of tens of seconds (large context prefill / long reasoning) no longer counts against the client's response-headers timeout — the client already has headers and is only waiting for tokens.
+4. A client disconnect mid-wait cancels the stream (`onClose("cancel")`) so the row is logged as `client_abort` instead of vanishing with no D1 row (the pre-commit failure mode: Worker torn down while still `await`ing upstream headers).
+
+**Non-stream** requests (`stream` absent/false) are unchanged: the proxy still waits for upstream headers and returns that HTTP status.
+
+### Keepalive and idle timeout
+
+- **Keepalive comments** (`: keepalive\n\n`, an SSE comment line clients ignore) fire every 30s of silence — Cloudflare's own idle-connection mitigation. Keepalives re-arm after **every** real upstream chunk, so any silence gap anywhere in the stream gets them (including the pre-upstream TTFB window under eager commit).
+- **120s upstream idle timeout.** Applies only **while an upstream body is being piped** — not during the acquire/refresh/TTFB wait before the first upstream byte. If no real upstream chunk (keepalive comments do not count) arrives for 120s after piping starts, the proxy emits one final stall frame, then ends the stream cleanly. Frame shape is surface-specific:
   - Anthropic surface: `event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"upstream stalled: no data received for 120s"}}\n\n`
   - OpenAI surface: `data: {"error":{"message":"upstream stalled: no data received for 120s","type":"api_error","code":"upstream_stall"}}\n\n`
 
   Logged as `error_code: "upstream_stall"` unconditionally on an idle-timeout close — see [logging.md](./logging.md) for the full close-reason → `error_code` mapping.
+
+### In-stream errors (stream: true)
+
+Because HTTP status/headers are already `200` when streaming starts, failures discovered after commit cannot change the status line. They surface as a **single terminal SSE error frame**, then the stream ends — same pattern as codex mid-turn failures and the stall frame above:
+
+| Failure | OpenAI frame (approx) | Anthropic frame (approx) | `error_code` |
+|---------|----------------------|--------------------------|--------------|
+| No account bound | `data: {"error":{"message","type":"invalid_request_error","code":"no_upstream_account"}}` | `event: error` + `invalid_request_error` message | `no_upstream_account` |
+| All accounts benched / loop exhausted | `…code":"upstream_unavailable"}` | `event: error` + `api_error` / `upstream_unavailable` | `upstream_unavailable` |
+| Upstream non-2xx after failover (non-bench) | OpenAI-shaped `error` from upstream body when JSON, else generic `upstream_error` | Anthropic `event: error` with mapped type/message | `upstream_error` |
+| Idle timeout (above) | stall frame | stall frame | `upstream_stall` |
+
+Non-stream requests still return the table in **Errors** as real HTTP status codes (`400` / `503` / pass-through upstream status). Clients that need HTTP-level errors for account/pool failures should use non-stream, or treat in-stream `error` events as terminal.
 
 ## Degenerate tool-call loop guard
 
@@ -263,20 +289,21 @@ On trip: `400`, no upstream call, logged with `error_code: "loop_detected"` (aut
 
 JSON error objects; OpenAI-ish or Anthropic-ish envelope depending on surface.
 
-| Situation | HTTP | `code` (approx) |
-|-----------|------|-----------------|
-| Missing/invalid API key | 401 | `invalid_api_key` |
-| Model string invalid | 400 | `invalid_model` |
-| No account **bound** for provider | 400 | `no_upstream_account` |
-| All bound accounts benched / unavailable | 503 | `upstream_unavailable` (+ `Retry-After` when known) |
-| Upstream 4xx/5xx after retries | pass through status when possible | `upstream_error` |
-| Reasoning rejected | 400 | `invalid_reasoning` |
-| Degenerate tool-call loop (conversion path only — see above) | 400 | `loop_detected` |
-| Key's spend limit reached ([pricing.md](./pricing.md)) | 429 | `spend_limit_exceeded` (Anthropic surface: `rate_limit_error` type) |
+| Situation | HTTP (non-stream) | HTTP (`stream: true`) | `code` (approx) |
+|-----------|-------------------|----------------------|-----------------|
+| Missing/invalid API key | 401 | 401 (pre-dispatch; never reaches eager commit) | `invalid_api_key` |
+| Model string invalid | 400 | 400 (pre-dispatch) | `invalid_model` |
+| No account **bound** for provider | 400 | **200** + in-stream error frame | `no_upstream_account` |
+| All bound accounts benched / unavailable | 503 (+ `Retry-After` when known) | **200** + in-stream error frame (`Retry-After` is not re-applied on the already-sent SSE response) | `upstream_unavailable` |
+| Upstream 4xx/5xx after retries | pass through status when possible | **200** + in-stream error frame | `upstream_error` |
+| Reasoning rejected | 400 | 400 (pre-dispatch / adapter before stream body) | `invalid_reasoning` |
+| Degenerate tool-call loop (conversion path only — see above) | 400 | 400 (pre-dispatch) | `loop_detected` |
+| Key's spend limit reached ([pricing.md](./pricing.md)) | 429 | 429 (pre-dispatch) | `spend_limit_exceeded` (Anthropic surface: `rate_limit_error` type) |
+| Upstream idle / client abort mid-stream | n/a (stream only) | 200 + stall frame or clean cancel | `upstream_stall` / `client_abort` |
 
 Auth failures (missing/invalid API key) are envelope-shaped per **surface**, matched on request path prefix rather than on provider: `/anthropic/*` gets the Anthropic shape `{"type":"error","error":{"type":"authentication_error","message":"Missing API key"|"Invalid API key"}}`; every other path (including `/openai/*`) keeps the OpenAI shape shown in the table above.
 
-`400 no_upstream_account` is reserved for the *unbound* case: the user has **zero** accounts for the resolved provider, so retrying can never help. When accounts exist but none is usable *right now* (every one benched — e.g. the pool's single account just got benched for its 300s cooldown), the response is `503 upstream_unavailable` with `Retry-After` set to the seconds until the earliest bench expiry (min 1) when known — a transient error agent clients retry instead of treating as fatal. If the failover loop itself exhausted the pool mid-request and an upstream response exists, that upstream status passes through instead (`upstream_error`).
+`400 no_upstream_account` (non-stream) / in-stream `no_upstream_account` is reserved for the *unbound* case: the user has **zero** accounts for the resolved provider, so retrying can never help. When accounts exist but none is usable *right now* (every one benched — e.g. the pool's single account just got benched for its 300s cooldown), non-stream returns `503 upstream_unavailable` with `Retry-After` set to the seconds until the earliest bench expiry (min 1) when known — a transient error agent clients retry instead of treating as fatal. On `stream: true` the same condition is an in-stream error (HTTP already `200`). If the failover loop itself exhausted the pool mid-request and an upstream response exists, non-stream passes that upstream status through (`upstream_error`); stream mode emits it as an in-stream error frame.
 
 Authenticated pre-dispatch failures (invalid model, no upstream account, loop-guard trip) are all logged as one `request_logs` row via `waitUntil`, same as a real dispatch; unauthenticated 401s are never logged — see [logging.md](./logging.md).
 

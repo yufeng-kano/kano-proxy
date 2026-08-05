@@ -166,3 +166,253 @@ export function streamWithKeepalive(
     },
   })
 }
+
+
+/**
+ * Controller handed to `streamWithEagerProducer`'s `run` callback.
+ * Keepalives already fire from stream start; idle timeout arms only inside
+ * `pipeUpstream` (docs/api.md "Eager streaming commit").
+ */
+export type EagerStreamController = {
+  /** Client already cancelled — stop acquire/upstream work. */
+  cancelled: () => boolean
+  /**
+   * Relay an upstream body with the same keepalive re-arm + optional idle
+   * timeout rules as `streamWithKeepalive`. Resolves when the upstream ends,
+   * idle-timeout fires, or the client cancels. Idle timeout starts only here
+   * — not during the pre-upstream TTFB wait.
+   */
+  pipeUpstream: (
+    upstream: ReadableStream<Uint8Array>,
+    pipeOpts?: Pick<StreamKeepaliveOpts, "tap" | "idleTimeoutMs" | "stallFrame">,
+  ) => Promise<void>
+  /** Enqueue one terminal frame (error) and close cleanly. */
+  fail: (frame: Uint8Array) => void
+  /** Close cleanly with no extra frame. */
+  close: () => void
+}
+
+/**
+ * SSE stream that commits immediately: keepalives from second 0, while
+ * `run` performs acquire / failover / upstream fetch and either pipes a
+ * body or emits a terminal error frame. Used for client `stream: true`.
+ */
+export function streamWithEagerProducer(
+  run: (ctl: EagerStreamController) => Promise<void>,
+  intervalMs = 30_000,
+  opts?: StreamKeepaliveOpts,
+): ReadableStream<Uint8Array> {
+  let closed = false
+  let closeFired = false
+  let cancelled = false
+  let keepaliveTimer: ReturnType<typeof setInterval> | undefined
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+
+  const clearKeepalive = () => {
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer)
+      keepaliveTimer = undefined
+    }
+  }
+  const clearIdle = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer)
+      idleTimer = undefined
+    }
+  }
+  const fireClose = (reason: StreamCloseReason) => {
+    if (closeFired) return
+    closeFired = true
+    try {
+      opts?.onClose?.(reason)
+    } catch {
+      /* capture must never break the stream */
+    }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const armKeepalive = () => {
+        clearKeepalive()
+        keepaliveTimer = setInterval(() => {
+          try {
+            controller.enqueue(sseKeepaliveComment())
+          } catch {
+            /* closed */
+          }
+        }, intervalMs)
+      }
+
+      // Keepalive from second 0 — before any upstream body exists.
+      armKeepalive()
+
+      const safeClose = (reason: StreamCloseReason) => {
+        if (closed) return
+        closed = true
+        clearKeepalive()
+        clearIdle()
+        try {
+          controller.close()
+        } catch {
+          /* already closed */
+        }
+        fireClose(reason)
+      }
+
+      const ctl: EagerStreamController = {
+        cancelled: () => cancelled,
+        fail: (frame) => {
+          if (closed) return
+          clearKeepalive()
+          clearIdle()
+          try {
+            controller.enqueue(frame)
+          } catch {
+            /* closed */
+          }
+          closed = true
+          try {
+            controller.close()
+          } catch {
+            /* */
+          }
+          // Terminal in-stream error is a clean end from the pipe's view;
+          // callers force `error_code` via their own state for logging.
+          fireClose("done")
+        },
+        close: () => safeClose(cancelled ? "cancel" : "done"),
+        pipeUpstream: async (upstream, pipeOpts) => {
+          if (closed || cancelled) {
+            try {
+              await upstream.cancel()
+            } catch {
+              /* */
+            }
+            return
+          }
+          const reader = upstream.getReader()
+          upstreamReader = reader
+          let idleTimedOut = false
+
+          const armIdle = () => {
+            if (!pipeOpts?.idleTimeoutMs) return
+            clearIdle()
+            idleTimer = setTimeout(() => {
+              if (closeFired) return
+              idleTimedOut = true
+              clearKeepalive()
+              clearIdle()
+              try {
+                if (pipeOpts?.stallFrame) controller.enqueue(pipeOpts.stallFrame)
+              } catch {
+                /* closed */
+              }
+              try {
+                controller.close()
+              } catch {
+                /* */
+              }
+              closed = true
+              reader.cancel().catch(() => {})
+              fireClose("idle_timeout")
+            }, pipeOpts.idleTimeoutMs)
+          }
+
+          // Re-arm keepalive for the piped phase; idle starts only now.
+          armKeepalive()
+          armIdle()
+
+          try {
+            for (;;) {
+              if (cancelled || closed) break
+              const { done, value } = await reader.read()
+              if (idleTimedOut || closed) break
+              clearKeepalive()
+              clearIdle()
+              if (done) break
+              if (value) {
+                try {
+                  controller.enqueue(value)
+                } catch {
+                  /* client gone */
+                  break
+                }
+                if (pipeOpts?.tap) {
+                  try {
+                    pipeOpts.tap(value)
+                  } catch {
+                    /* capture must never break the stream */
+                  }
+                }
+                if (opts?.tap) {
+                  try {
+                    opts.tap(value)
+                  } catch {
+                    /* */
+                  }
+                }
+              }
+              if (cancelled || closed) break
+              armKeepalive()
+              armIdle()
+            }
+            if (!idleTimedOut && !closed) {
+              safeClose(cancelled ? "cancel" : "done")
+            }
+          } catch (e) {
+            if (!idleTimedOut && !closed) {
+              closed = true
+              clearKeepalive()
+              clearIdle()
+              try {
+                controller.error(e)
+              } catch {
+                /* */
+              }
+              fireClose("error")
+            }
+          } finally {
+            clearKeepalive()
+            clearIdle()
+            upstreamReader = null
+            try {
+              reader.releaseLock()
+            } catch {
+              /* */
+            }
+          }
+        },
+      }
+
+      try {
+        await run(ctl)
+        if (!closed) {
+          safeClose(cancelled ? "cancel" : "done")
+        }
+      } catch (e) {
+        if (!closed) {
+          closed = true
+          clearKeepalive()
+          clearIdle()
+          try {
+            controller.error(e)
+          } catch {
+            /* */
+          }
+          fireClose("error")
+        }
+      }
+    },
+    cancel() {
+      cancelled = true
+      clearKeepalive()
+      clearIdle()
+      if (upstreamReader) {
+        upstreamReader.cancel().catch(() => {})
+      }
+      closed = true
+      fireClose("cancel")
+    },
+  })
+}

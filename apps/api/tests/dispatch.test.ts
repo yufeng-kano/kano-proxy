@@ -242,7 +242,7 @@ describe("dispatchAnthropicMessages — idle timeout (injectable for testability
     const res = await dispatchAnthropicMessages(buildEnv(db), {
       userId: "user_1",
       apiKeyId: "key_1",
-      body: { model: "claude-opus-5", max_tokens: 10, messages: [] },
+      body: { model: "claude-opus-5", max_tokens: 10, messages: [], stream: true },
       headers: new Headers(),
       model: "claude-code/claude-opus-5",
       provider: "claude-code",
@@ -687,5 +687,179 @@ describe("dispatchChatCompletions — bottom-of-loop 503 also carries Retry-Afte
     for (const id of ids) {
       expect(await isBenched(env, "user_1", provider, id)).toBe(true)
     }
+  })
+})
+
+
+describe("dispatchChatCompletions — eager streaming commit", () => {
+  it("stream:true returns 200 + event-stream BEFORE a slow upstream resolves", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    const { waitUntil, drain } = collectWaitUntil()
+
+    let release!: (res: Response) => void
+    const gate = new Promise<Response>((resolve) => {
+      release = resolve
+    })
+
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions() {
+        return gate
+      },
+    }
+
+    const resPromise = dispatchChatCompletions(buildEnv(db), {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: "grok",
+      adapter,
+      waitUntil,
+      req: {
+        model: "grok/grok-4.5",
+        rawModel: "grok/grok-4.5",
+        upstreamModel: "grok-4.5",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        rawBody: {},
+      },
+    })
+
+    // Headers must commit without waiting for the hung adapter.
+    const res = await resPromise
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type") || "").toContain("text/event-stream")
+
+    release(
+      new Response('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n', {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      }),
+    )
+    const text = await drainBody(res.body)
+    expect(text).toContain("hi")
+    await drain()
+  })
+
+  it("stream:true + no account → 200 + in-stream no_upstream_account + log status 200", async () => {
+    const db = new FakeD1()
+    // No seedAccount — unbound pool.
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchChatCompletions(buildEnv(db), {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: "grok",
+      adapter: {
+        id: "grok",
+        async chatCompletions() {
+          throw new Error("must not be called")
+        },
+      },
+      waitUntil,
+      req: {
+        model: "grok/grok-4.5",
+        rawModel: "grok/grok-4.5",
+        upstreamModel: "grok-4.5",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        rawBody: {},
+      },
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type") || "").toContain("text/event-stream")
+    const text = await drainBody(res.body)
+    expect(text).toContain("no_upstream_account")
+    expect(text).toContain("invalid_request_error")
+    await drain()
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      provider: "grok",
+      status_code: 200,
+      error_code: "no_upstream_account",
+    })
+  })
+
+  it("stream:true + client cancel while adapter hung → error_code client_abort", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    const { waitUntil, drain } = collectWaitUntil()
+
+    // Never resolves — client cancels during TTFB wait.
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions() {
+        return new Promise(() => {})
+      },
+    }
+
+    const res = await dispatchChatCompletions(buildEnv(db), {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: "grok",
+      adapter,
+      waitUntil,
+      req: {
+        model: "grok/grok-4.5",
+        rawModel: "grok/grok-4.5",
+        upstreamModel: "grok-4.5",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+        rawBody: {},
+      },
+    })
+    expect(res.status).toBe(200)
+    const reader = res.body!.getReader()
+    // Give the producer a tick to start the hung acquire/adapter path.
+    await new Promise((r) => setTimeout(r, 10))
+    await reader.cancel()
+    await drain()
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      status_code: 200,
+      error_code: "client_abort",
+    })
+  })
+})
+
+describe("dispatchAnthropicMessages — eager streaming commit", () => {
+  it("stream:true + no account → 200 + event:error + log no_upstream_account status 200", async () => {
+    const db = new FakeD1()
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchAnthropicMessages(buildEnv(db), {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      body: { model: "claude-opus-5", max_tokens: 10, messages: [], stream: true },
+      headers: new Headers(),
+      model: "claude-code/claude-opus-5",
+      provider: "claude-code",
+      adapter: {
+        id: "claude-code",
+        async chatCompletions() {
+          throw new Error("not used")
+        },
+        async messages() {
+          throw new Error("must not be called")
+        },
+      },
+      waitUntil,
+    })
+    expect(res.status).toBe(200)
+    expect(res.headers.get("content-type") || "").toContain("text/event-stream")
+    const text = await drainBody(res.body)
+    expect(text).toContain("event: error")
+    expect(text).toContain("invalid_request_error")
+    expect(text).toContain("No usable claude-code account")
+    await drain()
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      provider: "claude-code",
+      status_code: 200,
+      error_code: "no_upstream_account",
+    })
   })
 })

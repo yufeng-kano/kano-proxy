@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { streamWithKeepalive, type StreamCloseReason } from "../src/proxy/sse"
+import { streamWithEagerProducer, streamWithKeepalive, type StreamCloseReason } from "../src/proxy/sse"
 
 /** A source stream the test can push chunks into (or close) on demand. */
 function controllableStream(): {
@@ -159,5 +159,110 @@ describe("streamWithKeepalive — tap", () => {
     close()
     await collect(out)
     expect(seen).toEqual(["chunk-1", "chunk-2"])
+  })
+})
+
+
+describe("streamWithEagerProducer", () => {
+  it("keepalives fire before pipeUpstream", async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const reasons: StreamCloseReason[] = []
+    const out = streamWithEagerProducer(
+      async (ctl) => {
+        await gate
+        ctl.close()
+      },
+      15,
+      { onClose: (r) => reasons.push(r) },
+    )
+    const reader = out.getReader()
+    // Wait long enough for at least one keepalive while still blocked in run.
+    await sleep(45)
+    release()
+    let text = ""
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      text += new TextDecoder().decode(value)
+    }
+    expect(text).toContain(": keepalive")
+    expect(reasons).toEqual(["done"])
+  })
+
+  it("pipeUpstream relays bytes unmodified", async () => {
+    const { stream, push, close } = controllableStream()
+    const out = streamWithEagerProducer(async (ctl) => {
+      await ctl.pipeUpstream(stream)
+    }, 10_000)
+    push("hello ")
+    push("world")
+    close()
+    expect(await collect(out)).toBe("hello world")
+  })
+
+  it("fail enqueues the frame and closes", async () => {
+    const reasons: StreamCloseReason[] = []
+    const frame = new TextEncoder().encode("ERR\n")
+    const out = streamWithEagerProducer(
+      async (ctl) => {
+        ctl.fail(frame)
+      },
+      10_000,
+      { onClose: (r) => reasons.push(r) },
+    )
+    expect(await collect(out)).toBe("ERR\n")
+    // Terminal in-stream error is a clean end from the pipe's view.
+    expect(reasons).toEqual(["done"])
+  })
+
+  it("cancel during wait → onClose cancel", async () => {
+    const reasons: StreamCloseReason[] = []
+    const out = streamWithEagerProducer(
+      async () => {
+        await new Promise(() => {}) // hang forever
+      },
+      10_000,
+      { onClose: (r) => reasons.push(r) },
+    )
+    const reader = out.getReader()
+    await sleep(5)
+    await reader.cancel()
+    expect(reasons).toEqual(["cancel"])
+  })
+
+  it("idle timeout only arms after pipeUpstream starts", async () => {
+    let release!: () => void
+    const prePipe = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const reasons: StreamCloseReason[] = []
+    const stallFrame = new TextEncoder().encode("STALL\n")
+    const out = streamWithEagerProducer(
+      async (ctl) => {
+        // Spend longer than idleTimeoutMs before piping — must NOT stall yet.
+        await prePipe
+        const { stream, push } = controllableStream()
+        // Start pipe with one chunk then silence so idle can fire during pipe.
+        const pipePromise = ctl.pipeUpstream(stream, {
+          idleTimeoutMs: 25,
+          stallFrame,
+        })
+        push("first")
+        await pipePromise
+      },
+      10_000,
+      { onClose: (r) => reasons.push(r) },
+    )
+
+    // Hold pre-pipe for > idle timeout window; stream should stay open.
+    await sleep(50)
+    release()
+    const text = await collect(out)
+    expect(text).toContain("first")
+    expect(text).toContain("STALL")
+    expect(reasons).toEqual(["idle_timeout"])
   })
 })

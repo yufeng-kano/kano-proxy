@@ -35,8 +35,16 @@ A request that fails before any upstream call is logged only when the caller **a
 
 A streamed request's row is written once, deferred to stream close (`waitUntil`) — see "Token usage capture" below. Two independent fields describe how it ended:
 
-- `status_code` is always whatever the upstream response headers said (typically `200`) — a failure discovered after headers are sent can never change it.
-- `error_code` marks a stream that closed before its documented completion signal was seen (Anthropic `message_stop`; OpenAI `[DONE]` or a chunk carrying a non-null `finish_reason`): `upstream_stall` (idle-timeout close, regardless of completeness), `client_abort` (client cancelled first, and no completion signal had been seen yet), or `incomplete_stream` (the connection just ended — clean EOF or a transport error — with no completion signal). A stream that did reach its completion signal keeps `error_code: NULL`, same as before this change.
+- **Eager commit** (`stream: true`): the Worker returns `200` + SSE headers **before** acquire / upstream, so `status_code` is always `200` for these rows — a failure discovered after commit (no account, pool exhausted, upstream 4xx/5xx, idle stall, client abort) cannot change the HTTP status. The failure mode lives in `error_code` (and the in-stream error frame the client already saw). See [api.md](./api.md) "Eager streaming commit".
+- **Legacy attach** (only when a non-eager path still waits for upstream headers then wraps an event-stream body): `status_code` is whatever those upstream headers said (typically `200`).
+- `error_code` for a stream close:
+  - **Forced terminal failures** set during the in-stream failover loop take priority: `no_upstream_account`, `upstream_unavailable`, `upstream_error` (same meanings as the Error codes table).
+  - Otherwise, from how the pipe closed and whether the sniffer saw the upstream's documented completion signal (Anthropic `message_stop`; OpenAI `[DONE]` or a chunk carrying a non-null `finish_reason`): `upstream_stall` (idle-timeout close, regardless of completeness), `client_abort` (client cancelled first, and no completion signal had been seen yet), or `incomplete_stream` (the connection just ended — clean EOF or a transport error — with no completion signal). A stream that did reach its completion signal keeps `error_code: NULL`.
+- `latency_ms` for an eager stream is measured from request start until upstream headers are obtained (TTFB into the pipe), or until a terminal in-stream failure / cancel if that happens first — not until the last token. That keeps long prefill visible in the dashboard without conflating it with full generation time.
+
+### Why pre-commit timeouts left no row
+
+Before eager commit, a client that abandoned the connection while the Worker was still `await`ing upstream response headers tore down the invocation with **no** `logRequest` (every log site sat after that await). Those incidents produced client-side timeouts and empty D1. Eager commit + stream `cancel` → `client_abort` closes that gap.
 
 ## Forbidden by default
 

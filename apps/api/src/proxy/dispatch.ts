@@ -17,7 +17,11 @@ import {
   fromOpenAIUsage,
   type NormalizedUsage,
 } from "../logging/usage_capture"
-import { streamWithKeepalive, type StreamCloseReason } from "./sse"
+import {
+  streamWithEagerProducer,
+  streamWithKeepalive,
+  type StreamCloseReason,
+} from "./sse"
 
 /** Keeps a Worker invocation alive for a deferred `logRequest` past the returned Response — `c.executionCtx.waitUntil` in production, a test double in tests. */
 export type WaitUntil = (promise: Promise<unknown>) => void
@@ -70,6 +74,83 @@ function upstreamUnavailableResponse(body: Record<string, unknown>, untilMs: num
   return Response.json(body, init)
 }
 
+/** OpenAI SSE terminal error frame (eager commit / stall pattern). */
+function openaiStreamErrorFrame(message: string, type: string, code?: string): Uint8Array {
+  const error: Record<string, string> = { message, type }
+  if (code) error.code = code
+  return new TextEncoder().encode(`data: ${JSON.stringify({ error })}\n\n`)
+}
+
+/** Anthropic SSE terminal error event (eager commit / stall pattern). */
+function anthropicStreamErrorFrame(message: string, type: string): Uint8Array {
+  return new TextEncoder().encode(
+    `event: error\ndata: ${JSON.stringify({ type: "error", error: { type, message } })}\n\n`,
+  )
+}
+
+/** Best-effort message extraction from an upstream error JSON body. */
+function messageFromUpstreamErrorBody(text: string, fallback: string): string {
+  try {
+    const j = JSON.parse(text) as {
+      error?: { message?: string; type?: string; code?: string } | string
+      message?: string
+    }
+    if (typeof j.error === "object" && j.error && typeof j.error.message === "string" && j.error.message) {
+      return j.error.message
+    }
+    if (typeof j.error === "string" && j.error) return j.error
+    if (typeof j.message === "string" && j.message) return j.message
+  } catch {
+    /* not JSON */
+  }
+  const trimmed = text.trim()
+  return trimmed || fallback
+}
+
+function openaiErrorTypeFromBody(text: string): string {
+  try {
+    const j = JSON.parse(text) as { error?: { type?: string } }
+    if (typeof j.error?.type === "string" && j.error.type) return j.error.type
+  } catch {
+    /* */
+  }
+  return "api_error"
+}
+
+function anthropicErrorTypeFromBody(text: string): string {
+  try {
+    const j = JSON.parse(text) as {
+      error?: { type?: string }
+      type?: string
+    }
+    if (typeof j.error?.type === "string" && j.error.type) return j.error.type
+    if (j.type === "error" && typeof j.error === "object") return "api_error"
+  } catch {
+    /* */
+  }
+  return "api_error"
+}
+
+/** SSE response headers for eager commit (HTTP already 200 before upstream). */
+function sseResponseHeaders(extra?: Headers): Headers {
+  const out = new Headers()
+  out.set("content-type", "text/event-stream; charset=utf-8")
+  out.set("cache-control", "no-cache")
+  if (extra) {
+    const rl = [...extra.entries()].filter(([k]) => k.startsWith("anthropic-ratelimit-"))
+    for (const [k, v] of rl) out.set(k, v)
+  }
+  return out
+}
+
+function bodyWantsStream(body: unknown): boolean {
+  return (
+    !!body &&
+    typeof body === "object" &&
+    (body as { stream?: unknown }).stream === true
+  )
+}
+
 export async function dispatchChatCompletions(
   env: Env,
   opts: {
@@ -82,6 +163,211 @@ export async function dispatchChatCompletions(
     req: ChatCompletionRequest & { rawModel: string }
     waitUntil: WaitUntil
     /** Testability hook for the streaming idle timeout; defaults to 120_000. */
+    idleTimeoutMs?: number
+  },
+): Promise<Response> {
+  if (opts.req.stream) {
+    return dispatchChatCompletionsEager(env, opts)
+  }
+  return dispatchChatCompletionsLegacy(env, opts)
+}
+
+/**
+ * Eager streaming commit: return 200 + SSE immediately, run acquire/failover
+ * inside the stream (docs/api.md "Eager streaming commit").
+ */
+async function dispatchChatCompletionsEager(
+  env: Env,
+  opts: {
+    userId: string
+    apiKeyId: string | null
+    provider: string
+    adapter?: ProviderAdapter
+    req: ChatCompletionRequest & { rawModel: string }
+    waitUntil: WaitUntil
+    idleTimeoutMs?: number
+  },
+): Promise<Response> {
+  const started = Date.now()
+  const adapter = opts.adapter ?? getAdapter(opts.provider as ProviderId)
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+
+  let forcedErrorCode: string | null = null
+  let accountId: string | undefined
+  /** TTFB into the pipe, or time until terminal fail/cancel if earlier. */
+  let headersLatencyMs: number | null = null
+  const sniffer = createOpenAISseUsageSniffer()
+
+  const body = streamWithEagerProducer(
+    async (ctl) => {
+      const exclude = new Set<string>()
+      let lastResponse: Response | null = null
+      let used: AcquiredAccount | null = null
+
+      for (let attempt = 0; attempt < 8; attempt++) {
+        if (ctl.cancelled()) return
+
+        const account = await acquireAccount(env, opts.userId, opts.provider, exclude)
+        if (ctl.cancelled()) return
+
+        if (!account) {
+          if (lastResponse) {
+            accountId = used?.row.id
+            const text = await safeResponseText(lastResponse)
+            headersLatencyMs = Date.now() - started
+            forcedErrorCode = "upstream_error"
+            ctl.fail(
+              openaiStreamErrorFrame(
+                messageFromUpstreamErrorBody(text, "upstream error"),
+                openaiErrorTypeFromBody(text),
+                "upstream_error",
+              ),
+            )
+            return
+          }
+          const boundAccounts = await listAccounts(env.DB, opts.userId, opts.provider)
+          headersLatencyMs = Date.now() - started
+          if (boundAccounts.length === 0) {
+            forcedErrorCode = "no_upstream_account"
+            ctl.fail(
+              openaiStreamErrorFrame(
+                `No usable ${opts.provider} account for this user`,
+                "invalid_request_error",
+                "no_upstream_account",
+              ),
+            )
+            return
+          }
+          forcedErrorCode = "upstream_unavailable"
+          ctl.fail(
+            openaiStreamErrorFrame(
+              "All upstream accounts unavailable",
+              "api_error",
+              "upstream_unavailable",
+            ),
+          )
+          return
+        }
+
+        used = account
+        accountId = account.row.id
+        let refreshed = account
+        if (adapter.refreshIfNeeded) {
+          refreshed = await adapter.refreshIfNeeded(env, account)
+        }
+        if (ctl.cancelled()) return
+
+        const res = await adapter.chatCompletions(env, refreshed, opts.req, {
+          apiKeyId: opts.apiKeyId,
+          waitUntil: opts.waitUntil,
+        })
+        if (ctl.cancelled()) {
+          try {
+            await res.body?.cancel()
+          } catch {
+            /* */
+          }
+          return
+        }
+
+        if (shouldBenchStatus(res.status)) {
+          await benchAccount(env, opts.userId, opts.provider, account.row.id)
+          exclude.add(account.row.id)
+          if (lastResponse) {
+            try {
+              await lastResponse.body?.cancel()
+            } catch {
+              /* */
+            }
+          }
+          lastResponse = res
+          continue
+        }
+
+        // Non-bench response — success stream or terminal upstream error.
+        if (res.body && res.ok && isEventStream(res)) {
+          headersLatencyMs = Date.now() - started
+          await ctl.pipeUpstream(res.body, {
+            tap: (chunk) => sniffer.feed(chunk),
+            idleTimeoutMs,
+            stallFrame: OPENAI_STALL_FRAME,
+          })
+          return
+        }
+
+        const text = await safeResponseText(res)
+        headersLatencyMs = Date.now() - started
+        if (!res.ok) {
+          forcedErrorCode = "upstream_error"
+          ctl.fail(
+            openaiStreamErrorFrame(
+              messageFromUpstreamErrorBody(text, "upstream error"),
+              openaiErrorTypeFromBody(text),
+              "upstream_error",
+            ),
+          )
+          return
+        }
+        // 200 but not event-stream under stream:true — nothing useful to pipe.
+        ctl.close()
+        return
+      }
+
+      // Loop exhausted after only bench continues.
+      headersLatencyMs = Date.now() - started
+      forcedErrorCode = "upstream_unavailable"
+      ctl.fail(
+        openaiStreamErrorFrame(
+          "All upstream accounts unavailable",
+          "api_error",
+          "upstream_unavailable",
+        ),
+      )
+    },
+    undefined,
+    {
+      onClose: (reason) => {
+        const usage = sniffer.finish()
+        const errorCode =
+          forcedErrorCode ?? streamCloseErrorCode(reason, sniffer.complete())
+        const latencyMs = headersLatencyMs ?? Date.now() - started
+        opts.waitUntil(
+          logRequest(env, {
+            userId: opts.userId,
+            apiKeyId: opts.apiKeyId,
+            provider: opts.provider,
+            model: opts.req.rawModel,
+            accountId,
+            statusCode: 200,
+            latencyMs,
+            errorCode,
+            ...usageFields(usage),
+          }),
+        )
+      },
+    },
+  )
+
+  return new Response(body, {
+    status: 200,
+    headers: sseResponseHeaders(),
+  })
+}
+
+/**
+ * Non-stream path (and legacy attach when upstream unexpectedly returns
+ * event-stream without client stream:true). HTTP status mirrors upstream /
+ * pool errors exactly — existing tests depend on 400/503 pass-through.
+ */
+async function dispatchChatCompletionsLegacy(
+  env: Env,
+  opts: {
+    userId: string
+    apiKeyId: string | null
+    provider: string
+    adapter?: ProviderAdapter
+    req: ChatCompletionRequest & { rawModel: string }
+    waitUntil: WaitUntil
     idleTimeoutMs?: number
   },
 ): Promise<Response> {
@@ -177,10 +463,8 @@ export async function dispatchChatCompletions(
     }
 
     const latencyMs = Date.now() - started
-    if (res.body && (opts.req.stream || isEventStream(res))) {
-      // Row is written once the stream ends (waitUntil), so token fields can
-      // be populated — the sniffer taps the exact bytes piped to the client,
-      // never buffering the stream itself.
+    if (res.body && isEventStream(res)) {
+      // Legacy attach: client did not ask stream but upstream returned SSE.
       const sniffer = createOpenAISseUsageSniffer()
       const body = streamWithKeepalive(res.body, undefined, {
         tap: (chunk) => sniffer.feed(chunk),
@@ -278,6 +562,194 @@ export async function dispatchAnthropicMessages(
     endpoint?: "messages" | "count_tokens"
     waitUntil: WaitUntil
     /** Testability hook for the streaming idle timeout; defaults to 120_000. */
+    idleTimeoutMs?: number
+  },
+): Promise<Response> {
+  const endpoint = opts.endpoint ?? "messages"
+  if (endpoint === "messages" && bodyWantsStream(opts.body)) {
+    return dispatchAnthropicMessagesEager(env, opts)
+  }
+  return dispatchAnthropicMessagesLegacy(env, opts)
+}
+
+async function dispatchAnthropicMessagesEager(
+  env: Env,
+  opts: {
+    userId: string
+    apiKeyId: string | null
+    body: unknown
+    headers: Headers
+    model: string
+    provider?: string
+    adapter?: ProviderAdapter
+    endpoint?: "messages" | "count_tokens"
+    waitUntil: WaitUntil
+    idleTimeoutMs?: number
+  },
+): Promise<Response> {
+  const started = Date.now()
+  const provider = opts.provider ?? "claude-code"
+  const adapter = opts.adapter ?? getAdapter(provider as ProviderId)
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+  const call = adapter.messages
+  if (!call) {
+    return Response.json(
+      { type: "error", error: { type: "api_error", message: "messages not supported" } },
+      { status: 500 },
+    )
+  }
+
+  let forcedErrorCode: string | null = null
+  let accountId: string | undefined
+  let headersLatencyMs: number | null = null
+  const sniffer = createAnthropicSseUsageSniffer()
+
+  const body = streamWithEagerProducer(
+    async (ctl) => {
+      const exclude = new Set<string>()
+      let last: Response | null = null
+
+      for (let i = 0; i < 8; i++) {
+        if (ctl.cancelled()) return
+
+        const account = await acquireAccount(env, opts.userId, provider, exclude)
+        if (ctl.cancelled()) return
+
+        if (!account) {
+          if (last) {
+            const text = await safeResponseText(last)
+            headersLatencyMs = Date.now() - started
+            forcedErrorCode = "upstream_error"
+            ctl.fail(
+              anthropicStreamErrorFrame(
+                messageFromUpstreamErrorBody(text, "upstream error"),
+                anthropicErrorTypeFromBody(text),
+              ),
+            )
+            return
+          }
+          const boundAccounts = await listAccounts(env.DB, opts.userId, provider)
+          headersLatencyMs = Date.now() - started
+          if (boundAccounts.length === 0) {
+            forcedErrorCode = "no_upstream_account"
+            ctl.fail(
+              anthropicStreamErrorFrame(
+                `No usable ${provider} account`,
+                "invalid_request_error",
+              ),
+            )
+            return
+          }
+          forcedErrorCode = "upstream_unavailable"
+          ctl.fail(
+            anthropicStreamErrorFrame("upstream_unavailable", "api_error"),
+          )
+          return
+        }
+
+        accountId = account.row.id
+        let refreshed = account
+        if (adapter.refreshIfNeeded) refreshed = await adapter.refreshIfNeeded(env, account)
+        if (ctl.cancelled()) return
+
+        const res = await call(env, refreshed, opts.body, opts.headers, {
+          waitUntil: opts.waitUntil,
+        })
+        if (ctl.cancelled()) {
+          try {
+            await res.body?.cancel()
+          } catch {
+            /* */
+          }
+          return
+        }
+
+        if (shouldBenchStatus(res.status)) {
+          await benchAccount(env, opts.userId, provider, account.row.id)
+          exclude.add(account.row.id)
+          if (last) {
+            try {
+              await last.body?.cancel()
+            } catch {
+              /* */
+            }
+          }
+          last = res
+          continue
+        }
+
+        if (res.body && res.ok && isEventStream(res)) {
+          headersLatencyMs = Date.now() - started
+          await ctl.pipeUpstream(res.body, {
+            tap: (chunk) => sniffer.feed(chunk),
+            idleTimeoutMs,
+            stallFrame: ANTHROPIC_STALL_FRAME,
+          })
+          return
+        }
+
+        const text = await safeResponseText(res)
+        headersLatencyMs = Date.now() - started
+        if (!res.ok) {
+          forcedErrorCode = "upstream_error"
+          ctl.fail(
+            anthropicStreamErrorFrame(
+              messageFromUpstreamErrorBody(text, "upstream error"),
+              anthropicErrorTypeFromBody(text),
+            ),
+          )
+          return
+        }
+        ctl.close()
+        return
+      }
+
+      headersLatencyMs = Date.now() - started
+      forcedErrorCode = "upstream_unavailable"
+      ctl.fail(anthropicStreamErrorFrame("upstream_unavailable", "api_error"))
+    },
+    undefined,
+    {
+      onClose: (reason) => {
+        const usage = sniffer.finish()
+        const errorCode =
+          forcedErrorCode ?? streamCloseErrorCode(reason, sniffer.complete())
+        const latencyMs = headersLatencyMs ?? Date.now() - started
+        opts.waitUntil(
+          logRequest(env, {
+            userId: opts.userId,
+            apiKeyId: opts.apiKeyId,
+            provider,
+            model: opts.model,
+            accountId,
+            statusCode: 200,
+            latencyMs,
+            errorCode,
+            ...usageFields(usage),
+          }),
+        )
+      },
+    },
+  )
+
+  return new Response(body, {
+    status: 200,
+    headers: sseResponseHeaders(),
+  })
+}
+
+async function dispatchAnthropicMessagesLegacy(
+  env: Env,
+  opts: {
+    userId: string
+    apiKeyId: string | null
+    body: unknown
+    headers: Headers
+    model: string
+    provider?: string
+    adapter?: ProviderAdapter
+    endpoint?: "messages" | "count_tokens"
+    waitUntil: WaitUntil
     idleTimeoutMs?: number
   },
 ): Promise<Response> {
@@ -526,6 +998,8 @@ export async function dispatchAnthropicViaOpenAI(
     // Keepalive again on the converted stream: the upstream wrapper's comments
     // are consumed by the converter, and no Anthropic event is emitted until
     // the first token — a long reasoning turn would otherwise send zero bytes.
+    // With eager commit, dispatchChatCompletions already returned 200 + SSE;
+    // openaiSseToAnthropicStream converts OpenAI error lines to Anthropic error events.
     return new Response(
       streamWithKeepalive(openaiSseToAnthropicStream(openaiRes.body, opts.rawModel)),
       {
@@ -596,6 +1070,14 @@ function passthroughStreamHeaders(h: Headers): Headers {
   const rl = [...h.entries()].filter(([k]) => k.startsWith("anthropic-ratelimit-"))
   for (const [k, v] of rl) out.set(k, v)
   return out
+}
+
+async function safeResponseText(res: Response): Promise<string> {
+  try {
+    return await res.text()
+  } catch {
+    return ""
+  }
 }
 
 /** `null` (nothing captured) flattens to all-NULL request_logs token fields. */

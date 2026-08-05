@@ -21,6 +21,9 @@ const XAI_API = "https://api.x.ai/v1"
 const CLI_CHAT_PROXY = "https://cli-chat-proxy.grok.com/v1"
 const DEFAULT_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828"
 
+/** Bound refresh / models / usage fetches so a hung xAI edge cannot stall the Worker (same order as codex_models). */
+const REFRESH_TIMEOUT_MS = 10_000
+
 /**
  * Official Grok Build CLI client identity — used on the Chat Completions
  * (`api.x.ai`) path. See docs/providers.md.
@@ -73,31 +76,37 @@ async function refreshGrok(env: Env, account: AcquiredAccount): Promise<Acquired
   const exp = credential.expires_at ? Date.parse(credential.expires_at) : 0
   if (exp && exp - 3_600_000 > Date.now()) return account
 
-  const res = await fetch(credential.token_endpoint, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: credential.refresh_token,
-      client_id: credential.client_id || clientId(env),
-    }),
-  })
-  if (!res.ok) return account
-  const json = (await res.json()) as {
-    access_token: string
-    refresh_token?: string
-    expires_in?: number
+  try {
+    const res = await fetch(credential.token_endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: credential.refresh_token,
+        client_id: credential.client_id || clientId(env),
+      }),
+      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+    })
+    if (!res.ok) return account
+    const json = (await res.json()) as {
+      access_token: string
+      refresh_token?: string
+      expires_in?: number
+    }
+    const next = {
+      ...credential,
+      access_token: json.access_token,
+      refresh_token: json.refresh_token ?? credential.refresh_token,
+      expires_at: json.expires_in
+        ? new Date(Date.now() + json.expires_in * 1000).toISOString()
+        : credential.expires_at,
+    }
+    await saveCredential(env, account.row.id, next)
+    return { row: account.row, credential: next }
+  } catch {
+    // Timeout / network — keep existing credential; next request can retry.
+    return account
   }
-  const next = {
-    ...credential,
-    access_token: json.access_token,
-    refresh_token: json.refresh_token ?? credential.refresh_token,
-    expires_at: json.expires_in
-      ? new Date(Date.now() + json.expires_in * 1000).toISOString()
-      : credential.expires_at,
-  }
-  await saveCredential(env, account.row.id, next)
-  return { row: account.row, credential: next }
 }
 
 function affinityFromHeaders(headers: Headers): {
@@ -127,6 +136,7 @@ export const grokAdapter: ProviderAdapter = {
           ...grokChatCompletionsHeaders(acc.credential.access_token),
           accept: "application/json",
         },
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
       })
       if (!res.ok) {
         return { models: [], error: `models ${res.status}` }
@@ -419,6 +429,7 @@ export const grokAdapter: ProviderAdapter = {
           authorization: `Bearer ${acc.credential.access_token}`,
           accept: "application/json",
         },
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
       })
       let userId: string | undefined
       if (userRes.ok) {
@@ -432,7 +443,7 @@ export const grokAdapter: ProviderAdapter = {
       if (userId) headers["x-userid"] = userId
       const billRes = await fetch(
         "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
-        { headers },
+        { headers, signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS) },
       )
       if (!billRes.ok) {
         return {
