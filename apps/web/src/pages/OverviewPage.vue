@@ -18,7 +18,6 @@ import StatCard from "@/components/overview/StatCard.vue"
 import {
   buildCacheSeries,
   buildMetricSeries,
-  buildModelLabels,
   type MetricId,
   type MetricSeries,
 } from "@/components/overview/series"
@@ -35,7 +34,6 @@ import { useAuth } from "@/composables/useAuth"
 import { useScrollRestore } from "@/composables/useScrollRestore"
 import { useUsage } from "@/composables/useUsage"
 import { useI18n } from "@/i18n"
-import { readModelsCache } from "@/services/cache"
 import { getOverviewPrefs, setOverviewPrefs, type ChartView } from "@/services/prefs"
 import type { ModelUsageRow, UsageDays } from "@/types"
 
@@ -88,27 +86,12 @@ const isEmpty = computed(() => totals.value != null && totals.value.requests ===
 /** First paint with nothing cached — the cards show their own skeletons. */
 const isFirstLoad = computed(() => loading.value && !summary.value)
 
-/**
- * Display names from the models-catalog cache when it holds one — free, no
- * request. A model absent from the catalog (or no cache yet) falls back to
- * its upstream id segment in `buildModelLabels`.
- */
-const modelLabels = computed(() => {
-  const s = summary.value
-  if (!s) return new Map<string, string>()
-  const catalog = readModelsCache(user.value?.id ?? null)
-  const names = new Map<string, string>()
-  for (const m of catalog?.data ?? []) names.set(m.id, m.display_name)
-  const ids = [...new Set(s.series.map((p) => p.model))]
-  return buildModelLabels(ids, (id) => names.get(id) ?? null)
-})
-
 const EMPTY_SERIES: MetricSeries = { total: 0, models: [], buckets: [] }
 
 function metricSeriesFor(metric: MetricId): MetricSeries {
   const s = summary.value
   if (!s) return EMPTY_SERIES
-  return buildMetricSeries(s, metric, modelLabels.value, t("overview.card.others"), format)
+  return buildMetricSeries(s, metric, t("overview.card.others"), format)
 }
 
 const spendSeries = computed(() => metricSeriesFor("spend"))

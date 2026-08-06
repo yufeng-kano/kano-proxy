@@ -35,6 +35,7 @@ export const OTHER_KEY = "__other__"
 export type RankedModel = {
   /** Raw `provider/model` id, or OTHER_KEY. */
   key: string
+  /** What every surface prints: the canonical id, or the "Others" label for the folded tail. */
   label: string
   color: string
   /** Range total of the ranking metric. */
@@ -98,39 +99,18 @@ export function timeBuckets(summary: UsageSummary): TimeBucket[] {
 }
 
 /**
- * Display label for a full `provider/model` id: the catalog's display name
- * when the caller can supply one, else the upstream id segment. Labels that
- * collide across two ranked models fall back to the full id for both — a
- * legend with two identical entries identifies nothing.
- */
-export function buildModelLabels(
-  ids: string[],
-  displayNameFor: (id: string) => string | null,
-): Map<string, string> {
-  const labels = new Map<string, string>()
-  for (const id of ids) {
-    const display = displayNameFor(id)
-    const slash = id.indexOf("/")
-    labels.set(id, display || (slash === -1 ? id : id.slice(slash + 1)))
-  }
-  const counts = new Map<string, number>()
-  for (const label of labels.values()) counts.set(label, (counts.get(label) ?? 0) + 1)
-  for (const [id, label] of labels) {
-    if ((counts.get(label) ?? 0) > 1) labels.set(id, id)
-  }
-  return labels
-}
-
-/**
  * Models ranked by their range total of `metric`, top slots colored, tail
  * folded into "Others". Color follows the *model within this metric*: rank
  * order can differ between the three cards, but inside any one surface a
  * model keeps its hue across every bucket.
+ *
+ * The label is the canonical `provider/model` id itself — every Overview
+ * surface names a model the same way the By-model table does, with no
+ * friendly-name remap (docs/admin-ui.md § Overview page).
  */
 export function rankModels(
   summary: UsageSummary,
   metric: MetricId,
-  labels: Map<string, string>,
   otherLabel: string,
 ): RankedModel[] {
   const byModel = new Map<string, number>()
@@ -139,7 +119,7 @@ export function rankModels(
   }
   const ranked = [...byModel.entries()]
     .sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))
-    .map(([key, total]) => ({ key, label: labels.get(key) ?? key, total }))
+    .map(([key, total]) => ({ key, label: key, total }))
 
   if (ranked.length <= SERIES_COLORS.length) {
     return ranked.map((m, i) => ({ ...m, color: SERIES_COLORS[i]! }))
@@ -165,11 +145,10 @@ export function rankModels(
 export function buildMetricSeries(
   summary: UsageSummary,
   metric: MetricId,
-  labels: Map<string, string>,
   otherLabel: string,
   format: Formatters,
 ): MetricSeries {
-  const models = rankModels(summary, metric, labels, otherLabel)
+  const models = rankModels(summary, metric, otherLabel)
   const named = new Map(models.map((m) => [m.key, m]))
   const other = named.get(OTHER_KEY) ?? null
   const hourly = summary.days === 1
