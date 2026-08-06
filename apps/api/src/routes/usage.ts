@@ -5,7 +5,13 @@ import { loadSessionUser } from "../auth/session"
 import { PROVIDERS } from "../env"
 import { listCustomProviders } from "../db/custom_providers"
 import type { UserRow } from "../db/users"
-import { estimateCost, getPriceTable, refreshPriceTable, type PriceTable } from "../pricing/litellm"
+import {
+  estimateCost,
+  getPriceTable,
+  hasSourceTaggedPriceTables,
+  refreshPriceTable,
+  type PriceTable,
+} from "../pricing/litellm"
 
 export const usageRoutes = new Hono<HonoEnv>()
 
@@ -272,10 +278,11 @@ usageRoutes.get("/summary", async (c) => {
   )
 
   // Read-time pricing for NULL-cost rows. First call after a deploy may find
-  // no table anywhere — fetch it inline once here (admin surface, not the
-  // proxy hot path); every later call hits the memo/KV copy.
+  // no table anywhere — or only a legacy untagged snapshot — so fetch it
+  // inline here (admin surface, not the proxy hot path). Tagged snapshots
+  // remain a KV/memo read only.
   let table = await getPriceTable(c.env)
-  if (!table) table = await refreshPriceTable(c.env)
+  if (!table || !hasSourceTaggedPriceTables()) table = await refreshPriceTable(c.env)
   const priced = fillEstimatedCosts(scoped, table)
 
   return c.json(summarizeUsageRows(priced, days, from))

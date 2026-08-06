@@ -7,7 +7,12 @@ import {
 } from "../src/routes/usage"
 import { createSession } from "../src/auth/session"
 import type { Env } from "../src/env"
-import { _resetPricingForTests, trimLiteLLMTable } from "../src/pricing/litellm"
+import {
+  _resetPricingForTests,
+  getPriceTable,
+  resolveModelPrice,
+  trimLiteLLMTable,
+} from "../src/pricing/litellm"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
 type Row = {
@@ -537,6 +542,65 @@ describe("GET /api/usage/summary", () => {
     const json = (await res.json()) as SummaryJson
     expect(json.totals.cost).toBeCloseTo(2.0, 9)
     expect(json.totals.cost_known_requests).toBe(2)
+  })
+
+  it("refreshes a legacy snapshot from the admin summary and prices OpenRouter after catalog fetch", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await env.CACHE.put(
+      "pricing:litellm:v1",
+      JSON.stringify({
+        fetchedAt: Date.now(),
+        table: {
+          "openrouter/z-ai/glm-5.2": { input: 1, output: 1, cacheRead: null, cacheCreation: null },
+        },
+      }),
+    )
+    db.seed("custom_providers", [
+      {
+        id: "cprov_openrouter",
+        user_id: "user_1",
+        slug: "openrouter",
+        name: "OpenRouter",
+        format: "openai",
+        base_url: "https://api.example.com/v1",
+        models_mode: "auto",
+        manual_models_json: null,
+        created_at: "2026-08-01T00:00:00.000Z",
+        updated_at: "2026-08-01T00:00:00.000Z",
+      },
+    ])
+    seedLog(db, {
+      user_id: "user_1",
+      provider: "openrouter",
+      model: "openrouter/z-ai/glm-5.2",
+      prompt_tokens: 100,
+      completion_tokens: 10,
+    })
+
+    const legacy = await getPriceTable(env)
+    expect(resolveModelPrice(legacy!, "openrouter/z-ai/glm-5.2")).toBeNull()
+
+    let calls = 0
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      calls++
+      if (String(input).includes("openrouter.ai")) {
+        return Response.json({
+          data: [{ id: "z-ai/glm-5.2", pricing: { prompt: "0.000001", completion: "0.000002" } }],
+        })
+      }
+      return Response.json({
+        "claude-opus-5": { input_cost_per_token: 0.00001, output_cost_per_token: 0.00005 },
+      })
+    }) as typeof fetch
+
+    const res = await usageRoutes.request("/summary?days=30", req(cookie), env)
+    const json = (await res.json()) as SummaryJson
+    expect(calls).toBe(2)
+    expect(json.totals.cost).toBeCloseTo(100 * 0.000001 + 10 * 0.000002, 12)
+    expect(json.totals.cost_known_requests).toBe(1)
   })
 })
 

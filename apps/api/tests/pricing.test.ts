@@ -378,6 +378,42 @@ describe("refresh / cache lifecycle", () => {
     expect(resolveModelPrice(refreshed!, "claude-code/claude-opus-5")).toBeTruthy()
   })
 
+  it("refreshes a fresh legacy snapshot and prices OpenRouter only after its catalog succeeds", async () => {
+    const cache = fakeKV()
+    await cache.put(
+      "pricing:litellm:v1",
+      JSON.stringify({
+        fetchedAt: Date.now(),
+        table: {
+          "claude-opus-5": { input: 1, output: 1, cacheRead: null, cacheCreation: null },
+          "openrouter/z-ai/glm-5.2": { input: 1, output: 1, cacheRead: null, cacheCreation: null },
+        },
+      }),
+    )
+    const env = { CACHE: cache } as unknown as Env
+
+    const legacy = await getPriceTable(env)
+    expect(resolveModelPrice(legacy!, "claude-code/claude-opus-5")).toBeTruthy()
+    expect(resolveModelPrice(legacy!, "openrouter/z-ai/glm-5.2")).toBeNull()
+
+    let calls = 0
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      calls++
+      return Response.json(String(input).includes("openrouter.ai") ? OPENROUTER_JSON : LITELLM_JSON)
+    }) as typeof fetch
+    await ensureFreshPriceTable(env)
+
+    expect(calls).toBe(2)
+    const refreshed = await getPriceTable(env)
+    expect(resolveModelPrice(refreshed!, "openrouter/z-ai/glm-5.2")).toEqual({
+      input: 0.00000076,
+      output: 0.00000242,
+      cacheRead: 0.00000014,
+      cacheCreation: null,
+      source: "openrouter",
+    })
+  })
+
   it("keeps LiteLLM prices when OpenRouter is unavailable on the first refresh", async () => {
     const env = buildEnv()
     globalThis.fetch = (async (input: string | URL | Request) => {

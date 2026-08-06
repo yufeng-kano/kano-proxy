@@ -58,6 +58,11 @@ export function _resetPricingForTests(): void {
   memoCheckedAt = 0
 }
 
+/** Whether the loaded snapshot has separately persisted, source-tagged tables. */
+export function hasSourceTaggedPriceTables(): boolean {
+  return memo?.litellmTable != null && memo.openRouterTable != null
+}
+
 /**
  * Memo → KV → null. Never fetches. A KV failure or malformed entry falls back
  * to whatever the isolate already holds. The recheck window caches misses
@@ -139,12 +144,7 @@ export async function refreshPriceTable(env: Env): Promise<PriceTable | null> {
 /** Daily-cron entry: refetch when a source is missing, or the stored table is stale. */
 export async function ensureFreshPriceTable(env: Env): Promise<void> {
   await getPriceTable(env)
-  if (
-    memo &&
-    memo.litellmTable &&
-    memo.openRouterTable &&
-    Date.now() - memo.fetchedAt < PRICING_FRESH_MS
-  ) {
+  if (memo && hasSourceTaggedPriceTables() && Date.now() - memo.fetchedAt < PRICING_FRESH_MS) {
     return
   }
   await refreshPriceTable(env)
