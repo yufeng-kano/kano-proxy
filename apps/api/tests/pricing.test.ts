@@ -44,6 +44,8 @@ const OPENROUTER_JSON = {
       id: "conditional/model",
       pricing: { prompt: "0.000001", completion: "0.000002", overrides: [{}] },
     },
+    { id: "prompt-only/model", pricing: { prompt: "0.000001" } },
+    { id: "completion-only/model", pricing: { completion: "0.000002" } },
   ],
 }
 
@@ -120,12 +122,14 @@ describe("trimOpenRouterTable", () => {
         output: 0.00000242,
         cacheRead: 0.00000014,
         cacheCreation: null,
+        source: "openrouter",
       },
     })
   })
 
-  it("skips conditional catalog prices and malformed catalog responses", () => {
+  it("skips conditional, partial, and malformed catalog prices", () => {
     expect(trimOpenRouterTable({ data: [{ id: "bad", pricing: { prompt: "nope" } }] })).toEqual({})
+    expect(trimOpenRouterTable({ data: OPENROUTER_JSON.data.slice(1) })).toEqual({})
     expect(trimOpenRouterTable({ data: [] })).toEqual({})
   })
 })
@@ -159,11 +163,28 @@ describe("resolveModelPrice", () => {
       output: 0.00000242,
       cacheRead: 0.00000014,
       cacheCreation: null,
+      source: "openrouter",
     })
-    expect(resolveModelPrice(table, "openrouter/openai/gpt-5.6-luna")).toBeTruthy()
+    expect(resolveModelPrice(table, "openrouter/openai/gpt-5.6-luna")).toBeNull()
     expect(
       resolveModelPrice(
         { "z-ai/glm-5.2": { input: 1, output: 1, cacheRead: null, cacheCreation: null } },
+        "openrouter/z-ai/glm-5.2",
+      ),
+    ).toBeNull()
+  })
+
+  it("does not use a LiteLLM OpenRouter lookalike", () => {
+    expect(
+      resolveModelPrice(
+        {
+          "openrouter/z-ai/glm-5.2": {
+            input: 1,
+            output: 1,
+            cacheRead: null,
+            cacheCreation: null,
+          },
+        },
         "openrouter/z-ai/glm-5.2",
       ),
     ).toBeNull()
@@ -329,7 +350,32 @@ describe("refresh / cache lifecycle", () => {
       output: 0.00000242,
       cacheRead: 0.00000014,
       cacheCreation: null,
+      source: "openrouter",
     })
+  })
+
+  it("does not authorize a legacy combined snapshot's LiteLLM OpenRouter entry", async () => {
+    const cache = fakeKV()
+    await cache.put(
+      "pricing:litellm:v1",
+      JSON.stringify({
+        fetchedAt: Date.now(),
+        table: {
+          "claude-opus-5": { input: 1, output: 1, cacheRead: null, cacheCreation: null },
+          "openrouter/z-ai/glm-5.2": { input: 1, output: 1, cacheRead: null, cacheCreation: null },
+        },
+      }),
+    )
+    const env = { CACHE: cache } as unknown as Env
+    expect(resolveModelPrice((await getPriceTable(env))!, "openrouter/z-ai/glm-5.2")).toBeNull()
+
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).includes("openrouter.ai")) return new Response("down", { status: 500 })
+      return Response.json(LITELLM_JSON)
+    }) as typeof fetch
+    const refreshed = await refreshPriceTable(env)
+    expect(resolveModelPrice(refreshed!, "openrouter/z-ai/glm-5.2")).toBeNull()
+    expect(resolveModelPrice(refreshed!, "claude-code/claude-opus-5")).toBeTruthy()
   })
 
   it("keeps LiteLLM prices when OpenRouter is unavailable on the first refresh", async () => {

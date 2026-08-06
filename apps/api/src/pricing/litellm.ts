@@ -35,6 +35,8 @@ export type ModelPrice = {
   output: number
   cacheRead: number | null
   cacheCreation: number | null
+  /** Source is persisted so OpenRouter rows cannot use a LiteLLM lookalike. */
+  source?: "litellm" | "openrouter"
 }
 
 /** Keyed by lowercased LiteLLM model id. */
@@ -43,7 +45,7 @@ export type PriceTable = Record<string, ModelPrice>
 type CachedTable = {
   fetchedAt: number
   table: PriceTable
-  /** Present in snapshots created after OpenRouter pricing support. */
+  /** Present in snapshots created after source tagging was added. */
   litellmTable?: PriceTable
   openRouterTable?: PriceTable
 }
@@ -109,11 +111,15 @@ export async function refreshPriceTable(env: Env): Promise<PriceTable | null> {
     fetchAndTrim(OPENROUTER_MODELS_URL, trimOpenRouterTable),
   ])
 
-  // Legacy snapshots predate source-specific copies. Treat their combined
-  // table as a LiteLLM fallback once so it remains available through a failed
-  // initial refresh. Empty source tables record an attempted fetch, letting
-  // the cache retain its normal 24h refresh cadence after a source outage.
-  const litellmTable = freshLiteLLM ?? memo?.litellmTable ?? memo?.table ?? {}
+  // Legacy combined snapshots have no provenance: preserve their LiteLLM
+  // entries for non-OpenRouter traffic only, and never treat any of their
+  // openrouter/<id> entries as catalog prices. A source-tagged snapshot's
+  // `table` is just a merged read view and must not become a legacy fallback.
+  const legacyLiteLLM =
+    memo && !memo.litellmTable && !memo.openRouterTable ? stripOpenRouterEntries(memo.table) : {}
+  // Empty source tables record an attempted fetch, letting the cache retain
+  // its normal 24h refresh cadence after a source outage.
+  const litellmTable = freshLiteLLM ?? memo?.litellmTable ?? legacyLiteLLM
   const openRouterTable = freshOpenRouter ?? memo?.openRouterTable ?? {}
   const table = { ...litellmTable, ...openRouterTable }
   if (Object.keys(table).length === 0) return memo?.table ?? null
@@ -174,6 +180,13 @@ function decimal(v: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+/** Legacy combined snapshots cannot prove an OpenRouter price's source. */
+function stripOpenRouterEntries(table: PriceTable): PriceTable {
+  return Object.fromEntries(
+    Object.entries(table).filter(([key]) => !key.toLowerCase().startsWith("openrouter/")),
+  )
+}
+
 /**
  * Add OpenRouter's default rates only under its complete catalog id. Conditional
  * overrides cannot be applied from the aggregate usage we log, so skip them
@@ -192,12 +205,14 @@ export function trimOpenRouterTable(json: unknown): PriceTable {
     if (Array.isArray(p.overrides) && p.overrides.length > 0) continue
     const input = decimal(p.prompt)
     const output = decimal(p.completion)
-    if (input == null && output == null) continue
+    // We cannot safely price a partially specified token pair as a zero rate.
+    if (input == null || output == null) continue
     out[`openrouter/${normalizeId(id)}`] = {
-      input: input ?? 0,
-      output: output ?? 0,
+      input,
+      output,
       cacheRead: decimal(p.input_cache_read),
       cacheCreation: decimal(p.input_cache_write),
+      source: "openrouter",
     }
   }
   return out
@@ -222,8 +237,11 @@ export function resolveModelPrice(table: PriceTable, rawModel: string): ModelPri
   if (!upstream) return null
 
   // OpenRouter's catalog prices an exact provider/model id. Do not let an
-  // unrelated bare or Cloudflare entry price an OpenRouter request.
-  if (provider === "openrouter") return table[`openrouter/${upstream}`] ?? null
+  // unrelated bare, LiteLLM, or Cloudflare entry price an OpenRouter request.
+  if (provider === "openrouter") {
+    const hit = table[`openrouter/${upstream}`]
+    return hit?.source === "openrouter" ? hit : null
+  }
 
   const candidates: string[] = [upstream]
   let rest = upstream
@@ -234,13 +252,13 @@ export function resolveModelPrice(table: PriceTable, rawModel: string): ModelPri
 
   for (const c of candidates) {
     const hit = table[c]
-    if (hit) return hit
+    if (hit?.source !== "openrouter" && hit) return hit
   }
   const PREFIXES = ["anthropic", "openai", "xai", "gemini", "vertex_ai", "openrouter"]
   for (const c of candidates) {
     for (const p of PREFIXES) {
       const hit = table[`${p}/${c}`]
-      if (hit) return hit
+      if (hit?.source !== "openrouter" && hit) return hit
     }
   }
   return null

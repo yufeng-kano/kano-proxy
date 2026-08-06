@@ -28,10 +28,10 @@ function num(v: unknown): number | undefined {
 /**
  * OpenAI Chat Completions-shaped `usage` — also the shape this proxy's own
  * converters build for claude-code / custom-anthropic / codex on
- * `/openai/v1` (see openai_anthropic.ts / codex_openai.ts). There,
- * `cache_creation_input_tokens` is this proxy's own extension field (no
- * official OpenAI equivalent — see docs/api.md), not something a real
- * OpenAI-compatible upstream sends. `prompt_tokens` is already
+ * `/openai/v1` (see openai_anthropic.ts / codex_openai.ts). OpenAI-compatible
+ * upstreams can report cache writes in
+ * `prompt_tokens_details.cache_write_tokens`; converted responses retain the
+ * proxy's `cache_creation_input_tokens` extension. `prompt_tokens` is already
  * cache-inclusive, so it is stored as-is. A missing detail field means
  * unreported: NULL, never 0. `completion_tokens_details.reasoning_tokens`
  * (grok's `include_reasoning`, or any upstream that reports it) is added
@@ -48,7 +48,8 @@ export function fromOpenAIUsage(u: Record<string, unknown> | null | undefined): 
     promptTokens: num(u.prompt_tokens) ?? null,
     completionTokens: completionBase != null ? completionBase + (reasoningTokens ?? 0) : null,
     cacheReadInputTokens: num(details?.cached_tokens) ?? null,
-    cacheCreationInputTokens: num(u.cache_creation_input_tokens) ?? null,
+    cacheCreationInputTokens:
+      num(details?.cache_write_tokens) ?? num(u.cache_creation_input_tokens) ?? null,
   }
 }
 

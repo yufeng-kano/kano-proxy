@@ -113,7 +113,7 @@ Created by `0001_init.sql` as an "optional cache", never read or written by any 
 | prompt_tokens | INTEGER | nullable; **total** input tokens, including cached reads and cache writes |
 | completion_tokens | INTEGER | nullable |
 | cache_read_input_tokens | INTEGER | nullable; input tokens served from upstream prompt cache |
-| cache_creation_input_tokens | INTEGER | nullable; Anthropic cache-write tokens (no OpenAI equivalent) |
+| cache_creation_input_tokens | INTEGER | nullable; cache-write tokens, from Anthropic `cache_creation_input_tokens`, OpenAI-compatible `prompt_tokens_details.cache_write_tokens`, or the proxy's conversion extension |
 | cost | REAL | nullable; estimated USD cost computed at write time from the LiteLLM price table ([pricing.md](./pricing.md)); `NULL` = unpriced/unknown, never 0-as-guess |
 | error_code | TEXT | nullable |
 | created_at | TEXT | |
@@ -123,8 +123,8 @@ Created by `0001_init.sql` as an "optional cache", never read or written by any 
 Token semantics (normalized across providers — capture matrix in [logging.md](./logging.md)):
 
 - `prompt_tokens` is always the **total** input count. Anthropic-shaped usage reports `input_tokens` *excluding* cache reads/writes, so the logged value is `input_tokens + cache_read_input_tokens + cache_creation_input_tokens`; OpenAI-shaped `prompt_tokens` already includes cached tokens and is stored as-is.
-- `cache_read_input_tokens` maps from Anthropic `cache_read_input_tokens`, OpenAI `prompt_tokens_details.cached_tokens`, or Responses `input_tokens_details.cached_tokens`.
-- `NULL` means *unreported*, not zero: when an Anthropic-shaped `usage` is present, absent cache fields default to `0` (the API defines them); OpenAI-shaped usage stores `NULL` unless `prompt_tokens_details` (or the `cache_creation_input_tokens` extension) was actually present. Cache-rate aggregation divides only over rows where `cache_read_input_tokens IS NOT NULL`.
+- `cache_read_input_tokens` maps from Anthropic `cache_read_input_tokens`, OpenAI `prompt_tokens_details.cached_tokens`, or Responses `input_tokens_details.cached_tokens`. `cache_creation_input_tokens` maps from Anthropic `cache_creation_input_tokens`, OpenAI-compatible `prompt_tokens_details.cache_write_tokens`, or the proxy's `cache_creation_input_tokens` conversion extension.
+- `NULL` means *unreported*, not zero: when an Anthropic-shaped `usage` is present, absent cache fields default to `0` (the API defines them); OpenAI-shaped usage stores `NULL` unless the corresponding `prompt_tokens_details` member (or the `cache_creation_input_tokens` extension) was actually present. Cache-rate aggregation divides only over rows where `cache_read_input_tokens IS NOT NULL`.
 - Streamed requests write their row when the stream ends (`waitUntil`), so token fields can be populated; a client that disconnects mid-stream still gets a row with whatever usage was seen by then.
 
 Cache columns added in `0003_request_log_cache_tokens.sql`; `cost` and the spend-limit index `request_logs_api_key_created_idx` on `(api_key_id, created_at)` added in `0004_api_key_spend_limits.sql`. Dashboard range queries are covered by the existing `request_logs_user_created_idx` on `(user_id, created_at)` from `0001_init.sql`.

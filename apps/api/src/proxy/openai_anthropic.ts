@@ -374,7 +374,7 @@ export function openaiToAnthropicMessage(
     | {
         prompt_tokens?: number
         completion_tokens?: number
-        prompt_tokens_details?: { cached_tokens?: number }
+        prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number }
         completion_tokens_details?: { reasoning_tokens?: number }
       }
     | undefined
@@ -405,21 +405,21 @@ export function openaiToAnthropicMessage(
 function anthropicUsageFromOpenAI(usage: {
   prompt_tokens?: number
   completion_tokens?: number
-  prompt_tokens_details?: { cached_tokens?: number }
+  prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number }
   completion_tokens_details?: { reasoning_tokens?: number }
 }): Record<string, unknown> {
   const prompt = usage.prompt_tokens ?? 0
   const reasoning = usage.completion_tokens_details?.reasoning_tokens
   const output = (usage.completion_tokens ?? 0) + (typeof reasoning === "number" ? reasoning : 0)
   const cached = usage.prompt_tokens_details?.cached_tokens
-  if (typeof cached === "number") {
-    return {
-      input_tokens: prompt - cached,
-      output_tokens: output,
-      cache_read_input_tokens: cached,
-    }
+  const cacheWrite = usage.prompt_tokens_details?.cache_write_tokens
+  const input = prompt - (typeof cached === "number" ? cached : 0) - (typeof cacheWrite === "number" ? cacheWrite : 0)
+  return {
+    input_tokens: input,
+    output_tokens: output,
+    ...(typeof cached === "number" ? { cache_read_input_tokens: cached } : {}),
+    ...(typeof cacheWrite === "number" ? { cache_creation_input_tokens: cacheWrite } : {}),
   }
-  return { input_tokens: prompt, output_tokens: output }
 }
 
 /**
@@ -459,6 +459,8 @@ export function openaiSseToAnthropicStream(
   let completionTokens: number | null = null
   /** From `prompt_tokens_details.cached_tokens`, when the upstream reports it. */
   let cacheReadInputTokens: number | null = null
+  /** From `prompt_tokens_details.cache_write_tokens`, when the upstream reports it. */
+  let cacheCreationInputTokens: number | null = null
   /**
    * Anthropic content blocks are strictly sequential: a block must stop before
    * the next one starts, and a stopped block can never be reopened. An OpenAI
@@ -796,8 +798,8 @@ export function openaiSseToAnthropicStream(
         // (docs/api.md "Usage cache details on converted responses") —
         // unchanged otherwise.
         const inputTokens =
-          promptTokens != null && cacheReadInputTokens != null
-            ? promptTokens - cacheReadInputTokens
+          promptTokens != null
+            ? promptTokens - (cacheReadInputTokens ?? 0) - (cacheCreationInputTokens ?? 0)
             : promptTokens
         emitEvent("message_delta", {
           type: "message_delta",
@@ -809,6 +811,9 @@ export function openaiSseToAnthropicStream(
             output_tokens: completionTokens ?? outputTokens,
             ...(cacheReadInputTokens != null
               ? { cache_read_input_tokens: cacheReadInputTokens }
+              : {}),
+            ...(cacheCreationInputTokens != null
+              ? { cache_creation_input_tokens: cacheCreationInputTokens }
               : {}),
           },
         })
@@ -851,7 +856,7 @@ export function openaiSseToAnthropicStream(
                 | {
                     prompt_tokens?: number
                     completion_tokens?: number
-                    prompt_tokens_details?: { cached_tokens?: number }
+                    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number }
                     completion_tokens_details?: { reasoning_tokens?: number }
                   }
                 | null
@@ -871,6 +876,9 @@ export function openaiSseToAnthropicStream(
                 }
                 if (typeof usage.prompt_tokens_details?.cached_tokens === "number") {
                   cacheReadInputTokens = usage.prompt_tokens_details.cached_tokens
+                }
+                if (typeof usage.prompt_tokens_details?.cache_write_tokens === "number") {
+                  cacheCreationInputTokens = usage.prompt_tokens_details.cache_write_tokens
                 }
               }
               const choice = (json.choices as Array<Record<string, unknown>> | undefined)?.[0]

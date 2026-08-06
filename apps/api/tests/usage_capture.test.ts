@@ -56,13 +56,12 @@ describe("fromOpenAIUsage", () => {
     expect(out.cacheCreationInputTokens).toBeNull()
   })
 
-  it("reads prompt_tokens_details.cached_tokens and the cache_creation_input_tokens extension", () => {
+  it("reads cache read/write fields from prompt_tokens_details", () => {
     expect(
       fromOpenAIUsage({
         prompt_tokens: 100,
         completion_tokens: 40,
-        prompt_tokens_details: { cached_tokens: 20 },
-        cache_creation_input_tokens: 6,
+        prompt_tokens_details: { cached_tokens: 20, cache_write_tokens: 6 },
       }),
     ).toEqual({
       promptTokens: 100,
@@ -70,6 +69,21 @@ describe("fromOpenAIUsage", () => {
       cacheReadInputTokens: 20,
       cacheCreationInputTokens: 6,
     })
+  })
+
+  it("uses the proxy cache-creation extension only when no upstream cache-write value exists", () => {
+    expect(
+      fromOpenAIUsage({
+        prompt_tokens: 100,
+        completion_tokens: 40,
+        prompt_tokens_details: { cache_write_tokens: 6 },
+        cache_creation_input_tokens: 9,
+      }).cacheCreationInputTokens,
+    ).toBe(6)
+    expect(
+      fromOpenAIUsage({ prompt_tokens: 100, completion_tokens: 40, cache_creation_input_tokens: 9 })
+        .cacheCreationInputTokens,
+    ).toBe(9)
   })
 
   it("cached_tokens: 0 is a real reported value, not treated as absent", () => {
