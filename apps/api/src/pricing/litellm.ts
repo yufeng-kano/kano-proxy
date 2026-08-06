@@ -1,14 +1,14 @@
 /**
- * Estimated per-request cost from LiteLLM's community price table
- * (docs/pricing.md).
+ * Estimated per-request cost from LiteLLM's community price table plus the
+ * public OpenRouter catalog for OpenRouter-specific ids (docs/pricing.md).
  *
- * The full table is ~2MB of JSON; only the four per-token rates this proxy
- * uses survive the trim. The trimmed table lives in the CACHE KV namespace
- * with a 24h freshness window (one KV write per day — the minimal-KV rule)
- * behind a per-isolate in-memory memo, so the request path costs ~0 KV
- * operations and **never** a network fetch: refreshes happen from the daily
- * cron, or inline from the admin usage-summary route the first time after a
- * deploy when KV has nothing yet.
+ * The source tables are trimmed to the four per-token rates this proxy uses.
+ * The combined table lives in the CACHE KV namespace with a 24h freshness
+ * window (one KV write per day — the minimal-KV rule) behind a per-isolate
+ * in-memory memo, so the request path costs ~0 KV operations and **never** a
+ * network fetch: refreshes happen from the daily cron, or inline from the
+ * admin usage-summary route the first time after a deploy when KV has nothing
+ * yet.
  *
  * Everything degrades to "cost unknown" (null): a fetch failure serves the
  * last copy regardless of age, an unmatched model prices as null. Never
@@ -19,6 +19,7 @@ import type { Env } from "../env"
 
 export const LITELLM_PRICING_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+export const OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 const KV_KEY = "pricing:litellm:v1"
 /** KV lifetime — long enough that a week of failed refreshes still stale-serves. */
@@ -39,7 +40,13 @@ export type ModelPrice = {
 /** Keyed by lowercased LiteLLM model id. */
 export type PriceTable = Record<string, ModelPrice>
 
-type CachedTable = { fetchedAt: number; table: PriceTable }
+type CachedTable = {
+  fetchedAt: number
+  table: PriceTable
+  /** Present in snapshots created after OpenRouter pricing support. */
+  litellmTable?: PriceTable
+  openRouterTable?: PriceTable
+}
 
 let memo: CachedTable | null = null
 let memoCheckedAt = 0
@@ -73,37 +80,67 @@ export async function getPriceTable(env: Env): Promise<PriceTable | null> {
   return memo?.table ?? null
 }
 
-/**
- * Fetch + trim + store. Returns the freshest table it can — on any failure,
- * the previous copy (or null when there has never been one). Never throws.
- */
-export async function refreshPriceTable(env: Env): Promise<PriceTable | null> {
+async function fetchAndTrim(
+  url: string,
+  trim: (json: unknown) => PriceTable,
+): Promise<PriceTable | null> {
   try {
-    const res = await fetch(LITELLM_PRICING_URL, { headers: { accept: "application/json" } })
-    if (!res.ok) return memo?.table ?? null
-    const json = (await res.json()) as Record<string, unknown>
-    const table = trimLiteLLMTable(json)
-    // An empty trim means the upstream shape changed — keep the old copy
-    // rather than overwriting a working table with nothing.
-    if (Object.keys(table).length === 0) return memo?.table ?? null
-    const snap: CachedTable = { fetchedAt: Date.now(), table }
-    memo = snap
-    memoCheckedAt = snap.fetchedAt
-    try {
-      await env.CACHE.put(KV_KEY, JSON.stringify(snap), { expirationTtl: KV_TTL_SECONDS })
-    } catch {
-      /* keep the in-memory copy */
-    }
-    return table
+    const res = await fetch(url, { headers: { accept: "application/json" } })
+    if (!res.ok) return null
+    const table = trim(await res.json())
+    // An empty trim means the upstream shape changed — do not replace a
+    // working source table with nothing.
+    return Object.keys(table).length > 0 ? table : null
   } catch {
-    return memo?.table ?? null
+    return null
   }
 }
 
-/** Daily-cron entry: refetch only when the stored table is missing or past the freshness window. */
+/**
+ * Fetch + trim + store both sources. A failure of either source stale-serves
+ * only that source's prior copy, so an OpenRouter outage cannot discard
+ * LiteLLM prices (or vice versa). Never throws.
+ */
+export async function refreshPriceTable(env: Env): Promise<PriceTable | null> {
+  const [freshLiteLLM, freshOpenRouter] = await Promise.all([
+    fetchAndTrim(LITELLM_PRICING_URL, (json) =>
+      trimLiteLLMTable(json as Record<string, unknown>),
+    ),
+    fetchAndTrim(OPENROUTER_MODELS_URL, trimOpenRouterTable),
+  ])
+
+  // Legacy snapshots predate source-specific copies. Treat their combined
+  // table as a LiteLLM fallback once so it remains available through a failed
+  // initial refresh. Empty source tables record an attempted fetch, letting
+  // the cache retain its normal 24h refresh cadence after a source outage.
+  const litellmTable = freshLiteLLM ?? memo?.litellmTable ?? memo?.table ?? {}
+  const openRouterTable = freshOpenRouter ?? memo?.openRouterTable ?? {}
+  const table = { ...litellmTable, ...openRouterTable }
+  if (Object.keys(table).length === 0) return memo?.table ?? null
+
+  // The public OpenRouter catalog is authoritative for its exact model keys.
+  const snap: CachedTable = { fetchedAt: Date.now(), table, litellmTable, openRouterTable }
+  memo = snap
+  memoCheckedAt = snap.fetchedAt
+  try {
+    await env.CACHE.put(KV_KEY, JSON.stringify(snap), { expirationTtl: KV_TTL_SECONDS })
+  } catch {
+    /* keep the in-memory copy */
+  }
+  return table
+}
+
+/** Daily-cron entry: refetch when a source is missing, or the stored table is stale. */
 export async function ensureFreshPriceTable(env: Env): Promise<void> {
   await getPriceTable(env)
-  if (memo && Date.now() - memo.fetchedAt < PRICING_FRESH_MS) return
+  if (
+    memo &&
+    memo.litellmTable &&
+    memo.openRouterTable &&
+    Date.now() - memo.fetchedAt < PRICING_FRESH_MS
+  ) {
+    return
+  }
   await refreshPriceTable(env)
 }
 
@@ -131,6 +168,41 @@ export function trimLiteLLMTable(json: Record<string, unknown>): PriceTable {
   return out
 }
 
+function decimal(v: unknown): number | null {
+  if (typeof v !== "string" || !v.trim()) return null
+  const parsed = Number(v)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/**
+ * Add OpenRouter's default rates only under its complete catalog id. Conditional
+ * overrides cannot be applied from the aggregate usage we log, so skip them
+ * rather than guessing. Never use these entries for another provider.
+ */
+export function trimOpenRouterTable(json: unknown): PriceTable {
+  const out: PriceTable = {}
+  if (!json || typeof json !== "object") return out
+  const data = (json as { data?: unknown }).data
+  if (!Array.isArray(data)) return out
+  for (const model of data) {
+    if (!model || typeof model !== "object") continue
+    const { id, pricing } = model as { id?: unknown; pricing?: unknown }
+    if (typeof id !== "string" || !pricing || typeof pricing !== "object") continue
+    const p = pricing as Record<string, unknown>
+    if (Array.isArray(p.overrides) && p.overrides.length > 0) continue
+    const input = decimal(p.prompt)
+    const output = decimal(p.completion)
+    if (input == null && output == null) continue
+    out[`openrouter/${normalizeId(id)}`] = {
+      input: input ?? 0,
+      output: output ?? 0,
+      cacheRead: decimal(p.input_cache_read),
+      cacheCreation: decimal(p.input_cache_write),
+    }
+  }
+  return out
+}
+
 /** Lowercase, trimmed, bracket variant stripped: "claude-opus-5[1m]" → "claude-opus-5". */
 function normalizeId(id: string): string {
   return id.trim().toLowerCase().replace(/\[[^\]]*\]$/, "")
@@ -145,8 +217,13 @@ function normalizeId(id: string): string {
  */
 export function resolveModelPrice(table: PriceTable, rawModel: string): ModelPrice | null {
   const slash = rawModel.indexOf("/")
+  const provider = normalizeId(slash === -1 ? "" : rawModel.slice(0, slash))
   const upstream = normalizeId(slash === -1 ? rawModel : rawModel.slice(slash + 1))
   if (!upstream) return null
+
+  // OpenRouter's catalog prices an exact provider/model id. Do not let an
+  // unrelated bare or Cloudflare entry price an OpenRouter request.
+  if (provider === "openrouter") return table[`openrouter/${upstream}`] ?? null
 
   const candidates: string[] = [upstream]
   let rest = upstream

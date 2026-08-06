@@ -6,18 +6,20 @@ Estimated USD cost per request, computed from logged token counts and a public p
 
 ## Price table
 
-- **Source:** LiteLLM's community-maintained table — `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`.
-- Fetched server-side, trimmed to the four per-token rates this proxy uses (`input_cost_per_token`, `output_cost_per_token`, `cache_read_input_token_cost`, `cache_creation_input_token_cost`), and cached in the `CACHE` KV namespace for **24h** (key `pricing:litellm:v1`) — one KV write per day, per the minimal-KV rule. A per-isolate in-memory memo fronts the KV read, so steady-state request handling costs ~0 KV operations.
-- Fetch failure serves the last KV copy regardless of age; with no copy at all, costs are `NULL` (unknown), never guessed. Pricing must never fail or delay a proxied request — the table refresh happens via `waitUntil`, off the critical path.
+- **Primary source:** LiteLLM's community-maintained table — `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`.
+- **OpenRouter source:** for rows whose provider prefix is exactly `openrouter`, the public OpenRouter catalog — `https://openrouter.ai/api/v1/models` — is authoritative. It supplies provider-specific prices that LiteLLM may not list. Its default `pricing.prompt`, `pricing.completion`, `pricing.input_cache_read`, and `pricing.input_cache_write` rates map to this proxy's input, output, cache-read, and cache-creation rates. Models with catalog `pricing.overrides` are left unpriced: this proxy records aggregate token counts, not the threshold/timestamp inputs needed to apply conditional rates safely. Fixed request, image, web-search, and other non-token catalog charges are likewise outside the stored token-cost formula.
+- Both sources are fetched server-side, trimmed to the four per-token rates this proxy uses, combined into one table, and cached in the `CACHE` KV namespace for **24h** (key `pricing:litellm:v1`) — one KV write per day, per the minimal-KV rule. A per-isolate in-memory memo fronts the KV read, so steady-state request handling costs ~0 KV operations. OpenRouter catalog entries override the same LiteLLM key because the catalog is authoritative for OpenRouter traffic, and are only added under their full `openrouter/<catalog id>` keys; they can therefore never price a non-OpenRouter row.
+- Source failures serve the last KV copy regardless of age. A failed OpenRouter catalog fetch still refreshes LiteLLM-only prices; with no applicable copy or source entry, costs are `NULL` (unknown), never guessed. Pricing must never fail or delay a proxied request — the table refresh happens via `waitUntil`, off the critical path.
 
 ## Model matching
 
 `request_logs.model` is `provider/upstream…`; the LiteLLM table keys are bare model ids, sometimes vendor-prefixed. Matching is normalization + a fallback chain, first hit wins:
 
 1. Normalize: lowercase, strip a trailing bracket variant (`claude-opus-5[1m]` → `claude-opus-5`).
-2. Exact match on the upstream id (everything after the first `/`).
-3. The upstream id with its own leading path segments progressively stripped (`openai/gpt-4o-mini` → `gpt-4o-mini`).
-4. Common LiteLLM prefix forms for the segment (`anthropic/<id>`, `openai/<id>`, `xai/<id>`, `gemini/<id>`, `openrouter/<full upstream id>`).
+2. For an `openrouter/...` row, exact match only on `openrouter/<full upstream id>`. This preserves the OpenRouter provider-specific rate and prevents a bare/provider price (including a Cloudflare price) from pricing an OpenRouter request.
+3. For every other provider, exact match on the upstream id (everything after the first `/`).
+4. The upstream id with its own leading path segments progressively stripped (`openai/gpt-4o-mini` → `gpt-4o-mini`).
+5. Common LiteLLM prefix forms for the segment (`anthropic/<id>`, `openai/<id>`, `xai/<id>`, `gemini/<id>`, `openrouter/<full upstream id>`).
 
 No match → `cost` stays `NULL` and the row is reported as unpriced. **Never fabricate a rate.**
 

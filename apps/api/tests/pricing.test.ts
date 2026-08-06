@@ -10,6 +10,7 @@ import {
   refreshPriceTable,
   resolveModelPrice,
   trimLiteLLMTable,
+  trimOpenRouterTable,
   type PriceTable,
 } from "../src/pricing/litellm"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
@@ -29,6 +30,23 @@ function buildEnv(): Env {
 }
 
 /** A plausible LiteLLM payload slice — rates are fixture values, not real prices. */
+const OPENROUTER_JSON = {
+  data: [
+    {
+      id: "z-ai/glm-5.2",
+      pricing: {
+        prompt: "0.00000076",
+        completion: "0.00000242",
+        input_cache_read: "0.00000014",
+      },
+    },
+    {
+      id: "conditional/model",
+      pricing: { prompt: "0.000001", completion: "0.000002", overrides: [{}] },
+    },
+  ],
+}
+
 const LITELLM_JSON = {
   sample_spec: { input_cost_per_token: 0, output_cost_per_token: 0 },
   "claude-opus-5": {
@@ -59,6 +77,16 @@ function stubFetchOk(json: unknown = LITELLM_JSON): void {
   globalThis.fetch = (async () => Response.json(json)) as typeof fetch
 }
 
+function stubPricingFetch(
+  litellm: unknown = LITELLM_JSON,
+  openRouter: unknown = OPENROUTER_JSON,
+): void {
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input)
+    return Response.json(url.includes("openrouter.ai") ? openRouter : litellm)
+  }) as typeof fetch
+}
+
 describe("trimLiteLLMTable", () => {
   it("keeps only priced entries, lowercases keys, drops sample_spec", () => {
     const table = trimLiteLLMTable(LITELLM_JSON as Record<string, unknown>)
@@ -84,6 +112,24 @@ describe("trimLiteLLMTable", () => {
   })
 })
 
+describe("trimOpenRouterTable", () => {
+  it("maps the public catalog default rates only under the complete OpenRouter id", () => {
+    expect(trimOpenRouterTable(OPENROUTER_JSON)).toEqual({
+      "openrouter/z-ai/glm-5.2": {
+        input: 0.00000076,
+        output: 0.00000242,
+        cacheRead: 0.00000014,
+        cacheCreation: null,
+      },
+    })
+  })
+
+  it("skips conditional catalog prices and malformed catalog responses", () => {
+    expect(trimOpenRouterTable({ data: [{ id: "bad", pricing: { prompt: "nope" } }] })).toEqual({})
+    expect(trimOpenRouterTable({ data: [] })).toEqual({})
+  })
+})
+
 describe("resolveModelPrice", () => {
   const table = trimLiteLLMTable(LITELLM_JSON as Record<string, unknown>)
 
@@ -97,15 +143,30 @@ describe("resolveModelPrice", () => {
     expect(resolveModelPrice(table, "claude-code/Claude-Opus-5[1M]")).toBeTruthy()
   })
 
-  it("tries vendor-prefixed LiteLLM keys (xai/, openrouter/) for the upstream id", () => {
+  it("tries vendor-prefixed LiteLLM keys for non-OpenRouter upstream ids", () => {
     expect(resolveModelPrice(table, "grok/grok-4.5")).toEqual({
       input: 0.000003,
       output: 0.000015,
       cacheRead: null,
       cacheCreation: null,
     })
-    // Upstream id itself contains slashes: openrouter/openai/gpt-5.6-luna.
+  })
+
+  it("uses an exact OpenRouter catalog key and never falls back to another provider's rate", () => {
+    const openRouterTable = trimOpenRouterTable(OPENROUTER_JSON)
+    expect(resolveModelPrice(openRouterTable, "openrouter/z-ai/glm-5.2")).toEqual({
+      input: 0.00000076,
+      output: 0.00000242,
+      cacheRead: 0.00000014,
+      cacheCreation: null,
+    })
     expect(resolveModelPrice(table, "openrouter/openai/gpt-5.6-luna")).toBeTruthy()
+    expect(
+      resolveModelPrice(
+        { "z-ai/glm-5.2": { input: 1, output: 1, cacheRead: null, cacheCreation: null } },
+        "openrouter/z-ai/glm-5.2",
+      ),
+    ).toBeNull()
   })
 
   it("progressively strips the upstream id's own path segments", () => {
@@ -241,16 +302,45 @@ describe("refresh / cache lifecycle", () => {
     await expect(refreshPriceTable(env)).resolves.toBeNull()
   })
 
-  it("ensureFreshPriceTable skips the fetch while the stored table is fresh", async () => {
+  it("ensureFreshPriceTable skips both source fetches while the stored tables are fresh", async () => {
     const env = buildEnv()
     let calls = 0
-    globalThis.fetch = (async () => {
+    globalThis.fetch = (async (input: string | URL | Request) => {
       calls++
-      return Response.json(LITELLM_JSON)
+      return Response.json(String(input).includes("openrouter.ai") ? OPENROUTER_JSON : LITELLM_JSON)
     }) as typeof fetch
     await ensureFreshPriceTable(env)
     await ensureFreshPriceTable(env)
-    expect(calls).toBe(1)
+    expect(calls).toBe(2)
+  })
+
+  it("stale-serves a source independently when the other source refresh fails", async () => {
+    const env = buildEnv()
+    stubPricingFetch()
+    await refreshPriceTable(env)
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).includes("openrouter.ai")) return new Response("down", { status: 500 })
+      return Response.json(LITELLM_JSON)
+    }) as typeof fetch
+
+    const table = await refreshPriceTable(env)
+    expect(resolveModelPrice(table!, "openrouter/z-ai/glm-5.2")).toEqual({
+      input: 0.00000076,
+      output: 0.00000242,
+      cacheRead: 0.00000014,
+      cacheCreation: null,
+    })
+  })
+
+  it("keeps LiteLLM prices when OpenRouter is unavailable on the first refresh", async () => {
+    const env = buildEnv()
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input).includes("openrouter.ai")) return new Response("down", { status: 500 })
+      return Response.json(LITELLM_JSON)
+    }) as typeof fetch
+
+    const table = await refreshPriceTable(env)
+    expect(table?.["claude-opus-5"]).toBeTruthy()
   })
 })
 
