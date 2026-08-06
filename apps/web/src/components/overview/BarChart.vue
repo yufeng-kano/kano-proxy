@@ -40,7 +40,7 @@ export type BarBucket = {
 </script>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useI18n } from "@/i18n"
 import ChartTooltip, { type TooltipRow } from "./ChartTooltip.vue"
 
@@ -73,8 +73,13 @@ const FULL_MARGIN = { top: 10, right: 8, bottom: 24, left: 46 }
 const MINI_MARGIN = { top: 2, right: 0, bottom: 2, left: 0 }
 const MAX_BAR_W = 28
 const BAR_RADIUS = 3
-const TOOLTIP_HALF = 84
 const FALLBACK_PLOT_W = 640
+/// Guard for the clamp before the tooltip has a measured width. It has to be
+/// real rather than 0 so the center-only path (middle buckets) keeps working
+/// on first render — the ResizeObserver fires after mount. Picked from the
+/// tooltip's `min-width`, not its `max-width`, so the initial clamp stays
+/// inside the plot rather than overhanging a wide readout.
+const TOOLTIP_HALF_UNMEASURED = 64
 
 const plotH = computed(() => (props.mini ? MINI_H : FULL_H))
 const margin = computed(() => (props.mini ? MINI_MARGIN : FULL_MARGIN))
@@ -88,6 +93,19 @@ const root = ref<HTMLElement | null>(null)
 const availableW = ref(0)
 let resizeObserver: ResizeObserver | undefined
 
+// Measured tooltip — its rendered width is content-driven (128–320px and any
+// number of rows), so a fixed half-width constant can't clamp it safely. We
+// watch the live element instead and re-clamp on every content/size change.
+const tooltipRef = ref<{ rootEl?: HTMLElement } | null>(null)
+const tooltipW = ref(0)
+let tooltipResizeObserver: ResizeObserver | undefined
+
+function measureTooltip(): void {
+  const el = tooltipRef.value?.rootEl
+  if (!el) return
+  tooltipW.value = el.offsetWidth
+}
+
 onMounted(() => {
   const el = root.value
   if (!el) return
@@ -99,7 +117,34 @@ onMounted(() => {
   resizeObserver.observe(el)
 })
 
-onBeforeUnmount(() => resizeObserver?.disconnect())
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
+  tooltipResizeObserver?.disconnect()
+})
+
+/**
+ * Set up / tear down the tooltip's own ResizeObserver as the tooltip appears
+ * and as its content (rows, total, footer) changes between buckets. A single
+ * observer attached at first mount is not enough: its entries only fire on
+ * size changes, and two buckets can render the same width but a third wider —
+ * the observer does catch that, but the imperative remeasure here also
+ * covers the initial render and any change that happens to land on the same
+ * pixel width (keeping `tooltipW` in sync with whichever bucket is shown).
+ */
+watch(
+  () => tooltipRef.value?.rootEl,
+  (el, _prev, onCleanup) => {
+    tooltipResizeObserver?.disconnect()
+    tooltipW.value = 0
+    if (!el) return
+    measureTooltip()
+    if (typeof ResizeObserver === "undefined") return
+    tooltipResizeObserver = new ResizeObserver(() => measureTooltip())
+    tooltipResizeObserver.observe(el)
+    onCleanup(() => tooltipResizeObserver?.disconnect())
+  },
+  { flush: "post" },
+)
 
 /**
  * Floor width below which full-mode groups collide; the wrap scrolls
@@ -222,9 +267,16 @@ const hoveredGroup = computed<Group | null>(() =>
 
 const tooltipX = computed(() => {
   const g = hoveredGroup.value
-  if (!g) return plotW.value / 2
+  const pw = plotW.value
+  if (!g) return pw / 2
   const center = g.hitX + g.hitWidth / 2
-  return Math.min(plotW.value - TOOLTIP_HALF, Math.max(TOOLTIP_HALF, center))
+  // Real measured half-width, or a safe undershoot until the observer fires.
+  const half = tooltipW.value > 0 ? tooltipW.value / 2 : TOOLTIP_HALF_UNMEASURED
+  // Tooltip wider than the plot (a guard, not the common case): park it
+  // fully inside at the plot's left edge rather than letting either side
+  // overhang into `.chart-scroll` and spawn a horizontal scrollbar.
+  if (half * 2 >= pw) return half
+  return Math.min(pw - half, Math.max(half, center))
 })
 
 /** Largest segment first — the tooltip reads as a ranking, like the cards. */
@@ -258,6 +310,7 @@ function bucketAriaLabel(group: Group): string {
       <div class="chart-plot" :style="{ '--plot-min': `${chartMinWidth}px`, '--plot-height': `${plotH}px` }">
         <ChartTooltip
           v-if="!mini && hoveredGroup"
+          ref="tooltipRef"
           :x="tooltipX"
           :title="hoveredGroup.bucket.fullLabel"
           :rows="tooltipRows"

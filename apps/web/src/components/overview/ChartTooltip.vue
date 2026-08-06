@@ -24,6 +24,8 @@ export type TooltipRow = {
 </script>
 
 <script setup lang="ts">
+import { ref } from "vue"
+
 defineProps<{
   /** Bucket centre in plot pixels; the tooltip centres itself on it. */
   x: number
@@ -36,10 +38,21 @@ defineProps<{
   /** Shown instead of the rows when the bucket has nothing to report. */
   empty?: string | null
 }>()
+
+/**
+ * Exposed so BarChart can measure the rendered tooltip width and clamp it
+ * inside the plot's bounds — the width is content-driven (128–320px, any
+ * number of rows), so the parent re-clamps via a ResizeObserver as the
+ * hovered bucket's content changes. Named `rootEl` rather than `el` because
+ * `el` is the conventional local in the parent's setup for an unrelated
+ * element.
+ */
+const rootEl = ref<HTMLElement | null>(null)
+defineExpose({ rootEl })
 </script>
 
 <template>
-  <div class="tooltip" :style="{ '--tip-x': `${x}px` }">
+  <div ref="rootEl" class="tooltip" :style="{ '--tip-x': `${x}px` }">
     <p class="tooltip-title">{{ title }}</p>
 
     <p v-if="!rows.length && empty" class="tooltip-empty">{{ empty }}</p>
