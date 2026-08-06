@@ -321,7 +321,7 @@ Do **not** create a GitHub Release / tag without updating and pushing `package.j
 
 **Never cut a release with `--generate-notes` alone.** That flag builds its output from *merged pull requests*; this repo lands work as direct commits to `main`, so it has nothing to summarize and emits a bare `**Full Changelog**: …compare/…` line. A release published that way is blank on the `/changelog` page — and those notes are the **only** source that page has (no `CHANGELOG.md`, no D1 table — see [changelog.md](./changelog.md)). v2.1.0–v2.2.1 shipped blank this way and were backfilled by hand.
 
-Write the notes into a file and pass `--notes-file`. What they are for:
+Pass the notes inline with `gh release create --notes '<markdown>'` — no scratch file needed. What the notes are for:
 
 - **Address the operator, in the product's voice** (the copy rules in [i18n.md](./i18n.md) § Copy voice apply): say what they can now do, not which module changed. The commit message is where the mechanism goes.
 - Lead with a one-line summary of the release, then group under `##` headings when there is more than a handful of items.
@@ -338,11 +338,17 @@ git push origin main
 git tag -a v1.0.1 -m "v1.0.1"
 git push origin v1.0.1
 
-# 2) write the user-facing notes, then publish with them
-gh release create v1.0.1 --title v1.0.1 --notes-file notes-v1.0.1.md
+# 2) write the user-facing notes inline, then publish
+gh release create v1.0.1 --title v1.0.1 --notes '
+A one-line summary of the release.
+
+## What's new
+- First change users can see.
+- Second change users can see.
+'
 ```
 
-Notes can be corrected after the fact with `gh release edit <tag> --notes-file <file>`; editing a release does **not** re-run the deploy workflow (it triggers on `published`, not `edited`). The `/changelog` page refetches within an hour, or immediately via its Refresh.
+Notes can be corrected after the fact with `gh release edit <tag> --notes '<markdown>'`; editing a release does **not** re-run the deploy workflow (it triggers on `published`, not `edited`). The `/changelog` page refetches within an hour, or immediately via its Refresh.
 
 ### Repository secrets (Settings → Secrets and variables → Actions)
 
