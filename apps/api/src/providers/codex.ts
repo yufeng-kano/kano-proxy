@@ -81,6 +81,27 @@ export function codexSessionId(promptCacheKey?: string): string | null {
   return uuid ?? key
 }
 
+/** OpenAI's documented `prompt_cache_key` ceiling; over it is a hard 400. */
+const CODEX_PROMPT_CACHE_KEY_MAX = 64
+
+/**
+ * Fit a prompt_cache_key into the Responses field's 64-char limit. Claude
+ * Code's metadata.user_id (`user_<hash>_account_<uuid>_session_<uuid>`) is
+ * ~150 chars, so an unfitted key fails every /anthropic → codex turn with
+ * `Invalid 'prompt_cache_key': string too long`. Must be deterministic —
+ * a conversation only gets upstream cache hits if its key is stable.
+ * Long keys are hashed rather than truncated: Claude Code ids share a long
+ * `user_<hash>_account_<uuid>_` prefix, so a prefix cut would collapse every
+ * session of one account onto a single cache shard.
+ */
+export async function fitCodexPromptCacheKey(key: string): Promise<string> {
+  const uuid = SESSION_UUID_SUFFIX.exec(key)?.[1]
+  if (uuid) return uuid
+  if (key.length <= CODEX_PROMPT_CACHE_KEY_MAX) return key
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")
+}
+
 function windowLabel(seconds: number | undefined): string {
   if (!seconds) return "window"
   if (seconds === 604800) return "Week"
@@ -322,7 +343,11 @@ export async function buildCodexRequestBody(
       }
     }
   }
-  if (req.prompt_cache_key) body.prompt_cache_key = req.prompt_cache_key
+  // Only the upstream body field is fitted; the replay session key and the
+  // session_id header still key off the full client-supplied value.
+  if (req.prompt_cache_key) {
+    body.prompt_cache_key = await fitCodexPromptCacheKey(req.prompt_cache_key)
+  }
   const serviceTier = codexServiceTier(req)
   if (serviceTier !== undefined) body.service_tier = serviceTier
   return stripRejectedCodexFields(body)

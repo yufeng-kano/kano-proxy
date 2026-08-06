@@ -98,6 +98,13 @@ describe("codex upstream request headers", () => {
     expect(affinityWins.headers.get("session_id")).toBe("session-9")
   })
 
+  it("keys the session_id header off the full prompt_cache_key, not the body's fitted one", async () => {
+    const key = "q".repeat(200)
+    const captured = await captureCodexRequest({ ...baseReq, prompt_cache_key: key })
+    expect(captured.headers.get("session_id")).toBe(key)
+    expect(captured.body.prompt_cache_key).toMatch(/^[0-9a-f]{64}$/)
+  })
+
   it("omits an empty ChatGPT account id", async () => {
     const captured = await captureCodexRequest(baseReq)
     expect(captured.headers.has("chatgpt-account-id")).toBe(false)
@@ -324,6 +331,69 @@ describe("buildCodexRequestBody", () => {
         messages: [{ role: "user", content: "hi" }],
       })
       expect("prompt_cache_key" in body).toBe(false)
+    })
+
+    // Upstream rejects anything over 64 chars with
+    // `Invalid 'prompt_cache_key': string too long`.
+    it("sends the bare session uuid for a Claude Code metadata.user_id", async () => {
+      const uuid = "0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e"
+      const key = `user_${"a".repeat(64)}_account_11111111-2222-3333-4444-555555555555_session_${uuid}`
+      expect(key.length).toBeGreaterThan(140)
+
+      const body = await buildCodexRequestBody({
+        upstreamModel: "m",
+        messages: [{ role: "user", content: "hi" }],
+        prompt_cache_key: key,
+      })
+      expect(body.prompt_cache_key).toBe(uuid)
+      expect(String(body.prompt_cache_key).length).toBeLessThanOrEqual(64)
+    })
+
+    it("hashes an over-long key with no session suffix, stably", async () => {
+      const key = "x".repeat(200)
+      const build = async () =>
+        buildCodexRequestBody({
+          upstreamModel: "m",
+          messages: [{ role: "user", content: "hi" }],
+          prompt_cache_key: key,
+        })
+
+      const first = (await build()).prompt_cache_key
+      const second = (await build()).prompt_cache_key
+      expect(first).toBe(second)
+      expect(first).toMatch(/^[0-9a-f]{64}$/)
+    })
+
+    it("keeps two long keys sharing a prefix on distinct cache shards", async () => {
+      const prefix = "user_shared_account_prefix".padEnd(100, "p")
+      const build = async (suffix: string) =>
+        (
+          await buildCodexRequestBody({
+            upstreamModel: "m",
+            messages: [{ role: "user", content: "hi" }],
+            prompt_cache_key: prefix + suffix,
+          })
+        ).prompt_cache_key
+
+      expect(await build("-alpha")).not.toBe(await build("-beta"))
+    })
+
+    it("never emits a key over the upstream limit", async () => {
+      const keys = [
+        "short",
+        "y".repeat(64),
+        "y".repeat(65),
+        "z".repeat(300),
+        `user_ab_account_1_session_0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e`,
+      ]
+      for (const prompt_cache_key of keys) {
+        const body = await buildCodexRequestBody({
+          upstreamModel: "m",
+          messages: [{ role: "user", content: "hi" }],
+          prompt_cache_key,
+        })
+        expect(String(body.prompt_cache_key).length).toBeLessThanOrEqual(64)
+      }
     })
   })
 
