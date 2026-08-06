@@ -1,0 +1,1 @@
+The pricing refresh now recognizes older cached pricing snapshots and refreshes them safely. OpenRouter models can therefore receive catalog pricing immediately after this update instead of waiting for the next daily refresh.
