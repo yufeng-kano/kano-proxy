@@ -184,8 +184,16 @@ function execute(
   if (m) {
     const table = m[1]!
     const cols = m[2]!.split(",").map((s) => s.trim())
+    const values = splitTopLevel(m[3]!, /^\s*,\s*/)
     const row: Row = {}
-    cols.forEach((c, i) => (row[c] = params[i]))
+    let pi = 0
+    cols.forEach((c, i) => {
+      const value = values[i]!.trim()
+      if (value === "?") row[c] = params[pi++]
+      else if (/^'.*'$/.test(value)) row[c] = value.slice(1, -1).replace(/''/g, "'")
+      else if (value.toUpperCase() === "NULL") row[c] = null
+      else throw new Error(`FakeD1: unsupported INSERT value: ${value}`)
+    })
     db.rows(table).push(row)
     return { rows: [], changes: 1 }
   }

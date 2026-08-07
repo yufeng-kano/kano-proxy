@@ -28,8 +28,6 @@ id = "local-kano-proxy-cache-placeholder"
 # Production: set in wrangler.production.toml (not here — this file is public).
 APP_URL = "http://127.0.0.1:5173"
 GOOGLE_REDIRECT_URI = "http://127.0.0.1:8787/api/auth/callback"
-# Codex public client only allows this registered redirect. Manual paste completes the flow.
-CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 # Releases source for the changelog feature (public info) — forks point this at their own repo.
 GITHUB_REPO = "yufeng-kano/kano-proxy"
 

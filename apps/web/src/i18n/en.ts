@@ -173,13 +173,11 @@ export const en = {
   "addAccount.claude.step1": "Approve access on the page that opened.",
   "addAccount.claude.step2": "Copy the code you're given and paste it below.",
   "addAccount.claude.label": "Authorization code",
-  "addAccount.codex.step1": "Approve access on the page that opened.",
-  "addAccount.codex.step2":
-    "You'll land on a page that can't load — copy its full address and paste it below.",
-  "addAccount.codex.label": "Callback address",
-  "addAccount.grok.intro": "Enter this code on the page that opened.",
-  "addAccount.grok.waiting": "Waiting for you to approve…",
-  "addAccount.grok.check": "I've approved it",
+  // Shared by every device-code provider (Codex, Grok) — the copy describes
+  // the flow, not the brand, so it must stay provider-neutral.
+  "addAccount.device.intro": "Enter this code on the page that opened.",
+  "addAccount.device.waiting": "Waiting for you to approve…",
+  "addAccount.device.check": "I've approved it",
   "addAccount.complete": "Finish",
   "addAccount.manual.title": "Enter tokens manually",
   "addAccount.manual.intro": "For accounts you already hold credentials for.",

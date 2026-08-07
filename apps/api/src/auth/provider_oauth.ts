@@ -1,6 +1,4 @@
-/**
- * Provider OAuth (Claude Code / Codex). Both require PKCE S256.
- */
+/** Provider OAuth helpers. Claude Code uses browser PKCE; Codex uses device PKCE. */
 
 import { buildPkcePair, buildStateToken } from "./pkce"
 
@@ -13,12 +11,12 @@ export const CLAUDE_OAUTH = {
 } as const
 
 /** Must match the public Codex CLI OAuth client registration. */
-export const CODEX_OAUTH = {
+export const CODEX_DEVICE_AUTH = {
   clientId: "app_EMoamEEZ73f0CkXaXp7hrann",
-  authorizeUrl: "https://auth.openai.com/oauth/authorize",
+  userCodeUrl: "https://auth.openai.com/api/accounts/deviceauth/usercode",
+  deviceTokenUrl: "https://auth.openai.com/api/accounts/deviceauth/token",
   tokenUrl: "https://auth.openai.com/oauth/token",
-  /** Registered redirect — do not change unless you own a custom OAuth app. */
-  redirectUri: "http://localhost:1455/auth/callback",
+  redirectUri: "https://auth.openai.com/deviceauth/callback",
   scope: "openid profile email offline_access",
 } as const
 
@@ -84,71 +82,6 @@ export async function exchangeClaudeCode(opts: {
   if (!res.ok) {
     const detail = (await res.text()).trim() || `HTTP ${res.status}`
     throw new Error(`Claude OAuth token exchange failed: ${detail}`)
-  }
-  return (await res.json()) as {
-    access_token: string
-    refresh_token?: string
-    expires_in?: number
-  }
-}
-
-export async function beginCodexAuthorization(clientId?: string): Promise<{
-  authorizationUrl: string
-  pending: PendingOAuth
-}> {
-  const { codeVerifier, codeChallenge } = await buildPkcePair()
-  const oauthState = buildStateToken()
-  const cid = clientId || CODEX_OAUTH.clientId
-  // Extra Codex CLI flags + PKCE
-  const params = new URLSearchParams({
-    response_type: "code",
-    client_id: cid,
-    redirect_uri: CODEX_OAUTH.redirectUri,
-    scope: CODEX_OAUTH.scope,
-    code_challenge: codeChallenge,
-    code_challenge_method: "S256",
-    id_token_add_organizations: "true",
-    codex_cli_simplified_flow: "true",
-    state: oauthState,
-    originator: "codex_cli_rs",
-  })
-  return {
-    authorizationUrl: `${CODEX_OAUTH.authorizeUrl}?${params}`,
-    pending: {
-      client_id: cid,
-      code_verifier: codeVerifier,
-      oauth_state: oauthState,
-      redirect_uri: CODEX_OAUTH.redirectUri,
-    },
-  }
-}
-
-export async function exchangeCodexCode(opts: {
-  code: string
-  returnedState: string
-  pending: PendingOAuth
-}): Promise<{
-  access_token: string
-  refresh_token?: string
-  expires_in?: number
-}> {
-  if (opts.returnedState !== opts.pending.oauth_state) {
-    throw new Error("Authorization state mismatch. Restart the login flow.")
-  }
-  const res = await fetch(CODEX_OAUTH.tokenUrl, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: opts.pending.client_id,
-      code: opts.code,
-      code_verifier: opts.pending.code_verifier,
-      redirect_uri: opts.pending.redirect_uri,
-    }),
-  })
-  if (!res.ok) {
-    const detail = (await res.text()).trim() || `HTTP ${res.status}`
-    throw new Error(`Codex OAuth token exchange failed: ${detail}`)
   }
   return (await res.json()) as {
     access_token: string

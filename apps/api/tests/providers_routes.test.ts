@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest"
 import { createSession } from "../src/auth/session"
-import { encryptJson } from "../src/crypto/token_crypto"
+import { decryptJson, encryptJson } from "../src/crypto/token_crypto"
 import type { Env } from "../src/env"
 import { providerRoutes } from "../src/routes/providers"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
@@ -322,6 +322,317 @@ describe("PATCH /api/providers/:provider/accounts/:id custom_label", () => {
  * that N devices cost one upstream call, not N, so most of these assert on the
  * upstream call count rather than on the response body.
  */
+describe("Codex device OAuth", () => {
+  it("starts device login with PKCE and returns the Grok-compatible polling shape", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    env.CODEX_OAUTH_CLIENT_ID = "codex-client-override"
+    const cookie = await cookieFor(env, "user_1")
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} })
+      return new Response(
+        JSON.stringify({
+          device_code: "device-code",
+          user_code: "ABCD-EFGH",
+          verification_uri: "https://auth.openai.com/codex/device",
+          verification_uri_complete: "https://auth.openai.com/codex/device?user_code=ABCD-EFGH",
+          interval: "7",
+        }),
+        { status: 200 },
+      )
+    }) as typeof fetch
+
+    const res = await providerRoutes.request("/codex/login", req("POST", cookie), env)
+
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json).toEqual({
+      login_id: expect.any(String),
+      user_code: "ABCD-EFGH",
+      verification_uri: "https://auth.openai.com/codex/device",
+      verification_uri_complete: "https://auth.openai.com/codex/device?user_code=ABCD-EFGH",
+      interval: 7,
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe("https://auth.openai.com/api/accounts/deviceauth/usercode")
+    expect(calls[0]!.init).toMatchObject({
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+    })
+    const form = new URLSearchParams(calls[0]!.init.body as string)
+    expect(form.get("client_id")).toBe("codex-client-override")
+    expect(form.get("scope")).toBe("openid profile email offline_access")
+    expect(form.get("code_challenge_method")).toBe("S256")
+    expect(form.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]+$/)
+    const state = db.rows("oauth_login_states")[0]!
+    expect(JSON.parse(state.payload_json as string)).toMatchObject({
+      client_id: "codex-client-override",
+      device_code: "device-code",
+      code_verifier: expect.any(String),
+    })
+  })
+
+  it("defaults the device polling interval when OpenAI omits it", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          device_code: "device-code",
+          user_code: "ABCD-EFGH",
+          verification_uri: "https://auth.openai.com/codex/device",
+        }),
+        { status: 200 },
+      )) as typeof fetch
+
+    const res = await providerRoutes.request("/codex/login", req("POST", cookie), env)
+
+    expect((await readJson(res)).interval).toBe(5)
+  })
+
+  it("returns pending errors without exchanging tokens for pending device polls", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    db.seed("oauth_login_states", [
+      {
+        id: "login_pending",
+        kind: "provider",
+        user_id: "user_1",
+        provider: "codex",
+        payload_json: JSON.stringify({
+          client_id: "codex-client",
+          device_code: "device-code",
+          code_verifier: "stored-verifier",
+        }),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        created_at: NOW,
+      },
+    ])
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} })
+      return new Response(JSON.stringify({ error: "authorization_pending" }), { status: 400 })
+    }) as typeof fetch
+
+    const res = await providerRoutes.request(
+      "/codex/login/login_pending/complete",
+      req("POST", cookie),
+      env,
+    )
+
+    expect(res.status).toBe(400)
+    expect(await readJson(res)).toEqual({ error: "authorization_pending" })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe("https://auth.openai.com/api/accounts/deviceauth/token")
+    expect(calls[0]!.init).toMatchObject({
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+    })
+    expect(new URLSearchParams(calls[0]!.init.body as string)).toEqual(
+      new URLSearchParams({ client_id: "codex-client", device_code: "device-code" }),
+    )
+    expect(db.rows("oauth_login_states")).toHaveLength(1)
+  })
+
+  it("treats slow_down, OpenAI's 403, and 404 polls as pending and distinguishes failure", async () => {
+    const slowDownDb = new FakeD1()
+    seedUser(slowDownDb, "user_1")
+    const slowDownEnv = buildEnv(slowDownDb)
+    const slowDownCookie = await cookieFor(slowDownEnv, "user_1")
+    slowDownDb.seed("oauth_login_states", [
+      {
+        id: "login_slow_down",
+        kind: "provider",
+        user_id: "user_1",
+        provider: "codex",
+        payload_json: JSON.stringify({ client_id: "client", device_code: "device" }),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        created_at: NOW,
+      },
+    ])
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "slow_down" }), { status: 400 })) as typeof fetch
+    const slowDown = await providerRoutes.request(
+      "/codex/login/login_slow_down/complete",
+      req("POST", slowDownCookie),
+      slowDownEnv,
+    )
+    expect(await readJson(slowDown)).toEqual({ error: "slow_down" })
+
+    for (const status of [403, 404]) {
+      const db = new FakeD1()
+      seedUser(db, "user_1")
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      db.seed("oauth_login_states", [
+        {
+          id: `login_${status}`,
+          kind: "provider",
+          user_id: "user_1",
+          provider: "codex",
+          payload_json: JSON.stringify({ client_id: "client", device_code: "device" }),
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+          created_at: NOW,
+        },
+      ])
+      globalThis.fetch = (async () => new Response("not ready", { status })) as typeof fetch
+      const pending = await providerRoutes.request(
+        `/codex/login/login_${status}/complete`,
+        req("POST", cookie),
+        env,
+      )
+      expect(await readJson(pending)).toEqual({ error: `token ${status}` })
+    }
+
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    db.seed("oauth_login_states", [
+      {
+        id: "login_failed",
+        kind: "provider",
+        user_id: "user_1",
+        provider: "codex",
+        payload_json: JSON.stringify({ client_id: "client", device_code: "device" }),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        created_at: NOW,
+      },
+    ])
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ error: "access_denied" }), { status: 400 })) as typeof fetch
+    const failed = await providerRoutes.request(
+      "/codex/login/login_failed/complete",
+      req("POST", cookie),
+      env,
+    )
+    expect(await readJson(failed)).toEqual({ error: "Codex device token failed: access_denied" })
+  })
+
+  it("exchanges the approved authorization code with the stored verifier and creates an account", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const jwt = `eyJhbGciOiJub25lIn0.${btoa(
+      JSON.stringify({
+        exp: 1_800_000_000,
+        email: "codex@example.com",
+        "https://api.openai.com/auth": { chatgpt_account_id: "account-123" },
+      }),
+    )
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "")}.signature`
+    db.seed("oauth_login_states", [
+      {
+        id: "login_approved",
+        kind: "provider",
+        user_id: "user_1",
+        provider: "codex",
+        payload_json: JSON.stringify({
+          client_id: "codex-client",
+          device_code: "device-code",
+          code_verifier: "stored-verifier",
+        }),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        created_at: NOW,
+      },
+    ])
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init: init ?? {} })
+      if (String(input) === "https://auth.openai.com/api/accounts/deviceauth/token") {
+        return new Response(
+          JSON.stringify({ authorization_code: "approved-code", code_verifier: "upstream-verifier" }),
+          { status: 200 },
+        )
+      }
+      if (String(input) === "https://auth.openai.com/oauth/token") {
+        return new Response(
+          JSON.stringify({ access_token: jwt, refresh_token: "refresh-token", expires_in: 3600 }),
+          { status: 200 },
+        )
+      }
+      if (String(input).includes("/wham/usage") || String(input).includes("/codex/usage")) {
+        return new Response("not available", { status: 403 })
+      }
+      throw new Error(`unexpected fetch: ${input}`)
+    }) as typeof fetch
+
+    const res = await providerRoutes.request(
+      "/codex/login/login_approved/complete",
+      req("POST", cookie),
+      env,
+    )
+
+    expect(res.status).toBe(200)
+    expect(await readJson(res)).toEqual({ ok: true, token_id: expect.any(String), label: "codex@example.com" })
+    expect(calls.slice(0, 2).map((call) => call.url)).toEqual([
+      "https://auth.openai.com/api/accounts/deviceauth/token",
+      "https://auth.openai.com/oauth/token",
+    ])
+    expect(calls[0]!.init).toMatchObject({
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+    })
+    expect(new URLSearchParams(calls[0]!.init.body as string)).toEqual(
+      new URLSearchParams({ client_id: "codex-client", device_code: "device-code" }),
+    )
+    expect(calls[1]!.init).toMatchObject({
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+    })
+    expect(new URLSearchParams(calls[1]!.init.body as string)).toEqual(
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: "codex-client",
+        code: "approved-code",
+        code_verifier: "stored-verifier",
+        redirect_uri: "https://auth.openai.com/deviceauth/callback",
+      }),
+    )
+    const account = db.rows("upstream_accounts")[0]!
+    expect(account).toMatchObject({
+      provider: "codex",
+      external_account_id: "account-123",
+      label: "codex@example.com",
+      account_meta_json: JSON.stringify({
+        email: "codex@example.com",
+        plan_type: null,
+        account_id: "account-123",
+      }),
+    })
+    expect(await decryptJson<unknown>(TOKEN_KEY, account.encrypted_payload as string)).toMatchObject({
+      access_token: jwt,
+      refresh_token: "refresh-token",
+      account_id: "account-123",
+      client_id: "codex-client",
+      email: "codex@example.com",
+      expires_at: "2027-01-15T08:00:00.000Z",
+    })
+    expect(db.rows("oauth_login_states")).toHaveLength(0)
+  })
+})
+
 describe("GET /api/providers/:provider/accounts usage cache", () => {
   it("serves a second read from cache without calling upstream again", async () => {
     const db = new FakeD1()

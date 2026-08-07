@@ -1,4 +1,4 @@
-/** PKCE S256 helpers for Claude Code / Codex OAuth. */
+/** PKCE S256 helpers for provider OAuth. */
 
 export async function buildPkcePair(): Promise<{
   codeVerifier: string
@@ -40,20 +40,4 @@ export function parseCodeHashState(value: string): { code: string; state: string
     code: cleaned.slice(0, hash).trim(),
     state: cleaned.slice(hash + 1).trim(),
   }
-}
-
-/** Parse Codex callback: full URL or code#state. */
-export function parseCodexCallbackValue(value: string): { code: string; state: string } {
-  const cleaned = value.trim()
-  if (!cleaned) throw new Error("Paste the callback URL or code#state")
-  if (cleaned.startsWith("http://") || cleaned.startsWith("https://")) {
-    const u = new URL(cleaned)
-    const code = u.searchParams.get("code")
-    const state = u.searchParams.get("state")
-    const err = u.searchParams.get("error")
-    if (err) throw new Error(`OAuth error: ${err}`)
-    if (!code || !state) throw new Error("Callback URL missing code or state")
-    return { code, state }
-  }
-  return parseCodeHashState(cleaned)
 }

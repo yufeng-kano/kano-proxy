@@ -62,7 +62,6 @@ id = "{cache}"
 [vars]
 APP_URL = "{app}"
 GOOGLE_REDIRECT_URI = "{app}/api/auth/callback"
-CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 GITHUB_REPO = "{repo}"
 {relay_line}
 [triggers]

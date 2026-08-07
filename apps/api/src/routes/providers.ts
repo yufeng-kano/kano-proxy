@@ -3,14 +3,13 @@ import type { HonoEnv } from "../auth/session"
 import { loadSessionUser } from "../auth/session"
 import {
   beginClaudeAuthorization,
-  beginCodexAuthorization,
+  CODEX_DEVICE_AUTH,
   exchangeClaudeCode,
-  exchangeCodexCode,
   extractChatgptAccountId,
   extractJwtExpiryIso,
   type PendingOAuth,
 } from "../auth/provider_oauth"
-import { parseCodeHashState, parseCodexCallbackValue } from "../auth/pkce"
+import { buildPkcePair, parseCodeHashState } from "../auth/pkce"
 import {
   acquireUsageLock,
   insertAccount,
@@ -349,22 +348,79 @@ providerRoutes.post("/:provider/login", async (c) => {
   }
 
   if (provider === "codex") {
-    // Public Codex client only accepts redirect_uri=http://localhost:1455/auth/callback.
-    // Browser will fail to connect there — copy the full URL from the address bar
-    // (or code#state) and paste back into complete.
-    const { authorizationUrl, pending } = await beginCodexAuthorization(c.env.CODEX_OAUTH_CLIENT_ID)
+    const { codeVerifier, codeChallenge } = await buildPkcePair()
+    const clientId = c.env.CODEX_OAUTH_CLIENT_ID || CODEX_DEVICE_AUTH.clientId
+    const deviceRes = await fetch(CODEX_DEVICE_AUTH.userCodeUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+      body: new URLSearchParams({
+        client_id: clientId,
+        scope: CODEX_DEVICE_AUTH.scope,
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256",
+      }),
+    })
+    if (!deviceRes.ok) {
+      const detail = (await deviceRes.text()).trim() || `HTTP ${deviceRes.status}`
+      return c.json({ error: `device code failed: ${detail}` }, 502)
+    }
+    const device = (await deviceRes.json()) as {
+      device_code?: unknown
+      user_code?: unknown
+      verification_uri?: unknown
+      verification_uri_complete?: unknown
+      interval?: unknown
+    }
+    if (typeof device.device_code !== "string" || !device.device_code) {
+      return c.json({ error: "device code response missing device_code" }, 502)
+    }
+    if (typeof device.user_code !== "string" || !device.user_code) {
+      return c.json({ error: "device code response missing user_code" }, 502)
+    }
+    const verificationUri =
+      typeof device.verification_uri === "string" && device.verification_uri
+        ? device.verification_uri
+        : undefined
+    const verificationUriComplete =
+      typeof device.verification_uri_complete === "string" && device.verification_uri_complete
+        ? device.verification_uri_complete
+        : undefined
+    if (!verificationUri && !verificationUriComplete) {
+      return c.json({ error: "device code response missing verification URI" }, 502)
+    }
+    const parsedInterval =
+      typeof device.interval === "number"
+        ? device.interval
+        : typeof device.interval === "string"
+          ? Number(device.interval)
+          : Number.NaN
+    const interval = Number.isFinite(parsedInterval) ? parsedInterval : 5
     await c.env.DB.prepare(
       `INSERT INTO oauth_login_states (id, kind, user_id, provider, payload_json, expires_at, created_at)
        VALUES (?, 'provider', ?, ?, ?, ?, ?)`,
     )
-      .bind(loginId, user.id, provider, JSON.stringify(pending), expires, nowIso())
+      .bind(
+        loginId,
+        user.id,
+        provider,
+        JSON.stringify({
+          client_id: clientId,
+          device_code: device.device_code,
+          code_verifier: codeVerifier,
+        }),
+        expires,
+        nowIso(),
+      )
       .run()
     return c.json({
       login_id: loginId,
-      authorization_url: authorizationUrl,
-      redirect_uri: pending.redirect_uri,
-      instructions:
-        "Open authorization_url, sign in. When the browser lands on localhost:1455 (may fail to load), copy the full URL from the address bar and paste it to complete.",
+      user_code: device.user_code,
+      verification_uri: verificationUri,
+      verification_uri_complete: verificationUriComplete,
+      interval,
     })
   }
 
@@ -515,24 +571,85 @@ providerRoutes.post("/:provider/login/:id/complete", async (c) => {
 
   if (provider === "codex") {
     try {
-      const { code, state } = parseCodexCallbackValue(raw)
       const stateRow = await loadPendingLogin(c.env, {
         userId: user.id,
         provider,
         loginId,
-        oauthState: state,
       })
-      if (!stateRow) {
-        return c.json(
-          {
-            error:
-              "login expired or state not found; click Start OAuth again, then paste the new callback URL immediately",
-          },
-          400,
-        )
+      if (!stateRow) return c.json({ error: "login expired; start again" }, 400)
+      const pending = JSON.parse(stateRow.payload_json) as {
+        client_id?: unknown
+        device_code?: unknown
+        code_verifier?: unknown
       }
-      const pending = JSON.parse(stateRow.payload_json) as PendingOAuth
-      const tok = await exchangeCodexCode({ code, returnedState: state, pending })
+      if (typeof pending.client_id !== "string" || typeof pending.device_code !== "string") {
+        return c.json({ error: "invalid Codex device login state; start again" }, 400)
+      }
+      const tokenRes = await fetch(CODEX_DEVICE_AUTH.deviceTokenUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          accept: "application/json",
+        },
+        body: new URLSearchParams({
+          client_id: pending.client_id,
+          device_code: pending.device_code,
+        }),
+      })
+      const tokenText = await tokenRes.text()
+      let deviceToken: {
+        authorization_code?: unknown
+        code_verifier?: unknown
+        error?: unknown
+      } = {}
+      try {
+        deviceToken = JSON.parse(tokenText) as typeof deviceToken
+      } catch {
+        /* The pending 403/404 responses may not be JSON. */
+      }
+      const deviceError = typeof deviceToken.error === "string" ? deviceToken.error : null
+      if (deviceError === "authorization_pending" || deviceError === "slow_down") {
+        return c.json({ error: deviceError }, 400)
+      }
+      if (tokenRes.status === 403 || tokenRes.status === 404) {
+        return c.json({ error: `token ${tokenRes.status}` }, 400)
+      }
+      if (!tokenRes.ok) {
+        const detail = deviceError || tokenText.trim() || `HTTP ${tokenRes.status}`
+        return c.json({ error: `Codex device token failed: ${detail}` }, 400)
+      }
+      if (typeof deviceToken.authorization_code !== "string" || !deviceToken.authorization_code) {
+        return c.json({ error: "Codex device token response missing authorization_code" }, 400)
+      }
+      const codeVerifier =
+        (typeof pending.code_verifier === "string" && pending.code_verifier) ||
+        (typeof deviceToken.code_verifier === "string" && deviceToken.code_verifier)
+      if (!codeVerifier) {
+        return c.json({ error: "Codex device login state missing code_verifier; start again" }, 400)
+      }
+      const exchangeRes = await fetch(CODEX_DEVICE_AUTH.tokenUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          accept: "application/json",
+        },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          client_id: pending.client_id,
+          code: deviceToken.authorization_code,
+          code_verifier: codeVerifier,
+          redirect_uri: CODEX_DEVICE_AUTH.redirectUri,
+        }),
+      })
+      if (!exchangeRes.ok) {
+        const detail = (await exchangeRes.text()).trim() || `HTTP ${exchangeRes.status}`
+        return c.json({ error: `Codex OAuth token exchange failed: ${detail}` }, 400)
+      }
+      const tok = (await exchangeRes.json()) as {
+        access_token: string
+        refresh_token?: string
+        expires_in?: number
+      }
       const accountId = extractChatgptAccountId(tok.access_token)
       const identity = await fetchCodexIdentity(tok.access_token, accountId)
       const label = pickAccountLabel({

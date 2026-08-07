@@ -2,10 +2,10 @@
 /**
  * Connect one upstream subscription account.
  *
- * Three OAuth shapes behind one dialog: Claude Code and Codex open a sign-in
- * page and the user pastes what they land on, Grok is a device flow the app
- * polls. The manual-token step is the escape hatch for credentials the user
- * already holds.
+ * Two OAuth shapes behind one dialog: Claude Code opens a sign-in page and the
+ * user pastes the code Anthropic hands them, while Codex and Grok are device
+ * flows the app polls until the user approves elsewhere. The manual-token step
+ * is the escape hatch for credentials the user already holds.
  *
  * Focus trap, Escape, and the mobile bottom sheet all come from Modal — this
  * component owns only the flow.
@@ -25,7 +25,7 @@ const emit = defineEmits<{ close: []; added: [] }>()
 
 const { t } = useI18n()
 
-type Step = "idle" | "claude" | "codex" | "grok" | "import"
+type Step = "idle" | "claude" | "device" | "import"
 
 const step = ref<Step>("idle")
 const busy = ref(false)
@@ -47,21 +47,8 @@ const title = computed(() =>
     : t("addAccount.title", { provider: props.providerName }),
 )
 
-/**
- * Claude and Codex share one paste step — approve, then paste what you land
- * on — and differ only in what "what you land on" is, so the copy is picked
- * here rather than branched twice in the template.
- */
-const isCodex = computed(() => props.provider === "codex")
-
-const pasteSteps = computed(() => [
-  isCodex.value ? t("addAccount.codex.step1") : t("addAccount.claude.step1"),
-  isCodex.value ? t("addAccount.codex.step2") : t("addAccount.claude.step2"),
-])
-
-const pasteLabel = computed(() =>
-  isCodex.value ? t("addAccount.codex.label") : t("addAccount.claude.label"),
-)
+/** Claude Code is the only paste flow left: approve, then paste the code. */
+const claudeSteps = computed(() => [t("addAccount.claude.step1"), t("addAccount.claude.step2")])
 
 function clearPoll() {
   if (pollTimer) {
@@ -84,12 +71,10 @@ async function beginOAuth() {
       step.value = "claude"
       authUrl.value = res.authorization_url ?? null
       if (authUrl.value) window.open(authUrl.value, "_blank", "noopener")
-    } else if (props.provider === "codex") {
-      step.value = "codex"
-      authUrl.value = res.authorization_url ?? null
-      if (authUrl.value) window.open(authUrl.value, "_blank", "noopener")
-    } else if (props.provider === "grok") {
-      step.value = "grok"
+    } else {
+      // Codex and Grok are the same device flow, start to finish: show a code,
+      // open the verification page, poll the same endpoint until approval.
+      step.value = "device"
       userCode.value = res.user_code ?? null
       verificationUri.value = res.verification_uri_complete || res.verification_uri || null
       if (verificationUri.value) {
@@ -97,7 +82,7 @@ async function beginOAuth() {
       }
       const intervalMs = Math.max(3, res.interval ?? 5) * 1000
       pollTimer = setInterval(() => {
-        void pollGrok()
+        void pollDevice()
       }, intervalMs)
     }
   } catch {
@@ -114,7 +99,7 @@ async function submitPasteComplete() {
   try {
     const raw = pasteCode.value.trim()
     await completeLogin(props.provider, loginId.value, {
-      // Claude: code#state · Codex: full localhost:1455 URL or code#state
+      // Claude: code#state from the Anthropic callback page.
       code: raw,
       value: raw,
     })
@@ -127,7 +112,7 @@ async function submitPasteComplete() {
   }
 }
 
-async function pollGrok() {
+async function pollDevice() {
   if (!loginId.value || busy.value) return
   busy.value = true
   error.value = null
@@ -189,16 +174,16 @@ function backToStart() {
         <p class="lede">{{ t("addAccount.intro", { provider: providerName }) }}</p>
       </template>
 
-      <template v-else-if="step === 'claude' || step === 'codex'">
+      <template v-else-if="step === 'claude'">
         <ol class="steps">
-          <li v-for="(instruction, i) in pasteSteps" :key="i">{{ instruction }}</li>
+          <li v-for="(instruction, i) in claudeSteps" :key="i">{{ instruction }}</li>
         </ol>
 
         <AppButton v-if="authUrl" :href="authUrl">
           {{ t("addAccount.openAuth") }}
         </AppButton>
 
-        <FormField v-slot="field" :label="pasteLabel">
+        <FormField v-slot="field" :label="t('addAccount.claude.label')">
           <TextInput
             :id="field.id"
             v-model="pasteCode"
@@ -210,8 +195,8 @@ function backToStart() {
         </FormField>
       </template>
 
-      <template v-else-if="step === 'grok'">
-        <p class="lede">{{ t("addAccount.grok.intro") }}</p>
+      <template v-else-if="step === 'device'">
+        <p class="lede">{{ t("addAccount.device.intro") }}</p>
         <p v-if="userCode" class="code mono">{{ userCode }}</p>
         <AppButton v-if="verificationUri" :href="verificationUri">
           {{ t("addAccount.openAuth") }}
@@ -219,7 +204,7 @@ function backToStart() {
         <!-- Polite, not assertive: this repeats on every poll tick, and an
              alert would re-announce "still waiting" every few seconds. -->
         <p class="hint" role="status" aria-live="polite">
-          {{ t("addAccount.grok.waiting") }}
+          {{ t("addAccount.device.waiting") }}
         </p>
       </template>
 
@@ -272,7 +257,7 @@ function backToStart() {
         </AppButton>
       </template>
 
-      <template v-else-if="step === 'claude' || step === 'codex'">
+      <template v-else-if="step === 'claude'">
         <AppButton variant="ghost" @click="emit('close')">{{ t("action.cancel") }}</AppButton>
         <AppButton
           variant="primary"
@@ -284,10 +269,10 @@ function backToStart() {
         </AppButton>
       </template>
 
-      <template v-else-if="step === 'grok'">
+      <template v-else-if="step === 'device'">
         <AppButton variant="ghost" @click="emit('close')">{{ t("action.cancel") }}</AppButton>
-        <AppButton variant="primary" :loading="busy" @click="pollGrok">
-          {{ t("addAccount.grok.check") }}
+        <AppButton variant="primary" :loading="busy" @click="pollDevice">
+          {{ t("addAccount.device.check") }}
         </AppButton>
       </template>
 

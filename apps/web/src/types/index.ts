@@ -65,6 +65,11 @@ export type CreatedKey = ApiKey & {
   key: string
 }
 
+/**
+ * Two disjoint shapes behind one response: `authorization_url` for the browser
+ * redirect flow (Claude Code), the device-code fields for the poll flows
+ * (Codex, Grok).
+ */
 export type LoginStart = {
   login_id: string
   authorization_url?: string

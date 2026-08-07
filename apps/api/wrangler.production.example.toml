@@ -30,7 +30,6 @@ id = "<kv-cache-id>"
 [vars]
 APP_URL = "https://<your-domain>"
 GOOGLE_REDIRECT_URI = "https://<your-domain>/api/auth/callback"
-CODEX_REDIRECT_URI = "http://localhost:1455/auth/callback"
 # Optional codex egress relay (docs/codex-relay.md); delete to disable.
 # Pair with: pnpm exec wrangler secret put CODEX_RELAY_SA_KEY --config wrangler.production.toml
 # CODEX_RELAY_URL = "https://<relay>.run.app"
