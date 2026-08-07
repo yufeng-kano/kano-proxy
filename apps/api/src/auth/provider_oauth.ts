@@ -1,4 +1,4 @@
-/** Provider OAuth helpers. Claude Code uses browser PKCE; Codex uses device PKCE. */
+/** Provider OAuth helpers. Claude Code uses browser PKCE; Codex device PKCE is server-side. */
 
 import { buildPkcePair, buildStateToken } from "./pkce"
 
@@ -17,7 +17,6 @@ export const CODEX_DEVICE_AUTH = {
   deviceTokenUrl: "https://auth.openai.com/api/accounts/deviceauth/token",
   tokenUrl: "https://auth.openai.com/oauth/token",
   redirectUri: "https://auth.openai.com/deviceauth/callback",
-  scope: "openid profile email offline_access",
 } as const
 
 export type PendingOAuth = {

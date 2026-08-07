@@ -323,7 +323,7 @@ describe("PATCH /api/providers/:provider/accounts/:id custom_label", () => {
  * upstream call count rather than on the response body.
  */
 describe("Codex device OAuth", () => {
-  it("starts device login with PKCE and returns the Grok-compatible polling shape", async () => {
+  it("starts device login with JSON and returns the Grok-compatible polling shape", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)
@@ -334,10 +334,8 @@ describe("Codex device OAuth", () => {
       calls.push({ url: String(input), init: init ?? {} })
       return new Response(
         JSON.stringify({
-          device_code: "device-code",
+          device_auth_id: "device-auth-id",
           user_code: "ABCD-EFGH",
-          verification_uri: "https://auth.openai.com/codex/device",
-          verification_uri_complete: "https://auth.openai.com/codex/device?user_code=ABCD-EFGH",
           interval: "7",
         }),
         { status: 200 },
@@ -347,12 +345,10 @@ describe("Codex device OAuth", () => {
     const res = await providerRoutes.request("/codex/login", req("POST", cookie), env)
 
     expect(res.status).toBe(200)
-    const json = await readJson(res)
-    expect(json).toEqual({
+    expect(await readJson(res)).toEqual({
       login_id: expect.any(String),
       user_code: "ABCD-EFGH",
       verification_uri: "https://auth.openai.com/codex/device",
-      verification_uri_complete: "https://auth.openai.com/codex/device?user_code=ABCD-EFGH",
       interval: 7,
     })
     expect(calls).toHaveLength(1)
@@ -360,20 +356,20 @@ describe("Codex device OAuth", () => {
     expect(calls[0]!.init).toMatchObject({
       method: "POST",
       headers: {
-        "content-type": "application/x-www-form-urlencoded",
+        "content-type": "application/json",
         accept: "application/json",
       },
     })
-    const form = new URLSearchParams(calls[0]!.init.body as string)
-    expect(form.get("client_id")).toBe("codex-client-override")
-    expect(form.get("scope")).toBe("openid profile email offline_access")
-    expect(form.get("code_challenge_method")).toBe("S256")
-    expect(form.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]+$/)
+    // A form body is rejected by OpenAI with model_attributes_type.
+    expect(calls[0]!.init.headers).not.toMatchObject({
+      "content-type": "application/x-www-form-urlencoded",
+    })
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ client_id: "codex-client-override" })
     const state = db.rows("oauth_login_states")[0]!
-    expect(JSON.parse(state.payload_json as string)).toMatchObject({
+    expect(JSON.parse(state.payload_json as string)).toEqual({
       client_id: "codex-client-override",
-      device_code: "device-code",
-      code_verifier: expect.any(String),
+      device_auth_id: "device-auth-id",
+      user_code: "ABCD-EFGH",
     })
   })
 
@@ -385,9 +381,8 @@ describe("Codex device OAuth", () => {
     globalThis.fetch = (async () =>
       new Response(
         JSON.stringify({
-          device_code: "device-code",
+          device_auth_id: "device-auth-id",
           user_code: "ABCD-EFGH",
-          verification_uri: "https://auth.openai.com/codex/device",
         }),
         { status: 200 },
       )) as typeof fetch
@@ -397,7 +392,7 @@ describe("Codex device OAuth", () => {
     expect((await readJson(res)).interval).toBe(5)
   })
 
-  it("returns pending errors without exchanging tokens for pending device polls", async () => {
+  it("returns nested 403 pending errors without exchanging tokens", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)
@@ -410,8 +405,8 @@ describe("Codex device OAuth", () => {
         provider: "codex",
         payload_json: JSON.stringify({
           client_id: "codex-client",
-          device_code: "device-code",
-          code_verifier: "stored-verifier",
+          device_auth_id: "device-auth-id",
+          user_code: "ABCD-EFGH",
         }),
         expires_at: new Date(Date.now() + 60_000).toISOString(),
         created_at: NOW,
@@ -420,7 +415,15 @@ describe("Codex device OAuth", () => {
     const calls: Array<{ url: string; init: RequestInit }> = []
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push({ url: String(input), init: init ?? {} })
-      return new Response(JSON.stringify({ error: "authorization_pending" }), { status: 400 })
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "Authorization pending",
+            code: "deviceauth_authorization_pending",
+          },
+        }),
+        { status: 403 },
+      )
     }) as typeof fetch
 
     const res = await providerRoutes.request(
@@ -430,23 +433,24 @@ describe("Codex device OAuth", () => {
     )
 
     expect(res.status).toBe(400)
-    expect(await readJson(res)).toEqual({ error: "authorization_pending" })
+    expect(await readJson(res)).toEqual({ error: "token 403" })
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe("https://auth.openai.com/api/accounts/deviceauth/token")
     expect(calls[0]!.init).toMatchObject({
       method: "POST",
       headers: {
-        "content-type": "application/x-www-form-urlencoded",
+        "content-type": "application/json",
         accept: "application/json",
       },
     })
-    expect(new URLSearchParams(calls[0]!.init.body as string)).toEqual(
-      new URLSearchParams({ client_id: "codex-client", device_code: "device-code" }),
-    )
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+      device_auth_id: "device-auth-id",
+      user_code: "ABCD-EFGH",
+    })
     expect(db.rows("oauth_login_states")).toHaveLength(1)
   })
 
-  it("treats slow_down, OpenAI's 403, and 404 polls as pending and distinguishes failure", async () => {
+  it("treats slow_down and OpenAI's 404 poll as pending and distinguishes failure", async () => {
     const slowDownDb = new FakeD1()
     seedUser(slowDownDb, "user_1")
     const slowDownEnv = buildEnv(slowDownDb)
@@ -457,7 +461,11 @@ describe("Codex device OAuth", () => {
         kind: "provider",
         user_id: "user_1",
         provider: "codex",
-        payload_json: JSON.stringify({ client_id: "client", device_code: "device" }),
+        payload_json: JSON.stringify({
+          client_id: "client",
+          device_auth_id: "device-auth-id",
+          user_code: "ABCD-EFGH",
+        }),
         expires_at: new Date(Date.now() + 60_000).toISOString(),
         created_at: NOW,
       },
@@ -471,42 +479,48 @@ describe("Codex device OAuth", () => {
     )
     expect(await readJson(slowDown)).toEqual({ error: "slow_down" })
 
-    for (const status of [403, 404]) {
-      const db = new FakeD1()
-      seedUser(db, "user_1")
-      const env = buildEnv(db)
-      const cookie = await cookieFor(env, "user_1")
-      db.seed("oauth_login_states", [
-        {
-          id: `login_${status}`,
-          kind: "provider",
-          user_id: "user_1",
-          provider: "codex",
-          payload_json: JSON.stringify({ client_id: "client", device_code: "device" }),
-          expires_at: new Date(Date.now() + 60_000).toISOString(),
-          created_at: NOW,
-        },
-      ])
-      globalThis.fetch = (async () => new Response("not ready", { status })) as typeof fetch
-      const pending = await providerRoutes.request(
-        `/codex/login/login_${status}/complete`,
-        req("POST", cookie),
-        env,
-      )
-      expect(await readJson(pending)).toEqual({ error: `token ${status}` })
-    }
-
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)
     const cookie = await cookieFor(env, "user_1")
     db.seed("oauth_login_states", [
       {
+        id: "login_404",
+        kind: "provider",
+        user_id: "user_1",
+        provider: "codex",
+        payload_json: JSON.stringify({
+          client_id: "client",
+          device_auth_id: "device-auth-id",
+          user_code: "ABCD-EFGH",
+        }),
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+        created_at: NOW,
+      },
+    ])
+    globalThis.fetch = (async () => new Response("not ready", { status: 404 })) as typeof fetch
+    const pending = await providerRoutes.request(
+      "/codex/login/login_404/complete",
+      req("POST", cookie),
+      env,
+    )
+    expect(await readJson(pending)).toEqual({ error: "token 404" })
+
+    const failedDb = new FakeD1()
+    seedUser(failedDb, "user_1")
+    const failedEnv = buildEnv(failedDb)
+    const failedCookie = await cookieFor(failedEnv, "user_1")
+    failedDb.seed("oauth_login_states", [
+      {
         id: "login_failed",
         kind: "provider",
         user_id: "user_1",
         provider: "codex",
-        payload_json: JSON.stringify({ client_id: "client", device_code: "device" }),
+        payload_json: JSON.stringify({
+          client_id: "client",
+          device_auth_id: "device-auth-id",
+          user_code: "ABCD-EFGH",
+        }),
         expires_at: new Date(Date.now() + 60_000).toISOString(),
         created_at: NOW,
       },
@@ -515,13 +529,13 @@ describe("Codex device OAuth", () => {
       new Response(JSON.stringify({ error: "access_denied" }), { status: 400 })) as typeof fetch
     const failed = await providerRoutes.request(
       "/codex/login/login_failed/complete",
-      req("POST", cookie),
-      env,
+      req("POST", failedCookie),
+      failedEnv,
     )
     expect(await readJson(failed)).toEqual({ error: "Codex device token failed: access_denied" })
   })
 
-  it("exchanges the approved authorization code with the stored verifier and creates an account", async () => {
+  it("exchanges the approved authorization code with the server-issued verifier and creates an account", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)
@@ -544,8 +558,8 @@ describe("Codex device OAuth", () => {
         provider: "codex",
         payload_json: JSON.stringify({
           client_id: "codex-client",
-          device_code: "device-code",
-          code_verifier: "stored-verifier",
+          device_auth_id: "device-auth-id",
+          user_code: "ABCD-EFGH",
         }),
         expires_at: new Date(Date.now() + 60_000).toISOString(),
         created_at: NOW,
@@ -587,13 +601,14 @@ describe("Codex device OAuth", () => {
     expect(calls[0]!.init).toMatchObject({
       method: "POST",
       headers: {
-        "content-type": "application/x-www-form-urlencoded",
+        "content-type": "application/json",
         accept: "application/json",
       },
     })
-    expect(new URLSearchParams(calls[0]!.init.body as string)).toEqual(
-      new URLSearchParams({ client_id: "codex-client", device_code: "device-code" }),
-    )
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+      device_auth_id: "device-auth-id",
+      user_code: "ABCD-EFGH",
+    })
     expect(calls[1]!.init).toMatchObject({
       method: "POST",
       headers: {
@@ -606,7 +621,7 @@ describe("Codex device OAuth", () => {
         grant_type: "authorization_code",
         client_id: "codex-client",
         code: "approved-code",
-        code_verifier: "stored-verifier",
+        code_verifier: "upstream-verifier",
         redirect_uri: "https://auth.openai.com/deviceauth/callback",
       }),
     )

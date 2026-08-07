@@ -9,7 +9,7 @@ import {
   extractJwtExpiryIso,
   type PendingOAuth,
 } from "../auth/provider_oauth"
-import { buildPkcePair, parseCodeHashState } from "../auth/pkce"
+import { parseCodeHashState } from "../auth/pkce"
 import {
   acquireUsageLock,
   insertAccount,
@@ -313,7 +313,7 @@ providerRoutes.post("/:provider/accounts/import", async (c) => {
   return c.json({ ok: true, id: row.id })
 })
 
-/** Begin OAuth login — PKCE required (Claude + Codex). */
+/** Begin OAuth login — Claude uses PKCE; Codex is a server-PKCE device flow. */
 providerRoutes.post("/:provider/login", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
@@ -348,48 +348,29 @@ providerRoutes.post("/:provider/login", async (c) => {
   }
 
   if (provider === "codex") {
-    const { codeVerifier, codeChallenge } = await buildPkcePair()
     const clientId = c.env.CODEX_OAUTH_CLIENT_ID || CODEX_DEVICE_AUTH.clientId
     const deviceRes = await fetch(CODEX_DEVICE_AUTH.userCodeUrl, {
       method: "POST",
       headers: {
-        "content-type": "application/x-www-form-urlencoded",
+        "content-type": "application/json",
         accept: "application/json",
       },
-      body: new URLSearchParams({
-        client_id: clientId,
-        scope: CODEX_DEVICE_AUTH.scope,
-        code_challenge: codeChallenge,
-        code_challenge_method: "S256",
-      }),
+      body: JSON.stringify({ client_id: clientId }),
     })
     if (!deviceRes.ok) {
       const detail = (await deviceRes.text()).trim() || `HTTP ${deviceRes.status}`
       return c.json({ error: `device code failed: ${detail}` }, 502)
     }
     const device = (await deviceRes.json()) as {
-      device_code?: unknown
+      device_auth_id?: unknown
       user_code?: unknown
-      verification_uri?: unknown
-      verification_uri_complete?: unknown
       interval?: unknown
     }
-    if (typeof device.device_code !== "string" || !device.device_code) {
-      return c.json({ error: "device code response missing device_code" }, 502)
+    if (typeof device.device_auth_id !== "string" || !device.device_auth_id) {
+      return c.json({ error: "device code response missing device_auth_id" }, 502)
     }
     if (typeof device.user_code !== "string" || !device.user_code) {
       return c.json({ error: "device code response missing user_code" }, 502)
-    }
-    const verificationUri =
-      typeof device.verification_uri === "string" && device.verification_uri
-        ? device.verification_uri
-        : undefined
-    const verificationUriComplete =
-      typeof device.verification_uri_complete === "string" && device.verification_uri_complete
-        ? device.verification_uri_complete
-        : undefined
-    if (!verificationUri && !verificationUriComplete) {
-      return c.json({ error: "device code response missing verification URI" }, 502)
     }
     const parsedInterval =
       typeof device.interval === "number"
@@ -408,8 +389,8 @@ providerRoutes.post("/:provider/login", async (c) => {
         provider,
         JSON.stringify({
           client_id: clientId,
-          device_code: device.device_code,
-          code_verifier: codeVerifier,
+          device_auth_id: device.device_auth_id,
+          user_code: device.user_code,
         }),
         expires,
         nowIso(),
@@ -418,8 +399,7 @@ providerRoutes.post("/:provider/login", async (c) => {
     return c.json({
       login_id: loginId,
       user_code: device.user_code,
-      verification_uri: verificationUri,
-      verification_uri_complete: verificationUriComplete,
+      verification_uri: "https://auth.openai.com/codex/device",
       interval,
     })
   }
@@ -579,21 +559,25 @@ providerRoutes.post("/:provider/login/:id/complete", async (c) => {
       if (!stateRow) return c.json({ error: "login expired; start again" }, 400)
       const pending = JSON.parse(stateRow.payload_json) as {
         client_id?: unknown
-        device_code?: unknown
-        code_verifier?: unknown
+        device_auth_id?: unknown
+        user_code?: unknown
       }
-      if (typeof pending.client_id !== "string" || typeof pending.device_code !== "string") {
+      if (
+        typeof pending.client_id !== "string" ||
+        typeof pending.device_auth_id !== "string" ||
+        typeof pending.user_code !== "string"
+      ) {
         return c.json({ error: "invalid Codex device login state; start again" }, 400)
       }
       const tokenRes = await fetch(CODEX_DEVICE_AUTH.deviceTokenUrl, {
         method: "POST",
         headers: {
-          "content-type": "application/x-www-form-urlencoded",
+          "content-type": "application/json",
           accept: "application/json",
         },
-        body: new URLSearchParams({
-          client_id: pending.client_id,
-          device_code: pending.device_code,
+        body: JSON.stringify({
+          device_auth_id: pending.device_auth_id,
+          user_code: pending.user_code,
         }),
       })
       const tokenText = await tokenRes.text()
@@ -622,10 +606,9 @@ providerRoutes.post("/:provider/login/:id/complete", async (c) => {
         return c.json({ error: "Codex device token response missing authorization_code" }, 400)
       }
       const codeVerifier =
-        (typeof pending.code_verifier === "string" && pending.code_verifier) ||
-        (typeof deviceToken.code_verifier === "string" && deviceToken.code_verifier)
+        typeof deviceToken.code_verifier === "string" && deviceToken.code_verifier
       if (!codeVerifier) {
-        return c.json({ error: "Codex device login state missing code_verifier; start again" }, 400)
+        return c.json({ error: "Codex device token response missing code_verifier" }, 400)
       }
       const exchangeRes = await fetch(CODEX_DEVICE_AUTH.tokenUrl, {
         method: "POST",
