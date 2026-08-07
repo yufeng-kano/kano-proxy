@@ -22,8 +22,10 @@ export function stripCacheControl(value: unknown): unknown {
  * Anthropic `metadata.user_id` → the internal request's `prompt_cache_key`
  * (codex-only effect; see docs/api.md "Prompt cache"). The Messages wire
  * format has no prompt_cache_key field, but Claude Code sends a stable
- * per-session id (`user_<hash>_account_<uuid>_session_<uuid>`) here — the
- * per-conversation granularity the upstream cache router needs. Guard
+ * per-session id here — the per-conversation granularity the upstream cache
+ * router needs. Its exact shape is not relied on anywhere: the production
+ * 400 (`got 150`) proved it carries no `_session_<uuid>` tail, so downstream
+ * code treats it as an opaque string and fits it by length. Guard
  * mirrors Anthropic's own metadata.user_id limit (≤ 256 chars); anything
  * else yields undefined — a client-supplied id is translated, never invented.
  */

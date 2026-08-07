@@ -68,11 +68,12 @@ function credentialAccount(_json: unknown): string | null {
 const SESSION_UUID_SUFFIX = /_session_([0-9a-fA-F-]{36})$/
 
 /**
- * Stable `session_id` header value from the request's prompt_cache_key
+ * Candidate `session_id` header value from the request's prompt_cache_key
  * (client-sent on /openai/v1, metadata.user_id-derived on /anthropic).
- * Claude Code's id ends in `_session_<uuid>` — send that bare UUID, matching
+ * A key ending in `_session_<uuid>` contributes that bare UUID, matching
  * what the Codex CLI itself puts in this header; any other non-empty key is
- * sent as-is. The header only needs to be stable per conversation.
+ * used as-is. The header only needs to be stable per conversation. The
+ * caller still fits the winning value — see the `session_id` header below.
  */
 export function codexSessionId(promptCacheKey?: string): string | null {
   const key = promptCacheKey?.trim()
@@ -85,14 +86,15 @@ export function codexSessionId(promptCacheKey?: string): string | null {
 const CODEX_PROMPT_CACHE_KEY_MAX = 64
 
 /**
- * Fit a prompt_cache_key into the Responses field's 64-char limit. Claude
- * Code's metadata.user_id (`user_<hash>_account_<uuid>_session_<uuid>`) is
- * ~150 chars, so an unfitted key fails every /anthropic → codex turn with
- * `Invalid 'prompt_cache_key': string too long`. Must be deterministic —
- * a conversation only gets upstream cache hits if its key is stable.
- * Long keys are hashed rather than truncated: Claude Code ids share a long
- * `user_<hash>_account_<uuid>_` prefix, so a prefix cut would collapse every
- * session of one account onto a single cache shard.
+ * Fit a cache/session identifier into the Responses `prompt_cache_key`
+ * 64-char limit. Applies to BOTH the body field and the `session_id` header:
+ * the backend validates the header under the `prompt_cache_key` name, so an
+ * over-long header 400s the turn (`Invalid 'prompt_cache_key': string too
+ * long`) even when the body field is already fitted. Must be deterministic —
+ * a conversation only gets upstream cache hits if its value is stable.
+ * Long keys are hashed rather than truncated: client ids share long fixed
+ * prefixes, so a prefix cut would collapse every session of one account onto
+ * a single cache shard.
  */
 export async function fitCodexPromptCacheKey(key: string): Promise<string> {
   const uuid = SESSION_UUID_SUFFIX.exec(key)?.[1]
@@ -100,6 +102,26 @@ export async function fitCodexPromptCacheKey(key: string): Promise<string> {
   if (key.length <= CODEX_PROMPT_CACHE_KEY_MAX) return key
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key))
   return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")
+}
+
+/**
+ * The `session_id` header value actually sent upstream: client affinity ids
+ * first, then the prompt_cache_key-derived candidate, then a per-request
+ * random UUID — each fitted to the 64-char ceiling above.
+ *
+ * Every candidate is fitted, not just the derived one: affinity ids are
+ * opaque client input and are just as capable of exceeding the limit.
+ * Fitting is a no-op for anything already ≤ 64 chars, so short ids (the
+ * Codex CLI's bare UUID included) still go out verbatim.
+ */
+export async function codexSessionIdHeader(req: {
+  affinity?: { sessionId?: string; convId?: string }
+  prompt_cache_key?: string
+}): Promise<string> {
+  const candidate =
+    req.affinity?.sessionId || req.affinity?.convId || codexSessionId(req.prompt_cache_key)
+  if (!candidate) return crypto.randomUUID()
+  return fitCodexPromptCacheKey(candidate)
 }
 
 function windowLabel(seconds: number | undefined): string {
@@ -165,11 +187,7 @@ export const codexAdapter: ProviderAdapter = {
       "user-agent": CODEX_USER_AGENT,
       originator: CODEX_ORIGINATOR,
       connection: "Keep-Alive",
-      session_id:
-        req.affinity?.sessionId ||
-        req.affinity?.convId ||
-        codexSessionId(req.prompt_cache_key) ||
-        crypto.randomUUID(),
+      session_id: await codexSessionIdHeader(req),
       "content-type": "application/json",
       accept: "text/event-stream",
     }
@@ -343,8 +361,9 @@ export async function buildCodexRequestBody(
       }
     }
   }
-  // Only the upstream body field is fitted; the replay session key and the
-  // session_id header still key off the full client-supplied value.
+  // Both wire-bound values are fitted (here and in codexSessionIdHeader);
+  // only the KV replay session key still uses the full client value, since
+  // it never leaves this Worker.
   if (req.prompt_cache_key) {
     body.prompt_cache_key = await fitCodexPromptCacheKey(req.prompt_cache_key)
   }

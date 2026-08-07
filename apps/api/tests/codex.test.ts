@@ -98,11 +98,21 @@ describe("codex upstream request headers", () => {
     expect(affinityWins.headers.get("session_id")).toBe("session-9")
   })
 
-  it("keys the session_id header off the full prompt_cache_key, not the body's fitted one", async () => {
+  it("fits an over-long prompt_cache_key in the session_id header too, not just the body", async () => {
+    // The backend validates this header under the `prompt_cache_key` name,
+    // so an unfitted header 400s the turn even with a fitted body field.
     const key = "q".repeat(200)
     const captured = await captureCodexRequest({ ...baseReq, prompt_cache_key: key })
-    expect(captured.headers.get("session_id")).toBe(key)
+    expect(captured.headers.get("session_id")).toMatch(/^[0-9a-f]{64}$/)
     expect(captured.body.prompt_cache_key).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it("fits an over-long client affinity id in the session_id header", async () => {
+    const captured = await captureCodexRequest({
+      ...baseReq,
+      affinity: { sessionId: "s".repeat(120) },
+    })
+    expect(captured.headers.get("session_id")).toMatch(/^[0-9a-f]{64}$/)
   })
 
   it("omits an empty ChatGPT account id", async () => {

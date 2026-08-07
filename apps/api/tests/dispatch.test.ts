@@ -15,6 +15,7 @@ import {
   dispatchChatCompletions,
 } from "../src/proxy/dispatch"
 import { benchKey, isBenched } from "../src/pool/bench"
+import { getAdapter } from "../src/providers"
 import type { ProviderAdapter } from "../src/providers/types"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
@@ -388,6 +389,89 @@ describe("dispatchAnthropicViaOpenAI — metadata.user_id → prompt_cache_key",
       messages: [{ role: "user", content: "hi" }],
     })
     expect(captured.prompt_cache_key).toBeUndefined()
+  })
+})
+
+/**
+ * Regression for the `400 Invalid 'prompt_cache_key': string too long` that
+ * v2.7.2 only half-fixed. Asserting on `buildCodexRequestBody`'s return value
+ * missed it, because the over-long value went out on the `session_id` header
+ * — which the Responses backend validates under the `prompt_cache_key` name
+ * too. These drive the real /anthropic → codex path down to the fetch
+ * boundary and check everything a length limit can apply to.
+ */
+describe("dispatchAnthropicViaOpenAI → codex — nothing over 64 chars reaches the wire", () => {
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  /**
+   * A 150-char `metadata.user_id` with no `_session_<uuid>` tail — the two
+   * properties production proved the real Claude Code id has: the upstream
+   * 400 said `got 150`, and every branch of the fit rule returns ≤ 64, so the
+   * value reaching the wire was unfitted; a `_session_<uuid>` tail would have
+   * collapsed it to a 36-char uuid on both the header and the body. The exact
+   * shape below is illustrative — the fit is deliberately shape-agnostic.
+   */
+  const claudeCodeUserId = JSON.stringify({
+    device_id: "a".repeat(64),
+    account_uuid: "",
+    session_id: "0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e",
+  })
+
+  async function captureUpstream(userId: string, stream: boolean) {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "codex" })
+    let captured: { headers: Headers; body: Record<string, unknown> } | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      captured = { headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) }
+      return new Response("", { status: 200 })
+    }) as typeof fetch
+
+    const res = await dispatchAnthropicViaOpenAI(buildEnv(db), {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: "codex",
+      adapter: getAdapter("codex"),
+      rawModel: "codex/gpt-5.6-terra",
+      upstreamModel: "gpt-5.6-terra",
+      body: {
+        model: "gpt-5.6-terra",
+        max_tokens: 10,
+        stream,
+        metadata: { user_id: userId },
+        messages: [{ role: "user", content: "hi" }],
+      },
+      waitUntil: () => {},
+    })
+    // Eager streaming commit returns headers before the upstream call runs, so
+    // the stubbed fetch is only reached once the body has been drained.
+    await drainBody(res.body)
+    return captured!
+  }
+
+  it("fits both the session_id header and the body field on a streaming turn", async () => {
+    expect(claudeCodeUserId.length).toBe(150)
+    const captured = await captureUpstream(claudeCodeUserId, true)
+    expect(captured.headers.get("session_id")!.length).toBeLessThanOrEqual(64)
+    expect(String(captured.body.prompt_cache_key).length).toBeLessThanOrEqual(64)
+  })
+
+  it("fits them on a non-streaming turn too", async () => {
+    const captured = await captureUpstream(claudeCodeUserId, false)
+    expect(captured.headers.get("session_id")!.length).toBeLessThanOrEqual(64)
+    expect(String(captured.body.prompt_cache_key).length).toBeLessThanOrEqual(64)
+  })
+
+  it("still sends the bare uuid verbatim for a `_session_<uuid>` id", async () => {
+    const uuid = "0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e"
+    const captured = await captureUpstream(
+      `user_ab12_account_11111111-2222-3333-4444-555555555555_session_${uuid}`,
+      true,
+    )
+    expect(captured.headers.get("session_id")).toBe(uuid)
+    expect(captured.body.prompt_cache_key).toBe(uuid)
   })
 })
 
