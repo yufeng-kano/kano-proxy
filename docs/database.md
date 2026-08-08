@@ -81,8 +81,11 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 | base_url | TEXT | validated (https, no credentials/query/fragment, not localhost/private/loopback/own-host) and trailing-slash-stripped on save |
 | models_mode | TEXT | `auto` \| `manual`; `NOT NULL DEFAULT 'auto'` |
 | manual_models_json | TEXT | nullable; JSON array of upstream model id strings |
+| sort_order | INTEGER | display order within the user's list, ascending; `NOT NULL DEFAULT 0` (`0007_custom_provider_sort_order.sql`) |
 | created_at | TEXT | |
 | updated_at | TEXT | |
+
+`sort_order` is **display only** — it never affects routing, pooling, or failover (a custom provider is selected by slug, not by list position; within-provider key priority stays in `upstream_accounts.priority`). Backfilled by `created_at ASC` so existing lists keep their current visual order. Reads sort `ORDER BY sort_order ASC, created_at ASC`, so ties and a all-zero legacy table degrade to the old behavior. Writes renumber the user's full list to a dense `0..n-1` sequence in one transaction rather than patching single rows; a create appends at the end.
 
 `UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-KV-bench convention as `upstream_accounts`, over that provider's account row(s).
 

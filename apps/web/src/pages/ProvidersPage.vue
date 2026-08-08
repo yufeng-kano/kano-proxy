@@ -273,6 +273,89 @@ async function onCustomProviderSaved() {
   await customProviders.load({ refresh: true })
 }
 
+/**
+ * Reordering. The page owns the ordering logic — the row only reports intent —
+ * so both paths (buttons and drag) funnel into one `moveCustomProvider`.
+ *
+ * `reorderableCustom` gates the controls on there being something to reorder: a
+ * single endpoint with a disabled pair of arrows is two dead controls.
+ */
+const customOrderAnnouncement = ref("")
+const draggingCustomId = ref<string | null>(null)
+/** The order the drag started from — the rollback target, not render state. */
+let customDragStartIds: string[] | null = null
+
+const reorderableCustom = computed(() => (customProviders.state.data?.length ?? 0) >= 2)
+
+async function moveCustomProvider(from: number, to: number) {
+  const list = customProviders.state.data
+  if (!list || from === to || to < 0 || to >= list.length) return
+
+  const moved = list[from]
+  const ids = list.map((p) => p.id)
+  ids.splice(from, 1)
+  ids.splice(to, 0, moved.id)
+
+  const ok = await customProviders.reorder(ids)
+  if (!ok) {
+    actionError.value = t("custom.error.reorder")
+    customOrderAnnouncement.value = ""
+    return
+  }
+  actionError.value = null
+  // Announced from the server's order, so what is read out is what was saved.
+  const index = customProviders.state.data?.findIndex((p) => p.id === moved.id) ?? to
+  customOrderAnnouncement.value = t("custom.reorder.moved", {
+    name: moved.name,
+    position: index + 1,
+    total: customProviders.state.data?.length ?? 0,
+  })
+}
+
+/**
+ * A drag reorders the list locally as it crosses rows and saves **once** on
+ * drop: a PUT per hovered row would fire a request per pixel of travel and
+ * leave the list mid-flight when the pointer lifts.
+ */
+function onCustomDragStart(id: string) {
+  draggingCustomId.value = id
+  customDragStartIds = customProviders.state.data?.map((p) => p.id) ?? null
+}
+
+function onCustomDragEnter(index: number) {
+  const list = customProviders.state.data
+  const dragged = draggingCustomId.value
+  if (!list || !dragged) return
+  const from = list.findIndex((p) => p.id === dragged)
+  if (from < 0 || from === index) return
+  const next = list.slice()
+  const [moved] = next.splice(from, 1)
+  next.splice(index, 0, moved)
+  customProviders.state.data = next
+}
+
+async function onCustomDragEnd() {
+  const before = customDragStartIds
+  const dragged = draggingCustomId.value
+  draggingCustomId.value = null
+  customDragStartIds = null
+
+  const list = customProviders.state.data
+  if (!before || !list) return
+  const ids = list.map((p) => p.id)
+  if (ids.join(",") === before.join(",")) return
+
+  // Restore the pre-drag order first so `reorder` rolls back to it on failure.
+  customProviders.state.data = before
+    .map((id) => list.find((p) => p.id === id))
+    .filter((p): p is CustomProvider => !!p)
+
+  const from = before.indexOf(dragged ?? "")
+  const to = ids.indexOf(dragged ?? "")
+  if (from < 0 || to < 0) return
+  await moveCustomProvider(from, to)
+}
+
 async function onRemoveCustomProvider(provider: CustomProvider) {
   if (!confirm(t("custom.removeConfirm", { name: provider.name }))) return
   customBusyId.value = provider.id
@@ -457,13 +540,22 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 
           <div v-else-if="customProviders.state.data.length" class="rows">
             <CustomProviderCard
-              v-for="provider in customProviders.state.data"
+              v-for="(provider, index) in customProviders.state.data"
               :key="provider.id"
               :provider="provider"
               :busy="customBusyId === provider.id"
               :editing="isEditing(CUSTOM)"
+              :reorderable="reorderableCustom"
+              :can-move-up="index > 0"
+              :can-move-down="index < customProviders.state.data.length - 1"
+              :dragging="draggingCustomId === provider.id"
               @edit="openEditCustomDialog(provider)"
               @remove="onRemoveCustomProvider(provider)"
+              @move-up="moveCustomProvider(index, index - 1)"
+              @move-down="moveCustomProvider(index, index + 1)"
+              @drag-start="onCustomDragStart(provider.id)"
+              @drag-enter="onCustomDragEnter(index)"
+              @drag-end="onCustomDragEnd"
             />
           </div>
 
@@ -473,6 +565,13 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
             :title="t('custom.empty.title')"
             :body="t('custom.empty.body')"
           />
+
+          <!-- Outside the v-if chain above, so it survives the list rerendering:
+               the new position is the only feedback the move buttons give a
+               screen-reader user. -->
+          <span class="sr-only" role="status" aria-live="polite">
+            {{ customOrderAnnouncement }}
+          </span>
         </div>
       </AppCard>
     </div>

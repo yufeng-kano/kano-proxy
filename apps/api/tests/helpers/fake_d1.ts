@@ -33,6 +33,10 @@ export class FakeD1 {
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, sql, [])
   }
+
+  async batch(statements: FakeStatement[]): Promise<Array<{ success: boolean; meta: { changes: number } }>> {
+    return Promise.all(statements.map((statement) => statement.run()))
+  }
 }
 
 class FakeStatement {

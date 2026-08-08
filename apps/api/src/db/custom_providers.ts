@@ -9,6 +9,7 @@ export type CustomProviderRow = {
   base_url: string
   models_mode: "auto" | "manual"
   manual_models_json: string | null
+  sort_order: number
   created_at: string
   updated_at: string
 }
@@ -18,7 +19,11 @@ export async function listCustomProviders(
   userId: string,
 ): Promise<CustomProviderRow[]> {
   const res = await db
-    .prepare(`SELECT * FROM custom_providers WHERE user_id = ? ORDER BY created_at ASC`)
+    .prepare(
+      `SELECT * FROM custom_providers
+       WHERE user_id = ?
+       ORDER BY sort_order ASC, created_at ASC`,
+    )
     .bind(userId)
     .all<CustomProviderRow>()
   return res.results ?? []
@@ -73,11 +78,20 @@ export async function insertCustomProvider(
 ): Promise<CustomProviderRow> {
   const id = newId("cprov")
   const ts = nowIso()
+  const count = await db
+    .prepare(`SELECT COUNT(*) as c FROM custom_providers WHERE user_id = ?`)
+    .bind(input.userId)
+    .first<{ c: number }>()
+  const max = await db
+    .prepare(`SELECT COALESCE(MAX(sort_order), 0) as m FROM custom_providers WHERE user_id = ?`)
+    .bind(input.userId)
+    .first<{ m: number }>()
+  const sortOrder = count?.c ? Math.max(max?.m ?? 0, count.c - 1) + 1 : 0
   await db
     .prepare(
       `INSERT INTO custom_providers
-       (id, user_id, slug, name, format, base_url, models_mode, manual_models_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, slug, name, format, base_url, models_mode, manual_models_json, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -88,6 +102,7 @@ export async function insertCustomProvider(
       input.baseUrl,
       input.modelsMode,
       input.manualModelsJson,
+      sortOrder,
       ts,
       ts,
     )
@@ -101,9 +116,28 @@ export async function insertCustomProvider(
     base_url: input.baseUrl,
     models_mode: input.modelsMode,
     manual_models_json: input.manualModelsJson,
+    sort_order: sortOrder,
     created_at: ts,
     updated_at: ts,
   }
+}
+
+/** Renumber a user's complete custom-provider list in one D1 batch transaction. */
+export async function reorderCustomProviders(
+  db: D1Database,
+  userId: string,
+  orderedIds: string[],
+): Promise<void> {
+  const statements = orderedIds.map((id, sortOrder) =>
+    db
+      .prepare(
+        `UPDATE custom_providers
+         SET sort_order = ?, updated_at = ?
+         WHERE id = ? AND user_id = ?`,
+      )
+      .bind(sortOrder, nowIso(), id, userId),
+  )
+  await db.batch(statements)
 }
 
 /**

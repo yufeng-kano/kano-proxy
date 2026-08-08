@@ -1,5 +1,5 @@
 import { reactive, ref } from "vue"
-import { listCustomProviders } from "@/services/api"
+import { listCustomProviders, reorderCustomProviders } from "@/services/api"
 import {
   CACHE_TTL_MS,
   isCustomProvidersCacheFresh,
@@ -80,6 +80,35 @@ export function useCustomProviders() {
     }
   }
 
+  /**
+   * Writes a new display order. Optimistic: the list is repainted in `ids`
+   * order first so a keypress or a drop lands immediately, then the server's
+   * own returned array is adopted as truth. A failure restores the array the
+   * user was looking at and surfaces the error — no half-applied order.
+   */
+  async function reorder(ids: string[]): Promise<boolean> {
+    const previous = state.data
+    if (!previous) return false
+
+    const byId = new Map(previous.map((p) => [p.id, p]))
+    const optimistic = ids.map((id) => byId.get(id)).filter((p): p is CustomProvider => !!p)
+    if (optimistic.length !== previous.length) return false
+
+    state.data = optimistic
+    state.error = null
+    try {
+      const data = await reorderCustomProviders(ids)
+      state.data = data
+      state.fromCache = false
+      writeCustomProvidersCache(userId.value, data)
+      return true
+    } catch (e) {
+      state.data = previous
+      state.error = e instanceof Error ? e.message : "Failed to reorder custom providers"
+      return false
+    }
+  }
+
   function invalidateLocal() {
     state.data = null
     state.fromCache = false
@@ -89,6 +118,7 @@ export function useCustomProviders() {
     state,
     setUserId,
     load,
+    reorder,
     invalidateLocal,
     CACHE_TTL_MS,
   }

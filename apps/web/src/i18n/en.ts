@@ -195,6 +195,13 @@ export const en = {
   "custom.testEndpoint": "Test {name}",
   "custom.editEndpoint": "Edit {name}",
   "custom.removeEndpoint": "Remove {name}",
+  // Reordering is display only — the copy must not suggest it changes routing
+  // or which key a request uses.
+  "custom.reorder.moveUp": "Move {name} up",
+  "custom.reorder.moveDown": "Move {name} down",
+  "custom.reorder.moving": "Moving",
+  "custom.reorder.moved": "{name} is now {position} of {total}",
+  "custom.error.reorder": "Couldn't save the new order",
   "custom.empty.title": "No custom endpoints",
   "custom.empty.body":
     "Point at any OpenAI- or Anthropic-compatible API and call it like every other model.",

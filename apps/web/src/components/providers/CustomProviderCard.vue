@@ -9,6 +9,7 @@
  * docs/admin-ui.md § Data freshness).
  */
 import { computed, ref } from "vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -22,11 +23,25 @@ const props = defineProps<{
   busy?: boolean
   /** The section's gate — the row's actions render only while this is on. */
   editing?: boolean
+  /**
+   * Reordering controls, owned by the section: it knows the list length, so it
+   * decides whether this row can move and whether ordering is offered at all.
+   */
+  reorderable?: boolean
+  canMoveUp?: boolean
+  canMoveDown?: boolean
+  /** True while this row is the one being dragged — paired with a text cue, never color alone. */
+  dragging?: boolean
 }>()
 
 const emit = defineEmits<{
   edit: []
   remove: []
+  moveUp: []
+  moveDown: []
+  dragStart: []
+  dragEnter: []
+  dragEnd: []
 }>()
 
 const { t } = useI18n()
@@ -58,6 +73,30 @@ const testHeadline = computed(() => {
     : t("custom.test.ok")
 })
 
+/**
+ * The row is only `draggable` while the pointer is on the handle. Marking the
+ * whole row draggable makes selecting the base URL start a drag instead, and
+ * the handle is the affordance we advertise.
+ */
+const dragArmed = ref(false)
+
+function onDragStart(event: DragEvent) {
+  if (!dragArmed.value) {
+    event.preventDefault()
+    return
+  }
+  // Required for Firefox to start a drag at all; the payload is unused — the
+  // page tracks which row is moving.
+  event.dataTransfer?.setData("text/plain", props.provider.id)
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = "move"
+  emit("dragStart")
+}
+
+function onDragEnd() {
+  dragArmed.value = false
+  emit("dragEnd")
+}
+
 async function runTest() {
   testing.value = true
   testResult.value = null
@@ -73,13 +112,36 @@ async function runTest() {
 </script>
 
 <template>
-  <div class="endpoint">
+  <div
+    class="endpoint"
+    :class="{ 'is-dragging': dragging }"
+    :draggable="reorderable && dragArmed ? true : undefined"
+    @dragstart="onDragStart"
+    @dragenter="reorderable && emit('dragEnter')"
+    @dragover.prevent
+    @dragend="onDragEnd"
+  >
     <div class="endpoint-head">
+      <!-- Decoration on top of the move buttons: the same capability lives in
+           real controls below, so the handle itself is hidden from a11y. -->
+      <span
+        v-if="editing && reorderable"
+        class="handle"
+        aria-hidden="true"
+        @pointerdown="dragArmed = true"
+        @pointerup="dragArmed = false"
+      >
+        <ActionIcon name="grip" />
+      </span>
+
       <div class="identity">
         <span class="name" :title="provider.name">{{ provider.name }}</span>
         <div class="tags">
           <StatusDot :status="provider.status" />
           <Badge>{{ formatLabel }}</Badge>
+          <!-- A word, not a tint: the drag state has to survive a color-blind
+               reader and a high-contrast mode. -->
+          <span v-if="dragging" class="moving">{{ t("custom.reorder.moving") }}</span>
         </div>
       </div>
 
@@ -88,6 +150,28 @@ async function runTest() {
            carries the endpoint name for the accessible name, since several rows
            show the same three words. -->
       <div v-if="editing" class="actions">
+        <template v-if="reorderable">
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('custom.reorder.moveUp', { name: provider.name })"
+            :disabled="busy || !canMoveUp"
+            @click="emit('moveUp')"
+          >
+            <template #icon><ActionIcon name="arrow-up" /></template>
+          </AppButton>
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('custom.reorder.moveDown', { name: provider.name })"
+            :disabled="busy || !canMoveDown"
+            @click="emit('moveDown')"
+          >
+            <template #icon><ActionIcon name="arrow-down" /></template>
+          </AppButton>
+        </template>
         <AppButton
           size="sm"
           :label="t('custom.testEndpoint', { name: provider.name })"
@@ -165,6 +249,35 @@ async function runTest() {
   justify-content: space-between;
   gap: var(--space-3);
   flex-wrap: wrap;
+}
+
+/* Grabbable, but never the only way to reorder — the move buttons carry the
+   same capability for keyboard and touch. */
+.handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 24px;
+  flex-shrink: 0;
+  color: var(--faint);
+  cursor: grab;
+  touch-action: none;
+}
+
+.handle:active {
+  cursor: grabbing;
+}
+
+/* Dimmed *and* labelled: the "Moving" tag beside the name is what carries the
+   state; the opacity is only there to say which row the drop will land on. */
+.endpoint.is-dragging {
+  opacity: 0.6;
+}
+
+.moving {
+  color: var(--muted);
+  font-size: var(--text-2xs);
 }
 
 .identity {

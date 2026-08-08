@@ -15,6 +15,7 @@ import {
   getCustomProviderBySlug,
   insertCustomProvider,
   listCustomProviders,
+  reorderCustomProviders,
   updateCustomProviderFields,
   type CustomProviderRow,
 } from "../db/custom_providers"
@@ -101,6 +102,7 @@ async function toListItem(
     base_url: row.base_url,
     models_mode: row.models_mode,
     manual_models: parseManualModels(row.manual_models_json),
+    sort_order: row.sort_order,
     key_mask: keyMaskFromAccount(accounts[0]),
     status,
     created_at: row.created_at,
@@ -191,6 +193,42 @@ customProviderRoutes.post("/", async (c) => {
 
   const item = await toListItem(c.env, user.id, row)
   return c.json(item, 201)
+})
+
+customProviderRoutes.put("/order", async (c) => {
+  const user = await requireUser(c)
+  if (!user) return c.json({ error: "unauthorized" }, 401)
+
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: "invalid JSON" }, 400)
+  }
+
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "body must be an object" }, 400)
+  }
+  const ids = (body as Record<string, unknown>).ids
+  if (!Array.isArray(ids) || ids.some((id) => typeof id !== "string")) {
+    return c.json({ error: "ids must be an array of strings" }, 400)
+  }
+
+  const rows = await listCustomProviders(c.env.DB, user.id)
+  const expected = new Set(rows.map((row) => row.id))
+  const received = new Set(ids)
+  if (
+    received.size !== ids.length ||
+    received.size !== expected.size ||
+    ids.some((id) => !expected.has(id))
+  ) {
+    return c.json({ error: "ids must list every custom provider exactly once" }, 400)
+  }
+
+  await reorderCustomProviders(c.env.DB, user.id, ids)
+  const updatedRows = await listCustomProviders(c.env.DB, user.id)
+  const providers = await Promise.all(updatedRows.map((r) => toListItem(c.env, user.id, r)))
+  return c.json({ providers })
 })
 
 customProviderRoutes.put("/:id", async (c) => {

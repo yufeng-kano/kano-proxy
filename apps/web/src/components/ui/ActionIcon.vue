@@ -12,7 +12,9 @@
  * `label` (which becomes both the accessible name and the tooltip), never in
  * the glyph — so this is unconditionally `aria-hidden`.
  */
-defineProps<{ name: "refresh" | "copy" | "check" | "edit" | "expand" | "plus" }>()
+defineProps<{
+  name: "refresh" | "copy" | "check" | "edit" | "expand" | "plus" | "arrow-up" | "arrow-down" | "grip"
+}>()
 </script>
 
 <template>
@@ -57,6 +59,22 @@ defineProps<{ name: "refresh" | "copy" | "check" | "edit" | "expand" | "plus" }>
     <!-- Plus: create. -->
     <template v-else-if="name === 'plus'">
       <path d="M8 3v10M3 8h10" />
+    </template>
+
+    <!-- Arrow up / down: move a row one position within its list. -->
+    <template v-else-if="name === 'arrow-up'">
+      <path d="M8 12.5V3.5" />
+      <path d="M4.25 7.25L8 3.5l3.75 3.75" />
+    </template>
+
+    <template v-else-if="name === 'arrow-down'">
+      <path d="M8 3.5v9" />
+      <path d="M4.25 8.75L8 12.5l3.75-3.75" />
+    </template>
+
+    <!-- Grip: the drag handle's two rails. Decoration over the move buttons. -->
+    <template v-else-if="name === 'grip'">
+      <path d="M6 4.5h.01M6 8h.01M6 11.5h.01M10 4.5h.01M10 8h.01M10 11.5h.01" />
     </template>
 
     <!-- Check: the confirmation the copy swaps to. -->

@@ -139,6 +139,8 @@ export type CustomProvider = {
   /** Non-secret display mask, e.g. "sk-abc…f3a2". Never the plaintext key. */
   key_mask: string | null
   status: CustomProviderStatus
+  /** Display-only position in the user's list. The server returns items pre-sorted by it. */
+  sort_order: number
   created_at: string
   updated_at: string
 }

@@ -268,6 +268,19 @@ export async function updateCustomProvider(
   })
 }
 
+/**
+ * Rewrites the display order of every custom endpoint in one call: `ids` must
+ * list all of the user's providers exactly once, in the desired order. Returns
+ * the full list in the new order. Display only — it does not affect routing.
+ */
+export async function reorderCustomProviders(ids: string[]): Promise<CustomProvider[]> {
+  const data = await request<{ providers: CustomProvider[] }>("/api/custom-providers/order", {
+    method: "PUT",
+    body: JSON.stringify({ ids }),
+  })
+  return data.providers
+}
+
 /** Removes the provider and its stored key(s). */
 export async function deleteCustomProvider(id: string): Promise<void> {
   await request<{ ok: boolean }>(`/api/custom-providers/${encodeURIComponent(id)}`, {

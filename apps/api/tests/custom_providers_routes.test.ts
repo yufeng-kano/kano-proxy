@@ -196,6 +196,23 @@ describe("POST /api/custom-providers (create)", () => {
     expect(json.manual_models).toEqual(["model-a", "model-b"])
   })
 
+  it("includes sort_order and appends a newly created provider last", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const first = await createProvider(env, cookie, { slug: "first-endpoint", name: "First" })
+    const second = await createProvider(env, cookie, { slug: "second-endpoint", name: "Second" })
+    expect((await readJson(first)).sort_order).toBe(0)
+    expect((await readJson(second)).sort_order).toBe(1)
+
+    const list = await customProviderRoutes.request("/", req("GET", cookie), env)
+    const json = await readJson(list)
+    expect(json.providers.map((p: any) => p.slug)).toEqual(["first-endpoint", "second-endpoint"])
+    expect(json.providers.map((p: any) => p.sort_order)).toEqual([0, 1])
+  })
+
   it("rejects a base_url over 300 characters", async () => {
     const db = new FakeD1()
     seedUser(db)
@@ -323,6 +340,143 @@ describe("GET /api/custom-providers (list)", () => {
     expect(json.providers).toEqual([])
   })
 })
+
+describe("PUT /api/custom-providers/order", () => {
+  async function createProviderId(env: Env, cookie: string, slug: string): Promise<string> {
+    const res = await createProvider(env, cookie, { slug, name: slug })
+    return (await readJson(res)).id as string
+  }
+
+  async function listSlugs(env: Env, cookie: string): Promise<string[]> {
+    const res = await customProviderRoutes.request("/", req("GET", cookie), env)
+    const json = await readJson(res)
+    return json.providers.map((provider: { slug: string }) => provider.slug)
+  }
+
+  it("requires auth", async () => {
+    const db = new FakeD1()
+    const res = await customProviderRoutes.request("/order", req("PUT", "", { ids: [] }), buildEnv(db))
+    expect(res.status).toBe(401)
+  })
+
+  it("persists the requested order and returns the server list shape", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const first = await createProviderId(env, cookie, "first-endpoint")
+    const second = await createProviderId(env, cookie, "second-endpoint")
+
+    const res = await customProviderRoutes.request("/order", req("PUT", cookie, { ids: [second, first] }), env)
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json.providers.map((provider: { id: string }) => provider.id)).toEqual([second, first])
+    expect(json.providers.map((provider: { sort_order: number }) => provider.sort_order)).toEqual([0, 1])
+    expect(await listSlugs(env, cookie)).toEqual(["second-endpoint", "first-endpoint"])
+  })
+
+  it.each([
+    ["missing id", (ids: string[]) => ids.slice(1)],
+    ["extra id", (ids: string[]) => [...ids, "cprov_foreign"]],
+    ["duplicate id", (ids: string[]) => [ids[0]!, ids[0]!]],
+  ])("rejects %s without changing stored order", async (_label, mutate) => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const first = await createProviderId(env, cookie, "first-endpoint")
+    const second = await createProviderId(env, cookie, "second-endpoint")
+    const before = await listSlugs(env, cookie)
+
+    const res = await customProviderRoutes.request(
+      "/order",
+      req("PUT", cookie, { ids: mutate([first, second]) }),
+      env,
+    )
+    expect(res.status).toBe(400)
+    expect(await listSlugs(env, cookie)).toEqual(before)
+  })
+
+  it("rejects another user's id without changing stored order", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    seedUser(db, "user_2")
+    const env = buildEnv(db)
+    const cookie1 = await cookieFor(env, "user_1")
+    const cookie2 = await cookieFor(env, "user_2")
+    const first = await createProviderId(env, cookie1, "first-endpoint")
+    const second = await createProviderId(env, cookie2, "second-endpoint")
+    const before = await listSlugs(env, cookie1)
+
+    const res = await customProviderRoutes.request(
+      "/order",
+      req("PUT", cookie1, { ids: [first, second] }),
+      env,
+    )
+    expect(res.status).toBe(400)
+    expect(await listSlugs(env, cookie1)).toEqual(before)
+  })
+
+  it("rejects a non-array body without changing stored order", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await createProviderId(env, cookie, "first-endpoint")
+    await createProviderId(env, cookie, "second-endpoint")
+    const before = await listSlugs(env, cookie)
+
+    const res = await customProviderRoutes.request("/order", req("PUT", cookie, { ids: "not-an-array" }), env)
+    expect(res.status).toBe(400)
+    expect(await listSlugs(env, cookie)).toEqual(before)
+  })
+})
+
+describe("custom provider legacy sort order", () => {
+  it("falls back to created_at order when every sort_order is zero", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    db.seed("custom_providers", [
+      {
+        id: "cprov_later",
+        user_id: "user_1",
+        slug: "later-endpoint",
+        name: "Later",
+        format: "openai",
+        base_url: "https://later.example.com/v1",
+        models_mode: "auto",
+        manual_models_json: null,
+        sort_order: 0,
+        created_at: "2026-01-02T00:00:00.000Z",
+        updated_at: "2026-01-02T00:00:00.000Z",
+      },
+      {
+        id: "cprov_earlier",
+        user_id: "user_1",
+        slug: "earlier-endpoint",
+        name: "Earlier",
+        format: "openai",
+        base_url: "https://earlier.example.com/v1",
+        models_mode: "auto",
+        manual_models_json: null,
+        sort_order: 0,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    ])
+    db.seed("upstream_accounts", [])
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const res = await customProviderRoutes.request("/", req("GET", cookie), env)
+    const json = await readJson(res)
+    expect(json.providers.map((provider: { slug: string }) => provider.slug)).toEqual([
+      "earlier-endpoint",
+      "later-endpoint",
+    ])
+  })
+})
+
 
 describe("PUT /api/custom-providers/:id (update)", () => {
   async function createAndGetId(env: Env, cookie: string): Promise<string> {

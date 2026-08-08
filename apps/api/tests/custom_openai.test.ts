@@ -13,6 +13,7 @@ const row: CustomProviderRow = {
   base_url: "https://upstream.example.com/v1",
   models_mode: "auto",
   manual_models_json: null,
+  sort_order: 0,
   created_at: "2026-01-01T00:00:00.000Z",
   updated_at: "2026-01-01T00:00:00.000Z",
 }
