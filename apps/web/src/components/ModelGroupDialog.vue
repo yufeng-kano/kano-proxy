@@ -631,15 +631,16 @@ async function remove() {
 
 <template>
   <Modal
-    size="lg"
+    size="wide"
     :title="isEdit ? t('groups.dialog.editTitle') : t('groups.create')"
     @close="emit('close')"
   >
-    <!-- Two columns, one surface: a single hairline between them, both heads on
-         the same row, the same padding either side. Boxing the columns
-         separately read as two unrelated cards and was rejected. -->
+    <!-- Three columns, one surface: identity, picker, order — a hairline
+         between each adjacent pair, all three heads on the same row, the same
+         padding in every column. Boxing them separately read as unrelated
+         cards and was rejected; so did stacking identity above the picker. -->
     <div class="board">
-      <!-- Left: what the group is, then what it can point at. -->
+      <!-- ① What the group is called, and what clients may call it. -->
       <section class="col" aria-labelledby="group-col-identity">
         <h3 id="group-col-identity" class="col-head">
           {{ t("groups.dialog.identityLabel") }}
@@ -711,10 +712,13 @@ async function remove() {
 
           <p v-if="aliasError" class="field-error" role="alert">{{ aliasError }}</p>
         </fieldset>
+      </section>
+
+      <!-- ② Where targets come from: provider, then account, then model. -->
+      <section class="col" aria-labelledby="group-col-picker">
+        <h3 id="group-col-picker" class="col-head">{{ t("groups.dialog.pickerLabel") }}</h3>
 
         <div class="picker">
-          <p class="field-label">{{ t("groups.dialog.pickerLabel") }}</p>
-
           <!-- Scrolls sideways rather than wrapping, so the region below never
                moves as the endpoint list grows. -->
           <SectionNav
@@ -844,7 +848,7 @@ async function remove() {
         </div>
       </section>
 
-      <!-- Right: what the group actually routes to, in the order it is tried. -->
+      <!-- ③ What the group actually routes to, in the order it is tried. -->
       <section class="col" aria-labelledby="group-col-targets">
         <h3 id="group-col-targets" class="col-head">{{ t("groups.dialog.targetsLabel") }}</h3>
 
@@ -973,22 +977,26 @@ async function remove() {
 
 <style scoped>
 /*
- * Two columns that read as one surface.
+ * Three columns that read as one surface.
  *
- * The dialog's own background runs behind both, one hairline separates them,
- * and nothing inside either column is boxed — structure is drawn with hairlines
- * only. The board bleeds through Modal's body padding (which it then restates
- * per column, so the spacing is unchanged) because that divider has to reach
- * the panel's edges: a rule floating inside a padded box is exactly what made
- * the previous version read as two cards parked next to each other.
+ * The dialog's own background runs behind all three, a hairline separates each
+ * adjacent pair, and nothing inside any column is boxed — structure is drawn
+ * with hairlines only. The board bleeds through Modal's body padding (which it
+ * then restates per column, so the spacing is unchanged) because those dividers
+ * have to reach the panel's edges: a rule floating inside a padded box is
+ * exactly what made an earlier version read as cards parked next to each other.
  *
  * The columns stretch to a common height — the default, deliberately not
- * `align-items: start` — so the divider runs the full height of the surface
- * rather than stopping wherever the shorter column ends.
+ * `align-items: start` — so each divider runs the full height of the surface
+ * rather than stopping wherever the shortest column ends.
+ *
+ * Tracks: identity is a form and needs the least; the picker holds a rail *and*
+ * a list and needs the most; the order column sits between them, wide enough
+ * that a target's id and its three controls share one line.
  */
 .board {
   display: grid;
-  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.3fr) minmax(0, 1.05fr);
   margin: calc(var(--space-5) * -1);
 }
 
@@ -1000,13 +1008,14 @@ async function remove() {
   padding: var(--space-5);
 }
 
-/* The one divider. */
+/* The dividers — one per adjacent pair, and nothing else draws a line between
+   columns. */
 .col + .col {
   border-left: 1px solid var(--border);
 }
 
-/* Both heads are their column's first child under identical padding, so they
-   sit on one row without either side declaring a height. */
+/* Each head is its column's first child under identical padding, so all three
+   sit on one row without any of them declaring a height. */
 .col-head {
   margin: 0;
   color: var(--text);
@@ -1019,12 +1028,15 @@ async function remove() {
 
 /* Unframed: the tab strip's underline and the rail's edge are the only lines,
    which is what makes the inverted L read as structure on the surface rather
-   than as a widget dropped onto it. */
+   than as a widget dropped onto it. It owns its column, so it takes the height
+   that column has. */
 .picker {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: var(--space-2);
   min-width: 0;
+  min-height: 0;
 }
 
 .picker-tabs {
@@ -1034,13 +1046,18 @@ async function remove() {
 
 /* The inverted L: rail down the left, models filling the rest. A declared
    height, not a content-driven one — the two regions scroll inside it, so the
-   dialog's own height never depends on how many models a provider lists. Sized
-   so the whole left column still fits a 900px-tall viewport once the identity
-   fields sit above it. */
+   dialog's own height never depends on how many models a provider lists. Its
+   own column now, so it can be tall: 400px keeps the whole dialog inside a
+   900px-tall viewport (Modal caps the panel at 760px, less its header, footer,
+   and this column's padding).
+
+   The rail is a proportion between two bounds rather than a fixed 128px: on a
+   small desktop the panel is narrower than 3/4 of a wide one, and a fixed rail
+   would take that difference out of the model list, which has less to give. */
 .picker-body {
   display: grid;
-  grid-template-columns: 128px minmax(0, 1fr);
-  height: 248px;
+  grid-template-columns: clamp(96px, 28%, 128px) minmax(0, 1fr);
+  height: 400px;
   min-height: 0;
 }
 
@@ -1248,9 +1265,12 @@ async function remove() {
 
 .targets {
   display: grid;
+  align-content: start;
   margin: 0;
   padding: 0;
-  max-height: 320px;
+  /* Matched to the picker beside it, so a full list and a full model list end
+     at the same line instead of one column dragging the panel taller. */
+  max-height: 424px;
   overflow-y: auto;
   overscroll-behavior: contain;
   list-style: none;
@@ -1426,12 +1446,12 @@ async function remove() {
   margin-right: auto;
 }
 
-/* Below the sheet breakpoint the two columns stack — picker above, selected
-   list below — and the divider turns with them, staying one hairline between
-   the two. The inverted L flattens into two rows as well: the rail becomes a
-   chip strip under the tabs, because a 128px column is width a phone does not
-   have to give. */
-@media (max-width: 640px) {
+/* Below the table breakpoint three columns no longer fit, so they stack in
+   reading order — identity, picker, order — and the dividers turn with them,
+   staying one hairline between each pair. The picker gives back some height
+   here: it is now one region in a scrolling column rather than one of three
+   side by side. */
+@media (max-width: 768px) {
   .board {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1441,6 +1461,19 @@ async function remove() {
     border-top: 1px solid var(--border);
   }
 
+  .picker-body {
+    height: 300px;
+  }
+
+  .targets {
+    max-height: 320px;
+  }
+}
+
+/* Below the sheet breakpoint the inverted L flattens too: the rail becomes a
+   chip strip under the tabs, because even 96px of side rail is width a phone
+   does not have to give. */
+@media (max-width: 640px) {
   .picker-body {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);

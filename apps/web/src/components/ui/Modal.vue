@@ -14,7 +14,18 @@ import { nextTick, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "@/i18n"
 import { getScrollRegion } from "@/services/scrollRegion"
 
-withDefaults(defineProps<{ title: string; size?: "sm" | "md" | "lg" }>(), { size: "sm" })
+withDefaults(
+  defineProps<{
+    title: string
+    /**
+     * `sm`/`md`/`lg` are fixed maximum widths. `wide` is the one relative size:
+     * a dialog whose content is a multi-column workspace rather than a form,
+     * sized to the viewport (docs/admin-ui.md § Groups page).
+     */
+    size?: "sm" | "md" | "lg" | "wide"
+  }>(),
+  { size: "sm" },
+)
 
 const emit = defineEmits<{ close: [] }>()
 
@@ -196,6 +207,21 @@ onBeforeUnmount(() => {
   max-width: 880px;
 }
 
+/*
+ * Three-quarters of the viewport, for a dialog that is a workspace: several
+ * columns side by side rather than one column of fields.
+ *
+ * The floor matters as much as the ceiling. Below it, 75vw would hand a
+ * multi-column layout less width than its columns need, so the panel instead
+ * takes everything the overlay offers — `width: 100%` and the overlay's own
+ * padding still cap it, which is what keeps the margins intact on a small
+ * desktop. The ceiling stops it from stretching to an unreadable slab on an
+ * ultrawide display.
+ */
+.panel.wide {
+  max-width: min(1440px, max(75vw, 980px));
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -286,7 +312,8 @@ onBeforeUnmount(() => {
   .panel,
   .panel.sm,
   .panel.md,
-  .panel.lg {
+  .panel.lg,
+  .panel.wide {
     max-width: none;
     /* `dvh`, not `vh`: the dynamic viewport shrinks when the on-screen
        keyboard opens, so a focused field stays above it instead of being
