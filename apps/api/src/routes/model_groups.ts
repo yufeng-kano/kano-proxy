@@ -18,11 +18,13 @@ import {
   type ModelGroupRow,
 } from "../db/model_groups"
 import { isProviderId } from "../env"
+import { DEFAULT_STRATEGY } from "../routing/strategy"
 import {
   MAX_MODEL_GROUPS_PER_USER,
   validateAliases,
   validateDisplayName,
   validateGroupTargets,
+  validateStrategy,
 } from "../utils/model_group"
 
 export const modelGroupRoutes = new Hono<HonoEnv>()
@@ -86,6 +88,11 @@ async function toListItem(
     name: row.name,
     aliases: aliasRows.map((a) => a.alias),
     targets: enriched,
+    // Raw column value, not run through the dispatch-time forward-compat
+    // degrade (`routing/strategy.ts` normalizeStrategy) — today the two are
+    // identical since `ordered` is the only writable value, but the read
+    // API should still surface exactly what's stored.
+    strategy: row.strategy ?? DEFAULT_STRATEGY,
     created_at: row.created_at,
     updated_at: row.updated_at,
   }
@@ -128,6 +135,12 @@ modelGroupRoutes.post("/", async (c) => {
   const targetsRes = await validateGroupTargets(body.targets, resolvePrefix, resolveAccount)
   if (!targetsRes.ok) return c.json({ error: targetsRes.error }, 400)
 
+  // `strategy` defaults to `ordered`; only `ordered` is accepted today
+  // (docs/providers.md § Routing module).
+  const strategy = body.strategy === undefined ? DEFAULT_STRATEGY : body.strategy
+  const strategyErr = validateStrategy(strategy)
+  if (strategyErr) return c.json({ error: strategyErr }, 400)
+
   const count = await countModelGroups(c.env.DB, user.id)
   if (count >= MAX_MODEL_GROUPS_PER_USER) {
     return c.json({ error: `maximum of ${MAX_MODEL_GROUPS_PER_USER} model groups reached` }, 400)
@@ -142,6 +155,7 @@ modelGroupRoutes.post("/", async (c) => {
     userId: user.id,
     name,
     targets: targetsRes.targets,
+    strategy: strategy as string,
   })
   await replaceAliases(c.env.DB, { userId: user.id, groupId: row.id, aliases: aliasesRes.aliases })
   return c.json(await toListItem(c.env.DB, user.id, row), 201)
@@ -194,7 +208,14 @@ modelGroupRoutes.put("/:id", async (c) => {
     targets = res.targets
   }
 
-  await updateModelGroupFields(c.env.DB, id, { name, targets })
+  let strategy: string | undefined
+  if (body.strategy !== undefined) {
+    const err = validateStrategy(body.strategy)
+    if (err) return c.json({ error: err }, 400)
+    strategy = body.strategy as string
+  }
+
+  await updateModelGroupFields(c.env.DB, id, { name, targets, strategy })
   if (aliases) {
     await replaceAliases(c.env.DB, { userId: user.id, groupId: id, aliases })
   }

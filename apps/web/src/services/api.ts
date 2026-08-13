@@ -13,6 +13,7 @@ import type {
   ModelGroupTargetInput,
   ModelsResponse,
   ProviderId,
+  RoutingStrategy,
   SpendLimitInterval,
   UsageDays,
   UsageSummary,
@@ -162,6 +163,22 @@ export async function listAccounts(
 ): Promise<AccountsResponse> {
   const q = opts?.refresh ? "?refresh=true" : ""
   return request<AccountsResponse>(`/api/providers/${provider}/accounts${q}`)
+}
+
+/**
+ * Sets the pool's routing strategy (docs/auth.md). `ordered` is the only value
+ * the server accepts today; anything else is a 400. Returns the stored value so
+ * the caller paints what was saved rather than what it sent.
+ */
+export async function setProviderStrategy(
+  provider: ProviderId,
+  strategy: RoutingStrategy,
+): Promise<RoutingStrategy> {
+  const data = await request<{ ok: boolean; strategy: RoutingStrategy }>(
+    `/api/providers/${provider}`,
+    { method: "PATCH", body: JSON.stringify({ strategy }) },
+  )
+  return data.strategy
 }
 
 export async function promoteAccount(
@@ -324,6 +341,7 @@ export async function createModelGroup(body: {
   name: string
   aliases: string[]
   targets: ModelGroupTargetInput[]
+  strategy?: RoutingStrategy
 }): Promise<ModelGroup> {
   return request<ModelGroup>("/api/model-groups", {
     method: "POST",
@@ -338,7 +356,12 @@ export async function createModelGroup(body: {
  */
 export async function updateModelGroup(
   id: string,
-  body: { name?: string; aliases?: string[]; targets?: ModelGroupTargetInput[] },
+  body: {
+    name?: string
+    aliases?: string[]
+    targets?: ModelGroupTargetInput[]
+    strategy?: RoutingStrategy
+  },
 ): Promise<ModelGroup> {
   return request<ModelGroup>(`/api/model-groups/${encodeURIComponent(id)}`, {
     method: "PUT",

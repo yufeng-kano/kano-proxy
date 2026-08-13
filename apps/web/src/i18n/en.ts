@@ -154,6 +154,18 @@ export const en = {
   "providers.error.promote": "Couldn't change the primary account",
   "providers.error.remove": "Couldn't remove the account",
   "providers.error.rename": "Couldn't rename the account",
+  "providers.error.strategy": "Couldn't change the routing strategy",
+
+  // --- Routing strategy ---------------------------------------------------
+  // How a pool or a group decides what a request runs on. One option ships
+  // today and the control still says so out loud: knowing there is a routing
+  // policy at all is the point, not choosing between two. The two description
+  // lines answer the same question on the two surfaces — a pool orders the
+  // accounts bound to it, a group orders the targets the user listed.
+  "strategy.label": "Strategy",
+  "strategy.ordered": "Ordered",
+  "strategy.pool.ordered": "Priority order, first usable account",
+  "strategy.group.ordered": "Targets tried in list order",
 
   // --- Provider descriptions (product copy, not mechanism) ----------------
   "provider.claude-code.name": "Claude Code",

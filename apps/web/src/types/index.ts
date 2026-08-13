@@ -29,11 +29,32 @@ export type ProviderAccount = {
   stale: boolean
 }
 
+/**
+ * How a pool or a group orders the candidates a request may run on
+ * (docs/providers.md § Routing module). `ordered` — priority order, first
+ * usable candidate — is the only value today; future ones (usage balancing)
+ * plug into the same field, which is why the UI writes it through a select
+ * rather than stating it as text.
+ */
+export type RoutingStrategy = "ordered"
+
+/** What the server falls back to, and what a payload without the field means. */
+export const DEFAULT_ROUTING_STRATEGY: RoutingStrategy = "ordered"
+
+/** Every strategy the UI offers, in display order. */
+export const ROUTING_STRATEGIES: RoutingStrategy[] = ["ordered"]
+
 export type AccountsResponse = {
   available: boolean
   accounts: ProviderAccount[]
   models: string[]
   error: string | null
+  /**
+   * The pool's routing strategy. Optional because a cache entry written before
+   * the field existed has none — absent reads as `ordered`, which is what the
+   * server would have answered anyway.
+   */
+  strategy?: RoutingStrategy
 }
 
 /** Reset window for a key's spend limit (docs/pricing.md). */
@@ -185,6 +206,8 @@ export type ModelGroup = {
   aliases: string[]
   /** Ordered targets — array order **is** priority. */
   targets: ModelGroupTarget[]
+  /** How the group orders its targets. Absent (old cache entry) reads as `ordered`. */
+  strategy?: RoutingStrategy
   created_at: string
   updated_at: string
 }

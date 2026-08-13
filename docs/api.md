@@ -185,11 +185,11 @@ Same host keeps `/anthropic/*` for additional Anthropic routes if needed; do not
 
 ## Model routing
 
-1. A `model` string **without any `/`** is a candidate **model group alias**: look it up in `model_group_aliases` scoped to the authenticated user; on a hit, expand the alias's group to the first usable target (ordered-priority walk — full selection contract in [providers.md](./providers.md) § Model groups) and continue below with that target. A target pinned to a specific account dispatches on exactly that account — step 5's pool acquire/failover collapses to that single account for the request. A miss is `400 invalid_model`. Applies identically on **both** surfaces.
+1. A `model` string **without any `/`** is a candidate **model group alias**: look it up in `model_group_aliases` scoped to the authenticated user; on a hit, expand the alias's group into the flat candidate list per the group's `strategy` (default `ordered` — full contract in [providers.md](./providers.md) § Model groups and § Routing module) and continue below with it. A target pinned to a specific account contributes exactly that account as a candidate; on a bench-type failure the walk continues into the group's later targets within the same request. A miss is `400 invalid_model`. Applies identically on **both** surfaces.
 2. Otherwise parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id, split on the **first** `/` only — an upstream id may itself contain further `/`).
 3. If `provider` is a builtin `ProviderId`, use it directly. Otherwise look it up as a custom provider slug, scoped to the authenticated user (`custom_providers` table) — never resolves another user's slug.
 4. Resolve user’s pool for that provider (or custom slug).
-5. `acquire()` usable account; on 401/402/403/429 bench and try next (402 = billing/credit exhaustion — e.g. OpenRouter's `402 Insufficient credits` — the account is unusable until topped up, so retrying it per-request just burns a failing upstream round-trip).
+5. Walk the routing module's candidate list ([providers.md](./providers.md) § Routing module) under the pool's `strategy` (default `ordered` = pool priority). Candidates whose stored usage snapshot shows an exhausted window (`utilization ≥ 100`) are skipped up front until that window's `resets_at`. On upstream 401/402/403/429/520/522/524, bench and try the next candidate — 429 benches until the upstream reset when derivable, others 300s (402 = billing/credit exhaustion — e.g. OpenRouter's `402 Insufficient credits` — the account is unusable until topped up, so retrying it per-request just burns a failing upstream round-trip).
 6. No usable account → error (below).
 7. No provider match at all (not a builtin id, not one of the caller's custom slugs, not one of their group names) → `400 invalid_model`.
 
@@ -312,7 +312,7 @@ Authenticated pre-dispatch failures (invalid model, no upstream account, loop-gu
 
 ## Rate limits
 
-No platform per-request rate limit. Upstream rate limits apply; pool benches on 401/402/403/429. A key with a configured **spend limit** gets 429 `spend_limit_exceeded` once its window's estimated spend reaches the ceiling — see [pricing.md](./pricing.md). The check is pre-dispatch and never counts a 429'd request itself as spend.
+No platform per-request rate limit. Upstream rate limits apply; the pool benches on 401/402/403/429 and on upstream edge-timeout statuses 520/522/524 — a 429 benches until the upstream reset when derivable (else 300s), and an account whose usage snapshot shows an exhausted window is skipped until that window resets ([providers.md](./providers.md) § Routing module). A key with a configured **spend limit** gets 429 `spend_limit_exceeded` once its window's estimated spend reaches the ceiling — see [pricing.md](./pricing.md). The check is pre-dispatch and never counts a 429'd request itself as spend.
 
 ## Changelog (admin)
 

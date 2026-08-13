@@ -1,6 +1,7 @@
 /** Validation and limits for user-defined model groups (docs/providers.md § Model groups). */
 
 import type { GroupTarget } from "../db/model_groups"
+import { DEFAULT_STRATEGY } from "../routing/strategy"
 import { splitModelId } from "./model"
 
 export const MAX_MODEL_GROUPS_PER_USER = 50
@@ -61,6 +62,20 @@ export function validateAliases(aliases: unknown): AliasesValidation {
     out.push(trimmed)
   }
   return { ok: true, aliases: out }
+}
+
+/**
+ * `strategy` (docs/providers.md § Routing module): `ordered` is the only
+ * accepted value today, so this is a strict equality check, not a set
+ * membership one — a future second value adds a branch here, not just to
+ * the set literal. `undefined` (field omitted) is the caller's job to
+ * default, not this validator's — see the POST/PUT routes.
+ */
+export function validateStrategy(strategy: unknown): string | null {
+  if (strategy !== DEFAULT_STRATEGY) {
+    return `strategy must be "${DEFAULT_STRATEGY}"`
+  }
+  return null
 }
 
 export type GroupTargetsValidation = { ok: true; targets: GroupTarget[] } | { ok: false; error: string }

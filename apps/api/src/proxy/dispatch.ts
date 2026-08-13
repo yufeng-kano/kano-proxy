@@ -1,14 +1,16 @@
+import { decryptJson } from "../crypto/token_crypto"
+import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env, ProviderId } from "../env"
-import {
-  acquireAccount,
-  benchAccount,
-  shouldBenchStatus,
-  type AcquiredAccount,
-} from "../pool/acquire"
-import { earliestBenchExpiry } from "../pool/bench"
-import { getAccount, listAccounts, type AccountRow } from "../db/accounts"
+import { markBenched } from "../pool/bench"
+import type { AcquiredAccount, StoredCredential } from "../pool/acquire"
 import { getAdapter } from "../providers"
+import { refreshAccountUsageInBackground } from "../providers/usage_refresh"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
+import { poolCandidates } from "../routing/candidates"
+import { candidateFactsList, earliestUnusableUntil } from "../routing/facts"
+import { penaltyForOutcome } from "../routing/feedback"
+import { normalizeStrategy, orderCandidates } from "../routing/strategy"
+import type { RoutingCandidate } from "../routing/types"
 import { logRequest } from "../logging/request_log"
 import {
   createAnthropicSseUsageSniffer,
@@ -17,6 +19,7 @@ import {
   fromOpenAIUsage,
   type NormalizedUsage,
 } from "../logging/usage_capture"
+import { splitModelId } from "../utils/model"
 import {
   streamWithEagerProducer,
   streamWithKeepalive,
@@ -25,6 +28,9 @@ import {
 
 /** Keeps a Worker invocation alive for a deferred `logRequest` past the returned Response — `c.executionCtx.waitUntil` in production, a test double in tests. */
 export type WaitUntil = (promise: Promise<unknown>) => void
+
+/** The candidate walk never retries more than this many real upstream calls in one request — same cap as the old `acquireAccount`+exclude loop. */
+const MAX_ATTEMPTS = 8
 
 /**
  * `request_logs.model`/`provider` always store the expanded canonical
@@ -36,28 +42,6 @@ export type WaitUntil = (promise: Promise<unknown>) => void
  */
 function canonicalModelId(provider: string, upstreamModel: string): string {
   return `${provider}/${upstreamModel}`
-}
-
-/**
- * The accounts this request may draw from for the "no account bound at all"
- * (400 `no_upstream_account`) vs "bound but unavailable right now" (503 +
- * `Retry-After`) decision, and for the `Retry-After` bench-expiry lookup.
- * Restricted to exactly the pinned account when a model-group target pinned
- * one (docs/providers.md § Model groups "Account pinning": failover is
- * disabled for a pinned target, so its "pool" is that one account, not the
- * whole provider) — a deleted or foreign-provider pinned account reads as no
- * bound account at all, same as an empty pool. Unpinned requests are
- * byte-identical to the unrestricted `listAccounts` call this replaces.
- */
-async function boundAccountsFor(
-  env: Env,
-  userId: string,
-  provider: string,
-  pinnedAccountId?: string,
-): Promise<AccountRow[]> {
-  if (!pinnedAccountId) return listAccounts(env.DB, userId, provider)
-  const row = await getAccount(env.DB, userId, pinnedAccountId)
-  return row && row.provider === provider ? [row] : []
 }
 
 /** No real upstream chunk for this long tears the stream down — docs/api.md "Streaming". */
@@ -98,9 +82,9 @@ function retryAfterSeconds(untilMs: number): number {
 /**
  * Shared "pool unavailable" 503 for both surfaces — same envelope shape
  * either dispatch function already returned before `Retry-After` existed,
- * now with the header attached whenever the earliest bench expiry across
- * the affected accounts is known (docs/api.md "Errors"): the whole bound
- * pool is benched right now, or the 8-attempt failover loop exhausted it.
+ * now with the header attached whenever the earliest bench/limit expiry
+ * across the candidates is known (docs/api.md "Errors"): every candidate is
+ * currently unusable, or the 8-attempt walk exhausted the ones that were.
  */
 function upstreamUnavailableResponse(body: Record<string, unknown>, untilMs: number | null): Response {
   const init: ResponseInit = { status: 503 }
@@ -185,6 +169,67 @@ function bodyWantsStream(body: unknown): boolean {
   )
 }
 
+/**
+ * The routing module's candidate list, ready for dispatch to walk
+ * (docs/providers.md § Routing module). `candidates` and `strategy` let a
+ * caller (a group dispatch, via the cross-target flattened list) hand in an
+ * already-built, possibly cross-provider list; when omitted, this builds
+ * the ordinary single-pool list dispatch has always used — the shape every
+ * existing single-provider call site (including tests) still gets.
+ */
+type CandidateSource = {
+  userId: string
+  apiKeyId: string | null
+  provider: string
+  adapter?: ProviderAdapter
+  pinnedAccountId?: string
+  /** Pre-built cross-target candidate list (group dispatch) — bypasses the single-pool builder below entirely. */
+  candidates?: RoutingCandidate[]
+  /** `model_groups.strategy` (candidates given) or `provider_settings.strategy` (single pool); defaults to `ordered`. */
+  strategy?: string
+  isBuiltin?: boolean
+  customProvider?: CustomProviderRow
+}
+
+type Plan =
+  | { kind: "no_account" }
+  | { kind: "unavailable"; untilMs: number | null }
+  | { kind: "usable"; ordered: RoutingCandidate[] }
+
+async function planCandidates(env: Env, src: CandidateSource, upstreamModel: string): Promise<Plan> {
+  const candidates =
+    src.candidates ??
+    (await poolCandidates(env, src.userId, {
+      provider: src.provider,
+      upstreamModel,
+      isBuiltin: src.isBuiltin ?? true,
+      customProvider: src.customProvider,
+      adapter: src.adapter ?? getAdapter(src.provider as ProviderId),
+      accountId: src.pinnedAccountId ?? null,
+    }))
+  if (candidates.length === 0) return { kind: "no_account" }
+  const facts = await candidateFactsList(env, src.userId, candidates)
+  const ordered = orderCandidates(candidates, facts, {
+    apiKeyId: src.apiKeyId,
+    strategy: normalizeStrategy(src.strategy),
+  })
+  const usable = ordered.filter((o) => o.facts.usable).map((o) => o.candidate)
+  if (usable.length === 0) return { kind: "unavailable", untilMs: earliestUnusableUntil(facts) }
+  return { kind: "usable", ordered: usable }
+}
+
+/** Decrypt + `refreshIfNeeded` for one candidate — `null` on an unreadable credential (skipped, never counted as an attempt, mirrors the old `acquireAccount`). */
+async function acquireCandidate(env: Env, candidate: RoutingCandidate): Promise<AcquiredAccount | null> {
+  try {
+    const credential = await decryptJson<StoredCredential>(env.TOKEN_ENCRYPTION_KEY, candidate.account.encrypted_payload)
+    let acquired: AcquiredAccount = { row: candidate.account, credential }
+    if (candidate.adapter.refreshIfNeeded) acquired = await candidate.adapter.refreshIfNeeded(env, acquired)
+    return acquired
+  } catch {
+    return null
+  }
+}
+
 export async function dispatchChatCompletions(
   env: Env,
   opts: {
@@ -200,8 +245,13 @@ export async function dispatchChatCompletions(
     idleTimeoutMs?: number
     /** The model-group alias this request was addressed to, if any — logged alongside the expanded canonical model (docs/database.md `request_logs.group_name`). */
     groupName?: string
-    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. */
+    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. Ignored when `candidates` is given (already scoped). */
     pinnedAccountId?: string
+    /** Pre-built cross-target candidate list — group dispatch (docs/providers.md § Routing module). */
+    candidates?: RoutingCandidate[]
+    strategy?: string
+    isBuiltin?: boolean
+    customProvider?: CustomProviderRow
   },
 ): Promise<Response> {
   if (opts.req.stream) {
@@ -210,97 +260,79 @@ export async function dispatchChatCompletions(
   return dispatchChatCompletionsLegacy(env, opts)
 }
 
+type ChatCompletionsOpts = Parameters<typeof dispatchChatCompletions>[1]
+
 /**
- * Eager streaming commit: return 200 + SSE immediately, run acquire/failover
- * inside the stream (docs/api.md "Eager streaming commit").
+ * Eager streaming commit: return 200 + SSE immediately, run the candidate
+ * walk inside the stream (docs/api.md "Eager streaming commit").
  */
-async function dispatchChatCompletionsEager(
-  env: Env,
-  opts: {
-    userId: string
-    apiKeyId: string | null
-    provider: string
-    adapter?: ProviderAdapter
-    req: ChatCompletionRequest & { rawModel: string }
-    waitUntil: WaitUntil
-    idleTimeoutMs?: number
-    groupName?: string
-    pinnedAccountId?: string
-  },
-): Promise<Response> {
+async function dispatchChatCompletionsEager(env: Env, opts: ChatCompletionsOpts): Promise<Response> {
   const started = Date.now()
-  const adapter = opts.adapter ?? getAdapter(opts.provider as ProviderId)
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
 
   let forcedErrorCode: string | null = null
   let accountId: string | undefined
+  let usedProvider = opts.provider
+  let usedUpstreamModel = opts.req.upstreamModel
   /** TTFB into the pipe, or time until terminal fail/cancel if earlier. */
   let headersLatencyMs: number | null = null
   const sniffer = createOpenAISseUsageSniffer()
 
   const body = streamWithEagerProducer(
     async (ctl) => {
-      const exclude = new Set<string>()
+      const plan = await planCandidates(env, opts, opts.req.upstreamModel)
+      if (ctl.cancelled()) return
+
+      if (plan.kind === "no_account") {
+        headersLatencyMs = Date.now() - started
+        forcedErrorCode = "no_upstream_account"
+        ctl.fail(
+          openaiStreamErrorFrame(
+            `No usable ${opts.provider} account for this user`,
+            "invalid_request_error",
+            "no_upstream_account",
+          ),
+        )
+        return
+      }
+      if (plan.kind === "unavailable") {
+        headersLatencyMs = Date.now() - started
+        forcedErrorCode = "upstream_unavailable"
+        ctl.fail(
+          openaiStreamErrorFrame("All upstream accounts unavailable", "api_error", "upstream_unavailable"),
+        )
+        return
+      }
+
       let lastResponse: Response | null = null
-      let used: AcquiredAccount | null = null
-
-      for (let attempt = 0; attempt < 8; attempt++) {
+      let idx = 0
+      let attempts = 0
+      /** Set only when the candidate list itself ran dry (not the attempt cap) — see the post-loop branch below. */
+      let ranOutOfCandidates = false
+      for (; attempts < MAX_ATTEMPTS; ) {
         if (ctl.cancelled()) return
-
-        const account = await acquireAccount(env, opts.userId, opts.provider, exclude, opts.pinnedAccountId)
-        if (ctl.cancelled()) return
-
-        if (!account) {
-          if (lastResponse) {
-            accountId = used?.row.id
-            const text = await safeResponseText(lastResponse)
-            headersLatencyMs = Date.now() - started
-            forcedErrorCode = "upstream_error"
-            ctl.fail(
-              openaiStreamErrorFrame(
-                messageFromUpstreamErrorBody(text, "upstream error"),
-                openaiErrorTypeFromBody(text),
-                "upstream_error",
-              ),
-            )
-            return
-          }
-          const boundAccounts = await boundAccountsFor(env, opts.userId, opts.provider, opts.pinnedAccountId)
-          headersLatencyMs = Date.now() - started
-          if (boundAccounts.length === 0) {
-            forcedErrorCode = "no_upstream_account"
-            ctl.fail(
-              openaiStreamErrorFrame(
-                `No usable ${opts.provider} account for this user`,
-                "invalid_request_error",
-                "no_upstream_account",
-              ),
-            )
-            return
-          }
-          forcedErrorCode = "upstream_unavailable"
-          ctl.fail(
-            openaiStreamErrorFrame(
-              "All upstream accounts unavailable",
-              "api_error",
-              "upstream_unavailable",
-            ),
-          )
-          return
+        const candidate = plan.ordered[idx]
+        if (!candidate) {
+          ranOutOfCandidates = true
+          break
         }
+        idx++
 
-        used = account
-        accountId = account.row.id
-        let refreshed = account
-        if (adapter.refreshIfNeeded) {
-          refreshed = await adapter.refreshIfNeeded(env, account)
-        }
+        const acquired = await acquireCandidate(env, candidate)
         if (ctl.cancelled()) return
+        if (!acquired) continue
+        attempts++
+        usedProvider = candidate.provider
+        usedUpstreamModel = candidate.upstreamModel
+        accountId = candidate.account.id
 
-        const res = await adapter.chatCompletions(env, refreshed, opts.req, {
-          apiKeyId: opts.apiKeyId,
-          waitUntil: opts.waitUntil,
-        })
+        const res = await candidate.adapter.chatCompletions(
+          env,
+          acquired,
+          { ...opts.req, upstreamModel: candidate.upstreamModel },
+          { apiKeyId: opts.apiKeyId, waitUntil: opts.waitUntil },
+        )
+        opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
         if (ctl.cancelled()) {
           try {
             await res.body?.cancel()
@@ -310,9 +342,9 @@ async function dispatchChatCompletionsEager(
           return
         }
 
-        if (shouldBenchStatus(res.status)) {
-          await benchAccount(env, opts.userId, opts.provider, account.row.id)
-          exclude.add(account.row.id)
+        const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
+        if (penalty) {
+          await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
           if (lastResponse) {
             try {
               await lastResponse.body?.cancel()
@@ -353,15 +385,27 @@ async function dispatchChatCompletionsEager(
         return
       }
 
-      // Loop exhausted after only bench continues.
       headersLatencyMs = Date.now() - started
+      if (ranOutOfCandidates && lastResponse) {
+        // Ran out of candidates (mirrors the old `acquireAccount` returning
+        // null after everyone tried is excluded) — pass the last upstream
+        // response through verbatim rather than synthesizing 503.
+        forcedErrorCode = "upstream_error"
+        const text = await safeResponseText(lastResponse)
+        ctl.fail(
+          openaiStreamErrorFrame(
+            messageFromUpstreamErrorBody(text, "upstream error"),
+            openaiErrorTypeFromBody(text),
+            "upstream_error",
+          ),
+        )
+        return
+      }
+      // Attempt cap reached with only bench continues, or every remaining
+      // candidate was undecryptable — synthesize the standard unavailable error.
       forcedErrorCode = "upstream_unavailable"
       ctl.fail(
-        openaiStreamErrorFrame(
-          "All upstream accounts unavailable",
-          "api_error",
-          "upstream_unavailable",
-        ),
+        openaiStreamErrorFrame("All upstream accounts unavailable", "api_error", "upstream_unavailable"),
       )
     },
     undefined,
@@ -375,8 +419,8 @@ async function dispatchChatCompletionsEager(
           logRequest(env, {
             userId: opts.userId,
             apiKeyId: opts.apiKeyId,
-            provider: opts.provider,
-            model: canonicalModelId(opts.provider, opts.req.upstreamModel),
+            provider: usedProvider,
+            model: canonicalModelId(usedProvider, usedUpstreamModel),
             accountId,
             statusCode: 200,
             latencyMs,
@@ -400,103 +444,78 @@ async function dispatchChatCompletionsEager(
  * event-stream without client stream:true). HTTP status mirrors upstream /
  * pool errors exactly — existing tests depend on 400/503 pass-through.
  */
-async function dispatchChatCompletionsLegacy(
-  env: Env,
-  opts: {
-    userId: string
-    apiKeyId: string | null
-    provider: string
-    adapter?: ProviderAdapter
-    req: ChatCompletionRequest & { rawModel: string }
-    waitUntil: WaitUntil
-    idleTimeoutMs?: number
-    groupName?: string
-    pinnedAccountId?: string
-  },
-): Promise<Response> {
+async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts): Promise<Response> {
   const started = Date.now()
-  const adapter = opts.adapter ?? getAdapter(opts.provider as ProviderId)
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
-  const exclude = new Set<string>()
-  let lastResponse: Response | null = null
-  let used: AcquiredAccount | null = null
 
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const account = await acquireAccount(env, opts.userId, opts.provider, exclude, opts.pinnedAccountId)
-    if (!account) {
-      if (lastResponse) {
-        await logRequest(env, {
-          userId: opts.userId,
-          apiKeyId: opts.apiKeyId,
-          provider: opts.provider,
-          model: canonicalModelId(opts.provider, opts.req.upstreamModel),
-          accountId: used?.row.id,
-          statusCode: lastResponse.status,
-          latencyMs: Date.now() - started,
-          errorCode: "upstream_error",
-          groupName: opts.groupName ?? null,
-        })
-        return lastResponse
-      }
-      // Distinguish "never bound" (fatal, 400) from "bound but every one is
-      // benched or undecryptable right now" (transient, 503 + Retry-After)
-      // — docs/api.md "Errors".
-      const boundAccounts = await boundAccountsFor(env, opts.userId, opts.provider, opts.pinnedAccountId)
-      if (boundAccounts.length === 0) {
-        await logRequest(env, {
-          userId: opts.userId,
-          apiKeyId: opts.apiKeyId,
-          provider: opts.provider,
-          model: canonicalModelId(opts.provider, opts.req.upstreamModel),
-          statusCode: 400,
-          latencyMs: Date.now() - started,
-          errorCode: "no_upstream_account",
-          groupName: opts.groupName ?? null,
-        })
-        return Response.json(
-          {
-            error: {
-              message: `No usable ${opts.provider} account for this user`,
-              type: "invalid_request_error",
-              code: "no_upstream_account",
-            },
-          },
-          { status: 400 },
-        )
-      }
-      const untilMs = await earliestBenchExpiry(
-        env,
-        opts.userId,
-        opts.provider,
-        boundAccounts.map((a) => a.id),
-      )
-      await logRequest(env, {
-        userId: opts.userId,
-        apiKeyId: opts.apiKeyId,
-        provider: opts.provider,
-        model: canonicalModelId(opts.provider, opts.req.upstreamModel),
-        statusCode: 503,
-        latencyMs: Date.now() - started,
-        errorCode: "upstream_unavailable",
-        groupName: opts.groupName ?? null,
-      })
-      return upstreamUnavailableResponse(
-        { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
-        untilMs,
-      )
-    }
-    used = account
-    let refreshed = account
-    if (adapter.refreshIfNeeded) {
-      refreshed = await adapter.refreshIfNeeded(env, account)
-    }
-    const res = await adapter.chatCompletions(env, refreshed, opts.req, {
+  const plan = await planCandidates(env, opts, opts.req.upstreamModel)
+  if (plan.kind === "no_account") {
+    await logRequest(env, {
+      userId: opts.userId,
       apiKeyId: opts.apiKeyId,
-      waitUntil: opts.waitUntil,
+      provider: opts.provider,
+      model: canonicalModelId(opts.provider, opts.req.upstreamModel),
+      statusCode: 400,
+      latencyMs: Date.now() - started,
+      errorCode: "no_upstream_account",
+      groupName: opts.groupName ?? null,
     })
-    if (shouldBenchStatus(res.status)) {
-      await benchAccount(env, opts.userId, opts.provider, account.row.id)
-      exclude.add(account.row.id)
+    return Response.json(
+      {
+        error: {
+          message: `No usable ${opts.provider} account for this user`,
+          type: "invalid_request_error",
+          code: "no_upstream_account",
+        },
+      },
+      { status: 400 },
+    )
+  }
+  if (plan.kind === "unavailable") {
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider: opts.provider,
+      model: canonicalModelId(opts.provider, opts.req.upstreamModel),
+      statusCode: 503,
+      latencyMs: Date.now() - started,
+      errorCode: "upstream_unavailable",
+      groupName: opts.groupName ?? null,
+    })
+    return upstreamUnavailableResponse(
+      { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
+      plan.untilMs,
+    )
+  }
+
+  let lastResponse: Response | null = null
+  let lastCandidate: RoutingCandidate | null = null
+  let idx = 0
+  let attempts = 0
+  let ranOutOfCandidates = false
+  for (; attempts < MAX_ATTEMPTS; ) {
+    const candidate = plan.ordered[idx]
+    if (!candidate) {
+      ranOutOfCandidates = true
+      break
+    }
+    idx++
+
+    const acquired = await acquireCandidate(env, candidate)
+    if (!acquired) continue
+    attempts++
+
+    const res = await candidate.adapter.chatCompletions(
+      env,
+      acquired,
+      { ...opts.req, upstreamModel: candidate.upstreamModel },
+      { apiKeyId: opts.apiKeyId, waitUntil: opts.waitUntil },
+    )
+    opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
+
+    const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
+    if (penalty) {
+      await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
       if (lastResponse) {
         try {
           await lastResponse.body?.cancel()
@@ -505,6 +524,7 @@ async function dispatchChatCompletionsLegacy(
         }
       }
       lastResponse = res
+      lastCandidate = candidate
       continue
     }
 
@@ -512,7 +532,7 @@ async function dispatchChatCompletionsLegacy(
     if (res.body && isEventStream(res)) {
       // Legacy attach: client did not ask stream but upstream returned SSE.
       const sniffer = createOpenAISseUsageSniffer()
-      const body = streamWithKeepalive(res.body, undefined, {
+      const streamBody = streamWithKeepalive(res.body, undefined, {
         tap: (chunk) => sniffer.feed(chunk),
         idleTimeoutMs,
         stallFrame: OPENAI_STALL_FRAME,
@@ -523,9 +543,9 @@ async function dispatchChatCompletionsLegacy(
             logRequest(env, {
               userId: opts.userId,
               apiKeyId: opts.apiKeyId,
-              provider: opts.provider,
-              model: canonicalModelId(opts.provider, opts.req.upstreamModel),
-              accountId: account.row.id,
+              provider: candidate.provider,
+              model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+              accountId: candidate.account.id,
               statusCode: res.status,
               latencyMs,
               errorCode,
@@ -535,7 +555,7 @@ async function dispatchChatCompletionsLegacy(
           )
         },
       })
-      return new Response(body, {
+      return new Response(streamBody, {
         status: res.status,
         headers: passthroughStreamHeaders(res.headers),
       })
@@ -553,9 +573,9 @@ async function dispatchChatCompletionsLegacy(
     await logRequest(env, {
       userId: opts.userId,
       apiKeyId: opts.apiKeyId,
-      provider: opts.provider,
-      model: canonicalModelId(opts.provider, opts.req.upstreamModel),
-      accountId: account.row.id,
+      provider: candidate.provider,
+      model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+      accountId: candidate.account.id,
       statusCode: res.status,
       latencyMs,
       groupName: opts.groupName ?? null,
@@ -567,10 +587,27 @@ async function dispatchChatCompletionsLegacy(
     })
   }
 
-  // The loop itself benched every account it tried (each `continue` above
-  // only follows a bench), so `exclude` is exactly that set — no extra D1
-  // round-trip needed to compute Retry-After here.
-  const untilMs = await earliestBenchExpiry(env, opts.userId, opts.provider, [...exclude])
+  if (ranOutOfCandidates && lastResponse && lastCandidate) {
+    // Ran out of candidates — pass the last upstream response through
+    // verbatim, exactly like the old `acquireAccount`-returns-null path.
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider: lastCandidate.provider,
+      model: canonicalModelId(lastCandidate.provider, lastCandidate.upstreamModel),
+      accountId: lastCandidate.account.id,
+      statusCode: lastResponse.status,
+      latencyMs: Date.now() - started,
+      errorCode: "upstream_error",
+      groupName: opts.groupName ?? null,
+    })
+    return lastResponse
+  }
+
+  // Attempt cap reached with only bench continues (or the remainder of the
+  // list was undecryptable) — same 503 + Retry-After as the all-unusable
+  // case, recomputed now that this loop just benched more of the pool.
+  const untilMs = await recomputeUnavailableUntil(env, opts.userId, plan.ordered.slice(0, idx))
   await logRequest(env, {
     userId: opts.userId,
     apiKeyId: opts.apiKeyId,
@@ -588,12 +625,31 @@ async function dispatchChatCompletionsLegacy(
 }
 
 /**
+ * Recomputes the earliest bench/limit expiry across exactly the candidates
+ * this walk just tried and benched — same "exclude set" the old loop used
+ * for its bottom-of-loop `Retry-After`, expressed as a fresh facts read
+ * (cheap: bounded by `MAX_ATTEMPTS`, and correct even though a 429's
+ * cooldown can vary per candidate, unlike the old flat 300s-for-everything
+ * assumption baked into `earliestBenchExpiry`).
+ */
+async function recomputeUnavailableUntil(
+  env: Env,
+  userId: string,
+  tried: RoutingCandidate[],
+): Promise<number | null> {
+  if (tried.length === 0) return null
+  const facts = await candidateFactsList(env, userId, tried)
+  return earliestUnusableUntil(facts)
+}
+
+/**
  * Native Anthropic Messages (or count_tokens) passthrough — claude-code by
  * default, or a custom anthropic-format provider when `provider`/`adapter`
  * are given. cache_control is never rewritten — body goes through the
  * adapter method as-is aside from whatever fixed prepend that adapter itself
- * applies (claude-code only). `endpoint` selects which adapter method
- * carries the request; both share this same bench/failover loop rather than
+ * applies (claude-code only) and the `model` rewrite to the acquired
+ * candidate's own upstream id. `endpoint` selects which adapter method
+ * carries the request; both share this same candidate walk rather than
  * duplicating it.
  */
 export async function dispatchAnthropicMessages(
@@ -615,8 +671,13 @@ export async function dispatchAnthropicMessages(
     idleTimeoutMs?: number
     /** The model-group alias this request was addressed to, if any (docs/database.md `request_logs.group_name`). */
     groupName?: string
-    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. Applies to `count_tokens` too — same loop. */
+    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. Applies to `count_tokens` too — same loop. Ignored when `candidates` is given. */
     pinnedAccountId?: string
+    /** Pre-built cross-target candidate list — group dispatch (docs/providers.md § Routing module). Every candidate's adapter must support `endpoint`. */
+    candidates?: RoutingCandidate[]
+    strategy?: string
+    isBuiltin?: boolean
+    customProvider?: CustomProviderRow
   },
 ): Promise<Response> {
   const endpoint = opts.endpoint ?? "messages"
@@ -626,91 +687,87 @@ export async function dispatchAnthropicMessages(
   return dispatchAnthropicMessagesLegacy(env, opts)
 }
 
-async function dispatchAnthropicMessagesEager(
-  env: Env,
-  opts: {
-    userId: string
-    apiKeyId: string | null
-    body: unknown
-    headers: Headers
-    model: string
-    provider?: string
-    adapter?: ProviderAdapter
-    endpoint?: "messages" | "count_tokens"
-    waitUntil: WaitUntil
-    idleTimeoutMs?: number
-    groupName?: string
-    pinnedAccountId?: string
-  },
-): Promise<Response> {
+type AnthropicMessagesOpts = Parameters<typeof dispatchAnthropicMessages>[1]
+
+/** `body` with `.model` rewritten to the candidate's own upstream id — cache_control and everything else pass through untouched. */
+function bodyForCandidate(body: unknown, upstreamModel: string): unknown {
+  return { ...(body as Record<string, unknown>), model: upstreamModel }
+}
+
+/** Bare upstream id from a canonical `provider/upstreamModel` string — used to build the single-pool candidate when dispatch wasn't handed a pre-built list. */
+function upstreamModelFromCanonical(model: string): string {
+  return splitModelId(model)?.upstreamModel ?? model
+}
+
+async function dispatchAnthropicMessagesEager(env: Env, opts: AnthropicMessagesOpts): Promise<Response> {
   const started = Date.now()
   const provider = opts.provider ?? "claude-code"
-  const adapter = opts.adapter ?? getAdapter(provider as ProviderId)
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
-  const call = adapter.messages
-  if (!call) {
-    return Response.json(
-      { type: "error", error: { type: "api_error", message: "messages not supported" } },
-      { status: 500 },
-    )
+  const upstreamModel = upstreamModelFromCanonical(opts.model)
+
+  // Fixed adapter (no candidates): keep the old immediate rejection for an
+  // adapter that never supports `messages` at all, before ever touching the
+  // pool — 500, not a synthesized pool-exhaustion error.
+  if (!opts.candidates) {
+    const fixedAdapter = opts.adapter ?? getAdapter(provider as ProviderId)
+    if (!fixedAdapter.messages) {
+      return Response.json(
+        { type: "error", error: { type: "api_error", message: "messages not supported" } },
+        { status: 500 },
+      )
+    }
   }
 
   let forcedErrorCode: string | null = null
   let accountId: string | undefined
+  let usedProvider = provider
   let headersLatencyMs: number | null = null
   const sniffer = createAnthropicSseUsageSniffer()
 
   const body = streamWithEagerProducer(
     async (ctl) => {
-      const exclude = new Set<string>()
-      let last: Response | null = null
+      const plan = await planCandidates(env, { ...opts, provider }, upstreamModel)
+      if (ctl.cancelled()) return
 
-      for (let i = 0; i < 8; i++) {
+      if (plan.kind === "no_account") {
+        headersLatencyMs = Date.now() - started
+        forcedErrorCode = "no_upstream_account"
+        ctl.fail(anthropicStreamErrorFrame(`No usable ${provider} account`, "invalid_request_error"))
+        return
+      }
+      if (plan.kind === "unavailable") {
+        headersLatencyMs = Date.now() - started
+        forcedErrorCode = "upstream_unavailable"
+        ctl.fail(anthropicStreamErrorFrame("upstream_unavailable", "api_error"))
+        return
+      }
+
+      let lastResponse: Response | null = null
+      let idx = 0
+      let attempts = 0
+      let ranOutOfCandidates = false
+      for (; attempts < MAX_ATTEMPTS; ) {
         if (ctl.cancelled()) return
-
-        const account = await acquireAccount(env, opts.userId, provider, exclude, opts.pinnedAccountId)
-        if (ctl.cancelled()) return
-
-        if (!account) {
-          if (last) {
-            const text = await safeResponseText(last)
-            headersLatencyMs = Date.now() - started
-            forcedErrorCode = "upstream_error"
-            ctl.fail(
-              anthropicStreamErrorFrame(
-                messageFromUpstreamErrorBody(text, "upstream error"),
-                anthropicErrorTypeFromBody(text),
-              ),
-            )
-            return
-          }
-          const boundAccounts = await boundAccountsFor(env, opts.userId, provider, opts.pinnedAccountId)
-          headersLatencyMs = Date.now() - started
-          if (boundAccounts.length === 0) {
-            forcedErrorCode = "no_upstream_account"
-            ctl.fail(
-              anthropicStreamErrorFrame(
-                `No usable ${provider} account`,
-                "invalid_request_error",
-              ),
-            )
-            return
-          }
-          forcedErrorCode = "upstream_unavailable"
-          ctl.fail(
-            anthropicStreamErrorFrame("upstream_unavailable", "api_error"),
-          )
-          return
+        const candidate = plan.ordered[idx]
+        if (!candidate) {
+          ranOutOfCandidates = true
+          break
         }
+        idx++
+        const call = candidate.adapter.messages
+        if (!call) continue
 
-        accountId = account.row.id
-        let refreshed = account
-        if (adapter.refreshIfNeeded) refreshed = await adapter.refreshIfNeeded(env, account)
+        const acquired = await acquireCandidate(env, candidate)
         if (ctl.cancelled()) return
+        if (!acquired) continue
+        attempts++
+        usedProvider = candidate.provider
+        accountId = candidate.account.id
 
-        const res = await call(env, refreshed, opts.body, opts.headers, {
+        const res = await call(env, acquired, bodyForCandidate(opts.body, candidate.upstreamModel), opts.headers, {
           waitUntil: opts.waitUntil,
         })
+        opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
         if (ctl.cancelled()) {
           try {
             await res.body?.cancel()
@@ -720,17 +777,17 @@ async function dispatchAnthropicMessagesEager(
           return
         }
 
-        if (shouldBenchStatus(res.status)) {
-          await benchAccount(env, opts.userId, provider, account.row.id)
-          exclude.add(account.row.id)
-          if (last) {
+        const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
+        if (penalty) {
+          await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
+          if (lastResponse) {
             try {
-              await last.body?.cancel()
+              await lastResponse.body?.cancel()
             } catch {
               /* */
             }
           }
-          last = res
+          lastResponse = res
           continue
         }
 
@@ -761,6 +818,17 @@ async function dispatchAnthropicMessagesEager(
       }
 
       headersLatencyMs = Date.now() - started
+      if (ranOutOfCandidates && lastResponse) {
+        forcedErrorCode = "upstream_error"
+        const text = await safeResponseText(lastResponse)
+        ctl.fail(
+          anthropicStreamErrorFrame(
+            messageFromUpstreamErrorBody(text, "upstream error"),
+            anthropicErrorTypeFromBody(text),
+          ),
+        )
+        return
+      }
       forcedErrorCode = "upstream_unavailable"
       ctl.fail(anthropicStreamErrorFrame("upstream_unavailable", "api_error"))
     },
@@ -775,7 +843,7 @@ async function dispatchAnthropicMessagesEager(
           logRequest(env, {
             userId: opts.userId,
             apiKeyId: opts.apiKeyId,
-            provider,
+            provider: usedProvider,
             model: opts.model,
             accountId,
             statusCode: 200,
@@ -795,140 +863,123 @@ async function dispatchAnthropicMessagesEager(
   })
 }
 
-async function dispatchAnthropicMessagesLegacy(
-  env: Env,
-  opts: {
-    userId: string
-    apiKeyId: string | null
-    body: unknown
-    headers: Headers
-    model: string
-    provider?: string
-    adapter?: ProviderAdapter
-    endpoint?: "messages" | "count_tokens"
-    waitUntil: WaitUntil
-    idleTimeoutMs?: number
-    groupName?: string
-    pinnedAccountId?: string
-  },
-): Promise<Response> {
+async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessagesOpts): Promise<Response> {
   const started = Date.now()
   const provider = opts.provider ?? "claude-code"
-  const adapter = opts.adapter ?? getAdapter(provider as ProviderId)
   const endpoint = opts.endpoint ?? "messages"
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
-  const call = endpoint === "count_tokens" ? adapter.countTokens : adapter.messages
-  if (!call) {
-    return Response.json(
-      { type: "error", error: { type: "api_error", message: `${endpoint} not supported` } },
-      { status: 500 },
-    )
-  }
-  const exclude = new Set<string>()
-  let last: Response | null = null
-  for (let i = 0; i < 8; i++) {
-    const account = await acquireAccount(env, opts.userId, provider, exclude, opts.pinnedAccountId)
-    if (!account) {
-      if (last) {
-        await logRequest(env, {
-          userId: opts.userId,
-          apiKeyId: opts.apiKeyId,
-          provider,
-          model: opts.model,
-          statusCode: last.status,
-          latencyMs: Date.now() - started,
-          errorCode: "upstream_error",
-          groupName: opts.groupName ?? null,
-        })
-        return last
-      }
-      // Same 400-vs-503 split as dispatchChatCompletions above.
-      const boundAccounts = await boundAccountsFor(env, opts.userId, provider, opts.pinnedAccountId)
-      if (boundAccounts.length === 0) {
-        await logRequest(env, {
-          userId: opts.userId,
-          apiKeyId: opts.apiKeyId,
-          provider,
-          model: opts.model,
-          statusCode: 400,
-          latencyMs: Date.now() - started,
-          errorCode: "no_upstream_account",
-          groupName: opts.groupName ?? null,
-        })
-        return Response.json(
-          {
-            type: "error",
-            error: {
-              type: "invalid_request_error",
-              message: `No usable ${provider} account`,
-            },
-          },
-          { status: 400 },
-        )
-      }
-      const untilMs = await earliestBenchExpiry(
-        env,
-        opts.userId,
-        provider,
-        boundAccounts.map((a) => a.id),
-      )
-      await logRequest(env, {
-        userId: opts.userId,
-        apiKeyId: opts.apiKeyId,
-        provider,
-        model: opts.model,
-        statusCode: 503,
-        latencyMs: Date.now() - started,
-        errorCode: "upstream_unavailable",
-        groupName: opts.groupName ?? null,
-      })
-      return upstreamUnavailableResponse(
-        { type: "error", error: { type: "api_error", message: "upstream_unavailable" } },
-        untilMs,
+  const upstreamModel = upstreamModelFromCanonical(opts.model)
+
+  // Fixed adapter (no candidates / not builtin-driven per-candidate): keep
+  // the old single-call rejection for an adapter that never supports this
+  // endpoint at all — e.g. a fixed non-builtin adapter test double.
+  if (!opts.candidates) {
+    const fixedAdapter = opts.adapter ?? getAdapter(provider as ProviderId)
+    const fixedCall = endpoint === "count_tokens" ? fixedAdapter.countTokens : fixedAdapter.messages
+    if (!fixedCall) {
+      return Response.json(
+        { type: "error", error: { type: "api_error", message: `${endpoint} not supported` } },
+        { status: 500 },
       )
     }
-    let refreshed = account
-    if (adapter.refreshIfNeeded) refreshed = await adapter.refreshIfNeeded(env, account)
-    const res = await call(env, refreshed, opts.body, opts.headers, {
+  }
+
+  const plan = await planCandidates(env, { ...opts, provider }, upstreamModel)
+  if (plan.kind === "no_account") {
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider,
+      model: opts.model,
+      statusCode: 400,
+      latencyMs: Date.now() - started,
+      errorCode: "no_upstream_account",
+      groupName: opts.groupName ?? null,
+    })
+    return Response.json(
+      {
+        type: "error",
+        error: { type: "invalid_request_error", message: `No usable ${provider} account` },
+      },
+      { status: 400 },
+    )
+  }
+  if (plan.kind === "unavailable") {
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider,
+      model: opts.model,
+      statusCode: 503,
+      latencyMs: Date.now() - started,
+      errorCode: "upstream_unavailable",
+      groupName: opts.groupName ?? null,
+    })
+    return upstreamUnavailableResponse(
+      { type: "error", error: { type: "api_error", message: "upstream_unavailable" } },
+      plan.untilMs,
+    )
+  }
+
+  let lastResponse: Response | null = null
+  let lastCandidate: RoutingCandidate | null = null
+  let idx = 0
+  let attempts = 0
+  let ranOutOfCandidates = false
+  for (; attempts < MAX_ATTEMPTS; ) {
+    const candidate = plan.ordered[idx]
+    if (!candidate) {
+      ranOutOfCandidates = true
+      break
+    }
+    idx++
+    const call = endpoint === "count_tokens" ? candidate.adapter.countTokens : candidate.adapter.messages
+    if (!call) continue
+
+    const acquired = await acquireCandidate(env, candidate)
+    if (!acquired) continue
+    attempts++
+
+    const res = await call(env, acquired, bodyForCandidate(opts.body, candidate.upstreamModel), opts.headers, {
       waitUntil: opts.waitUntil,
     })
-    if (shouldBenchStatus(res.status)) {
-      await benchAccount(env, opts.userId, provider, account.row.id)
-      exclude.add(account.row.id)
-      if (last) {
+    opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
+
+    const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
+    if (penalty) {
+      await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
+      if (lastResponse) {
         try {
-          await last.body?.cancel()
+          await lastResponse.body?.cancel()
         } catch {
           /* */
         }
       }
-      last = res
+      lastResponse = res
+      lastCandidate = candidate
       continue
     }
+
     const latencyMs = Date.now() - started
     // count_tokens estimates tokens, it never consumes them — never log a
     // count from that endpoint, streaming or not (it never streams anyway).
     const isCountTokens = endpoint === "count_tokens"
     if (res.body && isEventStream(res)) {
       const sniffer = createAnthropicSseUsageSniffer()
-      const body = streamWithKeepalive(res.body, undefined, {
+      const streamBody = streamWithKeepalive(res.body, undefined, {
         tap: (chunk) => sniffer.feed(chunk),
         idleTimeoutMs,
         stallFrame: ANTHROPIC_STALL_FRAME,
         onClose: (reason) => {
           const usage = isCountTokens ? null : sniffer.finish()
-          // count_tokens never streams in practice, but if it ever did, its
-          // response isn't a message turn — completeness doesn't apply.
-          const errorCode = isCountTokens
-            ? null
-            : streamCloseErrorCode(reason, sniffer.complete())
+          const errorCode = isCountTokens ? null : streamCloseErrorCode(reason, sniffer.complete())
           opts.waitUntil(
             logRequest(env, {
               userId: opts.userId,
               apiKeyId: opts.apiKeyId,
-              provider,
-              model: opts.model,
-              accountId: account.row.id,
+              provider: candidate.provider,
+              model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+              accountId: candidate.account.id,
               statusCode: res.status,
               latencyMs,
               errorCode,
@@ -938,7 +989,7 @@ async function dispatchAnthropicMessagesLegacy(
           )
         },
       })
-      return new Response(body, {
+      return new Response(streamBody, {
         status: res.status,
         headers: passthroughStreamHeaders(res.headers),
       })
@@ -959,9 +1010,9 @@ async function dispatchAnthropicMessagesLegacy(
     await logRequest(env, {
       userId: opts.userId,
       apiKeyId: opts.apiKeyId,
-      provider,
-      model: opts.model,
-      accountId: account.row.id,
+      provider: candidate.provider,
+      model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+      accountId: candidate.account.id,
       statusCode: res.status,
       latencyMs,
       groupName: opts.groupName ?? null,
@@ -969,8 +1020,33 @@ async function dispatchAnthropicMessagesLegacy(
     })
     return res
   }
-  // Same "loop benched exactly `exclude`" reasoning as dispatchChatCompletions.
-  const untilMs = await earliestBenchExpiry(env, opts.userId, provider, [...exclude])
+
+  if (ranOutOfCandidates && lastResponse && lastCandidate) {
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider: lastCandidate.provider,
+      model: canonicalModelId(lastCandidate.provider, lastCandidate.upstreamModel),
+      accountId: lastCandidate.account.id,
+      statusCode: lastResponse.status,
+      latencyMs: Date.now() - started,
+      errorCode: "upstream_error",
+      groupName: opts.groupName ?? null,
+    })
+    return lastResponse
+  }
+
+  const untilMs = await recomputeUnavailableUntil(env, opts.userId, plan.ordered.slice(0, idx))
+  await logRequest(env, {
+    userId: opts.userId,
+    apiKeyId: opts.apiKeyId,
+    provider,
+    model: opts.model,
+    statusCode: 503,
+    latencyMs: Date.now() - started,
+    errorCode: "upstream_unavailable",
+    groupName: opts.groupName ?? null,
+  })
   return upstreamUnavailableResponse(
     { type: "error", error: { type: "api_error", message: "upstream_unavailable" } },
     untilMs,
@@ -999,8 +1075,13 @@ export async function dispatchAnthropicViaOpenAI(
     waitUntil: WaitUntil
     /** The model-group alias this request was addressed to, if any (docs/database.md `request_logs.group_name`). */
     groupName?: string
-    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. */
+    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. Ignored when `candidates` is given. */
     pinnedAccountId?: string
+    /** Pre-built cross-target candidate list — group dispatch (docs/providers.md § Routing module). */
+    candidates?: RoutingCandidate[]
+    strategy?: string
+    isBuiltin?: boolean
+    customProvider?: CustomProviderRow
   },
 ): Promise<Response> {
   const {
@@ -1034,6 +1115,10 @@ export async function dispatchAnthropicViaOpenAI(
     waitUntil: opts.waitUntil,
     groupName: opts.groupName,
     pinnedAccountId: opts.pinnedAccountId,
+    candidates: opts.candidates,
+    strategy: opts.strategy,
+    isBuiltin: opts.isBuiltin,
+    customProvider: opts.customProvider,
     req: {
       model: opts.rawModel,
       rawModel: opts.rawModel,

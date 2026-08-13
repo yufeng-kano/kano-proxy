@@ -22,6 +22,7 @@ import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Banner from "@/components/ui/Banner.vue"
 import EmptyState from "@/components/ui/EmptyState.vue"
+import FormField from "@/components/ui/FormField.vue"
 import PageHeader from "@/components/ui/PageHeader.vue"
 import SectionNav from "@/components/ui/SectionNav.vue"
 import type { SectionItem } from "@/components/ui/SectionNav.vue"
@@ -30,13 +31,26 @@ import { useAuth } from "@/composables/useAuth"
 import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
-import { deleteCustomProvider, promoteAccount, removeAccount } from "@/services/api"
+import {
+  deleteCustomProvider,
+  promoteAccount,
+  removeAccount,
+  setProviderStrategy,
+} from "@/services/api"
 import { getProvidersPrefs, setProvidersPrefs } from "@/services/prefs"
-import { PROVIDERS, type CustomProvider, type ProviderAccount, type ProviderId } from "@/types"
+import {
+  DEFAULT_ROUTING_STRATEGY,
+  PROVIDERS,
+  ROUTING_STRATEGIES,
+  type CustomProvider,
+  type ProviderAccount,
+  type ProviderId,
+  type RoutingStrategy,
+} from "@/types"
 
 const { t } = useI18n()
 const { user } = useAuth()
-const { byProvider, setUserId, loadAll, loadProvider, CACHE_TTL_MS } = useAccounts()
+const { byProvider, setUserId, loadAll, loadProvider, setStrategy, CACHE_TTL_MS } = useAccounts()
 const customProviders = useCustomProviders()
 
 /**
@@ -55,6 +69,20 @@ const BLURB_KEY: Record<ProviderId, MessageKey> = {
   "claude-code": "provider.claude-code.blurb",
   codex: "provider.codex.blurb",
   grok: "provider.grok.blurb",
+}
+
+/**
+ * Each strategy's own name and the line that says what it does to a pool. A
+ * map rather than a template literal for the same reason as above — and it is
+ * the seam a second strategy lands in: an entry here, an entry in
+ * `ROUTING_STRATEGIES`, and the select offers it.
+ */
+const STRATEGY_KEY: Record<RoutingStrategy, MessageKey> = {
+  ordered: "strategy.ordered",
+}
+
+const STRATEGY_HINT_KEY: Record<RoutingStrategy, MessageKey> = {
+  ordered: "strategy.pool.ordered",
 }
 
 /** The custom-endpoints tab is not a `ProviderId`, so it gets its own id. */
@@ -245,6 +273,45 @@ async function onRemove(provider: ProviderId, id: string) {
   }
 }
 
+/**
+ * The pool's current strategy. A response (or a cache entry) without the field
+ * predates it and means the server's default — never a blank select.
+ */
+function strategyOf(provider: ProviderId): RoutingStrategy {
+  return byProvider[provider].data?.strategy ?? DEFAULT_ROUTING_STRATEGY
+}
+
+/** Which pool is mid-write; its select stays put until the server answers. */
+const strategyBusy = ref<ProviderId | null>(null)
+
+/**
+ * Saves on change, and paints what the server stored rather than what was
+ * sent. A refusal puts the element back by hand: the native select has already
+ * moved, and Vue patches nothing back because the bound value never changed.
+ * The failure is reported in the page's banner, like the row actions' are —
+ * nothing blocks.
+ */
+async function onStrategyChange(provider: ProviderId, event: Event) {
+  const el = event.target as HTMLSelectElement
+  const previous = strategyOf(provider)
+  const next = el.value as RoutingStrategy
+  if (next === previous) return
+
+  strategyBusy.value = provider
+  actionError.value = null
+  try {
+    setStrategy(provider, await setProviderStrategy(provider, next))
+    // Same reason as the rollback below: if the stored value is not the one
+    // that was sent, the bound value never changed and nothing is patched back.
+    el.value = strategyOf(provider)
+  } catch {
+    actionError.value = t("providers.error.strategy")
+    el.value = previous
+  } finally {
+    strategyBusy.value = null
+  }
+}
+
 async function onRenamed(provider: ProviderId) {
   await loadProvider(provider, { refresh: true })
 }
@@ -421,6 +488,31 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
         :subtitle="t(BLURB_KEY[pid])"
       >
         <template #actions>
+          <!-- Section-level config, so it appears with the section's other
+               config affordances when the gate opens — never on a row. It
+               renders with one option on purpose: it is the seam future
+               strategies appear in, and it tells the operator the pool has a
+               routing policy at all (docs/admin-ui.md § Providers page). -->
+          <FormField
+            v-if="isEditing(pid)"
+            v-slot="field"
+            class="strategy"
+            :label="t('strategy.label')"
+            :hint="t(STRATEGY_HINT_KEY[strategyOf(pid)])"
+          >
+            <select
+              :id="field.id"
+              class="select"
+              :value="strategyOf(pid)"
+              :aria-describedby="field.describedBy"
+              :disabled="strategyBusy === pid"
+              @change="onStrategyChange(pid, $event)"
+            >
+              <option v-for="option in ROUTING_STRATEGIES" :key="option" :value="option">
+                {{ t(STRATEGY_KEY[option]) }}
+              </option>
+            </select>
+          </FormField>
           <!-- Icon-only ghost: this page is read far more often than it is
                added to, so the create affordance sits at icon weight. Hidden
                while the gate is open — editing the pool and adding to it are
@@ -619,6 +711,47 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+/* Narrow enough that the pool's name still owns the header line, and capped by
+   the header itself on small screens where the actions wrap onto their own row. */
+.strategy {
+  width: 200px;
+  max-width: 100%;
+}
+
+/* The app's control spec, same as the other selects in the app (the key
+   dialog's interval, the group dialog's re-pick). */
+.select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.select:focus {
+  border-color: var(--ring-border);
+  box-shadow: var(--ring);
+  outline: none;
+}
+
+.select:disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* 16px type so iOS Safari does not zoom the page when the select takes focus. */
+@media (pointer: coarse) {
+  .select {
+    height: 40px;
+    font-size: var(--text-md);
+  }
 }
 
 /* The card body's own padding already spaces the first and last row, so the

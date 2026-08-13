@@ -41,17 +41,20 @@ import {
   updateModelGroup,
 } from "@/services/api"
 import {
+  DEFAULT_ROUTING_STRATEGY,
   MODEL_GROUP_ALIASES_MAX,
   MODEL_GROUP_ALIAS_MAX,
   MODEL_GROUP_NAME_MAX,
   MODEL_GROUP_TARGETS_MAX,
   PROVIDERS,
   PROVIDER_IDS,
+  ROUTING_STRATEGIES,
   type CatalogModel,
   type ModelGroup,
   type ModelGroupTarget,
   type ProviderAccount,
   type ProviderId,
+  type RoutingStrategy,
 } from "@/types"
 import ActionIcon from "./ui/ActionIcon.vue"
 import AppButton from "./ui/AppButton.vue"
@@ -91,6 +94,19 @@ const NAME_KEY: Record<ProviderId, MessageKey> = {
 }
 
 /**
+ * Each strategy's name and the line saying what it does to this group's
+ * targets. Explicit maps for the same typing reason as above, and the seam a
+ * second strategy lands in: an entry in each, an entry in `ROUTING_STRATEGIES`.
+ */
+const STRATEGY_KEY: Record<RoutingStrategy, MessageKey> = {
+  ordered: "strategy.ordered",
+}
+
+const STRATEGY_HINT_KEY: Record<RoutingStrategy, MessageKey> = {
+  ordered: "strategy.group.ordered",
+}
+
+/**
  * How many models the list draws at once. It scrolls, so this is only a ceiling
  * on what a large provider costs to render — the search is how anything past it
  * is reached.
@@ -118,6 +134,11 @@ const name = ref(props.group?.name ?? "")
 const aliases = ref<string[]>([...(props.group?.aliases ?? [])])
 const aliasDraft = ref("")
 const targets = ref<TargetRow[]>((props.group?.targets ?? []).map(toRow))
+/**
+ * How the group orders its targets. A group saved before the field existed
+ * (or read from a cache entry that predates it) means the server's default.
+ */
+const strategy = ref<RoutingStrategy>(props.group?.strategy ?? DEFAULT_ROUTING_STRATEGY)
 
 /** Picker state: which provider tab, which account in its rail, what is typed. */
 const selectedTab = ref<string>(prefixOf(props.group?.targets[0]?.model ?? "") || PROVIDERS[0]!.id)
@@ -581,6 +602,7 @@ async function submit() {
       // `account_label` is read-only display data — it goes no further than
       // this dialog.
       targets: targets.value.map((t) => ({ model: t.model, account_id: t.account_id })),
+      strategy: strategy.value,
     }
     if (props.group) await updateModelGroup(props.group.id, body)
     else await createModelGroup(body)
@@ -621,7 +643,8 @@ async function remove() {
          padding in every column. Boxing them separately read as unrelated
          cards and was rejected; so did stacking identity above the picker. -->
     <div class="board">
-      <!-- ① What the group is called, and what clients may call it. -->
+      <!-- ① What the group is called, what clients may call it, and how it
+           picks among the targets column ③ holds. -->
       <section class="col" aria-labelledby="group-col-identity">
         <h3 id="group-col-identity" class="col-head">
           {{ t("groups.dialog.identityLabel") }}
@@ -694,6 +717,30 @@ async function remove() {
 
           <p v-if="aliasError" class="field-error" role="alert">{{ aliasError }}</p>
         </fieldset>
+
+        <!-- How the group picks among its targets. One option today, and the
+             select still renders: it is the seam future strategies appear in,
+             and it says the group has a routing policy at all. The line sits
+             between the label and the control, like the name field above —
+             guidance to read before choosing, not after. -->
+        <FormField
+          v-slot="field"
+          hint-above
+          :label="t('strategy.label')"
+          :hint="t(STRATEGY_HINT_KEY[strategy])"
+        >
+          <select
+            :id="field.id"
+            v-model="strategy"
+            class="select strategy"
+            :aria-describedby="field.describedBy"
+            :disabled="saving || deleting"
+          >
+            <option v-for="option in ROUTING_STRATEGIES" :key="option" :value="option">
+              {{ t(STRATEGY_KEY[option]) }}
+            </option>
+          </select>
+        </FormField>
       </section>
 
       <!-- ② Where targets come from: provider, then account, then model. -->
@@ -866,7 +913,7 @@ async function remove() {
                   </label>
                   <select
                     :id="`target-account-${target.uid}`"
-                    class="select"
+                    class="select repick"
                     :value="target.account_id ?? ''"
                     :disabled="saving || deleting"
                     @change="onAccountChange(index, $event)"
@@ -1374,11 +1421,27 @@ async function remove() {
   min-width: 0;
   height: 28px;
   padding: 0 var(--space-2);
-  border: 1px solid var(--warn-border);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
   font-size: var(--text-xs);
+}
+
+/* The re-pick borrows the warn tone from the badge beside it: the row is
+   telling the user something is wrong, and the control is the fix. Declared
+   above `:focus`, at the same weight, so focus still takes the border. */
+.select.repick {
+  border-color: var(--warn-border);
+}
+
+/* In the identity column it is a form field like the name input above it, so
+   it takes TextInput's full-size spec instead of the row-sized one. */
+.select.strategy {
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-sm);
 }
 
 .select:focus {
@@ -1478,6 +1541,14 @@ async function remove() {
 @media (pointer: coarse) {
   .select {
     min-height: 34px;
+    font-size: var(--text-md);
+  }
+
+  /* Higher specificity than the rule above, so it has to restate the type size
+     it would otherwise keep — and it takes TextInput's coarse height, since it
+     is a form field rather than a control on a row. */
+  .select.strategy {
+    min-height: 40px;
     font-size: var(--text-md);
   }
 

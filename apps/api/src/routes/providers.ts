@@ -17,26 +17,24 @@ import {
   listAccounts,
   promoteAccount,
   readUsageSnapshot,
-  releaseUsageLock,
   removeAccount,
   setAccountCustomLabel,
-  updateAccountIdentity,
-  writeUsageSnapshot,
-  type UsageSnapshot,
 } from "../db/accounts"
+import { getProviderStrategy, setProviderStrategy } from "../db/provider_settings"
+import { DEFAULT_STRATEGY } from "../routing/strategy"
 import {
   fetchClaudeIdentity,
   fetchCodexIdentity,
   fetchGrokIdentity,
   pickAccountLabel,
 } from "../providers/identity"
+import { fetchAndPersistUsage } from "../providers/usage_refresh"
 import { encryptJson } from "../crypto/token_crypto"
 import { isProviderId, type ProviderId } from "../env"
 import { isBenched } from "../pool/bench"
 import type { StoredCredential } from "../pool/acquire"
 import { getAdapter } from "../providers"
 import { newId, nowIso } from "../utils/id"
-import { decryptJson } from "../crypto/token_crypto"
 
 export const providerRoutes = new Hono<HonoEnv>()
 
@@ -116,16 +114,17 @@ providerRoutes.get("/:provider/accounts", async (c) => {
           status = "unusable"
         }
       } else if (lockToken) {
-        try {
-          const cred = await decryptJson<StoredCredential>(
-            c.env.TOKEN_ENCRYPTION_KEY,
-            row.encrypted_payload,
-          )
-          const snap = await adapter.fetchUsage(c.env, { row, credential: cred })
+        // Shared core with the routing module's background refresh
+        // (docs/providers.md § Usage cache / § Routing module "Facts") —
+        // the lock/fetch/write sequence itself lives in `usage_refresh.ts`,
+        // never duplicated here.
+        const result = await fetchAndPersistUsage(c.env, row, adapter, lockToken)
+        if (result.ok) {
+          const snap = result.snapshot
           usage = { windows: snap.windows }
           accountMeta = { ...accountMeta, ...snap.account }
-          stale = !!snap.stale
-          error = snap.error ?? null
+          stale = snap.stale
+          error = snap.error
           // Usage 403 bot-wall must NOT mark the account unusable — chat can still work.
           if (
             status !== "benched" &&
@@ -136,58 +135,24 @@ providerRoutes.get("/:provider/accounts", async (c) => {
           ) {
             status = "unusable"
           }
-          // Prefer upstream email / username as stable pool label
-          const email =
-            typeof snap.account.email === "string" ? snap.account.email : null
-          const display =
-            typeof snap.account.display_name === "string"
-              ? snap.account.display_name
-              : typeof snap.account.username === "string"
-                ? snap.account.username
-                : null
-          const better = pickAccountLabel({
-            email,
-            displayName: display,
-            fallback: row.label || row.id,
-          })
-          if (better && better !== row.label) {
-            row.label = better
-            await updateAccountIdentity(c.env.DB, row.id, {
-              label: better,
-              accountMetaJson: JSON.stringify(accountMeta),
-            })
-          } else if (accountMeta) {
-            await updateAccountIdentity(c.env.DB, row.id, {
-              accountMetaJson: JSON.stringify(accountMeta),
-            })
-          }
-          const persisted: UsageSnapshot = {
-            windows: snap.windows,
-            account: snap.account,
-            error,
-            stale: !!snap.stale,
-            edgeBlocked: !!snap.edgeBlocked,
-          }
-          await writeUsageSnapshot(c.env.DB, row.id, lockToken, persisted)
-        } catch (e) {
-          error = e instanceof Error ? e.message : "usage failed"
+        } else {
+          error = result.error
           stale = true
           // Serve the unchanged snapshot too: one upstream hiccup must not blank
           // the usage bars for the request that encountered it.
-          const cached = readUsageSnapshot(row)
-          if (cached) {
-            usage = { windows: cached.windows }
-            accountMeta = { ...accountMeta, ...cached.account }
+          const cachedAfterFailure = readUsageSnapshot(row)
+          if (cachedAfterFailure) {
+            usage = { windows: cachedAfterFailure.windows }
+            accountMeta = { ...accountMeta, ...cachedAfterFailure.account }
             if (
               status !== "benched" &&
-              !cached.windows.length &&
-              !cached.edgeBlocked &&
+              !cachedAfterFailure.windows.length &&
+              !cachedAfterFailure.edgeBlocked &&
               /401|invalid.?token|unauthorized/i.test(error)
             ) {
               status = "unusable"
             }
           }
-          await releaseUsageLock(c.env.DB, row.id, lockToken)
         }
       }
     }
@@ -221,7 +186,39 @@ providerRoutes.get("/:provider/accounts", async (c) => {
     seen = true
   }
 
-  return c.json({ available: true, accounts, models: [], error: null })
+  // The pool's routing strategy (docs/providers.md § Routing module) — no
+  // separate read route; `PATCH /api/providers/:provider` is the only
+  // writer (docs/auth.md § Management routes).
+  const strategy = await getProviderStrategy(c.env.DB, user.id, provider)
+
+  return c.json({ available: true, accounts, models: [], error: null, strategy })
+})
+
+/**
+ * Sets the pool's routing strategy (docs/providers.md § Routing module):
+ * body `{strategy}`, only `ordered` accepted today. Upserts
+ * `provider_settings` — a missing row means `ordered`, so this is the only
+ * writer of that table.
+ */
+providerRoutes.patch("/:provider", async (c) => {
+  const user = await requireUser(c)
+  if (!user) return c.json({ error: "unauthorized" }, 401)
+  const provider = parseProvider(c.req.param("provider"))
+  if (!provider) return c.json({ error: "invalid provider" }, 400)
+
+  let body: unknown
+  try {
+    body = await c.req.json()
+  } catch {
+    return c.json({ error: "invalid strategy" }, 400)
+  }
+  const raw = body !== null && typeof body === "object" ? (body as { strategy?: unknown }).strategy : undefined
+  if (typeof raw !== "string" || raw !== DEFAULT_STRATEGY) {
+    return c.json({ error: `strategy must be "${DEFAULT_STRATEGY}"` }, 400)
+  }
+
+  await setProviderStrategy(c.env.DB, user.id, provider, raw)
+  return c.json({ ok: true, strategy: raw })
 })
 
 providerRoutes.patch("/:provider/accounts/:id", async (c) => {

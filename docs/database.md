@@ -99,6 +99,7 @@ User-defined bare-name model aliases → ordered `provider/model` target lists (
 | user_id | TEXT FK | `ON DELETE CASCADE` |
 | name | TEXT | **display name** (since `0009_model_group_aliases.sql`): trimmed, 1–64 chars, free text, a label only — the callable ids live in `model_group_aliases`. Still unique per user (original constraint kept; also avoids indistinguishable cards). Mutable |
 | targets_json | TEXT | JSON array of target objects `{model: "provider/model", account_id?}`, array order = priority; `account_id` (nullable) pins the target to one `upstream_accounts` row — no FK, a deleted account makes the target skip at resolve time, mirroring the custom-provider convention. Bare strings are accepted as `{model}` shorthand (v3.0.0 rows). Parse must tolerate further per-target fields (future balancing weights) |
+| strategy | TEXT | `NOT NULL DEFAULT 'ordered'`; how the group orders its candidates ([providers.md](./providers.md) § Routing module). `ordered` is the only accepted value today — unknown values are rejected at write time, and reads treat an unrecognized stored value as `ordered` (forward compat). Added in `0010_routing_strategy.sql` |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
@@ -117,6 +118,19 @@ The callable bare model ids of a group, 1–10 per group ([providers.md](./provi
 | created_at | TEXT | |
 
 `UNIQUE(user_id, alias)` — an alias resolves to exactly one group, enforced by the constraint, and bare-name resolution reads this table (indexed lookup), never a JSON scan.
+
+### `provider_settings`
+
+Per-user, per-provider-pool routing config ([providers.md](./providers.md) § Routing module) — the pool-level counterpart of `model_groups.strategy`, governing **direct** `provider/model` calls. Added in `0010_routing_strategy.sql`. `provider` is a builtin id **or** a custom provider's slug (same convention as `upstream_accounts.provider`); no FK to `custom_providers` — a row for a deleted slug is inert, mirroring how account rows are handled. **A missing row means `ordered`** — rows are created lazily on first write, never backfilled.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| user_id | TEXT | `ON DELETE CASCADE` → `users.id`; PK part |
+| provider | TEXT | builtin id or custom slug; PK part |
+| strategy | TEXT | `NOT NULL DEFAULT 'ordered'`; same value set and forward-compat rule as `model_groups.strategy` |
+| updated_at | TEXT | ISO |
+
+`PRIMARY KEY (user_id, provider)`.
 
 ### `usage_snapshots` — **deprecated, never used**
 

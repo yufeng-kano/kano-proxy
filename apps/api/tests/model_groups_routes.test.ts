@@ -839,3 +839,91 @@ describe("DELETE /api/model-groups/:id", () => {
     expect(list.groups).toHaveLength(0)
   })
 })
+
+describe("strategy (docs/providers.md § Routing module)", () => {
+  it("POST without strategy defaults to ordered", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createGroup(env, cookie))
+    expect(created.strategy).toBe("ordered")
+  })
+
+  it("POST with strategy: 'ordered' is accepted and echoed", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createGroup(env, cookie, { strategy: "ordered" } as any))
+    expect(created.strategy).toBe("ordered")
+  })
+
+  it("POST with an unknown strategy value is 400 with a field-level message", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createGroup(env, cookie, { strategy: "usage-balanced" } as any)
+    expect(res.status).toBe(400)
+    const json = await readJson(res)
+    expect(json.error).toMatch(/strategy/i)
+  })
+
+  it("GET lists strategy on every group", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await createGroup(env, cookie)
+    const list = await readJson(await modelGroupRoutes.request("/", req("GET", cookie), env))
+    expect(list.groups[0].strategy).toBe("ordered")
+  })
+
+  it("PUT roundtrips strategy: 'ordered'", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createGroup(env, cookie))
+
+    const res = await modelGroupRoutes.request(
+      `/${created.id}`,
+      req("PUT", cookie, { strategy: "ordered" }),
+      env,
+    )
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json.strategy).toBe("ordered")
+  })
+
+  it("PUT with an unknown strategy value is 400 and leaves the stored value untouched", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createGroup(env, cookie))
+
+    const res = await modelGroupRoutes.request(
+      `/${created.id}`,
+      req("PUT", cookie, { strategy: "spend-aware" }),
+      env,
+    )
+    expect(res.status).toBe(400)
+    const list = await readJson(await modelGroupRoutes.request("/", req("GET", cookie), env))
+    expect(list.groups[0].strategy).toBe("ordered")
+  })
+
+  it("PUT omitting strategy leaves it unchanged", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createGroup(env, cookie))
+
+    const res = await modelGroupRoutes.request(`/${created.id}`, req("PUT", cookie, { name: "Renamed" }), env)
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json.strategy).toBe("ordered")
+  })
+})

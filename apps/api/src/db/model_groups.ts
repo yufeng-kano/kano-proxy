@@ -6,6 +6,14 @@ export type ModelGroupRow = {
   /** Display name (free text, unique per user) since `0009_model_group_aliases.sql` — the callable ids live in `model_group_aliases`. */
   name: string
   targets_json: string
+  /**
+   * `NOT NULL DEFAULT 'ordered'` since `0010_routing_strategy.sql`
+   * (docs/providers.md § Routing module). Raw column value — an
+   * unrecognized value (a future strategy this deploy predates) is
+   * normalized to `ordered` by `routing/strategy.ts`, not here; this layer
+   * just stores and returns what's in the row.
+   */
+  strategy: string
   created_at: string
   updated_at: string
 }
@@ -147,23 +155,25 @@ export async function countModelGroups(db: D1Database, userId: string): Promise<
 
 export async function insertModelGroup(
   db: D1Database,
-  input: { userId: string; name: string; targets: GroupTarget[] },
+  input: { userId: string; name: string; targets: GroupTarget[]; strategy?: string },
 ): Promise<ModelGroupRow> {
   const id = newId("mgrp")
   const ts = nowIso()
   const targetsJson = JSON.stringify(input.targets)
+  const strategy = input.strategy ?? "ordered"
   await db
     .prepare(
-      `INSERT INTO model_groups (id, user_id, name, targets_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO model_groups (id, user_id, name, targets_json, strategy, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(id, input.userId, input.name, targetsJson, ts, ts)
+    .bind(id, input.userId, input.name, targetsJson, strategy, ts, ts)
     .run()
   return {
     id,
     user_id: input.userId,
     name: input.name,
     targets_json: targetsJson,
+    strategy,
     created_at: ts,
     updated_at: ts,
   }
@@ -176,7 +186,7 @@ export async function insertModelGroup(
 export async function updateModelGroupFields(
   db: D1Database,
   id: string,
-  patch: { name?: string; targets?: GroupTarget[] },
+  patch: { name?: string; targets?: GroupTarget[]; strategy?: string },
 ): Promise<void> {
   const ts = nowIso()
   await db
@@ -184,10 +194,11 @@ export async function updateModelGroupFields(
       `UPDATE model_groups SET
          name = COALESCE(?, name),
          targets_json = COALESCE(?, targets_json),
+         strategy = COALESCE(?, strategy),
          updated_at = ?
        WHERE id = ?`,
     )
-    .bind(patch.name ?? null, patch.targets ? JSON.stringify(patch.targets) : null, ts, id)
+    .bind(patch.name ?? null, patch.targets ? JSON.stringify(patch.targets) : null, patch.strategy ?? null, ts, id)
     .run()
 }
 

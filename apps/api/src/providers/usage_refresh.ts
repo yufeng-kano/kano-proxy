@@ -1,0 +1,100 @@
+/**
+ * Shared usage-refresh core (docs/providers.md § Usage cache) — the
+ * single-flight lock/fetch/write machinery used by BOTH
+ * `GET /api/providers/:provider/accounts` (routes/providers.ts) and the
+ * routing module's background refresh fired on every dispatch
+ * (docs/providers.md § Routing module "Facts"). The lock primitives
+ * themselves (`acquireUsageLock` / `writeUsageSnapshot` / `releaseUsageLock`
+ * — the compare-and-swap) live in `db/accounts.ts` and are never
+ * reimplemented here; this module is the one place that calls them plus
+ * `adapter.fetchUsage` and persists the result.
+ */
+import { decryptJson } from "../crypto/token_crypto"
+import {
+  acquireUsageLock,
+  isUsageFresh,
+  releaseUsageLock,
+  updateAccountIdentity,
+  writeUsageSnapshot,
+  type AccountRow,
+  type UsageSnapshot,
+} from "../db/accounts"
+import type { Env } from "../env"
+import type { StoredCredential } from "../pool/acquire"
+import { pickAccountLabel } from "./identity"
+import type { ProviderAdapter } from "./types"
+
+export type UsagePersistResult = { ok: true; snapshot: UsageSnapshot } | { ok: false; error: string }
+
+/**
+ * Fetch usage from upstream and persist it, or release the lock without
+ * writing on failure (one hiccup must not blank a good snapshot — same rule
+ * as the route). Caller must already hold `lockToken` from
+ * `acquireUsageLock`.
+ */
+export async function fetchAndPersistUsage(
+  env: Env,
+  row: AccountRow,
+  adapter: ProviderAdapter,
+  lockToken: string,
+): Promise<UsagePersistResult> {
+  try {
+    const credential = await decryptJson<StoredCredential>(env.TOKEN_ENCRYPTION_KEY, row.encrypted_payload)
+    const snap = await adapter.fetchUsage!(env, { row, credential })
+    const priorMeta: Record<string, unknown> = row.account_meta_json
+      ? (JSON.parse(row.account_meta_json) as Record<string, unknown>)
+      : {}
+    const accountMeta = { ...priorMeta, ...snap.account }
+    // Prefer upstream email / username as stable pool label, same as the
+    // route's inline version this replaces.
+    const email = typeof snap.account.email === "string" ? snap.account.email : null
+    const display =
+      typeof snap.account.display_name === "string"
+        ? snap.account.display_name
+        : typeof snap.account.username === "string"
+          ? snap.account.username
+          : null
+    const better = pickAccountLabel({ email, displayName: display, fallback: row.label || row.id })
+    if (better && better !== row.label) {
+      await updateAccountIdentity(env.DB, row.id, { label: better, accountMetaJson: JSON.stringify(accountMeta) })
+    } else {
+      await updateAccountIdentity(env.DB, row.id, { accountMetaJson: JSON.stringify(accountMeta) })
+    }
+    const persisted: UsageSnapshot = {
+      windows: snap.windows,
+      account: snap.account,
+      error: snap.error ?? null,
+      stale: !!snap.stale,
+      edgeBlocked: !!snap.edgeBlocked,
+    }
+    await writeUsageSnapshot(env.DB, row.id, lockToken, persisted)
+    return { ok: true, snapshot: persisted }
+  } catch (e) {
+    await releaseUsageLock(env.DB, row.id, lockToken)
+    return { ok: false, error: e instanceof Error ? e.message : "usage failed" }
+  }
+}
+
+/**
+ * Background refresh (docs/providers.md § Routing module "Facts"): fired
+ * via `waitUntil` on every dispatch so limit-aware skip facts stay warm
+ * while traffic flows, reusing the exact 60s-TTL single-flight cache `GET
+ * /api/providers/:provider/accounts` uses — zero added request latency.
+ *
+ * Fresh-within-60s short-circuits with no upstream call. A lock already
+ * held by another caller (another concurrent request, or the accounts-page
+ * poll) also short-circuits without queuing — the stored snapshot already
+ * serves every reader; there is nothing here to report a failure to, so a
+ * lost race is simply a no-op rather than a queued retry.
+ */
+export async function refreshAccountUsageInBackground(
+  env: Env,
+  row: AccountRow,
+  adapter: ProviderAdapter,
+): Promise<void> {
+  if (!adapter.fetchUsage) return
+  if (isUsageFresh(row)) return
+  const lockToken = await acquireUsageLock(env.DB, row.id)
+  if (!lockToken) return
+  await fetchAndPersistUsage(env, row, adapter, lockToken)
+}

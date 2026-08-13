@@ -17,6 +17,7 @@ import {
 import { benchKey, isBenched } from "../src/pool/bench"
 import { getAdapter } from "../src/providers"
 import type { ProviderAdapter } from "../src/providers/types"
+import type { RoutingCandidate } from "../src/routing/types"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
 afterEach(() => {
@@ -945,5 +946,373 @@ describe("dispatchAnthropicMessages — eager streaming commit", () => {
       status_code: 200,
       error_code: "no_upstream_account",
     })
+  })
+})
+
+describe("dispatchChatCompletions — 520/522/524 (upstream edge failure) benches and fails over", () => {
+  it.each([520, 522, 524])(
+    "a %d benches that account and the loop retries the next one — arrives as a response status before anything streamed, so in-request failover is safe",
+    async (status) => {
+      const db = new FakeD1()
+      const provider = "grok"
+      await seedAccounts(db, { userId: "user_1", provider, ids: ["acc_1", "acc_2"] })
+      const env = buildEnv(db)
+
+      const calls: string[] = []
+      const adapter: ProviderAdapter = {
+        id: provider,
+        async chatCompletions(_env, account) {
+          calls.push(account.row.id)
+          if (calls.length === 1) {
+            return new Response("upstream edge failure", { status })
+          }
+          return new Response(
+            JSON.stringify({
+              choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          )
+        },
+      }
+
+      const res = await dispatchChatCompletions(env, {
+        userId: "user_1",
+        apiKeyId: "key_1",
+        provider,
+        adapter,
+        waitUntil: () => {},
+        req: {
+          model: `${provider}/some-model`,
+          rawModel: `${provider}/some-model`,
+          upstreamModel: "some-model",
+          messages: [{ role: "user", content: "hi" }],
+          rawBody: {},
+        },
+      })
+
+      expect(res.status).toBe(200)
+      expect(calls).toEqual(["acc_1", "acc_2"])
+      expect(await isBenched(env, "user_1", provider, "acc_1")).toBe(true)
+      expect(await isBenched(env, "user_1", provider, "acc_2")).toBe(false)
+    },
+  )
+})
+
+describe("routing module facts — limit-aware skip integration", () => {
+  function seedAccountsWithSnapshots(
+    db: FakeD1,
+    opts: { userId: string; provider: string; accounts: Array<{ id: string; priority: number; usage_snapshot_json: string | null }> },
+  ): void {
+    db.seed(
+      "upstream_accounts",
+      opts.accounts.map((a) => ({
+        id: a.id,
+        user_id: opts.userId,
+        provider: opts.provider,
+        external_account_id: null,
+        label: opts.provider,
+        priority: a.priority,
+        encrypted_payload: "will-be-set-below",
+        account_meta_json: null,
+        usage_snapshot_json: a.usage_snapshot_json,
+        usage_fetched_at: null,
+        usage_fetching_at: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      })),
+    )
+  }
+
+  async function encryptAllPayloads(db: FakeD1): Promise<void> {
+    for (const row of db.rows("upstream_accounts")) {
+      row.encrypted_payload = await encryptJson(TOKEN_KEY, { access_token: `tok-${row.id as string}` })
+    }
+  }
+
+  function exhaustedSnapshot(resetsAt: string): string {
+    return JSON.stringify({
+      windows: [{ label: "5h", utilization: 100, resets_at: resetsAt }],
+      error: null,
+      stale: false,
+      edgeBlocked: false,
+    })
+  }
+
+  it("an account with a >=100% window and a future resets_at is skipped without a live call; a healthy sibling wins", async () => {
+    const db = new FakeD1()
+    const provider = "claude-code"
+    const future = new Date(Date.now() + 3_600_000).toISOString()
+    seedAccountsWithSnapshots(db, {
+      userId: "user_1",
+      provider,
+      accounts: [
+        { id: "acc_limited", priority: 10, usage_snapshot_json: exhaustedSnapshot(future) },
+        { id: "acc_ok", priority: 1, usage_snapshot_json: null },
+      ],
+    })
+    await encryptAllPayloads(db)
+    const env = buildEnv(db)
+
+    const calls: string[] = []
+    const adapter: ProviderAdapter = {
+      id: provider,
+      async chatCompletions(_env, account) {
+        calls.push(account.row.id)
+        return new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider,
+      adapter,
+      waitUntil: () => {},
+      req: {
+        model: `${provider}/some-model`,
+        rawModel: `${provider}/some-model`,
+        upstreamModel: "some-model",
+        messages: [{ role: "user", content: "hi" }],
+        rawBody: {},
+      },
+    })
+
+    expect(res.status).toBe(200)
+    // The limited account (higher priority) is never called at all.
+    expect(calls).toEqual(["acc_ok"])
+  })
+
+  it("an account whose window's resets_at has already passed is NOT skipped, even off a stale snapshot", async () => {
+    const db = new FakeD1()
+    const provider = "claude-code"
+    const past = new Date(Date.now() - 3_600_000).toISOString()
+    seedAccountsWithSnapshots(db, {
+      userId: "user_1",
+      provider,
+      accounts: [{ id: "acc_1", priority: 1, usage_snapshot_json: exhaustedSnapshot(past) }],
+    })
+    await encryptAllPayloads(db)
+    const env = buildEnv(db)
+
+    const calls: string[] = []
+    const adapter: ProviderAdapter = {
+      id: provider,
+      async chatCompletions(_env, account) {
+        calls.push(account.row.id)
+        return new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider,
+      adapter,
+      waitUntil: () => {},
+      req: {
+        model: `${provider}/some-model`,
+        rawModel: `${provider}/some-model`,
+        upstreamModel: "some-model",
+        messages: [{ role: "user", content: "hi" }],
+        rawBody: {},
+      },
+    })
+
+    expect(res.status).toBe(200)
+    expect(calls).toEqual(["acc_1"])
+  })
+
+  it("a malformed snapshot is ignored (fail open) — the account is tried normally", async () => {
+    const db = new FakeD1()
+    const provider = "claude-code"
+    seedAccountsWithSnapshots(db, {
+      userId: "user_1",
+      provider,
+      accounts: [{ id: "acc_1", priority: 1, usage_snapshot_json: "{not json" }],
+    })
+    await encryptAllPayloads(db)
+    const env = buildEnv(db)
+
+    const calls: string[] = []
+    const adapter: ProviderAdapter = {
+      id: provider,
+      async chatCompletions(_env, account) {
+        calls.push(account.row.id)
+        return new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider,
+      adapter,
+      waitUntil: () => {},
+      req: {
+        model: `${provider}/some-model`,
+        rawModel: `${provider}/some-model`,
+        upstreamModel: "some-model",
+        messages: [{ role: "user", content: "hi" }],
+        rawBody: {},
+      },
+    })
+
+    expect(res.status).toBe(200)
+    expect(calls).toEqual(["acc_1"])
+  })
+
+  it("every candidate limited: 503 upstream_unavailable with Retry-After from the window's resets_at, no live call", async () => {
+    const db = new FakeD1()
+    const provider = "claude-code"
+    const future = new Date(Date.now() + 1_800_000).toISOString()
+    seedAccountsWithSnapshots(db, {
+      userId: "user_1",
+      provider,
+      accounts: [{ id: "acc_1", priority: 1, usage_snapshot_json: exhaustedSnapshot(future) }],
+    })
+    await encryptAllPayloads(db)
+    const env = buildEnv(db)
+
+    const adapter: ProviderAdapter = {
+      id: provider,
+      async chatCompletions() {
+        throw new Error("must not be called — the candidate is already known-unusable")
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider,
+      adapter,
+      waitUntil: () => {},
+      req: {
+        model: `${provider}/some-model`,
+        rawModel: `${provider}/some-model`,
+        upstreamModel: "some-model",
+        messages: [{ role: "user", content: "hi" }],
+        rawBody: {},
+      },
+    })
+
+    expect(res.status).toBe(503)
+    expect(res.headers.get("retry-after")).toBe(String(Math.ceil((Date.parse(future) - Date.now()) / 1000)))
+  })
+})
+
+describe("cross-target failover — the flattened candidate list crosses provider/adapter boundaries within one request", () => {
+  it("target 1's account benches on a 429; the walk continues into target 2's own (different-provider) candidate within the same request", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "claude-code", ids: ["acc_cc"] })
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_grok"] })
+    const env = buildEnv(db)
+
+    const ccRow = db.rows("upstream_accounts").find((r) => r.id === "acc_cc")!
+    const grokRow = db.rows("upstream_accounts").find((r) => r.id === "acc_grok")!
+
+    const calls: string[] = []
+    const ccAdapter: ProviderAdapter = {
+      id: "claude-code",
+      async chatCompletions(_env, account) {
+        calls.push(`claude-code:${account.row.id}`)
+        return new Response(JSON.stringify({ error: "rate_limited" }), { status: 429 })
+      },
+    }
+    const grokAdapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions(_env, account) {
+        calls.push(`grok:${account.row.id}`)
+        return new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }] }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      },
+    }
+
+    const candidates: RoutingCandidate[] = [
+      {
+        targetIndex: 0,
+        pinned: false,
+        provider: "claude-code",
+        upstreamModel: "claude-opus-5",
+        isBuiltin: true,
+        adapter: ccAdapter,
+        account: ccRow as any,
+      },
+      {
+        targetIndex: 1,
+        pinned: false,
+        provider: "grok",
+        upstreamModel: "grok-4.5",
+        isBuiltin: true,
+        adapter: grokAdapter,
+        account: grokRow as any,
+      },
+    ]
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: "claude-code",
+      candidates,
+      groupName: "opus",
+      waitUntil: () => {},
+      req: {
+        model: "opus",
+        rawModel: "opus",
+        upstreamModel: "claude-opus-5",
+        messages: [{ role: "user", content: "hi" }],
+        rawBody: {},
+      },
+    })
+
+    expect(res.status).toBe(200)
+    expect(calls).toEqual(["claude-code:acc_cc", "grok:acc_grok"])
+    expect(await isBenched(env, "user_1", "claude-code", "acc_cc")).toBe(true)
+  })
+})
+
+describe("dispatchChatCompletions — strategy option is accepted and defaults to ordered (no other value exists yet)", () => {
+  it("omitting strategy behaves identically to passing 'ordered' explicitly", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions(_env, account) {
+        return new Response(
+          JSON.stringify({
+            choices: [{ message: { role: "assistant", content: account.row.id }, finish_reason: "stop" }],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      },
+    }
+    const reqOpts = {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: "grok",
+      adapter,
+      waitUntil: () => {},
+      req: {
+        model: "grok/grok-4.5",
+        rawModel: "grok/grok-4.5",
+        upstreamModel: "grok-4.5",
+        messages: [{ role: "user", content: "hi" }],
+        rawBody: {},
+      },
+    }
+    const withoutStrategy = await dispatchChatCompletions(env, reqOpts)
+    const withStrategy = await dispatchChatCompletions(env, { ...reqOpts, strategy: "ordered" })
+    expect(await withoutStrategy.text()).toBe(await withStrategy.text())
   })
 })

@@ -3,7 +3,7 @@ import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
 import { logRequest } from "../logging/request_log"
-import { resolveModel } from "../providers/resolve"
+import { resolveCandidates } from "../routing/candidates"
 import { dispatchChatCompletions } from "../proxy/dispatch"
 import { detectOpenAIToolLoop, loopDetectedMessage } from "../utils/loop_guard"
 import { loggingProviderFromRawModel } from "../utils/model"
@@ -42,7 +42,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const resolved = await resolveModel(c.env, userId, modelRaw)
+  const resolved = await resolveCandidates(c.env, userId, modelRaw)
   if (!resolved) {
     c.executionCtx.waitUntil(
       logRequest(c.env, {
@@ -78,9 +78,11 @@ openaiRoutes.post("/chat/completions", async (c) => {
   // never on native Anthropic passthrough adapters (claude-code /
   // custom-anthropic). grok exposes `messages()` for the /anthropic →
   // Responses path, but /openai/v1 still uses chatCompletions — keep it
-  // guarded (docs/api.md "Degenerate tool-call loop guard").
+  // guarded (docs/api.md "Degenerate tool-call loop guard"). Decided from
+  // the highest-priority resolved target only — a structural, not
+  // usability-based, property (routing/candidates.ts `primary`).
   const nativeAnthropicPassthrough =
-    !!resolved.adapter.messages && resolved.provider !== "grok"
+    !!resolved.primary.adapter.messages && resolved.primary.provider !== "grok"
   if (!nativeAnthropicPassthrough) {
     const loop = detectOpenAIToolLoop((body.messages as unknown[]) ?? [])
     if (loop.tripped) {
@@ -88,12 +90,12 @@ openaiRoutes.post("/chat/completions", async (c) => {
         logRequest(c.env, {
           userId,
           apiKeyId,
-          provider: resolved.provider,
-          model: `${resolved.provider}/${resolved.upstreamModel}`,
+          provider: resolved.primary.provider,
+          model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
           statusCode: 400,
           latencyMs: Date.now() - started,
           errorCode: "loop_detected",
-          groupName: resolved.group?.name ?? null,
+          groupName: resolved.groupName ?? null,
         }),
       )
       return c.json(
@@ -137,15 +139,18 @@ openaiRoutes.post("/chat/completions", async (c) => {
   return dispatchChatCompletions(c.env, {
     userId,
     apiKeyId,
-    provider: resolved.provider,
-    adapter: resolved.adapter,
+    provider: resolved.primary.provider,
+    adapter: resolved.primary.adapter,
     waitUntil: (p) => c.executionCtx.waitUntil(p),
-    groupName: resolved.group?.name,
-    pinnedAccountId: resolved.pinnedAccountId,
+    groupName: resolved.groupName,
+    candidates: resolved.candidates,
+    strategy: resolved.strategy,
+    isBuiltin: resolved.primary.isBuiltin,
+    customProvider: resolved.primary.customProvider,
     req: {
       model: modelRaw,
       rawModel: modelRaw,
-      upstreamModel: resolved.upstreamModel,
+      upstreamModel: resolved.primary.upstreamModel,
       messages: (body.messages as unknown[]) ?? [],
       stream: !!body.stream,
       max_tokens: maxTokens,

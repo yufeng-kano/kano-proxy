@@ -481,7 +481,14 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
 
     let capturedAuth: string | null = null
     let callCount = 0
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      // The dispatched candidate also fires a background usage refresh
+      // (docs/providers.md § Routing module "Facts") — a separate upstream
+      // call to a different path. Only the chat-completions call itself
+      // counts toward this test's assertion.
+      if (!String(input).endsWith("/v1/messages")) {
+        return new Response(JSON.stringify({ five_hour: null, seven_day: null }), { status: 200 })
+      }
       callCount++
       capturedAuth = (init?.headers as Record<string, string> | undefined)?.authorization ?? null
       return new Response(
@@ -533,7 +540,12 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     })
 
     let capturedAuth: string | null = null
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      // Ignore the background usage refresh (docs/providers.md § Routing
+      // module "Facts") — a separate call to a different upstream path.
+      if (!String(input).endsWith("/v1/messages")) {
+        return new Response(JSON.stringify({ five_hour: null, seven_day: null }), { status: 200 })
+      }
       capturedAuth = (init?.headers as Record<string, string> | undefined)?.authorization ?? null
       return new Response(
         JSON.stringify({
@@ -585,7 +597,12 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     })
 
     const seenAuth: string[] = []
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      // Ignore the background usage refresh (docs/providers.md § Routing
+      // module "Facts") — a separate call to a different upstream path.
+      if (!String(input).endsWith("/v1/messages")) {
+        return new Response(JSON.stringify({ five_hour: null, seven_day: null }), { status: 200 })
+      }
       const auth = (init?.headers as Record<string, string> | undefined)?.authorization ?? ""
       seenAuth.push(auth)
       // Upstream rate-limits the pinned account — benchable, would normally
@@ -640,7 +657,12 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     seedGroup(db, { userId: "user_1", name: "opus", targets: ["claude-code/claude-opus-5"] })
 
     const seenAuth: string[] = []
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      // Ignore the background usage refresh (docs/providers.md § Routing
+      // module "Facts") — a separate call to a different upstream path.
+      if (!String(input).endsWith("/v1/messages")) {
+        return new Response(JSON.stringify({ five_hour: null, seven_day: null }), { status: 200 })
+      }
       const auth = (init?.headers as Record<string, string> | undefined)?.authorization ?? ""
       seenAuth.push(auth)
       if (auth === "Bearer token-first") {

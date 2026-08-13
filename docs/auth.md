@@ -98,6 +98,7 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 | Method | Path |
 |--------|------|
 | GET | `/api/providers/:provider/accounts` |
+| PATCH | `/api/providers/:provider` |
 | POST | `/api/providers/:provider/login` |
 | POST | `/api/providers/:provider/login/:id/complete` |
 | GET | `/api/providers/:provider/login/:id` |
@@ -110,6 +111,8 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 `:provider` ∈ `claude-code` | `codex` | `grok`. `accounts/import` is a manual credential-ingest route (bootstrapping / tests) — same shape as a completed OAuth login, but the caller supplies `access_token` (and optional `refresh_token` / `expires_at` / `account_id` / `email` / `label`) directly instead of running the OAuth dance.
 
 `PATCH /api/providers/:provider/accounts/:id` renames an account: body `{custom_label: string | null}`, trimmed, max 64 chars, `null`/`""` clears it and falls back to the upstream identity. It touches **only** `custom_label` — never tokens, priority, or the upstream-synced `label` (see [database.md](./database.md)) — and returns `{ok: true, custom_label}`. 404 when the id is not the caller's.
+
+`PATCH /api/providers/:provider` sets the pool's routing strategy: body `{strategy}` — `ordered` is the only accepted value today, anything else is `400` ([providers.md](./providers.md) § Routing module). Upserts the `provider_settings` row ([database.md](./database.md)) and returns `{ok: true, strategy}`. The current value rides on `GET /api/providers/:provider/accounts` as a top-level `strategy` field (defaulting to `ordered` when no row exists) — no separate read route.
 
 ## Custom endpoint keys
 
@@ -136,9 +139,9 @@ Bare-name model aliases → ordered `provider/model` targets (contract: [provide
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/model-groups` | List the user's groups: `{id, name, aliases, targets, created_at, updated_at}` each. `aliases` is the group's callable bare model ids (string array); `targets` is the priority-ordered array of `{model, account_id, account_label}` — `account_id` `null` for an unpinned (whole-pool) target; `account_label` is resolved at read time for display (`custom_label` \|\| upstream `label`, `null` when unpinned or the account no longer exists) and is **never** stored |
-| POST | `/api/model-groups` | Create — body `{name, aliases, targets}`. Each target is `{model, account_id?}` or a bare `"provider/model"` string (shorthand for `{model}`). Validation: `name` trimmed, 1–64 chars, free text, unique per user; `aliases` 1–10 entries, each trimmed, 1–128 chars, no whitespace, no `/`, no duplicates in the payload, unique across **all** of the caller's groups (`400` naming the conflicting alias); `targets` 1–20 entries, each `model` parses as `provider/model` with a prefix that is a builtin or one of the caller's custom slugs; `account_id`, when present, must be an `upstream_accounts` row owned by the caller whose `provider` matches the target's prefix; no duplicate `model`+`account_id` pairs; max 50 groups per user. `400` with a field-level message on any violation |
-| PUT | `/api/model-groups/:id` | Update — body `{name?, aliases?, targets?}`; `aliases` and `targets`, when present, each replace their whole list (no per-entry patching — order is the semantics for targets). Same validation as create. 404 when the id is not the caller's |
+| GET | `/api/model-groups` | List the user's groups: `{id, name, aliases, targets, strategy, created_at, updated_at}` each. `aliases` is the group's callable bare model ids (string array); `targets` is the priority-ordered array of `{model, account_id, account_label}` — `account_id` `null` for an unpinned (whole-pool) target; `account_label` is resolved at read time for display (`custom_label` \|\| upstream `label`, `null` when unpinned or the account no longer exists) and is **never** stored |
+| POST | `/api/model-groups` | Create — body `{name, aliases, targets, strategy?}` (`strategy` defaults to `ordered`; only `ordered` accepted today — [providers.md](./providers.md) § Routing module). Each target is `{model, account_id?}` or a bare `"provider/model"` string (shorthand for `{model}`). Validation: `name` trimmed, 1–64 chars, free text, unique per user; `aliases` 1–10 entries, each trimmed, 1–128 chars, no whitespace, no `/`, no duplicates in the payload, unique across **all** of the caller's groups (`400` naming the conflicting alias); `targets` 1–20 entries, each `model` parses as `provider/model` with a prefix that is a builtin or one of the caller's custom slugs; `account_id`, when present, must be an `upstream_accounts` row owned by the caller whose `provider` matches the target's prefix; no duplicate `model`+`account_id` pairs; max 50 groups per user. `400` with a field-level message on any violation |
+| PUT | `/api/model-groups/:id` | Update — body `{name?, aliases?, targets?, strategy?}`; `aliases` and `targets`, when present, each replace their whole list (no per-entry patching — order is the semantics for targets). Same validation as create. 404 when the id is not the caller's |
 | DELETE | `/api/model-groups/:id` | Delete (aliases cascade). Requests already in flight finish; the next request for any of its aliases is `invalid_model` |
 
 ## Encryption

@@ -6,7 +6,7 @@ import {
   readAccountsCache,
   writeAccountsCache,
 } from "@/services/cache"
-import type { AccountsResponse, ProviderId } from "@/types"
+import type { AccountsResponse, ProviderId, RoutingStrategy } from "@/types"
 
 type ProviderState = {
   data: AccountsResponse | null
@@ -95,6 +95,19 @@ export function useAccounts() {
     await Promise.all(PROVIDER_IDS.map((p) => loadProvider(p, opts)))
   }
 
+  /**
+   * Records the strategy a write just saved. The whole payload is re-cached
+   * with it, so the next cache-first paint shows the new value instead of the
+   * one the last read happened to carry — a re-fetch would cost an upstream
+   * usage round trip to learn one field the response already told us.
+   */
+  function setStrategy(provider: ProviderId, strategy: RoutingStrategy) {
+    const data = byProvider[provider].data
+    if (!data) return
+    data.strategy = strategy
+    writeAccountsCache(userId.value, provider, data)
+  }
+
   function invalidateLocal(provider: ProviderId) {
     byProvider[provider].data = null
     byProvider[provider].fromCache = false
@@ -105,6 +118,7 @@ export function useAccounts() {
     setUserId,
     loadProvider,
     loadAll,
+    setStrategy,
     invalidateLocal,
     CACHE_TTL_MS,
   }

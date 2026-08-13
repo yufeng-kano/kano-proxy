@@ -814,3 +814,76 @@ describe("GET /api/providers/:provider/accounts usage cache", () => {
     expect(cached.accounts[0].status).toBe("unusable")
   })
 })
+
+describe("PATCH /api/providers/:provider (docs/providers.md § Routing module)", () => {
+  it("requires auth", async () => {
+    const db = new FakeD1()
+    const res = await providerRoutes.request("/claude-code", req("PATCH", undefined, { strategy: "ordered" }))
+    expect(res.status).toBe(401)
+    void db
+  })
+
+  it("400s on an invalid provider", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await providerRoutes.request("/not-a-provider", req("PATCH", cookie, { strategy: "ordered" }), env)
+    expect(res.status).toBe(400)
+  })
+
+  it("accepts strategy: 'ordered' and upserts provider_settings", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await providerRoutes.request("/claude-code", req("PATCH", cookie, { strategy: "ordered" }), env)
+    expect(res.status).toBe(200)
+    expect(await readJson(res)).toEqual({ ok: true, strategy: "ordered" })
+    const rows = db.rows("provider_settings")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ user_id: "user_1", provider: "claude-code", strategy: "ordered" })
+  })
+
+  it("400s on any value other than 'ordered'", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await providerRoutes.request(
+      "/claude-code",
+      req("PATCH", cookie, { strategy: "usage-balanced" }),
+      env,
+    )
+    expect(res.status).toBe(400)
+    expect(db.rows("provider_settings")).toHaveLength(0)
+  })
+
+  it("a second PATCH updates the existing row in place rather than inserting a duplicate", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await providerRoutes.request("/claude-code", req("PATCH", cookie, { strategy: "ordered" }), env)
+    await providerRoutes.request("/claude-code", req("PATCH", cookie, { strategy: "ordered" }), env)
+    expect(db.rows("provider_settings")).toHaveLength(1)
+  })
+
+  it("GET /accounts carries the current strategy as a top-level field, defaulting to ordered with no row", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const beforePatch = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(beforePatch.strategy).toBe("ordered")
+
+    await providerRoutes.request("/claude-code", req("PATCH", cookie, { strategy: "ordered" }), env)
+    const afterPatch = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(afterPatch.strategy).toBe("ordered")
+  })
+})

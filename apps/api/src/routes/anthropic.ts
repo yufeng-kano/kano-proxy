@@ -4,7 +4,7 @@ import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
 import type { ProviderId } from "../env"
 import { logRequest } from "../logging/request_log"
-import { resolveModel } from "../providers/resolve"
+import { resolveCandidates } from "../routing/candidates"
 import { dispatchAnthropicMessages, dispatchAnthropicViaOpenAI } from "../proxy/dispatch"
 import { detectAnthropicToolLoop, loopDetectedMessage } from "../utils/loop_guard"
 import { loggingProviderFromRawModel } from "../utils/model"
@@ -40,7 +40,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const resolved = await resolveModel(c.env, userId, modelRaw)
+  const resolved = await resolveCandidates(c.env, userId, modelRaw)
   if (!resolved) {
     c.executionCtx.waitUntil(
       logRequest(c.env, {
@@ -76,13 +76,17 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   // claude-code / custom anthropic-format: native Messages passthrough.
   // grok also exposes adapter.messages, but that path converts to Responses —
   // not Claude-native passthrough — so the loop guard still applies below.
+  // Decided from the highest-priority resolved target only — a structural,
+  // not usability-based, property (routing/candidates.ts `primary`); a
+  // later, differently-shaped target within the same group simply can't be
+  // reached by this call shape (docs/providers.md § Routing module).
   const isNativeAnthropicPassthrough =
-    !!resolved.adapter.messages && resolved.provider !== "grok"
+    !!resolved.primary.adapter.messages && resolved.primary.provider !== "grok"
 
   if (isNativeAnthropicPassthrough) {
     // Only normalize model to the bare upstream id — strict cache_control
     // passthrough, do not touch other body fields.
-    const upstreamBody = { ...body, model: resolved.upstreamModel }
+    const upstreamBody = { ...body, model: resolved.primary.upstreamModel }
     const headers = new Headers()
     const beta = c.req.header("anthropic-beta")
     const ver = c.req.header("anthropic-version")
@@ -94,12 +98,15 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       apiKeyId,
       body: upstreamBody,
       headers,
-      model: `${resolved.provider}/${resolved.upstreamModel}`,
-      provider: resolved.provider,
-      adapter: resolved.adapter,
+      model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
+      provider: resolved.primary.provider,
+      adapter: resolved.primary.adapter,
       waitUntil: (p) => c.executionCtx.waitUntil(p),
-      groupName: resolved.group?.name,
-      pinnedAccountId: resolved.pinnedAccountId,
+      groupName: resolved.groupName,
+      candidates: resolved.candidates,
+      strategy: resolved.strategy,
+      isBuiltin: resolved.primary.isBuiltin,
+      customProvider: resolved.primary.customProvider,
     })
   }
 
@@ -112,12 +119,12 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       logRequest(c.env, {
         userId,
         apiKeyId,
-        provider: resolved.provider,
-        model: `${resolved.provider}/${resolved.upstreamModel}`,
+        provider: resolved.primary.provider,
+        model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
         statusCode: 400,
         latencyMs: Date.now() - started,
         errorCode: "loop_detected",
-        groupName: resolved.group?.name ?? null,
+        groupName: resolved.groupName ?? null,
       }),
     )
     return c.json(
@@ -130,8 +137,8 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   }
 
   // grok: Anthropic ↔ Responses (encrypted reasoning). Not Chat Completions.
-  if (resolved.provider === "grok" && resolved.adapter.messages) {
-    const upstreamBody = { ...body, model: resolved.upstreamModel }
+  if (resolved.primary.provider === "grok" && resolved.primary.adapter.messages) {
+    const upstreamBody = { ...body, model: resolved.primary.upstreamModel }
     const headers = new Headers()
     // Strip any client-supplied isolation headers; only the route may set them.
     const beta = c.req.header("anthropic-beta")
@@ -149,27 +156,33 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       apiKeyId,
       body: upstreamBody,
       headers,
-      model: `${resolved.provider}/${resolved.upstreamModel}`,
-      provider: resolved.provider,
-      adapter: resolved.adapter,
+      model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
+      provider: resolved.primary.provider,
+      adapter: resolved.primary.adapter,
       waitUntil: (p) => c.executionCtx.waitUntil(p),
-      groupName: resolved.group?.name,
-      pinnedAccountId: resolved.pinnedAccountId,
+      groupName: resolved.groupName,
+      candidates: resolved.candidates,
+      strategy: resolved.strategy,
+      isBuiltin: resolved.primary.isBuiltin,
+      customProvider: resolved.primary.customProvider,
     })
   }
 
   return dispatchAnthropicViaOpenAI(c.env, {
     userId,
     apiKeyId,
-    provider: resolved.provider,
-    adapter: resolved.adapter,
+    provider: resolved.primary.provider,
+    adapter: resolved.primary.adapter,
     rawModel: resolved.raw,
-    upstreamModel: resolved.upstreamModel,
+    upstreamModel: resolved.primary.upstreamModel,
     body,
     affinity,
     waitUntil: (p) => c.executionCtx.waitUntil(p),
-    groupName: resolved.group?.name,
-    pinnedAccountId: resolved.pinnedAccountId,
+    groupName: resolved.groupName,
+    candidates: resolved.candidates,
+    strategy: resolved.strategy,
+    isBuiltin: resolved.primary.isBuiltin,
+    customProvider: resolved.primary.customProvider,
   })
 })
 
@@ -187,7 +200,7 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const resolved = await resolveModel(c.env, userId, modelRaw)
+  const resolved = await resolveCandidates(c.env, userId, modelRaw)
   if (!resolved) {
     c.executionCtx.waitUntil(
       logRequest(c.env, {
@@ -216,17 +229,17 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
   // Builtins keep the exact prior provider-identity check (and its test);
   // custom providers are rejected the same way, by adapter capability —
   // custom anthropic-format has countTokens, custom openai-format does not.
-  if (resolved.isBuiltin) {
-    const rejection = countTokensProviderError(resolved.provider as ProviderId)
+  if (resolved.primary.isBuiltin) {
+    const rejection = countTokensProviderError(resolved.primary.provider as ProviderId)
     if (rejection) return c.json(rejection, 400)
-  } else if (!resolved.adapter.countTokens) {
+  } else if (!resolved.primary.adapter.countTokens) {
     return c.json(COUNT_TOKENS_UNSUPPORTED, 400)
   }
 
   // Native passthrough only, same as /v1/messages: normalize model to bare
   // upstream id, forward anthropic-beta/anthropic-version if the client sent
   // them.
-  const upstreamBody = { ...body, model: resolved.upstreamModel }
+  const upstreamBody = { ...body, model: resolved.primary.upstreamModel }
   const headers = new Headers()
   const beta = c.req.header("anthropic-beta")
   const ver = c.req.header("anthropic-version")
@@ -238,13 +251,16 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     apiKeyId,
     body: upstreamBody,
     headers,
-    model: `${resolved.provider}/${resolved.upstreamModel}`,
-    provider: resolved.provider,
-    adapter: resolved.adapter,
+    model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
+    provider: resolved.primary.provider,
+    adapter: resolved.primary.adapter,
     endpoint: "count_tokens",
     waitUntil: (p) => c.executionCtx.waitUntil(p),
-    groupName: resolved.group?.name,
-    pinnedAccountId: resolved.pinnedAccountId,
+    groupName: resolved.groupName,
+    candidates: resolved.candidates,
+    strategy: resolved.strategy,
+    isBuiltin: resolved.primary.isBuiltin,
+    customProvider: resolved.primary.customProvider,
   })
 })
 

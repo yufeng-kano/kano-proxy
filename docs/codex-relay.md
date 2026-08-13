@@ -60,7 +60,7 @@ Status passes through untouched. Response headers are reduced to `content-type` 
 | `x-relay-fault: <reason>` | The relay itself failed (`path`, `method`, `upstream_unreachable`). Always status **502**. |
 | neither | The request never reached the relay app — Cloud Run IAM rejection (expired/invalid ID token) or a platform error. |
 
-**Relay self-errors never use 401/402/403/429.** Those four statuses bench pool accounts in the Worker (`pool/acquire.ts` `FAILOVER_STATUS`); a relay misconfiguration must degrade the codex *route*, not poison codex *account* state.
+**Relay self-errors never use 401/402/403/429.** Those four statuses (plus 520/522/524) bench pool accounts in the Worker (`routing/feedback.ts`'s penalty table — see docs/providers.md § Routing module); a relay misconfiguration must degrade the codex *route*, not poison codex *account* state.
 
 The Worker applies a tri-state guard to every relay response:
 
