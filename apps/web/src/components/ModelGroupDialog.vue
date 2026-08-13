@@ -13,8 +13,9 @@
  * the left edge, and the model list filling the rest. Tab → accounts (lazily
  * loaded, cache-first, the same data the Providers page reads); account →
  * models, filtered client-side over the catalog the page already holds so a
- * keystroke never hits the network, plus a free-text row for ids the catalog
- * does not list (codex lists none, so that row is the only way in for it).
+ * keystroke never hits the network. Catalog only — the free-text add row was
+ * removed 2026-08-14 (not this dialog's job); an id the catalog misses is the
+ * catalog's problem to fix, not a hole every group editor papers over.
  *
  * **Every target this dialog creates pins an account** — there is no "Any
  * account" entry in the rail (docs, 2026-08-13). The wire still accepts
@@ -122,7 +123,6 @@ const targets = ref<TargetRow[]>((props.group?.targets ?? []).map(toRow))
 const selectedTab = ref<string>(prefixOf(props.group?.targets[0]?.model ?? "") || PROVIDERS[0]!.id)
 const selectedAccountId = ref<string | null>(null)
 const query = ref("")
-const manual = ref("")
 
 const saving = ref(false)
 const deleting = ref(false)
@@ -248,17 +248,6 @@ const tabModels = computed<CatalogModel[]>(() => {
   return out
 })
 
-/**
- * What the free-text row would add. Typing the upstream id is enough — the tab
- * already says which provider it belongs to — and a value that already carries
- * the prefix is left alone rather than prefixed twice.
- */
-const manualId = computed(() => {
-  const raw = manual.value.trim()
-  if (!raw) return ""
-  return raw.startsWith(`${activeTab.value}/`) ? raw : `${activeTab.value}/${raw}`
-})
-
 /* --- Loading ------------------------------------------------------------- */
 
 const requestedProviders = new Set<ProviderId>()
@@ -300,7 +289,6 @@ onMounted(() => {
 watch(activeTab, (key) => {
   selectedAccountId.value = null
   query.value = ""
-  manual.value = ""
   ensureRail(key)
 })
 
@@ -382,13 +370,6 @@ function addTarget(modelId: string) {
     return
   }
   targets.value.push(toRow(target))
-}
-
-function addManual() {
-  if (!manualId.value) return
-  const before = targets.value.length
-  addTarget(manualId.value)
-  if (targets.value.length > before) manual.value = ""
 }
 
 /**
@@ -803,35 +784,6 @@ async function remove() {
                   {{ t("groups.dialog.noMatches", { query: trimmedQuery }) }}
                 </p>
                 <p v-else class="note">{{ t("groups.dialog.modelsEmpty") }}</p>
-
-                <!-- Free text, always available: the server validates only the
-                     prefix, so an id the catalog never listed is legitimate. -->
-                <div class="manual">
-                  <label class="manual-field">
-                    <span class="sr-only">{{ t("groups.dialog.manualLabel") }}</span>
-                    <TextInput
-                      v-model="manual"
-                      mono
-                      :placeholder="t('groups.dialog.manualPlaceholder')"
-                      :disabled="saving || deleting"
-                      @enter="addManual"
-                    />
-                  </label>
-                  <AppButton
-                    size="sm"
-                    :label="manualId ? t('groups.dialog.addTarget', { target: manualId }) : undefined"
-                    :disabled="!manualId || saving || deleting"
-                    @click="addManual"
-                  >
-                    {{ t("groups.dialog.add") }}
-                  </AppButton>
-                </div>
-                <p class="note manual-note">
-                  <template v-if="manualId">
-                    {{ t("groups.dialog.manualPreview", { id: manualId }) }}
-                  </template>
-                  <template v-else>{{ t("groups.dialog.manualHint") }}</template>
-                </p>
               </template>
 
               <EmptyState
@@ -1008,7 +960,7 @@ async function remove() {
      dialog empty on a tall display — the "not enough height" complaint,
      2026-08-13. The 380px budget is everything that is not this region:
      overlay padding, panel header/footer, column padding, the column head,
-     and the free-text row. The floor keeps small screens exactly where the
+     and the model search row. The floor keeps small screens exactly where the
      fixed height had them; the ceiling stops a 4K display from rendering a
      list taller than anyone scans. */
   --pane-h: clamp(400px, calc(100dvh - 380px), 760px);
@@ -1043,12 +995,19 @@ async function remove() {
 /* Unframed: the tab strip's underline and the rail's edge are the only lines,
    which is what makes the inverted L read as structure on the surface rather
    than as a widget dropped onto it. It owns its column, so it takes the height
-   that column has. */
+   that column has.
+
+   Full bleed: the picker cancels its column's horizontal padding so the tabs,
+   rail, and model list run divider to divider — the padded gutters either side
+   of it read as empty vertical bands splitting the surface (rejected
+   2026-08-14). The column head above keeps the padding, which is what holds
+   the three heads on one aligned row. */
 .picker {
   display: flex;
   flex-direction: column;
   flex: 1;
   gap: var(--space-2);
+  margin: 0 calc(var(--space-5) * -1);
   min-width: 0;
   min-height: 0;
 }
@@ -1159,9 +1118,13 @@ async function remove() {
   border-bottom: 1px solid var(--border);
 }
 
-/* The one region that grows with its data, so it is the one that scrolls. */
+/* The one region that grows with its data, so it is the one that scrolls.
+   `align-content: start` is load-bearing: a stretched grid distributes two
+   rows across the whole tall track and reads as items floating in space —
+   a list packs from the top whatever its count (rejected 2026-08-14). */
 .models-list {
   display: grid;
+  align-content: start;
   gap: 2px;
   flex: 1;
   margin: 0;
@@ -1206,21 +1169,6 @@ async function remove() {
   font-size: var(--text-2xs);
 }
 
-.manual {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-shrink: 0;
-  padding: var(--space-2);
-  border-top: 1px solid var(--border);
-}
-
-.manual-field {
-  display: block;
-  flex: 1;
-  min-width: 0;
-}
-
 .note {
   margin: 0;
   padding: var(--space-2);
@@ -1228,11 +1176,6 @@ async function remove() {
   font-size: var(--text-2xs);
   line-height: 1.5;
   overflow-wrap: anywhere;
-}
-
-.manual-note {
-  flex-shrink: 0;
-  padding-top: 0;
 }
 
 /* Nothing picked yet: the region says what to do instead of standing empty. */

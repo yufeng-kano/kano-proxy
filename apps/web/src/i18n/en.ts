@@ -339,14 +339,7 @@ export const en = {
   "groups.dialog.modelsEmpty": "This provider lists no models. Add one by id below.",
   "groups.dialog.addModelOn": "Add {model} on {account}",
   "groups.dialog.added": "Added",
-  // The way in for ids no catalog lists — the whole of codex, and anything an
-  // upstream added since the catalog was cached.
-  "groups.dialog.manualLabel": "Model id",
-  "groups.dialog.manualPlaceholder": "model id",
-  "groups.dialog.manualHint": "Not listed? Type the id the upstream uses.",
-  "groups.dialog.manualPreview": "Adds {id}",
   "groups.dialog.add": "Add",
-  "groups.dialog.addTarget": "Add {target}",
   "groups.dialog.noMatches": "No models match \"{query}\"",
   "groups.dialog.moveUp": "Move {target} up",
   "groups.dialog.moveDown": "Move {target} down",
