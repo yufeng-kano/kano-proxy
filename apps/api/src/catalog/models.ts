@@ -9,7 +9,7 @@ import type { Env, ProviderId } from "../env"
 import { PROVIDERS } from "../env"
 import { listAccounts } from "../db/accounts"
 import { listCustomProviders, type CustomProviderRow } from "../db/custom_providers"
-import { listModelGroups } from "../db/model_groups"
+import { listAliasesForGroup, listModelGroups } from "../db/model_groups"
 import { decryptJson } from "../crypto/token_crypto"
 import type { StoredCredential } from "../pool/acquire"
 import { isBenched } from "../pool/bench"
@@ -246,21 +246,30 @@ async function fetchCustomProviderModels(
 }
 
 /**
- * Model groups (docs/providers.md § Model groups): one cheap D1 read, no KV
- * cache needed. Listed regardless of current target usability — groups are
- * user config, never fabricated, and never expanded into their targets here.
+ * Model groups (docs/providers.md § Model groups): one row per **alias**,
+ * not per group — a group with 3 aliases lists as 3 catalog entries, `id` =
+ * the alias, `display_name` = the group's display name shared across them.
+ * Cheap D1 reads, no KV cache needed. Listed regardless of current target
+ * usability — groups are user config, never fabricated, and never expanded
+ * into their targets here.
  */
 async function fetchModelGroups(env: Env, userId: string): Promise<ProviderModelsSection> {
   const rows = await listModelGroups(env.DB, userId)
-  const models: CatalogModel[] = rows.map((row) => ({
-    id: row.name,
-    provider: "group",
-    upstream: row.name,
-    display_name: row.name,
-    available: true,
-    owned_by: "group",
-    object: "model" as const,
-  }))
+  const models: CatalogModel[] = []
+  for (const row of rows) {
+    const aliasRows = await listAliasesForGroup(env.DB, row.id)
+    for (const a of aliasRows) {
+      models.push({
+        id: a.alias,
+        provider: "group",
+        upstream: a.alias,
+        display_name: row.name,
+        available: true,
+        owned_by: "group",
+        object: "model" as const,
+      })
+    }
+  }
   return { provider: "group", models, error: null, cached: false }
 }
 

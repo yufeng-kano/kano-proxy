@@ -68,13 +68,20 @@ async function seedAccount(db: FakeD1, opts: { userId: string; provider: string 
   ])
 }
 
+/**
+ * Seeds a group row plus its `model_group_aliases` rows. Defaults to a
+ * single alias equal to `name`, so every existing test here (which sends
+ * `name`'s value as `model`) keeps resolving unchanged; pass `aliases`
+ * explicitly to exercise multi-alias dispatch.
+ */
 function seedGroup(
   db: FakeD1,
-  opts: { userId: string; name: string; targets: unknown[] },
+  opts: { userId: string; name: string; targets: unknown[]; aliases?: string[] },
 ): void {
+  const id = `mgrp_${opts.name}`
   db.seed("model_groups", [
     {
-      id: `mgrp_${opts.name}`,
+      id,
       user_id: opts.userId,
       name: opts.name,
       targets_json: JSON.stringify(opts.targets),
@@ -82,6 +89,17 @@ function seedGroup(
       updated_at: "2026-01-01T00:00:00.000Z",
     },
   ])
+  const aliases = opts.aliases ?? [opts.name]
+  db.seed(
+    "model_group_aliases",
+    aliases.map((alias, i) => ({
+      id: `${id}_alias_${i}`,
+      user_id: opts.userId,
+      group_id: id,
+      alias,
+      created_at: "2026-01-01T00:00:00.000Z",
+    })),
+  )
 }
 
 /** Distinguishable-credential account, for asserting exactly which account's token reached the wire. */
@@ -195,6 +213,51 @@ describe("/openai/v1/chat/completions — model group dispatch", () => {
       provider: "grok",
       model: "grok/grok-4.5",
       group_name: "fast",
+    })
+  })
+
+  it("multi-alias group: whichever alias the client sends is what's echoed and logged, never the display name or a sibling alias", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedAccount(db, { userId: "user_1", provider: "claude-code" })
+    seedGroup(db, {
+      userId: "user_1",
+      name: "OpenAI GPT-4o family", // free-text display name — not callable
+      aliases: ["gpt-4o", "gpt-4", "gpt-4-turbo"],
+      targets: ["claude-code/claude-opus-5"],
+    })
+
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 10, output_tokens: 5 },
+        }),
+        { status: 200 },
+      )) as typeof fetch
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "gpt-4", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { model: string }
+    expect(json.model).toBe("gpt-4")
+
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      provider: "claude-code",
+      model: "claude-code/claude-opus-5",
+      group_name: "gpt-4",
     })
   })
 

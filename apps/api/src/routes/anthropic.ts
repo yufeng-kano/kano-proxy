@@ -59,7 +59,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
         error: {
           type: "invalid_request_error",
           message:
-            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group names",
+            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group aliases",
         },
       },
       400,
@@ -206,7 +206,7 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
         error: {
           type: "invalid_request_error",
           message:
-            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group names",
+            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group aliases",
         },
       },
       400,

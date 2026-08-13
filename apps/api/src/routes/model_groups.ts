@@ -6,10 +6,13 @@ import { listCustomProviders } from "../db/custom_providers"
 import {
   countModelGroups,
   deleteModelGroup,
+  findAliasConflicts,
   getModelGroupById,
   insertModelGroup,
+  listAliasesForGroup,
   listModelGroups,
   parseGroupTargets,
+  replaceAliases,
   updateModelGroupFields,
   type GroupTarget,
   type ModelGroupRow,
@@ -17,7 +20,8 @@ import {
 import { isProviderId } from "../env"
 import {
   MAX_MODEL_GROUPS_PER_USER,
-  validateGroupName,
+  validateAliases,
+  validateDisplayName,
   validateGroupTargets,
 } from "../utils/model_group"
 
@@ -68,6 +72,7 @@ async function toListItem(
   userId: string,
   row: ModelGroupRow,
 ): Promise<Record<string, unknown>> {
+  const aliasRows = await listAliasesForGroup(db, row.id)
   const targets = parseGroupTargets(row.targets_json)
   const enriched = await Promise.all(
     targets.map(async (t) => ({
@@ -79,6 +84,7 @@ async function toListItem(
   return {
     id: row.id,
     name: row.name,
+    aliases: aliasRows.map((a) => a.alias),
     targets: enriched,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -105,8 +111,17 @@ modelGroupRoutes.post("/", async (c) => {
   }
 
   const name = typeof body.name === "string" ? body.name.trim() : ""
-  const nameErr = validateGroupName(name)
+  const nameErr = validateDisplayName(name)
   if (nameErr) return c.json({ error: nameErr }, 400)
+
+  const aliasesRes = validateAliases(body.aliases)
+  if (!aliasesRes.ok) return c.json({ error: aliasesRes.error }, 400)
+  // Cross-group uniqueness: no group of this user's yet owns any of these
+  // aliases (a brand-new group has nothing of its own to exclude).
+  const conflicts = await findAliasConflicts(c.env.DB, user.id, aliasesRes.aliases)
+  if (conflicts.length > 0) {
+    return c.json({ error: `alias "${conflicts[0]}" is already used by another of your groups` }, 400)
+  }
 
   const resolvePrefix = await prefixResolver(c.env.DB, user.id)
   const resolveAccount = accountResolver(c.env.DB, user.id)
@@ -128,6 +143,7 @@ modelGroupRoutes.post("/", async (c) => {
     name,
     targets: targetsRes.targets,
   })
+  await replaceAliases(c.env.DB, { userId: user.id, groupId: row.id, aliases: aliasesRes.aliases })
   return c.json(await toListItem(c.env.DB, user.id, row), 201)
 })
 
@@ -148,12 +164,25 @@ modelGroupRoutes.put("/:id", async (c) => {
   let name: string | undefined
   if (body.name !== undefined) {
     name = typeof body.name === "string" ? body.name.trim() : ""
-    const err = validateGroupName(name)
+    const err = validateDisplayName(name)
     if (err) return c.json({ error: err }, 400)
     const rows = await listModelGroups(c.env.DB, user.id)
     if (rows.some((g) => g.id !== id && g.name === name)) {
       return c.json({ error: `a model group named "${name}" already exists` }, 400)
     }
+  }
+
+  let aliases: string[] | undefined
+  if (body.aliases !== undefined) {
+    const res = validateAliases(body.aliases)
+    if (!res.ok) return c.json({ error: res.error }, 400)
+    // Exclude this group's own id — replacing a group's aliases with (a
+    // superset of) what it already had must never false-positive.
+    const conflicts = await findAliasConflicts(c.env.DB, user.id, res.aliases, id)
+    if (conflicts.length > 0) {
+      return c.json({ error: `alias "${conflicts[0]}" is already used by another of your groups` }, 400)
+    }
+    aliases = res.aliases
   }
 
   let targets: GroupTarget[] | undefined
@@ -166,6 +195,9 @@ modelGroupRoutes.put("/:id", async (c) => {
   }
 
   await updateModelGroupFields(c.env.DB, id, { name, targets })
+  if (aliases) {
+    await replaceAliases(c.env.DB, { userId: user.id, groupId: id, aliases })
+  }
   const updated = await getModelGroupById(c.env.DB, user.id, id)
   return c.json(await toListItem(c.env.DB, user.id, updated ?? existing))
 })

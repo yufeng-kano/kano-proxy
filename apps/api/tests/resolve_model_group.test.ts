@@ -8,21 +8,47 @@ function envWith(db: FakeD1): Env {
   return { DB: db as unknown as D1Database, BENCH: fakeKV() } as unknown as Env
 }
 
+/**
+ * Seeds a group row plus its `model_group_aliases` rows — resolution reads
+ * the alias table, not `model_groups.name` (which is a free-text display
+ * name since `0009_model_group_aliases.sql`). Defaults to a single alias
+ * matching `name`, so existing tests that resolve by "opus" keep working
+ * unchanged; pass `aliases` explicitly to exercise multi-alias resolution.
+ */
 function seedGroup(
   db: FakeD1,
-  overrides: Partial<{ id: string; user_id: string; name: string; targets_json: string }> = {},
+  overrides: Partial<{
+    id: string
+    user_id: string
+    name: string
+    targets_json: string
+    aliases: string[]
+  }> = {},
 ) {
+  const id = overrides.id ?? "mgrp_1"
+  const userId = overrides.user_id ?? "user_1"
+  const name = overrides.name ?? "opus"
   db.seed("model_groups", [
     {
-      id: "mgrp_1",
-      user_id: "user_1",
-      name: "opus",
-      targets_json: JSON.stringify(["claude-code/claude-opus-5"]),
+      id,
+      user_id: userId,
+      name,
+      targets_json: overrides.targets_json ?? JSON.stringify(["claude-code/claude-opus-5"]),
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
-      ...overrides,
     },
   ])
+  const aliases = overrides.aliases ?? [name]
+  db.seed(
+    "model_group_aliases",
+    aliases.map((alias, i) => ({
+      id: `${id}_alias_${i}`,
+      user_id: userId,
+      group_id: id,
+      alias,
+      created_at: "2026-01-01T00:00:00.000Z",
+    })),
+  )
 }
 
 function seedCustomProvider(db: FakeD1, slug: string, format: "openai" | "anthropic" = "openai") {
@@ -208,6 +234,68 @@ describe("resolveModel — model groups", () => {
     const resolved = await resolveModel(envWith(db), "user_1", "opus")
     expect(resolved).toMatchObject({ provider: "claude-code", upstreamModel: "claude-opus-5" })
     expect(resolved?.pinnedAccountId).toBeUndefined()
+  })
+
+  it("a resolves-by-display-name lookup (pre-alias behavior) no longer works — the display name alone is not callable", async () => {
+    const db = new FakeD1()
+    // A group whose display name is "opus" but whose only alias is "gpt-4o":
+    // sending "opus" as model must miss — resolution reads the alias table,
+    // never model_groups.name (docs/providers.md § Model groups "Display name").
+    seedGroup(db, { name: "opus", aliases: ["gpt-4o"] })
+    seedAccount(db, "claude-code")
+    const resolved = await resolveModel(envWith(db), "user_1", "opus")
+    expect(resolved).toBeNull()
+  })
+
+  describe("aliases (docs/providers.md § Model groups \"Aliases\")", () => {
+    it("migration-seeded alias resolves: a pre-0009 group row plus a seeded alias matching its then-name still resolves", async () => {
+      const db = new FakeD1()
+      // Simulates the 0009_model_group_aliases.sql seed: the group's
+      // pre-migration `name` (its only callable id at the time) becomes its
+      // first alias row, with no other change to the group row itself.
+      seedGroup(db, { name: "legacy-opus", aliases: ["legacy-opus"] })
+      seedAccount(db, "claude-code")
+      const resolved = await resolveModel(envWith(db), "user_1", "legacy-opus")
+      expect(resolved).toMatchObject({ provider: "claude-code", raw: "legacy-opus" })
+    })
+
+    it("multi-alias resolution: every alias of a group resolves to the same target list", async () => {
+      const db = new FakeD1()
+      seedGroup(db, {
+        name: "OpenAI GPT-4o family",
+        aliases: ["gpt-4o", "gpt-4", "gpt-4-turbo"],
+        targets_json: JSON.stringify(["codex/gpt-5.2"]),
+      })
+      const byFirst = await resolveModel(envWith(db), "user_1", "gpt-4o")
+      const bySecond = await resolveModel(envWith(db), "user_1", "gpt-4")
+      const byThird = await resolveModel(envWith(db), "user_1", "gpt-4-turbo")
+      expect(byFirst).toMatchObject({ provider: "codex", upstreamModel: "gpt-5.2", raw: "gpt-4o" })
+      expect(bySecond).toMatchObject({ provider: "codex", upstreamModel: "gpt-5.2", raw: "gpt-4" })
+      expect(byThird).toMatchObject({
+        provider: "codex",
+        upstreamModel: "gpt-5.2",
+        raw: "gpt-4-turbo",
+      })
+      // Each alias echoes itself in `group.name` — the alias the client sent,
+      // never the shared display name — since that feeds request_logs.group_name.
+      expect(byFirst?.group?.name).toBe("gpt-4o")
+      expect(bySecond?.group?.name).toBe("gpt-4")
+    })
+
+    it("an alias belonging to one group never resolves a sibling group of the same user", async () => {
+      const db = new FakeD1()
+      seedGroup(db, { id: "mgrp_a", name: "Group A", aliases: ["alias-a"] })
+      seedGroup(db, {
+        id: "mgrp_b",
+        name: "Group B",
+        aliases: ["alias-b"],
+        targets_json: JSON.stringify(["grok/grok-4.5"]),
+      })
+      seedAccount(db, "claude-code")
+      seedAccount(db, "grok")
+      const resolved = await resolveModel(envWith(db), "user_1", "alias-b")
+      expect(resolved?.provider).toBe("grok")
+    })
   })
 
   describe("account pinning (docs/providers.md § Model groups \"Account pinning\")", () => {

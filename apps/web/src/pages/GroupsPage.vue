@@ -44,7 +44,8 @@ const catalog = ref<CatalogModel[]>([])
 const error = ref<string | null>(null)
 const showDialog = ref(false)
 const editing = ref<ModelGroup | null>(null)
-const copiedName = ref<string | null>(null)
+/** Which alias last landed on the clipboard — aliases are unique per user, so the id is enough. */
+const copiedAlias = ref<string | null>(null)
 
 let copyTimer: number | undefined
 
@@ -52,12 +53,14 @@ const rows = computed(() => groups.state.data ?? [])
 const showSkeleton = computed(() => groups.state.loading && !groups.state.data)
 
 /**
- * Three data columns plus the edit control at the far right, which gets a
+ * Four data columns plus the edit control at the far right, which gets a
  * declared width and its own unlabelled track rather than riding beside the
- * name (docs/admin-ui.md § Component primitives).
+ * name (docs/admin-ui.md § Component primitives). Name is the label the user
+ * gave the group; the callable ids are the Aliases beside it.
  */
 const columns = computed<Column<ModelGroup>[]>(() => [
-  { key: "name", header: t("groups.column.name"), width: "28%" },
+  { key: "name", header: t("groups.column.name"), width: "20%" },
+  { key: "aliases", header: t("groups.column.aliases"), width: "26%" },
   { key: "targets", header: t("groups.column.targets") },
   { key: "updated", header: t("groups.column.updated"), width: "132px" },
   { key: "edit", header: "", srHeader: t("action.edit"), align: "end", width: "56px" },
@@ -137,17 +140,17 @@ async function onSaved() {
 }
 
 /**
- * The name *is* the model id a client sends, so copying it is the row's
- * primary read action — confirmed in place by the icon swapping to a check,
- * like the Models page rows.
+ * An alias *is* a model id a client sends, so copying one is the row's primary
+ * read action — confirmed in place by the chip's icon swapping to a check, like
+ * the Models page rows. The display name is a label and copies nothing.
  */
-async function copyName(name: string) {
+async function copyAlias(alias: string) {
   try {
-    await navigator.clipboard.writeText(name)
-    copiedName.value = name
+    await navigator.clipboard.writeText(alias)
+    copiedAlias.value = alias
     window.clearTimeout(copyTimer)
     copyTimer = window.setTimeout(() => {
-      if (copiedName.value === name) copiedName.value = null
+      if (copiedAlias.value === alias) copiedAlias.value = null
     }, 1600)
   } catch {
     error.value = t("state.copyFailed")
@@ -205,23 +208,32 @@ async function copyName(name: string) {
         :row-key="(g) => g.id"
         :caption="t('groups.title')"
       >
-        <!-- The name is the copyable model id, so the cell itself is the
-             control — a wider target than a 28px square, and the accessible
-             name spells out which group it copies. -->
+        <!-- A label, not an id: plain text, nothing to copy. -->
         <template #cell-name="{ row }">
-          <AppButton
-            size="sm"
-            variant="ghost"
-            class="name-copy"
-            :class="{ copied: copiedName === row.name }"
-            :label="t('groups.copyName', { name: row.name })"
-            @click="copyName(row.name)"
-          >
-            <template #icon>
-              <ActionIcon :name="copiedName === row.name ? 'check' : 'copy'" />
-            </template>
-            <span class="mono name">{{ row.name }}</span>
-          </AppButton>
+          <span class="name">{{ row.name }}</span>
+        </template>
+
+        <!-- Every alias is a model id a client can send, so every chip is a
+             copy control — the accessible name spells out which one it copies,
+             because "Copy" repeats down the whole column. -->
+        <template #cell-aliases="{ row }">
+          <ul class="aliases">
+            <li v-for="alias in row.aliases" :key="alias">
+              <AppButton
+                size="sm"
+                variant="ghost"
+                class="alias-copy"
+                :class="{ copied: copiedAlias === alias }"
+                :label="t('groups.copyAlias', { alias })"
+                @click="copyAlias(alias)"
+              >
+                <template #icon>
+                  <ActionIcon :name="copiedAlias === alias ? 'check' : 'copy'" />
+                </template>
+                <span class="mono alias">{{ alias }}</span>
+              </AppButton>
+            </li>
+          </ul>
         </template>
 
         <!-- Priority order, numbered: the position is the routing rule, so it
@@ -279,7 +291,7 @@ async function copyName(name: string) {
       </DataTable>
 
       <span class="sr-only" role="status" aria-live="polite">
-        {{ copiedName ? t("action.copied") : "" }}
+        {{ copiedAlias ? t("action.copied") : "" }}
       </span>
     </AppCard>
 
@@ -324,30 +336,52 @@ async function copyName(name: string) {
 
 /* --- Rows --------------------------------------------------------------- */
 
-/* The button is the cell: quiet by default and full strength under the pointer,
-   so a column of names still reads as names rather than as a stack of buttons.
+.name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+/* A group answers to several ids, so the cell is a list of them — wrapped, not
+   truncated to the first: which id a client may send is the question this
+   column exists to answer. */
+.aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  list-style: none;
+}
+
+/* The button is the chip: quiet by default and full strength under the pointer,
+   so a column of ids still reads as ids rather than as a stack of buttons.
    Always *present* though — never revealed on hover, which would read as the
    control having disappeared. Selected through the card so these outrank
    AppButton's own single-class rules rather than depending on style order. */
-.list :deep(.name-copy) {
+.list :deep(.alias-copy) {
   max-width: 100%;
   padding: 0 var(--space-2) 0 var(--space-1);
   color: var(--faint);
 }
 
-.list :deep(.name-copy:hover),
-.list :deep(.name-copy.copied) {
+.list :deep(.alias-copy:hover),
+.list :deep(.alias-copy.copied) {
   color: var(--text);
 }
 
 /* The label is a flex item, so it needs its own zero floor before the block
    inside it can ellipsize. */
-.list :deep(.name-copy .btn-label) {
+.list :deep(.alias-copy .btn-label) {
   min-width: 0;
   overflow: hidden;
 }
 
-.name {
+.alias {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;

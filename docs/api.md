@@ -185,7 +185,7 @@ Same host keeps `/anthropic/*` for additional Anthropic routes if needed; do not
 
 ## Model routing
 
-1. A `model` string **without any `/`** is a candidate **model group** name: look it up in `model_groups` scoped to the authenticated user; on a hit, expand to the first usable target (ordered-priority walk — full selection contract in [providers.md](./providers.md) § Model groups) and continue below with that target. A target pinned to a specific account dispatches on exactly that account — step 5's pool acquire/failover collapses to that single account for the request. A miss is `400 invalid_model`. Applies identically on **both** surfaces.
+1. A `model` string **without any `/`** is a candidate **model group alias**: look it up in `model_group_aliases` scoped to the authenticated user; on a hit, expand the alias's group to the first usable target (ordered-priority walk — full selection contract in [providers.md](./providers.md) § Model groups) and continue below with that target. A target pinned to a specific account dispatches on exactly that account — step 5's pool acquire/failover collapses to that single account for the request. A miss is `400 invalid_model`. Applies identically on **both** surfaces.
 2. Otherwise parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id, split on the **first** `/` only — an upstream id may itself contain further `/`).
 3. If `provider` is a builtin `ProviderId`, use it directly. Otherwise look it up as a custom provider slug, scoped to the authenticated user (`custom_providers` table) — never resolves another user's slug.
 4. Resolve user’s pool for that provider (or custom slug).

@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest"
 import { modelGroupRoutes } from "../src/routes/model_groups"
 import { createSession } from "../src/auth/session"
-import { MAX_MODEL_GROUPS_PER_USER, MAX_TARGETS_PER_GROUP } from "../src/utils/model_group"
+import {
+  MAX_ALIASES_PER_GROUP,
+  MAX_MODEL_GROUPS_PER_USER,
+  MAX_TARGETS_PER_GROUP,
+} from "../src/utils/model_group"
 import type { Env } from "../src/env"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
@@ -98,14 +102,15 @@ function req(method: string, cookie: string, body?: unknown): RequestInit {
 }
 
 const validCreateBody = {
-  name: "opus",
+  name: "Opus",
+  aliases: ["opus"],
   targets: ["claude-code/claude-opus-5"],
 }
 
 async function createGroup(
   env: Env,
   cookie: string,
-  overrides: Partial<{ name: string; targets: unknown }> = {},
+  overrides: Partial<{ name: string; aliases: unknown; targets: unknown }> = {},
 ) {
   return modelGroupRoutes.request("/", req("POST", cookie, { ...validCreateBody, ...overrides }), env)
 }
@@ -117,18 +122,22 @@ describe("GET /api/model-groups", () => {
     expect(res.status).toBe(401)
   })
 
-  it("lists the user's groups with targets in priority order", async () => {
+  it("lists the user's groups with aliases and targets in priority order", async () => {
     const db = new FakeD1()
     seedUser(db)
     const env = buildEnv(db)
     const cookie = await cookieFor(env, "user_1")
-    await createGroup(env, cookie, { targets: ["claude-code/claude-opus-5", "grok/grok-4.5"] })
+    await createGroup(env, cookie, {
+      aliases: ["gpt-4o", "gpt-4"],
+      targets: ["claude-code/claude-opus-5", "grok/grok-4.5"],
+    })
 
     const res = await modelGroupRoutes.request("/", req("GET", cookie), env)
     const json = await readJson(res)
     expect(json.groups).toHaveLength(1)
     expect(json.groups[0]).toMatchObject({
-      name: "opus",
+      name: "Opus",
+      aliases: ["gpt-4o", "gpt-4"],
       targets: [
         { model: "claude-code/claude-opus-5", account_id: null, account_label: null },
         { model: "grok/grok-4.5", account_id: null, account_label: null },
@@ -167,59 +176,172 @@ describe("POST /api/model-groups (create)", () => {
     expect(res.status).toBe(201)
     const json = await readJson(res)
     expect(json).toMatchObject({
-      name: "opus",
+      name: "Opus",
+      aliases: ["opus"],
       targets: [{ model: "claude-code/claude-opus-5", account_id: null, account_label: null }],
     })
     expect(typeof json.id).toBe("string")
   })
 
-  it("rejects a name with whitespace", async () => {
-    const db = new FakeD1()
-    seedUser(db)
-    const env = buildEnv(db)
-    const cookie = await cookieFor(env, "user_1")
-    const res = await createGroup(env, cookie, { name: "my group" })
-    expect(res.status).toBe(400)
+  describe("display name — free text since 0009_model_group_aliases.sql (not a callable id)", () => {
+    it("allows whitespace in the display name", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { name: "OpenAI GPT-4o family" })
+      expect(res.status).toBe(201)
+      const json = await readJson(res)
+      expect(json.name).toBe("OpenAI GPT-4o family")
+    })
+
+    it("allows '/' in the display name", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { name: "GPT-4o / GPT-4" })
+      expect(res.status).toBe(201)
+    })
+
+    it("rejects an empty name", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { name: "" })
+      expect(res.status).toBe(400)
+    })
+
+    it("rejects a name over 64 characters", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { name: "a".repeat(65) })
+      expect(res.status).toBe(400)
+    })
+
+    it("rejects a duplicate display name for the same user", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      await createGroup(env, cookie)
+      // Distinct aliases so the only possible conflict is the name itself.
+      const res = await createGroup(env, cookie, { aliases: ["opus-2"], targets: ["grok/grok-4.5"] })
+      expect(res.status).toBe(400)
+    })
+
+    it("allows the same display name for a different user", async () => {
+      const db = new FakeD1()
+      seedUser(db, "user_1")
+      seedUser(db, "user_2")
+      const env = buildEnv(db)
+      const cookie1 = await cookieFor(env, "user_1")
+      const cookie2 = await cookieFor(env, "user_2")
+      await createGroup(env, cookie1)
+      const res = await createGroup(env, cookie2)
+      expect(res.status).toBe(201)
+    })
   })
 
-  it("rejects a name containing '/'", async () => {
-    const db = new FakeD1()
-    seedUser(db)
-    const env = buildEnv(db)
-    const cookie = await cookieFor(env, "user_1")
-    const res = await createGroup(env, cookie, { name: "claude-code/opus" })
-    expect(res.status).toBe(400)
-  })
+  describe("aliases", () => {
+    it("rejects an empty aliases array", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { aliases: [] })
+      expect(res.status).toBe(400)
+    })
 
-  it("rejects an empty name", async () => {
-    const db = new FakeD1()
-    seedUser(db)
-    const env = buildEnv(db)
-    const cookie = await cookieFor(env, "user_1")
-    const res = await createGroup(env, cookie, { name: "" })
-    expect(res.status).toBe(400)
-  })
+    it("rejects more than the max aliases", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, {
+        aliases: Array.from({ length: MAX_ALIASES_PER_GROUP + 1 }, (_, i) => `alias-${i}`),
+      })
+      expect(res.status).toBe(400)
+    })
 
-  it("rejects a duplicate name for the same user", async () => {
-    const db = new FakeD1()
-    seedUser(db)
-    const env = buildEnv(db)
-    const cookie = await cookieFor(env, "user_1")
-    await createGroup(env, cookie)
-    const res = await createGroup(env, cookie, { targets: ["grok/grok-4.5"] })
-    expect(res.status).toBe(400)
-  })
+    it("accepts up to the max aliases", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, {
+        aliases: Array.from({ length: MAX_ALIASES_PER_GROUP }, (_, i) => `alias-${i}`),
+      })
+      expect(res.status).toBe(201)
+    })
 
-  it("allows the same name for a different user", async () => {
-    const db = new FakeD1()
-    seedUser(db, "user_1")
-    seedUser(db, "user_2")
-    const env = buildEnv(db)
-    const cookie1 = await cookieFor(env, "user_1")
-    const cookie2 = await cookieFor(env, "user_2")
-    await createGroup(env, cookie1)
-    const res = await createGroup(env, cookie2)
-    expect(res.status).toBe(201)
+    it("rejects an alias with whitespace", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { aliases: ["my alias"] })
+      expect(res.status).toBe(400)
+    })
+
+    it("rejects an alias containing '/'", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { aliases: ["claude-code/opus"] })
+      expect(res.status).toBe(400)
+    })
+
+    it("rejects a duplicate alias within the same payload", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { aliases: ["opus", "opus"] })
+      expect(res.status).toBe(400)
+    })
+
+    it("accepts multiple distinct aliases — any of them will be callable to the same targets", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, { aliases: ["gpt-4o", "gpt-4", "gpt-4-turbo"] })
+      expect(res.status).toBe(201)
+      const json = await readJson(res)
+      expect(json.aliases).toEqual(["gpt-4o", "gpt-4", "gpt-4-turbo"])
+    })
+
+    it("rejects a cross-group alias conflict, naming the conflicting alias", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      await createGroup(env, cookie, { name: "Opus", aliases: ["opus"] })
+      const res = await createGroup(env, cookie, {
+        name: "Also Opus?",
+        aliases: ["not-opus", "opus"],
+      })
+      expect(res.status).toBe(400)
+      const json = await readJson(res)
+      expect(json.error).toContain("opus")
+    })
+
+    it("allows the same alias string for a different user (aliases are unique per user, not globally)", async () => {
+      const db = new FakeD1()
+      seedUser(db, "user_1")
+      seedUser(db, "user_2")
+      const env = buildEnv(db)
+      const cookie1 = await cookieFor(env, "user_1")
+      const cookie2 = await cookieFor(env, "user_2")
+      await createGroup(env, cookie1)
+      const res = await createGroup(env, cookie2)
+      expect(res.status).toBe(201)
+    })
   })
 
   it("rejects an empty targets array", async () => {
@@ -298,10 +420,10 @@ describe("POST /api/model-groups (create)", () => {
     const env = buildEnv(db)
     const cookie = await cookieFor(env, "user_1")
     for (let i = 0; i < MAX_MODEL_GROUPS_PER_USER; i++) {
-      const res = await createGroup(env, cookie, { name: `group-${i}` })
+      const res = await createGroup(env, cookie, { name: `group-${i}`, aliases: [`alias-${i}`] })
       expect(res.status).toBe(201)
     }
-    const res = await createGroup(env, cookie, { name: "one-too-many" })
+    const res = await createGroup(env, cookie, { name: "one-too-many", aliases: ["one-too-many"] })
     expect(res.status).toBe(400)
   })
 })
@@ -337,7 +459,7 @@ describe("PUT /api/model-groups/:id (update)", () => {
     expect(res.status).toBe(404)
   })
 
-  it("renames a group — unlike a custom provider slug, the name is mutable", async () => {
+  it("renames the display name — unlike a custom provider slug, it's mutable", async () => {
     const db = new FakeD1()
     seedUser(db)
     const env = buildEnv(db)
@@ -346,12 +468,14 @@ describe("PUT /api/model-groups/:id (update)", () => {
 
     const res = await modelGroupRoutes.request(
       `/${created.id}`,
-      req("PUT", cookie, { name: "renamed-opus" }),
+      req("PUT", cookie, { name: "Renamed Opus" }),
       env,
     )
     expect(res.status).toBe(200)
     const json = await readJson(res)
-    expect(json.name).toBe("renamed-opus")
+    expect(json.name).toBe("Renamed Opus")
+    // Untouched — only `name` was in the PUT body.
+    expect(json.aliases).toEqual(["opus"])
     expect(json.targets).toEqual([
       { model: "claude-code/claude-opus-5", account_id: null, account_label: null },
     ])
@@ -376,20 +500,22 @@ describe("PUT /api/model-groups/:id (update)", () => {
     expect(res.status).toBe(200)
     const json = await readJson(res)
     expect(json.targets).toEqual([{ model: "codex/gpt-5.2", account_id: null, account_label: null }])
-    expect(json.name).toBe("opus")
+    expect(json.name).toBe("Opus")
   })
 
-  it("rejects renaming to a name already used by another of the caller's groups", async () => {
+  it("rejects renaming to a display name already used by another of the caller's groups", async () => {
     const db = new FakeD1()
     seedUser(db)
     const env = buildEnv(db)
     const cookie = await cookieFor(env, "user_1")
-    await createGroup(env, cookie, { name: "existing" })
-    const created = await readJson(await createGroup(env, cookie, { name: "renameable" }))
+    await createGroup(env, cookie, { name: "Existing", aliases: ["existing"] })
+    const created = await readJson(
+      await createGroup(env, cookie, { name: "Renameable", aliases: ["renameable"] }),
+    )
 
     const res = await modelGroupRoutes.request(
       `/${created.id}`,
-      req("PUT", cookie, { name: "existing" }),
+      req("PUT", cookie, { name: "Existing" }),
       env,
     )
     expect(res.status).toBe(400)
@@ -407,6 +533,102 @@ describe("PUT /api/model-groups/:id (update)", () => {
       env,
     )
     expect(res.status).toBe(400)
+  })
+
+  describe("aliases — replace-whole-list semantics", () => {
+    it("rejects invalid aliases on update the same way as create", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const created = await readJson(await createGroup(env, cookie))
+      const res = await modelGroupRoutes.request(
+        `/${created.id}`,
+        req("PUT", cookie, { aliases: [] }),
+        env,
+      )
+      expect(res.status).toBe(400)
+    })
+
+    it("replaces the whole alias list — an alias omitted from the new list is dropped", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const created = await readJson(
+        await createGroup(env, cookie, { aliases: ["gpt-4o", "gpt-4"] }),
+      )
+
+      const res = await modelGroupRoutes.request(
+        `/${created.id}`,
+        req("PUT", cookie, { aliases: ["gpt-4-turbo"] }),
+        env,
+      )
+      expect(res.status).toBe(200)
+      const json = await readJson(res)
+      expect(json.aliases).toEqual(["gpt-4-turbo"])
+    })
+
+    it("a dropped alias becomes available again — a new group can claim it", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const created = await readJson(
+        await createGroup(env, cookie, { name: "Opus", aliases: ["opus", "gpt-4o"] }),
+      )
+      await modelGroupRoutes.request(
+        `/${created.id}`,
+        req("PUT", cookie, { aliases: ["opus"] }),
+        env,
+      )
+
+      // "gpt-4o" is no longer used by any group — a second group may claim it.
+      const res = await createGroup(env, cookie, { name: "GPT-4o", aliases: ["gpt-4o"] })
+      expect(res.status).toBe(201)
+    })
+
+    it("self-conflict-free: replacing with a superset of the group's own current aliases does not 400", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const created = await readJson(await createGroup(env, cookie, { aliases: ["opus"] }))
+
+      const res = await modelGroupRoutes.request(
+        `/${created.id}`,
+        req("PUT", cookie, { aliases: ["opus", "opus-2"] }),
+        env,
+      )
+      expect(res.status).toBe(200)
+      const json = await readJson(res)
+      expect(json.aliases).toEqual(["opus", "opus-2"])
+    })
+
+    it("rejects a cross-group alias conflict on update, naming the conflicting alias", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      await createGroup(env, cookie, { name: "Other", aliases: ["taken"] })
+      const created = await readJson(
+        await createGroup(env, cookie, { name: "Mine", aliases: ["mine"] }),
+      )
+
+      const res = await modelGroupRoutes.request(
+        `/${created.id}`,
+        req("PUT", cookie, { aliases: ["taken"] }),
+        env,
+      )
+      expect(res.status).toBe(400)
+      const json = await readJson(res)
+      expect(json.error).toContain("taken")
+
+      // Not partially applied — the group's aliases are unchanged.
+      const list = await readJson(await modelGroupRoutes.request("/", req("GET", cookie), env))
+      const mine = list.groups.find((g: any) => g.id === created.id)
+      expect(mine.aliases).toEqual(["mine"])
+    })
   })
 })
 

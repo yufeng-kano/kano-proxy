@@ -36,4 +36,4 @@ Users sign in with Google, bind their own subscription accounts (Claude Code / C
 - `https://<your-domain>/openai/v1` — Chat Completions + Models  
 - `https://<your-domain>/anthropic` — Messages API (`/v1/messages`)
 
-Model ids use OpenRouter style on **both** bases: `provider/model` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, or `<your-slug>/<upstream-model>` for a custom endpoint) — or the bare name of a user-defined **model group**, an alias that expands to an ordered list of `provider/model` targets ([providers.md](./providers.md)). Set `<your-domain>` via DNS + Worker/Pages custom domain (see [deployment.md](./deployment.md)).
+Model ids use OpenRouter style on **both** bases: `provider/model` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, or `<your-slug>/<upstream-model>` for a custom endpoint) — or a bare **model-group alias** (each user-defined group carries a display name plus one or more callable aliases) that expands to an ordered list of `provider/model` targets ([providers.md](./providers.md)). Set `<your-domain>` via DNS + Worker/Pages custom domain (see [deployment.md](./deployment.md)).

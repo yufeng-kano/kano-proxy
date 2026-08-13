@@ -43,9 +43,11 @@ export const CACHE_TTL_MS = 90_000
  * targets became `{model, account_id, account_label}` objects — a v3 entry
  * holds bare strings, which would render as empty rows. v5: custom providers
  * grew `account_id` — a v4 entry has none, so the Groups picker would show
- * every endpoint as having no account to pin.
+ * every endpoint as having no account to pin. v6: a model group's `name` became
+ * a display label and its callable ids moved to `aliases` — a v5 entry has no
+ * aliases, so every row would render an empty Aliases column.
  */
-const CACHE_SCHEMA_VERSION = 5
+const CACHE_SCHEMA_VERSION = 6
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

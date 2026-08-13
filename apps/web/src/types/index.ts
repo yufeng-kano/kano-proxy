@@ -170,14 +170,19 @@ export type ModelGroupTarget = {
 }
 
 /**
- * A user-defined model group: a bare name (no `/`) that expands to an ordered
- * list of targets. `GET /api/model-groups` item shape — see docs/providers.md
- * § Model groups.
+ * A user-defined model group: one or more callable bare-name **aliases** over
+ * an ordered list of targets. `GET /api/model-groups` item shape — see
+ * docs/providers.md § Model groups.
  */
 export type ModelGroup = {
   id: string
-  /** The model id clients send. Bare by contract, so it can never collide with a `provider/model` id. */
+  /** Display label. Free text, never callable — the ids clients send are `aliases`. */
   name: string
+  /**
+   * The model ids clients send. Bare by contract, so an alias can never
+   * collide with a `provider/model` id; any one of them routes to this group.
+   */
+  aliases: string[]
   /** Ordered targets — array order **is** priority. */
   targets: ModelGroupTarget[]
   created_at: string
@@ -191,7 +196,9 @@ export type ModelGroupTargetInput = {
 }
 
 /** Server-side limits, mirrored client-side so a violation is caught before the request (docs/auth.md § Model groups). */
-export const MODEL_GROUP_NAME_MAX = 128
+export const MODEL_GROUP_NAME_MAX = 64
+export const MODEL_GROUP_ALIAS_MAX = 128
+export const MODEL_GROUP_ALIASES_MAX = 10
 export const MODEL_GROUP_TARGETS_MAX = 20
 
 /** `POST /api/custom-providers/test` result — always HTTP 200. */

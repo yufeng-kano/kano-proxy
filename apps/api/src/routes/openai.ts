@@ -59,7 +59,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
       {
         error: {
           message:
-            "model must be provider/model (e.g. claude-code/claude-opus-5) or one of your model group names",
+            "model must be provider/model (e.g. claude-code/claude-opus-5) or one of your model group aliases",
           code: "invalid_model",
         },
       },

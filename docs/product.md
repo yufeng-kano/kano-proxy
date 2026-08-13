@@ -59,7 +59,7 @@ Examples:
 - `grok/grok-4.5`
 - `<your-slug>/<upstream_model_id>` — a user-defined custom endpoint. Only the *first* `/` splits the id, so an upstream id that itself contains `/` (e.g. an OpenRouter-style `org/model`) still routes: `openrouter/anthropic/claude-3.7-sonnet` is slug `openrouter`, upstream id `anthropic/claude-3.7-sonnet`.
 
-**One exception to the prefix rule:** a bare id (no `/`) that matches one of the caller's **model group** names expands to that group's first usable `provider/model` target before dispatch ([providers.md](./providers.md) § Model groups). Any other bare id is rejected. The missing slash is what keeps the two namespaces from ever colliding.
+**One exception to the prefix rule:** a bare id (no `/`) that matches one of the caller's **model group aliases** (a group carries 1–10 of them) expands to that group's first usable `provider/model` target before dispatch ([providers.md](./providers.md) § Model groups). Any other bare id is rejected. The missing slash is what keeps the two namespaces from ever colliding.
 
 `GET /openai/v1/models` and `GET /anthropic/v1/models` list the same live catalog for the **authenticated user’s currently usable accounts** (ids always `provider/upstream`), plus the user's model groups under their bare names.
 

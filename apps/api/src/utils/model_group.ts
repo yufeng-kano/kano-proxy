@@ -5,20 +5,62 @@ import { splitModelId } from "./model"
 
 export const MAX_MODEL_GROUPS_PER_USER = 50
 export const MAX_TARGETS_PER_GROUP = 20
-export const MAX_GROUP_NAME_LENGTH = 128
+export const MAX_ALIASES_PER_GROUP = 10
+export const MAX_ALIAS_LENGTH = 128
+export const MAX_DISPLAY_NAME_LENGTH = 64
 
 /**
- * Trimmed, 1-128 chars, no whitespace, no "/" — the missing slash is the
- * namespace isolation from `provider/model` ids (`splitModelId` requires a
- * slash), so a bare name can never collide with a real model id.
+ * One callable alias: trimmed, 1-128 chars, no whitespace, no "/" — the
+ * missing slash is the namespace isolation from `provider/model` ids
+ * (`splitModelId` requires a slash), so an alias can never collide with a
+ * real model id.
  */
-export function validateGroupName(name: string): string | null {
-  if (!name || name.length > MAX_GROUP_NAME_LENGTH) {
-    return `name must be 1-${MAX_GROUP_NAME_LENGTH} characters`
+export function validateAlias(alias: string): string | null {
+  if (!alias || alias.length > MAX_ALIAS_LENGTH) {
+    return `alias must be 1-${MAX_ALIAS_LENGTH} characters`
   }
-  if (/\s/.test(name)) return "name must not contain whitespace"
-  if (name.includes("/")) return "name must not contain '/'"
+  if (/\s/.test(alias)) return "alias must not contain whitespace"
+  if (alias.includes("/")) return "alias must not contain '/'"
   return null
+}
+
+/**
+ * A group's display name: trimmed, 1-64 chars, free text (spaces fine — a
+ * label, never a callable id; the callable ids are `aliases`).
+ */
+export function validateDisplayName(name: string): string | null {
+  if (!name || name.length > MAX_DISPLAY_NAME_LENGTH) {
+    return `name must be 1-${MAX_DISPLAY_NAME_LENGTH} characters`
+  }
+  return null
+}
+
+export type AliasesValidation = { ok: true; aliases: string[] } | { ok: false; error: string }
+
+/**
+ * 1-10 entries, each a valid alias (`validateAlias`), no duplicates within
+ * the payload itself — cross-group uniqueness (docs/auth.md § Model groups)
+ * is a DB-backed check (`findAliasConflicts`) done by the route, not here.
+ */
+export function validateAliases(aliases: unknown): AliasesValidation {
+  if (!Array.isArray(aliases) || aliases.length === 0) {
+    return { ok: false, error: "aliases must be a non-empty array" }
+  }
+  if (aliases.length > MAX_ALIASES_PER_GROUP) {
+    return { ok: false, error: `aliases must have at most ${MAX_ALIASES_PER_GROUP} entries` }
+  }
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const a of aliases) {
+    if (typeof a !== "string") return { ok: false, error: "aliases entries must be strings" }
+    const trimmed = a.trim()
+    const err = validateAlias(trimmed)
+    if (err) return { ok: false, error: err }
+    if (seen.has(trimmed)) return { ok: false, error: `duplicate alias "${trimmed}"` }
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return { ok: true, aliases: out }
 }
 
 export type GroupTargetsValidation = { ok: true; targets: GroupTarget[] } | { ok: false; error: string }

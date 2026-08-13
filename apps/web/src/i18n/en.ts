@@ -284,23 +284,37 @@ export const en = {
   "groups.subtitle": "Your own model names, pointed at real models",
   "groups.create": "Create group",
   "groups.column.name": "Name",
+  "groups.column.aliases": "Aliases",
   "groups.column.targets": "Targets",
   "groups.column.updated": "Updated",
   // Accessible names for the row controls: several rows offer the same two
-  // words, so the group's name goes in the name. Each contains the visible
-  // label verbatim (WCAG 2.5.3) — the name itself, and "Edit".
-  "groups.copyName": "Copy {name}",
+  // words, so the subject goes in the name. Each contains the visible label
+  // verbatim (WCAG 2.5.3) — the alias itself, and "Edit".
+  "groups.copyAlias": "Copy {alias}",
   "groups.editGroup": "Edit {name}",
   "groups.empty.title": "No groups yet",
   "groups.empty.body":
     "A group gives a model your own name. Point a client's fixed model id at whatever you actually run, or gather one model from several accounts and endpoints behind a single name.",
   "groups.delete": "Delete group",
-  "groups.deleteConfirm": "Delete this group? Requests using its name stop working immediately.",
+  "groups.deleteConfirm": "Delete this group? Requests using its aliases stop working immediately.",
   "groups.dialog.editTitle": "Edit group",
   "groups.dialog.save": "Save changes",
+  // The two column heads. Nouns, not verbs: they name what each side holds, and
+  // they sit on one row, so they are read together.
+  "groups.dialog.identityLabel": "Group",
   "groups.dialog.nameLabel": "Name",
-  "groups.dialog.namePlaceholder": "my-model",
-  "groups.dialog.nameHint": "Clients send this as the model id, on both base URLs.",
+  "groups.dialog.namePlaceholder": "Fast Sonnet",
+  "groups.dialog.nameHint": "A label for this list. Clients never send it.",
+  // The callable ids, plural by design: a client with a hard-coded model name
+  // gets its own alias without anything else having to change.
+  "groups.dialog.aliasesLabel": "Aliases",
+  "groups.dialog.aliasesHint":
+    "Model ids clients can send, on both base URLs. Any of them routes here. Enter or a comma adds one.",
+  "groups.dialog.aliasField": "New alias",
+  "groups.dialog.aliasPlaceholder": "gpt-4o",
+  "groups.dialog.addAlias": "Add alias {alias}",
+  "groups.dialog.removeAlias": "Remove alias {alias}",
+  "groups.dialog.pickerLabel": "Models",
   "groups.dialog.targetsLabel": "Targets",
   "groups.dialog.targetsHint":
     "Requests try these in order and use the first one that can take them. A target pinned to an account uses only that account; the rest use the whole provider.",
@@ -341,8 +355,14 @@ export const en = {
   "groups.error.load": "Couldn't load your groups",
   "groups.error.name": "Enter a name",
   "groups.error.nameLength": "Use {max} characters or fewer",
-  "groups.error.nameWhitespace": "A name can't contain spaces",
-  "groups.error.nameSlash": "A name can't contain \"/\"",
+  // Alias rules are the id rules — no spaces, no "/" — stated as the fix, not
+  // as the constraint that was broken.
+  "groups.error.aliasesEmpty": "Add at least one alias",
+  "groups.error.aliasLength": "An alias can be at most {max} characters",
+  "groups.error.aliasWhitespace": "An alias can't contain spaces",
+  "groups.error.aliasSlash": "An alias can't contain \"/\"",
+  "groups.error.aliasDuplicate": "{alias} is already an alias of this group",
+  "groups.error.aliasesMax": "A group holds at most {max} aliases",
   "groups.error.targetFormat": "Use a full model id in the form {example}",
   // A model may appear twice as long as the two entries use different
   // accounts, so the message says how to make the second one legal.

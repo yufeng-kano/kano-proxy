@@ -3,10 +3,20 @@ import { newId, nowIso } from "../utils/id"
 export type ModelGroupRow = {
   id: string
   user_id: string
+  /** Display name (free text, unique per user) since `0009_model_group_aliases.sql` — the callable ids live in `model_group_aliases`. */
   name: string
   targets_json: string
   created_at: string
   updated_at: string
+}
+
+/** One callable bare id for a group — 1..10 per group, unique per user across all of that user's groups (docs/database.md `model_group_aliases`). */
+export type ModelGroupAliasRow = {
+  id: string
+  user_id: string
+  group_id: string
+  alias: string
+  created_at: string
 }
 
 /**
@@ -38,18 +48,93 @@ export async function getModelGroupById(
   )
 }
 
-/** Scoped to userId — a group name must never resolve cross-user. Exact, case-sensitive match. */
-export async function getModelGroupByName(
+/**
+ * A group's current aliases. No `ORDER BY`: real SQLite (and `FakeD1`) both
+ * return an unordered-clause `SELECT` in insertion order for a plain table
+ * scan, which best preserves the order the caller submitted — aliases carry
+ * no priority semantics (unlike `targets`) so this is a display nicety, not
+ * a correctness requirement.
+ */
+export async function listAliasesForGroup(
+  db: D1Database,
+  groupId: string,
+): Promise<ModelGroupAliasRow[]> {
+  const res = await db
+    .prepare(`SELECT * FROM model_group_aliases WHERE group_id = ?`)
+    .bind(groupId)
+    .all<ModelGroupAliasRow>()
+  return res.results ?? []
+}
+
+/**
+ * Resolves an alias to its group, scoped to `userId` — an alias must never
+ * resolve cross-user. Exact, case-sensitive match (docs/providers.md §
+ * Model groups "Aliases"). Two queries rather than a join: `FakeD1` has no
+ * join support, and this is a two-row point lookup either way.
+ */
+export async function getGroupByAlias(
   db: D1Database,
   userId: string,
-  name: string,
+  alias: string,
 ): Promise<ModelGroupRow | null> {
-  return (
-    (await db
-      .prepare(`SELECT * FROM model_groups WHERE user_id = ? AND name = ?`)
-      .bind(userId, name)
-      .first<ModelGroupRow>()) ?? null
-  )
+  const aliasRow = await db
+    .prepare(`SELECT * FROM model_group_aliases WHERE user_id = ? AND alias = ?`)
+    .bind(userId, alias)
+    .first<ModelGroupAliasRow>()
+  if (!aliasRow) return null
+  return getModelGroupById(db, userId, aliasRow.group_id)
+}
+
+/**
+ * The subset of `aliases` already owned by a *different* group of this user
+ * — a `400`-worthy cross-group conflict (docs/auth.md § Model groups).
+ * `excludeGroupId` lets an update check against every other group without
+ * false-positiving on the group's own current aliases (which, on a replace,
+ * are about to be deleted and reinserted anyway). One query per candidate
+ * alias — bounded by `MAX_ALIASES_PER_GROUP` (≤ 10), a write-path cost, not
+ * a hot read path.
+ */
+export async function findAliasConflicts(
+  db: D1Database,
+  userId: string,
+  aliases: string[],
+  excludeGroupId?: string,
+): Promise<string[]> {
+  const conflicts: string[] = []
+  for (const alias of aliases) {
+    const row = await db
+      .prepare(`SELECT * FROM model_group_aliases WHERE user_id = ? AND alias = ?`)
+      .bind(userId, alias)
+      .first<ModelGroupAliasRow>()
+    if (row && row.group_id !== excludeGroupId) conflicts.push(alias)
+  }
+  return conflicts
+}
+
+/**
+ * Atomic replace: delete the group's current aliases and insert the new
+ * ordered list in one D1 batch (same batch-as-transaction convention as
+ * `reorderCustomProviders`) — never a visible in-between state with zero or
+ * partial aliases. Callers validate + resolve cross-group conflicts first
+ * (`findAliasConflicts`); this function trusts its input.
+ */
+export async function replaceAliases(
+  db: D1Database,
+  input: { userId: string; groupId: string; aliases: string[] },
+): Promise<void> {
+  const ts = nowIso()
+  const statements = [
+    db.prepare(`DELETE FROM model_group_aliases WHERE group_id = ?`).bind(input.groupId),
+    ...input.aliases.map((alias) =>
+      db
+        .prepare(
+          `INSERT INTO model_group_aliases (id, user_id, group_id, alias, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .bind(newId("mgalias"), input.userId, input.groupId, alias, ts),
+    ),
+  ]
+  await db.batch(statements)
 }
 
 export async function countModelGroups(db: D1Database, userId: string): Promise<number> {

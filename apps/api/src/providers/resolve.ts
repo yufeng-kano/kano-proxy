@@ -1,6 +1,6 @@
 import { getAccount, listAccounts } from "../db/accounts"
 import { getCustomProviderBySlug, type CustomProviderRow } from "../db/custom_providers"
-import { getModelGroupByName, parseGroupTargets, type GroupTarget } from "../db/model_groups"
+import { getGroupByAlias, parseGroupTargets, type GroupTarget } from "../db/model_groups"
 import type { Env, ProviderId } from "../env"
 import { isProviderId } from "../env"
 import { isBenched } from "../pool/bench"
@@ -19,7 +19,12 @@ export type ResolvedModel = {
   isBuiltin: boolean
   /** Present only when `isBuiltin` is false. */
   customProvider?: CustomProviderRow
-  /** Present only when `model` was a model-group bare name that expanded to this target. */
+  /**
+   * Present only when `model` was a model-group alias that expanded to this
+   * target. `name` here is the **alias the client sent** (`raw`), not the
+   * group's display name — it feeds `request_logs.group_name`
+   * (docs/providers.md § Model groups "Response echo vs. logging").
+   */
   group?: { name: string }
   /**
    * Present only when the chosen group target pinned a specific
@@ -184,6 +189,14 @@ export async function resolveModel(
   }
 }
 
+/**
+ * `model` with no "/" is a candidate **alias** — looked up in
+ * `model_group_aliases` (not by the group's display name; a group may have
+ * up to 10 aliases, any of which resolves to the same target list). `raw`
+ * and `group.name` both stay the alias itself (the exact client-sent
+ * string), never the group's display name — that is what keeps response
+ * echo and `request_logs.group_name` showing what the client actually sent.
+ */
 async function resolveGroupModel(
   env: Env,
   userId: string,
@@ -192,7 +205,7 @@ async function resolveGroupModel(
   const trimmed = model.trim()
   if (!trimmed) return null
 
-  const group = await getModelGroupByName(env.DB, userId, trimmed)
+  const group = await getGroupByAlias(env.DB, userId, trimmed)
   if (!group) return null
 
   const targets = parseGroupTargets(group.targets_json)
@@ -213,7 +226,7 @@ async function resolveGroupModel(
     adapter: adapterFor(chosen),
     isBuiltin: chosen.isBuiltin,
     customProvider: chosen.customProvider,
-    group: { name: group.name },
+    group: { name: trimmed },
     pinnedAccountId: chosen.accountId ?? undefined,
   }
 }

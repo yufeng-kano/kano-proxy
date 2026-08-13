@@ -40,6 +40,8 @@ import {
   updateModelGroup,
 } from "@/services/api"
 import {
+  MODEL_GROUP_ALIASES_MAX,
+  MODEL_GROUP_ALIAS_MAX,
   MODEL_GROUP_NAME_MAX,
   MODEL_GROUP_TARGETS_MAX,
   PROVIDERS,
@@ -109,8 +111,11 @@ function toRow(target: ModelGroupTarget): TargetRow {
   return { ...target, uid: nextUid++ }
 }
 
+/** The display label — free text, and never what a client sends. */
 const name = ref(props.group?.name ?? "")
-/** A working copy: the list is only sent on Save, never patched entry by entry. */
+/** The callable ids. Working copies: both lists are only sent on Save. */
+const aliases = ref<string[]>([...(props.group?.aliases ?? [])])
+const aliasDraft = ref("")
 const targets = ref<TargetRow[]>((props.group?.targets ?? []).map(toRow))
 
 /** Picker state: which provider tab, which account in its rail, what is typed. */
@@ -122,6 +127,7 @@ const manual = ref("")
 const saving = ref(false)
 const deleting = ref(false)
 const nameError = ref<string | null>(null)
+const aliasError = ref<string | null>(null)
 const targetError = ref<string | null>(null)
 const error = ref<string | null>(null)
 /** The move buttons' only feedback for a screen-reader user. */
@@ -464,6 +470,71 @@ function move(from: number, to: number) {
 
 const canSave = computed(() => targets.value.length > 0)
 
+/* --- Aliases ------------------------------------------------------------- */
+
+/**
+ * One alias, by the server's rule: 1-128 chars, no whitespace, no "/" — the
+ * missing slash is what keeps a bare id from ever colliding with a
+ * `provider/model` one.
+ */
+function aliasRuleError(alias: string): string | null {
+  if (alias.length > MODEL_GROUP_ALIAS_MAX) {
+    return t("groups.error.aliasLength", { max: MODEL_GROUP_ALIAS_MAX })
+  }
+  if (/\s/.test(alias)) return t("groups.error.aliasWhitespace")
+  if (alias.includes("/")) return t("groups.error.aliasSlash")
+  return null
+}
+
+/** Takes one alias into the chip list. Returns whether it was taken. */
+function addAlias(raw: string): boolean {
+  const value = raw.trim()
+  aliasError.value = null
+  if (!value) return false
+  const invalid = aliasRuleError(value)
+  if (invalid) {
+    aliasError.value = invalid
+    return false
+  }
+  if (aliases.value.includes(value)) {
+    aliasError.value = t("groups.error.aliasDuplicate", { alias: value })
+    return false
+  }
+  if (aliases.value.length >= MODEL_GROUP_ALIASES_MAX) {
+    aliasError.value = t("groups.error.aliasesMax", { max: MODEL_GROUP_ALIASES_MAX })
+    return false
+  }
+  aliases.value.push(value)
+  return true
+}
+
+function commitAliasDraft() {
+  if (addAlias(aliasDraft.value)) aliasDraft.value = ""
+}
+
+/**
+ * A comma commits too, so a pasted `a,b,c` becomes three chips. Everything up
+ * to the last comma is committed; whatever follows stays in the field. A part
+ * the rules reject stops the run and stays in the field with the rest of it, so
+ * nothing is dropped on the way to an error message.
+ */
+watch(aliasDraft, (value) => {
+  if (!value.includes(",")) return
+  const parts = value.split(",")
+  let i = 0
+  for (; i < parts.length - 1; i++) {
+    const part = parts[i]!.trim()
+    if (!part) continue
+    if (!addAlias(part)) break
+  }
+  aliasDraft.value = parts.slice(i).join(",")
+})
+
+function removeAlias(alias: string) {
+  aliases.value = aliases.value.filter((a) => a !== alias)
+  aliasError.value = null
+}
+
 /* --- Save / delete ------------------------------------------------------- */
 
 /** Mirrors the server rule so a violation never costs a round trip. */
@@ -473,16 +544,16 @@ function validateName(): string | null {
   if (value.length > MODEL_GROUP_NAME_MAX) {
     return t("groups.error.nameLength", { max: MODEL_GROUP_NAME_MAX })
   }
-  if (/\s/.test(value)) return t("groups.error.nameWhitespace")
-  if (value.includes("/")) return t("groups.error.nameSlash")
   return null
 }
 
 /**
  * A rejected write answers with a single `error` string rather than a field map
  * (docs/auth.md § Model groups), so the message is placed by what it is about:
- * anything naming the group's name lands on the name field, anything naming a
- * target lands under the list, and everything else is a banner.
+ * anything naming an alias lands under the chips — including the cross-group
+ * conflict, whose text names the alias it clashed with — anything naming the
+ * group's name lands on the name field, anything naming a target lands under
+ * the target list, and everything else is a banner.
  */
 function applyServerError(e: unknown, fallback: string) {
   const message = e instanceof ApiError && e.status === 400 ? e.message : null
@@ -490,7 +561,8 @@ function applyServerError(e: unknown, fallback: string) {
     error.value = fallback
     return
   }
-  if (/^name\b|already exists/i.test(message)) nameError.value = message
+  if (/^alias(es)?\b|^duplicate alias/i.test(message)) aliasError.value = message
+  else if (/^name\b|^a model group named/i.test(message)) nameError.value = message
   else if (/^targets?\b|^duplicate target/i.test(message)) targetError.value = message
   else error.value = message
 }
@@ -498,12 +570,25 @@ function applyServerError(e: unknown, fallback: string) {
 async function submit() {
   if (saving.value || !canSave.value) return
   nameError.value = null
+  aliasError.value = null
   targetError.value = null
   error.value = null
+
+  // An alias typed but not yet committed is one the user means to save; taking
+  // it here beats silently dropping it because they reached for Save instead of
+  // Enter. A rejected one stops the save with its own message.
+  if (aliasDraft.value.trim()) {
+    commitAliasDraft()
+    if (aliasError.value) return
+  }
 
   const invalidName = validateName()
   if (invalidName) {
     nameError.value = invalidName
+    return
+  }
+  if (!aliases.value.length) {
+    aliasError.value = t("groups.error.aliasesEmpty")
     return
   }
 
@@ -511,6 +596,7 @@ async function submit() {
   try {
     const body = {
       name: name.value.trim(),
+      aliases: [...aliases.value],
       // `account_label` is read-only display data — it goes no further than
       // this dialog.
       targets: targets.value.map((t) => ({ model: t.model, account_id: t.account_id })),
@@ -549,9 +635,16 @@ async function remove() {
     :title="isEdit ? t('groups.dialog.editTitle') : t('groups.create')"
     @close="emit('close')"
   >
-    <div class="panes">
-      <!-- Left: the picker. Name on top, then the inverted L. -->
-      <section class="pane">
+    <!-- Two columns, one surface: a single hairline between them, both heads on
+         the same row, the same padding either side. Boxing the columns
+         separately read as two unrelated cards and was rejected. -->
+    <div class="board">
+      <!-- Left: what the group is, then what it can point at. -->
+      <section class="col" aria-labelledby="group-col-identity">
+        <h3 id="group-col-identity" class="col-head">
+          {{ t("groups.dialog.identityLabel") }}
+        </h3>
+
         <FormField
           v-slot="field"
           :label="t('groups.dialog.nameLabel')"
@@ -561,7 +654,6 @@ async function remove() {
           <TextInput
             :id="field.id"
             v-model="name"
-            mono
             :placeholder="t('groups.dialog.namePlaceholder')"
             :described-by="field.describedBy"
             :invalid="field.invalid"
@@ -570,7 +662,59 @@ async function remove() {
           />
         </FormField>
 
+        <!-- The callable ids. A fieldset so the chips and the add field reach
+             assistive tech as one named group. -->
+        <fieldset class="fieldset">
+          <legend class="field-label">{{ t("groups.dialog.aliasesLabel") }}</legend>
+          <p class="field-hint">{{ t("groups.dialog.aliasesHint") }}</p>
+
+          <ul v-if="aliases.length" class="chips">
+            <li v-for="alias in aliases" :key="alias" class="chip">
+              <code class="mono chip-id">{{ alias }}</code>
+              <button
+                type="button"
+                class="chip-remove"
+                :aria-label="t('groups.dialog.removeAlias', { alias })"
+                :disabled="saving || deleting"
+                @click="removeAlias(alias)"
+              >
+                <ActionIcon name="close" />
+              </button>
+            </li>
+          </ul>
+
+          <div class="alias-add">
+            <label class="alias-field">
+              <span class="sr-only">{{ t("groups.dialog.aliasField") }}</span>
+              <TextInput
+                v-model="aliasDraft"
+                mono
+                :placeholder="t('groups.dialog.aliasPlaceholder')"
+                :invalid="!!aliasError"
+                :disabled="saving || deleting"
+                @enter="commitAliasDraft"
+              />
+            </label>
+            <AppButton
+              size="sm"
+              :label="
+                aliasDraft.trim()
+                  ? t('groups.dialog.addAlias', { alias: aliasDraft.trim() })
+                  : undefined
+              "
+              :disabled="!aliasDraft.trim() || saving || deleting"
+              @click="commitAliasDraft"
+            >
+              {{ t("groups.dialog.add") }}
+            </AppButton>
+          </div>
+
+          <p v-if="aliasError" class="field-error" role="alert">{{ aliasError }}</p>
+        </fieldset>
+
         <div class="picker">
+          <p class="field-label">{{ t("groups.dialog.pickerLabel") }}</p>
+
           <!-- Scrolls sideways rather than wrapping, so the region below never
                moves as the endpoint list grows. -->
           <SectionNav
@@ -700,12 +844,14 @@ async function remove() {
         </div>
       </section>
 
-      <!-- Right: what the group actually is, in the order it is tried. -->
-      <section class="pane">
+      <!-- Right: what the group actually routes to, in the order it is tried. -->
+      <section class="col" aria-labelledby="group-col-targets">
+        <h3 id="group-col-targets" class="col-head">{{ t("groups.dialog.targetsLabel") }}</h3>
+
         <!-- A real fieldset/legend so the list's name reaches assistive tech
              natively, matching the endpoint dialog's models block. -->
         <fieldset class="fieldset">
-          <legend class="field-label">{{ t("groups.dialog.targetsLabel") }}</legend>
+          <legend class="sr-only">{{ t("groups.dialog.targetsLabel") }}</legend>
           <p class="field-hint">{{ t("groups.dialog.targetsHint") }}</p>
 
           <!-- The position is the routing rule, so it is real text in the row
@@ -826,48 +972,75 @@ async function remove() {
 </template>
 
 <style scoped>
-/* Pick on the left, order on the right. The picker gets the wider share: it
-   holds three regions, the right pane holds one list. */
-.panes {
+/*
+ * Two columns that read as one surface.
+ *
+ * The dialog's own background runs behind both, one hairline separates them,
+ * and nothing inside either column is boxed — structure is drawn with hairlines
+ * only. The board bleeds through Modal's body padding (which it then restates
+ * per column, so the spacing is unchanged) because that divider has to reach
+ * the panel's edges: a rule floating inside a padded box is exactly what made
+ * the previous version read as two cards parked next to each other.
+ *
+ * The columns stretch to a common height — the default, deliberately not
+ * `align-items: start` — so the divider runs the full height of the surface
+ * rather than stopping wherever the shorter column ends.
+ */
+.board {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-  gap: var(--space-5);
-  align-items: start;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  margin: calc(var(--space-5) * -1);
 }
 
-.pane {
+.col {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
   min-width: 0;
+  padding: var(--space-5);
+}
+
+/* The one divider. */
+.col + .col {
+  border-left: 1px solid var(--border);
+}
+
+/* Both heads are their column's first child under identical padding, so they
+   sit on one row without either side declaring a height. */
+.col-head {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
 }
 
 /* --- Picker -------------------------------------------------------------- */
 
-/* One framed region so the tabs, the rail, and the list read as one control
-   rather than three stacked widgets. */
+/* Unframed: the tab strip's underline and the rail's edge are the only lines,
+   which is what makes the inverted L read as structure on the surface rather
+   than as a widget dropped onto it. */
 .picker {
   display: flex;
   flex-direction: column;
+  gap: var(--space-2);
   min-width: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
 }
 
 .picker-tabs {
   flex-shrink: 0;
-  padding: 0 var(--space-2);
   border-bottom: 1px solid var(--border);
 }
 
 /* The inverted L: rail down the left, models filling the rest. A declared
    height, not a content-driven one — the two regions scroll inside it, so the
-   dialog's own height never depends on how many models a provider lists. */
+   dialog's own height never depends on how many models a provider lists. Sized
+   so the whole left column still fits a 900px-tall viewport once the identity
+   fields sit above it. */
 .picker-body {
   display: grid;
   grid-template-columns: 128px minmax(0, 1fr);
-  height: 264px;
+  height: 248px;
   min-height: 0;
 }
 
@@ -1075,7 +1248,6 @@ async function remove() {
 
 .targets {
   display: grid;
-  gap: var(--space-1);
   margin: 0;
   padding: 0;
   max-height: 320px;
@@ -1084,18 +1256,101 @@ async function remove() {
   list-style: none;
 }
 
+/* --- Aliases ------------------------------------------------------------- */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The chip is the id plus the one thing that can be done to it, so the border
+   belongs to the pair — this is a control, not a panel. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  padding: 1px 1px 1px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: var(--surface-2);
+}
+
+.chip-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
+.chip-remove {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.chip-remove:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.chip-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.chip-remove :deep(svg) {
+  width: 12px;
+  height: 12px;
+}
+
+.alias-add {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.alias-field {
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+
 /* Three tracks — position, subject, controls — and a second line under the
    subject for the row's facts. The facts line is where per-target balancing
    lands later (weight, live usage) beside the account, so growing it costs a
-   chip rather than a new row shape. */
+   chip rather than a new row shape.
+
+   Rows are separated by a hairline rather than each being boxed: twenty
+   outlined rectangles inside a column is the same "card" noise the two-panel
+   layout was rejected for. */
 .target {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-1) var(--space-2);
-  padding: var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  padding: var(--space-2) 0;
+}
+
+.target + .target {
+  border-top: 1px solid var(--border);
 }
 
 /* Sized to two digits — the list stops at 20 — so the ids line up in a column
@@ -1171,14 +1426,19 @@ async function remove() {
   margin-right: auto;
 }
 
-/* Below the sheet breakpoint the two panes stack — picker above, selected list
-   below — and the inverted L flattens into two rows: the rail becomes a chip
-   strip under the tabs, because a 128px column is width a phone does not have
-   to give. */
+/* Below the sheet breakpoint the two columns stack — picker above, selected
+   list below — and the divider turns with them, staying one hairline between
+   the two. The inverted L flattens into two rows as well: the rail becomes a
+   chip strip under the tabs, because a 128px column is width a phone does not
+   have to give. */
 @media (max-width: 640px) {
-  .panes {
+  .board {
     grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-4);
+  }
+
+  .col + .col {
+    border-left: none;
+    border-top: 1px solid var(--border);
   }
 
   .picker-body {
@@ -1216,11 +1476,18 @@ async function remove() {
 }
 
 /* Touch targets: the select matches what a small button gets here, and 16px
-   type so iOS Safari does not zoom the sheet when it takes focus. */
+   type so iOS Safari does not zoom the sheet when it takes focus. The chip's
+   remove grows too — not to the full 40px floor, which would double the height
+   of every chip, but to the same 28px the dialog's own close button uses. */
 @media (pointer: coarse) {
   .select {
     min-height: 34px;
     font-size: var(--text-md);
+  }
+
+  .chip-remove {
+    width: 28px;
+    height: 28px;
   }
 }
 </style>

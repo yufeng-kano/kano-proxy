@@ -97,12 +97,26 @@ User-defined bare-name model aliases → ordered `provider/model` target lists (
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | `ON DELETE CASCADE` |
-| name | TEXT | the callable bare model id: trimmed, 1–128 chars, no whitespace, no `/`; **mutable** (rename allowed — nothing references it) |
+| name | TEXT | **display name** (since `0009_model_group_aliases.sql`): trimmed, 1–64 chars, free text, a label only — the callable ids live in `model_group_aliases`. Still unique per user (original constraint kept; also avoids indistinguishable cards). Mutable |
 | targets_json | TEXT | JSON array of target objects `{model: "provider/model", account_id?}`, array order = priority; `account_id` (nullable) pins the target to one `upstream_accounts` row — no FK, a deleted account makes the target skip at resolve time, mirroring the custom-provider convention. Bare strings are accepted as `{model}` shorthand (v3.0.0 rows). Parse must tolerate further per-target fields (future balancing weights) |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
 `UNIQUE(user_id, name)`. Targets are validated at write time (prefix must be a builtin or the caller's own custom slug; never a bare name, so groups cannot nest). No `status` column — usability is computed per-request from the targets' pools.
+
+### `model_group_aliases`
+
+The callable bare model ids of a group, 1–10 per group ([providers.md](./providers.md) § Model groups). Added in `0009_model_group_aliases.sql`, which also seeds one alias per pre-existing group from its then-`name`, so every previously callable name keeps resolving.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | |
+| user_id | TEXT FK | `ON DELETE CASCADE` |
+| group_id | TEXT FK | → `model_groups.id`, `ON DELETE CASCADE` |
+| alias | TEXT | trimmed, 1–128 chars, no whitespace, no `/` |
+| created_at | TEXT | |
+
+`UNIQUE(user_id, alias)` — an alias resolves to exactly one group, enforced by the constraint, and bare-name resolution reads this table (indexed lookup), never a JSON scan.
 
 ### `usage_snapshots` — **deprecated, never used**
 
@@ -134,7 +148,7 @@ Created by `0001_init.sql` as an "optional cache", never read or written by any 
 | cache_creation_input_tokens | INTEGER | nullable; cache-write tokens, from Anthropic `cache_creation_input_tokens`, OpenAI-compatible `prompt_tokens_details.cache_write_tokens`, or the proxy's conversion extension |
 | cost | REAL | nullable; estimated USD cost computed at write time from the LiteLLM price table ([pricing.md](./pricing.md)); `NULL` = unpriced/unknown, never 0-as-guess |
 | error_code | TEXT | nullable |
-| group_name | TEXT | nullable; the model group the request was addressed to, when it came through one (`0008_model_groups.sql`). `provider`/`model` always store the **expanded** target so pricing and Overview aggregation stay canonical; this column preserves the alias for future per-group reporting |
+| group_name | TEXT | nullable; the group **alias** the request was addressed to, when it came through one (`0008_model_groups.sql`; alias semantics since `0009`). `provider`/`model` always store the **expanded** target so pricing and Overview aggregation stay canonical; this column preserves the alias for future per-group reporting |
 | created_at | TEXT | |
 
 **No message content, no prompts, no completions.**

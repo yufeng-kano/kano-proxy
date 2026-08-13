@@ -13,7 +13,17 @@
  * the glyph — so this is unconditionally `aria-hidden`.
  */
 defineProps<{
-  name: "refresh" | "copy" | "check" | "edit" | "expand" | "plus" | "arrow-up" | "arrow-down" | "grip"
+  name:
+    | "refresh"
+    | "copy"
+    | "check"
+    | "edit"
+    | "expand"
+    | "plus"
+    | "arrow-up"
+    | "arrow-down"
+    | "grip"
+    | "close"
 }>()
 </script>
 
@@ -75,6 +85,12 @@ defineProps<{
     <!-- Grip: the drag handle's two rails. Decoration over the move buttons. -->
     <template v-else-if="name === 'grip'">
       <path d="M6 4.5h.01M6 8h.01M6 11.5h.01M10 4.5h.01M10 8h.01M10 11.5h.01" />
+    </template>
+
+    <!-- Close: dismiss one thing — a chip off a list, not the dialog (Modal
+         draws its own, at its own size). -->
+    <template v-else-if="name === 'close'">
+      <path d="M4 4l8 8M12 4l-8 8" />
     </template>
 
     <!-- Check: the confirmation the copy swaps to. -->

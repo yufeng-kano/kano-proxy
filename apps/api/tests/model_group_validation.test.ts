@@ -1,47 +1,133 @@
 import { describe, expect, it } from "vitest"
 import {
-  MAX_GROUP_NAME_LENGTH,
+  MAX_ALIAS_LENGTH,
+  MAX_ALIASES_PER_GROUP,
+  MAX_DISPLAY_NAME_LENGTH,
   MAX_MODEL_GROUPS_PER_USER,
   MAX_TARGETS_PER_GROUP,
-  validateGroupName,
+  validateAlias,
+  validateAliases,
+  validateDisplayName,
   validateGroupTargets,
 } from "../src/utils/model_group"
 import { parseGroupTargets } from "../src/db/model_groups"
 
-describe("validateGroupName", () => {
-  it("accepts a plain bare name", () => {
-    expect(validateGroupName("opus")).toBeNull()
+describe("validateAlias", () => {
+  it("accepts a plain bare alias", () => {
+    expect(validateAlias("opus")).toBeNull()
   })
 
   it("accepts the maximum length (128 chars)", () => {
-    expect(validateGroupName("a".repeat(MAX_GROUP_NAME_LENGTH))).toBeNull()
+    expect(validateAlias("a".repeat(MAX_ALIAS_LENGTH))).toBeNull()
   })
 
   it("rejects empty", () => {
-    expect(validateGroupName("")).not.toBeNull()
+    expect(validateAlias("")).not.toBeNull()
   })
 
   it("rejects above maximum length", () => {
-    expect(validateGroupName("a".repeat(MAX_GROUP_NAME_LENGTH + 1))).not.toBeNull()
+    expect(validateAlias("a".repeat(MAX_ALIAS_LENGTH + 1))).not.toBeNull()
   })
 
   it("rejects internal whitespace", () => {
-    expect(validateGroupName("my group")).not.toBeNull()
+    expect(validateAlias("my alias")).not.toBeNull()
   })
 
   it("rejects a leading/trailing space (caller is expected to trim first, but this still must reject)", () => {
-    expect(validateGroupName(" opus")).not.toBeNull()
-    expect(validateGroupName("opus ")).not.toBeNull()
+    expect(validateAlias(" opus")).not.toBeNull()
+    expect(validateAlias("opus ")).not.toBeNull()
   })
 
   it("rejects any '/'", () => {
-    expect(validateGroupName("claude-code/opus")).not.toBeNull()
-    expect(validateGroupName("a/b")).not.toBeNull()
+    expect(validateAlias("claude-code/opus")).not.toBeNull()
+    expect(validateAlias("a/b")).not.toBeNull()
   })
 
   it("accepts punctuation other than whitespace and '/'", () => {
-    expect(validateGroupName("gpt-4o")).toBeNull()
-    expect(validateGroupName("my_group.v2")).toBeNull()
+    expect(validateAlias("gpt-4o")).toBeNull()
+    expect(validateAlias("my_group.v2")).toBeNull()
+  })
+})
+
+describe("validateDisplayName", () => {
+  it("accepts a plain name", () => {
+    expect(validateDisplayName("Opus")).toBeNull()
+  })
+
+  it("accepts free text with spaces — a label, not a callable id", () => {
+    expect(validateDisplayName("OpenAI GPT-4o family")).toBeNull()
+  })
+
+  it("accepts the maximum length (64 chars)", () => {
+    expect(validateDisplayName("a".repeat(MAX_DISPLAY_NAME_LENGTH))).toBeNull()
+  })
+
+  it("rejects empty", () => {
+    expect(validateDisplayName("")).not.toBeNull()
+  })
+
+  it("rejects above maximum length", () => {
+    expect(validateDisplayName("a".repeat(MAX_DISPLAY_NAME_LENGTH + 1))).not.toBeNull()
+  })
+
+  it("allows '/' and other punctuation — free text, not a callable id", () => {
+    expect(validateDisplayName("GPT-4o / GPT-4 family")).toBeNull()
+  })
+})
+
+describe("validateAliases", () => {
+  it("accepts a single alias", () => {
+    expect(validateAliases(["gpt-4o"])).toEqual({ ok: true, aliases: ["gpt-4o"] })
+  })
+
+  it("accepts up to the max alias count (10)", () => {
+    const aliases = Array.from({ length: MAX_ALIASES_PER_GROUP }, (_, i) => `alias-${i}`)
+    const res = validateAliases(aliases)
+    expect(res.ok).toBe(true)
+  })
+
+  it("rejects an empty array", () => {
+    expect(validateAliases([]).ok).toBe(false)
+  })
+
+  it("rejects a non-array", () => {
+    expect(validateAliases("gpt-4o").ok).toBe(false)
+  })
+
+  it("rejects more than the max alias count", () => {
+    const aliases = Array.from({ length: MAX_ALIASES_PER_GROUP + 1 }, (_, i) => `alias-${i}`)
+    expect(validateAliases(aliases).ok).toBe(false)
+  })
+
+  it("rejects a non-string entry", () => {
+    expect(validateAliases([42]).ok).toBe(false)
+  })
+
+  it("rejects an entry that fails validateAlias (e.g. contains whitespace)", () => {
+    expect(validateAliases(["bad alias"]).ok).toBe(false)
+  })
+
+  it("trims each alias", () => {
+    const res = validateAliases([" gpt-4o "])
+    expect(res).toEqual({ ok: true, aliases: ["gpt-4o"] })
+  })
+
+  it("rejects an in-payload duplicate (exact, case-sensitive)", () => {
+    expect(validateAliases(["gpt-4o", "gpt-4o"]).ok).toBe(false)
+  })
+
+  it("a duplicate after trimming is still caught", () => {
+    expect(validateAliases(["gpt-4o", " gpt-4o "]).ok).toBe(false)
+  })
+
+  it("does not treat differently-cased aliases as duplicates (matched exactly, case-sensitive)", () => {
+    const res = validateAliases(["GPT-4o", "gpt-4o"])
+    expect(res).toEqual({ ok: true, aliases: ["GPT-4o", "gpt-4o"] })
+  })
+
+  it("accepts multiple distinct aliases in order", () => {
+    const res = validateAliases(["gpt-4o", "gpt-4", "gpt-4-turbo"])
+    expect(res).toEqual({ ok: true, aliases: ["gpt-4o", "gpt-4", "gpt-4-turbo"] })
   })
 })
 
@@ -316,5 +402,9 @@ describe("limits", () => {
 
   it("MAX_TARGETS_PER_GROUP is 20 per docs/providers.md", () => {
     expect(MAX_TARGETS_PER_GROUP).toBe(20)
+  })
+
+  it("MAX_ALIASES_PER_GROUP is 10 per docs/providers.md", () => {
+    expect(MAX_ALIASES_PER_GROUP).toBe(10)
   })
 })

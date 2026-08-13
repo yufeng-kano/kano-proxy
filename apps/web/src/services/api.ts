@@ -315,12 +315,14 @@ export async function listModelGroups(): Promise<ModelGroup[]> {
 }
 
 /**
- * Targets go up as `{model, account_id}` objects. A bare string is still
- * accepted by the API as shorthand for an unpinned target, but sending objects
- * keeps the pin explicit — including when it is deliberately null.
+ * `name` is the display label; `aliases` are the callable ids. Targets go up as
+ * `{model, account_id}` objects — a bare string is still accepted by the API as
+ * shorthand for an unpinned target, but sending objects keeps the pin explicit,
+ * including when it is deliberately null.
  */
 export async function createModelGroup(body: {
   name: string
+  aliases: string[]
   targets: ModelGroupTargetInput[]
 }): Promise<ModelGroup> {
   return request<ModelGroup>("/api/model-groups", {
@@ -330,12 +332,13 @@ export async function createModelGroup(body: {
 }
 
 /**
- * `targets`, when sent, replaces the whole ordered list — there is no
- * per-entry patching, because the order *is* the routing priority.
+ * `aliases` and `targets`, when sent, each replace their whole list — there is
+ * no per-entry patching, because for targets the order *is* the routing
+ * priority, and an alias set is what the group answers to as a whole.
  */
 export async function updateModelGroup(
   id: string,
-  body: { name?: string; targets?: ModelGroupTargetInput[] },
+  body: { name?: string; aliases?: string[]; targets?: ModelGroupTargetInput[] },
 ): Promise<ModelGroup> {
   return request<ModelGroup>(`/api/model-groups/${encodeURIComponent(id)}`, {
     method: "PUT",
