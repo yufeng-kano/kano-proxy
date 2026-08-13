@@ -220,6 +220,11 @@ onBeforeUnmount(() => {
  */
 .panel.wide {
   max-width: min(1440px, max(75vw, 980px));
+  /* A workspace dialog uses the viewport's height too: the 760px cap that
+     suits a form would strand a third of a desktop screen as empty overlay
+     (rejected 2026-08-13). The content inside sizes itself to the viewport,
+     so the panel needs the room the fixed cap withheld. */
+  max-height: calc(100dvh - var(--space-10));
 }
 
 .panel-head {

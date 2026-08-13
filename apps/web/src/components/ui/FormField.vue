@@ -14,6 +14,12 @@ const props = defineProps<{
   error?: string
   /** Renders next to the label — for genuinely optional inputs. */
   optionalText?: string
+  /**
+   * Renders the hint between the label and the control instead of below it —
+   * for guidance the user should read before typing, not after. The error
+   * stays below the control either way.
+   */
+  hintAbove?: boolean
 }>()
 
 const id = useId()
@@ -32,6 +38,8 @@ const describedBy = computed(
       <span v-if="optionalText" class="field-optional">{{ optionalText }}</span>
     </label>
 
+    <p v-if="hintAbove && hint" :id="hintId" class="field-hint"><slot name="hint">{{ hint }}</slot></p>
+
     <slot
       :id="id"
       :described-by="describedBy"
@@ -39,7 +47,7 @@ const describedBy = computed(
     />
 
     <p v-if="error" :id="errorId" class="field-error">{{ error }}</p>
-    <p v-else-if="hint" :id="hintId" class="field-hint"><slot name="hint">{{ hint }}</slot></p>
+    <p v-else-if="hint && !hintAbove" :id="hintId" class="field-hint"><slot name="hint">{{ hint }}</slot></p>
   </div>
 </template>
 

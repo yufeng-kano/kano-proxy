@@ -648,6 +648,7 @@ async function remove() {
 
         <FormField
           v-slot="field"
+          hint-above
           :label="t('groups.dialog.nameLabel')"
           :hint="t('groups.dialog.nameHint')"
           :error="nameError ?? undefined"
@@ -856,7 +857,10 @@ async function remove() {
              natively, matching the endpoint dialog's models block. -->
         <fieldset class="fieldset">
           <legend class="sr-only">{{ t("groups.dialog.targetsLabel") }}</legend>
-          <p class="field-hint">{{ t("groups.dialog.targetsHint") }}</p>
+          <!-- Only while there is nothing else to read: once targets exist the
+               list itself says what the column is, and the paragraph is just
+               distance between the head and the data (rejected 2026-08-13). -->
+          <p v-if="!targets.length" class="field-hint">{{ t("groups.dialog.targetsHint") }}</p>
 
           <!-- The position is the routing rule, so it is real text in the row
                rather than a list marker: `list-style: none` drops list semantics
@@ -998,6 +1002,16 @@ async function remove() {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.3fr) minmax(0, 1.05fr);
   margin: calc(var(--space-5) * -1);
+  /* The shared height of the two scrolling regions (picker body, target list).
+     Viewport-driven, not fixed: the wide panel now grows with the screen
+     (Modal lifts its 760px cap for `wide`), and a fixed 400px left half the
+     dialog empty on a tall display — the "not enough height" complaint,
+     2026-08-13. The 380px budget is everything that is not this region:
+     overlay padding, panel header/footer, column padding, the column head,
+     and the free-text row. The floor keeps small screens exactly where the
+     fixed height had them; the ceiling stops a 4K display from rendering a
+     list taller than anyone scans. */
+  --pane-h: clamp(400px, calc(100dvh - 380px), 760px);
 }
 
 .col {
@@ -1046,10 +1060,8 @@ async function remove() {
 
 /* The inverted L: rail down the left, models filling the rest. A declared
    height, not a content-driven one — the two regions scroll inside it, so the
-   dialog's own height never depends on how many models a provider lists. Its
-   own column now, so it can be tall: 400px keeps the whole dialog inside a
-   900px-tall viewport (Modal caps the panel at 760px, less its header, footer,
-   and this column's padding).
+   dialog's own height never depends on how many models a provider lists. The
+   height itself is the board's viewport-driven `--pane-h`.
 
    The rail is a proportion between two bounds rather than a fixed 128px: on a
    small desktop the panel is narrower than 3/4 of a wide one, and a fixed rail
@@ -1057,7 +1069,7 @@ async function remove() {
 .picker-body {
   display: grid;
   grid-template-columns: clamp(96px, 28%, 128px) minmax(0, 1fr);
-  height: 400px;
+  height: var(--pane-h);
   min-height: 0;
 }
 
@@ -1065,20 +1077,24 @@ async function remove() {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: var(--space-2);
+  padding: var(--space-1) 0;
   border-right: 1px solid var(--border);
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
+/* A full-bleed list row, not a card: the selection fill runs the rail's whole
+   width, edge to edge (the inset boxed version was rejected 2026-08-13 — a
+   bordered rectangle inside a 128px rail read as a widget, not a selection). */
 .rail-item {
   display: flex;
   flex-direction: column;
   gap: 1px;
   flex-shrink: 0;
-  padding: var(--space-2);
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: none;
+  border-radius: 0;
   background: transparent;
   color: var(--text-secondary);
   text-align: left;
@@ -1093,11 +1109,10 @@ async function remove() {
   color: var(--text);
 }
 
-/* Selection is a filled pill *and* a weight step — the fill alone is a ~2%
-   luminance delta and reads as noise (docs/admin-ui.md § Scales). */
+/* Selection is the full-width fill *and* a weight step — the fill alone is a
+   ~2% luminance delta and reads as noise (docs/admin-ui.md § Scales). */
 .rail-item.active {
   background: var(--hover);
-  border-color: var(--border-strong);
   color: var(--text);
   font-weight: var(--weight-medium);
 }
@@ -1268,9 +1283,10 @@ async function remove() {
   align-content: start;
   margin: 0;
   padding: 0;
-  /* Matched to the picker beside it, so a full list and a full model list end
-     at the same line instead of one column dragging the panel taller. */
-  max-height: 424px;
+  /* Matched to the picker beside it (its height plus the hint line the picker
+     column spends on tabs), so a full list and a full model list end at the
+     same line instead of one column dragging the panel taller. */
+  max-height: calc(var(--pane-h) + 24px);
   overflow-y: auto;
   overscroll-behavior: contain;
   list-style: none;
@@ -1484,6 +1500,7 @@ async function remove() {
     flex-direction: row;
     align-items: center;
     gap: var(--space-1);
+    padding: var(--space-2);
     border-right: none;
     border-bottom: 1px solid var(--border);
     overflow-x: auto;
@@ -1495,9 +1512,12 @@ async function remove() {
     display: none;
   }
 
+  /* Chips again here: a horizontal strip needs each item's own outline back,
+     since there is no rail edge for a full-bleed fill to run to. */
   .rail-item {
+    width: auto;
     min-height: 34px;
-    border-color: var(--border);
+    border: 1px solid var(--border);
     border-radius: var(--radius-full);
     white-space: nowrap;
   }
