@@ -138,6 +138,12 @@ export type CustomProvider = {
   manual_models: string[]
   /** Non-secret display mask, e.g. "sk-abc…f3a2". Never the plaintext key. */
   key_mask: string | null
+  /**
+   * The `upstream_accounts` row holding this endpoint's key — what a model
+   * group target pins to (docs/admin-ui.md § Groups page). `null` when the
+   * account row is missing, which is the one case the picker cannot offer.
+   */
+  account_id: string | null
   status: CustomProviderStatus
   /** Display-only position in the user's list. The server returns items pre-sorted by it. */
   sort_order: number

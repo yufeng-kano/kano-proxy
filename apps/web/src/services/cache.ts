@@ -41,9 +41,11 @@ export const CACHE_TTL_MS = 90_000
  * stale shape into the UI. v2: usage summaries and keys grew cost/spend
  * fields (docs/pricing.md). v3: accounts grew `custom_label`. v4: model group
  * targets became `{model, account_id, account_label}` objects — a v3 entry
- * holds bare strings, which would render as empty rows.
+ * holds bare strings, which would render as empty rows. v5: custom providers
+ * grew `account_id` — a v4 entry has none, so the Groups picker would show
+ * every endpoint as having no account to pin.
  */
-const CACHE_SCHEMA_VERSION = 4
+const CACHE_SCHEMA_VERSION = 5
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

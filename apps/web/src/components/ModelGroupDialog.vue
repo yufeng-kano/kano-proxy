@@ -2,31 +2,37 @@
 /**
  * Create / edit a model group (docs/admin-ui.md § Groups page).
  *
- * A group is a bare name plus an **ordered** list of targets, each a
- * `provider/model` and the account it runs on: the order is the routing
- * priority, which is why the list is built with move controls rather than a
- * set of checkboxes, and why saving always sends the whole list.
+ * Two panes: **pick on the left, order on the right.** Building a group is
+ * browsing — which provider, whose account, which model — so the left pane is a
+ * picker and the right pane is the ordered list the picker feeds. The order is
+ * the routing priority, which is why the right pane is built with move controls
+ * rather than checkboxes, and why saving always sends the whole list.
  *
- * A target's account is either the provider's whole pool ("Any account", the
- * default) or one pinned account — pinning is what lets two accounts of the
- * same provider be ordered as two targets, so a model may legitimately appear
- * twice as long as the accounts differ. Duplicate identity is therefore
- * model + account, exactly as the server checks it.
+ * The picker is an inverted L: a horizontally scrollable provider tab strip
+ * across the top (the Models page pattern, reused as-is), an account rail down
+ * the left edge, and the model list filling the rest. Tab → accounts (lazily
+ * loaded, cache-first, the same data the Providers page reads); account →
+ * models, filtered client-side over the catalog the page already holds so a
+ * keystroke never hits the network, plus a free-text row for ids the catalog
+ * does not list (codex lists none, so that row is the only way in for it).
  *
- * The picker filters the catalog the page already loaded — a keystroke never
- * hits the network — and free text is a first-class path beside it: the server
- * validates only a target's provider prefix, so an upstream id the catalog
- * doesn't list is legitimate. Account lists come from the same per-provider
- * endpoint the Providers page reads, loaded lazily for the providers this
- * group actually targets and cached by that composable.
+ * **Every target this dialog creates pins an account** — there is no "Any
+ * account" entry in the rail (docs, 2026-08-13). The wire still accepts
+ * unpinned targets, and a group created before this design still renders its
+ * unpinned targets on the right with the "Any account" tag; the picker just
+ * cannot make new ones. Duplicate identity is therefore model + account,
+ * exactly as the server checks it, and "same model, different account" is two
+ * clicks: pick account A, click the model, pick account B, click it again.
  *
  * Delete lives in the footer, same reasoning as key revoke: rare and
  * irreversible, so it costs opening the group first and confirming.
  */
-import { computed, ref, watch } from "vue"
+import { computed, onMounted, ref, watch } from "vue"
 import { useAccounts } from "@/composables/useAccounts"
 import { useAuth } from "@/composables/useAuth"
+import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useI18n } from "@/i18n"
+import type { MessageKey } from "@/i18n"
 import {
   ApiError,
   createModelGroup,
@@ -36,6 +42,7 @@ import {
 import {
   MODEL_GROUP_NAME_MAX,
   MODEL_GROUP_TARGETS_MAX,
+  PROVIDERS,
   PROVIDER_IDS,
   type CatalogModel,
   type ModelGroup,
@@ -45,9 +52,13 @@ import {
 } from "@/types"
 import ActionIcon from "./ui/ActionIcon.vue"
 import AppButton from "./ui/AppButton.vue"
+import Badge from "./ui/Badge.vue"
 import Banner from "./ui/Banner.vue"
+import EmptyState from "./ui/EmptyState.vue"
 import FormField from "./ui/FormField.vue"
 import Modal from "./ui/Modal.vue"
+import SectionNav from "./ui/SectionNav.vue"
+import type { SectionItem } from "./ui/SectionNav.vue"
 import TextInput from "./ui/TextInput.vue"
 
 const props = defineProps<{
@@ -62,28 +73,33 @@ const emit = defineEmits<{ close: []; saved: [] }>()
 const { t } = useI18n()
 const { user } = useAuth()
 const accounts = useAccounts()
+const customProviders = useCustomProviders()
 
 /**
- * Wire form, not copy: the shape of a target id is protocol (docs/api.md), so
- * it reads the same in every locale — same call as the `slug/*` preview in the
- * custom endpoint dialog.
+ * Provider display copy lives in the catalog and `PROVIDERS` carries only wire
+ * ids, so an explicit map — a template literal widens to `string` and would not
+ * typecheck against `MessageKey`, which is what makes a renamed key fail the
+ * build here rather than render blank (same call as the Models page).
  */
-const MODEL_ID_FORM = "provider/model"
+const NAME_KEY: Record<ProviderId, MessageKey> = {
+  "claude-code": "provider.claude-code.name",
+  codex: "provider.codex.name",
+  grok: "provider.grok.name",
+}
 
 /**
- * How many matches the picker renders. The list is bounded and scrolls, so
- * this is only a ceiling on how much a catalog of thousands can cost to draw —
- * the search is how anything past it is reached.
+ * How many models the list draws at once. It scrolls, so this is only a ceiling
+ * on what a large provider costs to render — the search is how anything past it
+ * is reached.
  */
-const MAX_SUGGESTIONS = 24
+const MAX_MODELS = 50
 
 const isEdit = computed(() => !!props.group)
 
 /**
- * A row carries a `uid` the group itself never has: the list is keyed by it so
- * re-pinning a row edits that row instead of replacing it. Keying by the
- * target's own identity would tear the row down on every account change — and
- * with it the select the user just used, focus included.
+ * A row carries a `uid` the group itself never has: the right pane is keyed by
+ * it, so re-pinning a broken target edits that row instead of replacing it —
+ * and takes the control the user is holding down with it.
  */
 type TargetRow = ModelGroupTarget & { uid: number }
 
@@ -96,7 +112,12 @@ function toRow(target: ModelGroupTarget): TargetRow {
 const name = ref(props.group?.name ?? "")
 /** A working copy: the list is only sent on Save, never patched entry by entry. */
 const targets = ref<TargetRow[]>((props.group?.targets ?? []).map(toRow))
+
+/** Picker state: which provider tab, which account in its rail, what is typed. */
+const selectedTab = ref<string>(prefixOf(props.group?.targets[0]?.model ?? "") || PROVIDERS[0]!.id)
+const selectedAccountId = ref<string | null>(null)
 const query = ref("")
+const manual = ref("")
 
 const saving = ref(false)
 const deleting = ref(false)
@@ -105,6 +126,13 @@ const targetError = ref<string | null>(null)
 const error = ref<string | null>(null)
 /** The move buttons' only feedback for a screen-reader user. */
 const announcement = ref("")
+
+/**
+ * Wire form, not copy: the shape of a target id is protocol (docs/api.md), so
+ * it reads the same in every locale — same call as the `slug/*` preview in the
+ * custom endpoint dialog.
+ */
+const MODEL_ID_FORM = "provider/model"
 
 /**
  * A target's shape, mirroring the server's `splitModelId`: a prefix and an
@@ -116,54 +144,40 @@ function isTargetId(value: string): boolean {
   return slash > 0 && slash < value.length - 1
 }
 
-const trimmedQuery = computed(() => query.value.trim())
-
-/**
- * Catalog rows the picker offers. Group aliases are filtered out by their own
- * shape — a bare name has no "/" — because a group can never target another
- * group (docs/providers.md § Model groups).
- *
- * Models already in the list are deliberately **not** filtered out: the same
- * model on two different accounts is two legitimate targets, and hiding it
- * after the first add would make the page's whole point unreachable.
- */
-const suggestions = computed<CatalogModel[]>(() => {
-  const q = trimmedQuery.value.toLowerCase()
-  const out: CatalogModel[] = []
-  for (const model of props.catalog) {
-    if (!isTargetId(model.id)) continue
-    if (q && !model.id.toLowerCase().includes(q) && !model.display_name.toLowerCase().includes(q)) {
-      continue
-    }
-    out.push(model)
-    if (out.length === MAX_SUGGESTIONS) break
-  }
-  return out
-})
-
 /** Text before the first "/" — a builtin provider id, or a custom slug. */
 function prefixOf(model: string): string {
   const slash = model.indexOf("/")
-  return slash === -1 ? model : model.slice(0, slash)
+  return slash === -1 ? "" : model.slice(0, slash)
 }
+
+/** The builtin behind a tab key, or null when it is a custom endpoint's slug. */
+function asBuiltin(key: string): ProviderId | null {
+  return PROVIDER_IDS.includes(key as ProviderId) ? (key as ProviderId) : null
+}
+
+/* --- Providers, accounts, models ----------------------------------------- */
+
+/** The tab strip: the builtins in their declared order, then each custom endpoint. */
+const tabs = computed<SectionItem[]>(() => [
+  ...PROVIDERS.map((p) => ({ id: p.id, label: t(NAME_KEY[p.id]) })),
+  ...(customProviders.state.data ?? []).map((cp) => ({ id: cp.slug, label: cp.name })),
+])
 
 /**
- * The builtin provider a target belongs to, or null. Only builtins have an
- * accounts endpoint to list: a custom endpoint's key is one account the API
- * never exposes an id for, so those targets can only run on the whole pool —
- * which for a single-key endpoint is that key anyway.
+ * A stored tab that no longer exists resolves to the first one rather than an
+ * empty picker — the endpoint whose slug prefixed an existing target may have
+ * been deleted since.
  */
-function builtinProviderOf(model: string): ProviderId | null {
-  const prefix = prefixOf(model)
-  return PROVIDER_IDS.includes(prefix as ProviderId) ? (prefix as ProviderId) : null
-}
+const activeTab = computed(() =>
+  tabs.value.some((tab) => tab.id === selectedTab.value) ? selectedTab.value : tabs.value[0]!.id,
+)
 
-/** The bound accounts a target may pin, in the pool's own order. */
-function poolFor(model: string): ProviderAccount[] {
-  const provider = builtinProviderOf(model)
-  if (!provider) return []
-  return accounts.byProvider[provider].data?.accounts ?? []
-}
+const activeTabLabel = computed(
+  () => tabs.value.find((tab) => tab.id === activeTab.value)?.label ?? "",
+)
+
+/** One rail entry: an account a target can pin, named the way the user named it. */
+type RailAccount = { id: string; label: string; hint: string | null }
 
 /** The user's own name wins, then the upstream identity, then a short id. */
 function accountName(account: ProviderAccount): string {
@@ -171,115 +185,186 @@ function accountName(account: ProviderAccount): string {
 }
 
 /**
- * What a pinned target's account is called right now. The loaded pool wins
- * over `account_label`: the label is what the *last read* resolved, and the
- * pool is live — it also names an account the server had no label for at all,
- * which would otherwise read as removed. `null` only when nothing knows the
- * account any more.
+ * The rail for a provider key. A builtin's is its bound accounts in pool order;
+ * a custom endpoint's is the single `upstream_accounts` row holding its API key
+ * (`account_id` on the list response), named after the endpoint and hinted with
+ * its key mask. Uniform either way, which is what lets a target pin one of
+ * either without the rest of this dialog caring which it got.
  */
-function pinnedLabel(target: ModelGroupTarget): string | null {
-  if (!target.account_id) return null
-  const inPool = poolFor(target.model).find((a) => a.id === target.account_id)
-  return inPool ? accountName(inPool) : target.account_label
+function railFor(providerKey: string): RailAccount[] {
+  const builtin = asBuiltin(providerKey)
+  if (builtin) {
+    return (accounts.byProvider[builtin].data?.accounts ?? []).map((a) => ({
+      id: a.id,
+      label: accountName(a),
+      hint: null,
+    }))
+  }
+  const custom = (customProviders.state.data ?? []).find((cp) => cp.slug === providerKey)
+  if (!custom?.account_id) return []
+  return [{ id: custom.account_id, label: custom.name, hint: custom.key_mask }]
 }
 
-type AccountOption = { value: string; label: string; disabled: boolean }
+const rail = computed(() => railFor(activeTab.value))
 
 /**
- * "Any account" first — the default and the common case — then the provider's
- * bound accounts. A pin the pool no longer offers is appended so the select
- * never silently drops it: labelled by whatever is still known, or as removed,
- * in which case it is disabled so the only way out is forward.
+ * Whether the rail is still on its way. A *failed* load is not pending — the
+ * empty state then says what it can rather than spinning forever.
  */
-function accountOptions(target: ModelGroupTarget): AccountOption[] {
-  const options: AccountOption[] = [
-    { value: "", label: t("groups.account.any"), disabled: false },
-  ]
-  for (const account of poolFor(target.model)) {
-    options.push({ value: account.id, label: accountName(account), disabled: false })
-  }
-  if (target.account_id && !options.some((o) => o.value === target.account_id)) {
-    const known = pinnedLabel(target)
-    options.push({
-      value: target.account_id,
-      label: known ?? t("groups.account.missing"),
-      disabled: !known,
-    })
-  }
-  return options
-}
+const railPending = computed(() => {
+  const builtin = asBuiltin(activeTab.value)
+  const state = builtin ? accounts.byProvider[builtin] : customProviders.state
+  return !state.data && !state.error
+})
+
+const selectedAccount = computed(
+  () => rail.value.find((a) => a.id === selectedAccountId.value) ?? null,
+)
+
+const trimmedQuery = computed(() => query.value.trim())
 
 /**
- * A pin whose account is gone: neither the provider's pool nor the server's
- * read-time label knows it any more (docs/auth.md § Model groups). The row
- * stays, warned and re-pickable — dropping the pin silently would change what
- * the group routes to without saying so.
+ * The active tab's models. Keyed on each row's own `provider`, which is the
+ * catalog's section — so the fixed `group` section never appears under a
+ * provider tab, and a group can never target another group.
  */
-function isMissingAccount(target: ModelGroupTarget): boolean {
-  return !!target.account_id && !pinnedLabel(target)
+const tabModels = computed<CatalogModel[]>(() => {
+  const q = trimmedQuery.value.toLowerCase()
+  const out: CatalogModel[] = []
+  for (const model of props.catalog) {
+    if (model.provider !== activeTab.value || !isTargetId(model.id)) continue
+    if (q && !model.id.toLowerCase().includes(q) && !model.display_name.toLowerCase().includes(q)) {
+      continue
+    }
+    out.push(model)
+    if (out.length === MAX_MODELS) break
+  }
+  return out
+})
+
+/**
+ * What the free-text row would add. Typing the upstream id is enough — the tab
+ * already says which provider it belongs to — and a value that already carries
+ * the prefix is left alone rather than prefixed twice.
+ */
+const manualId = computed(() => {
+  const raw = manual.value.trim()
+  if (!raw) return ""
+  return raw.startsWith(`${activeTab.value}/`) ? raw : `${activeTab.value}/${raw}`
+})
+
+/* --- Loading ------------------------------------------------------------- */
+
+const requestedProviders = new Set<ProviderId>()
+let requestedCustom = false
+
+/**
+ * Accounts are fetched per provider, once, and only for a tab the user actually
+ * opens — the composables are cache-first, so a recent visit to Providers costs
+ * nothing here.
+ */
+function ensureRail(providerKey: string) {
+  const builtin = asBuiltin(providerKey)
+  if (!builtin) {
+    if (requestedCustom) return
+    requestedCustom = true
+    void customProviders.load()
+    return
+  }
+  if (requestedProviders.has(builtin)) return
+  requestedProviders.add(builtin)
+  void accounts.loadProvider(builtin)
 }
+
+onMounted(() => {
+  const uid = user.value?.id ?? null
+  accounts.setUserId(uid)
+  customProviders.setUserId(uid)
+  // The tab strip needs the endpoint list before it can offer their tabs.
+  requestedCustom = true
+  void customProviders.load()
+  ensureRail(activeTab.value)
+  // An existing target whose pin no longer resolves is re-picked on the right
+  // pane, which needs that provider's accounts even if its tab is never opened.
+  for (const target of targets.value) {
+    if (target.account_id) ensureRail(prefixOf(target.model))
+  }
+})
+
+watch(activeTab, (key) => {
+  selectedAccountId.value = null
+  query.value = ""
+  manual.value = ""
+  ensureRail(key)
+})
+
+/**
+ * One account is not a choice. Selecting it saves a click that could only ever
+ * have one outcome — a custom endpoint always has exactly one key — and the
+ * rail still shows which account is selected, so nothing is decided silently.
+ */
+watch(
+  rail,
+  (list) => {
+    if (!selectedAccountId.value && list.length === 1) selectedAccountId.value = list[0]!.id
+  },
+  { immediate: true },
+)
+
+/* --- Targets ------------------------------------------------------------- */
 
 /**
  * Identity the server dedupes on: model *and* account together. The separator
  * is a NUL — never legal inside a model id or an account id — written as an
  * escape so this file stays plain text, exactly as the server writes it.
  */
-function identityOf(target: ModelGroupTarget): string {
+function identityOf(target: { model: string; account_id: string | null }): string {
   return `${target.model}\u0000${target.account_id ?? ""}`
 }
 
 /**
- * Accounts are fetched only for the providers this group actually targets, and
- * only once each — the composable is cache-first, so a recent visit to
- * Providers costs nothing here.
+ * What a pinned target's account is called right now. The loaded rail wins over
+ * `account_label`: the label is what the *last read* resolved, and the rail is
+ * live — it also names an account the server had no label for at all, which
+ * would otherwise read as removed. `null` only when nothing knows it any more.
  */
-const targetedProviders = computed(() => {
-  const out = new Set<ProviderId>()
-  for (const target of targets.value) {
-    const provider = builtinProviderOf(target.model)
-    if (provider) out.add(provider)
-  }
-  return [...out]
-})
-
-const requested = new Set<ProviderId>()
-
-watch(
-  targetedProviders,
-  (providers) => {
-    accounts.setUserId(user.value?.id ?? null)
-    for (const provider of providers) {
-      if (requested.has(provider)) continue
-      requested.add(provider)
-      void accounts.loadProvider(provider)
-    }
-  },
-  { immediate: true },
-)
+function pinnedLabel(target: ModelGroupTarget): string | null {
+  if (!target.account_id) return null
+  const known = railFor(prefixOf(target.model)).find((a) => a.id === target.account_id)
+  return known ? known.label : target.account_label
+}
 
 /**
- * What the Add button (and Enter in the field) adds: the typed id when it is a
- * full one the catalog does not list, otherwise the top match. Nothing at all
- * while the field is empty — the list below is how the catalog is browsed.
+ * A pin whose account is gone: neither the provider's rail nor the server's
+ * read-time label knows it any more (docs/auth.md § Model groups). The target
+ * is skipped at request time, so the row warns and offers a re-pick — dropping
+ * the pin silently would change what the group routes to without saying so.
  */
-const addCandidate = computed(() => {
-  const raw = trimmedQuery.value
-  if (!raw) return null
-  if (isTargetId(raw) && !suggestions.value.some((m) => m.id === raw)) return raw
-  return suggestions.value[0]?.id ?? null
-})
+function isMissingAccount(target: ModelGroupTarget): boolean {
+  return !!target.account_id && !pinnedLabel(target)
+}
 
-const canSave = computed(() => targets.value.length > 0)
+/** Already in the list, on the account the rail currently has selected. */
+function isAdded(modelId: string): boolean {
+  const identity = identityOf({ model: modelId, account_id: selectedAccountId.value })
+  return targets.value.some((t) => identityOf(t) === identity)
+}
 
-/** Added unpinned; the row's own select is where an account is chosen. */
-function addTarget(model: string) {
-  const value = model.trim()
+/** Adds the model pinned to the selected account — the only kind this dialog makes. */
+function addTarget(modelId: string) {
+  const value = modelId.trim()
+  const account = selectedAccount.value
   targetError.value = null
+  if (!account) return
   if (!isTargetId(value)) {
     targetError.value = t("groups.error.targetFormat", { example: MODEL_ID_FORM })
     return
   }
-  const target: ModelGroupTarget = { model: value, account_id: null, account_label: null }
+  const target: ModelGroupTarget = {
+    model: value,
+    account_id: account.id,
+    account_label: account.label,
+  }
   if (targets.value.some((t) => identityOf(t) === identityOf(target))) {
     // Rejected here rather than at save: the list is what the user is reading,
     // so the moment to say "already in this group" is the moment they add it.
@@ -291,15 +376,21 @@ function addTarget(model: string) {
     return
   }
   targets.value.push(toRow(target))
-  query.value = ""
+}
+
+function addManual() {
+  if (!manualId.value) return
+  const before = targets.value.length
+  addTarget(manualId.value)
+  if (targets.value.length > before) manual.value = ""
 }
 
 /**
- * Re-pinning in place, rather than remove-and-re-add: changing an account is
- * the common edit once a group exists. A change that would collide with
- * another row is refused and the row keeps what it had — the same rule the
- * server would apply on Save, applied where the user can see it. Returns
- * whether the change was taken.
+ * Re-pinning a broken target in place, rather than remove-and-re-add: the pin
+ * is the only part that went bad, and the target's position in the order is
+ * worth keeping. A change that would collide with another row is refused and
+ * the row keeps what it had — the same rule the server applies on Save, applied
+ * where the user can see it. Returns whether the change was taken.
  */
 function setAccount(index: number, accountId: string): boolean {
   const target = targets.value[index]
@@ -307,7 +398,7 @@ function setAccount(index: number, accountId: string): boolean {
   const next = accountId || null
   if (next === target.account_id) return true
 
-  const candidate: ModelGroupTarget = { ...target, account_id: next }
+  const candidate = { ...target, account_id: next }
   if (targets.value.some((t, i) => i !== index && identityOf(t) === identityOf(candidate))) {
     targetError.value = t("groups.error.targetDuplicate")
     return false
@@ -317,8 +408,8 @@ function setAccount(index: number, accountId: string): boolean {
   target.account_id = next
   // The label is display data the server resolves; keep it in step locally so
   // the row stops reading as a removed account the moment it is re-pinned.
-  const picked = poolFor(target.model).find((a) => a.id === next)
-  target.account_label = picked ? accountName(picked) : null
+  const picked = railFor(prefixOf(target.model)).find((a) => a.id === next)
+  target.account_label = picked ? picked.label : null
   return true
 }
 
@@ -333,21 +424,24 @@ function onAccountChange(index: number, event: Event) {
 }
 
 /**
- * The provider's accounts are still on their way. The select is held disabled
- * for that moment rather than offering "Any account" alone, which would read as
- * "this provider has nothing to pin". A *failed* load is not pending: the list
- * stays enabled so an existing pin can still be cleared.
+ * The re-pick options for a broken row: the provider's accounts, plus the
+ * unresolvable pin itself so the select never silently drops it. That entry is
+ * disabled — the only way out is forward.
  */
-function accountsPending(model: string): boolean {
-  const provider = builtinProviderOf(model)
-  if (!provider) return false
-  const state = accounts.byProvider[provider]
-  return !state.data && !state.error
-}
-
-function addFromQuery() {
-  if (!addCandidate.value) return
-  addTarget(addCandidate.value)
+function repickOptions(target: ModelGroupTarget) {
+  const options = railFor(prefixOf(target.model)).map((a) => ({
+    value: a.id,
+    label: a.label,
+    disabled: false,
+  }))
+  if (target.account_id && !options.some((o) => o.value === target.account_id)) {
+    options.unshift({
+      value: target.account_id,
+      label: t("groups.account.missing"),
+      disabled: true,
+    })
+  }
+  return options
 }
 
 function removeTarget(index: number) {
@@ -367,6 +461,10 @@ function move(from: number, to: number) {
     total: targets.value.length,
   })
 }
+
+const canSave = computed(() => targets.value.length > 0)
+
+/* --- Save / delete ------------------------------------------------------- */
 
 /** Mirrors the server rule so a violation never costs a round trip. */
 function validateName(): string | null {
@@ -447,162 +545,256 @@ async function remove() {
 
 <template>
   <Modal
-    size="md"
+    size="lg"
     :title="isEdit ? t('groups.dialog.editTitle') : t('groups.create')"
     @close="emit('close')"
   >
-    <div class="body">
-      <FormField
-        v-slot="field"
-        :label="t('groups.dialog.nameLabel')"
-        :hint="t('groups.dialog.nameHint')"
-        :error="nameError ?? undefined"
-      >
-        <TextInput
-          :id="field.id"
-          v-model="name"
-          mono
-          :placeholder="t('groups.dialog.namePlaceholder')"
-          :described-by="field.describedBy"
-          :invalid="field.invalid"
-          :disabled="saving || deleting"
-          @enter="submit"
-        />
-      </FormField>
-
-      <!-- A real fieldset/legend so the group's name reaches assistive tech
-           natively, matching the endpoint dialog's models block. -->
-      <fieldset class="fieldset">
-        <legend class="field-label">{{ t("groups.dialog.targetsLabel") }}</legend>
-        <p class="field-hint">{{ t("groups.dialog.targetsHint") }}</p>
-
-        <!-- The position is the routing rule, so it is real text in the row
-             rather than a list marker: `list-style: none` drops list semantics
-             in Safari, and the number is the one thing that must survive. -->
-        <ol v-if="targets.length" class="targets">
-          <li v-for="(target, index) in targets" :key="target.uid" class="target">
-            <span class="pos tabular">{{ index + 1 }}</span>
-            <code class="mono target-id" :title="target.model">{{ target.model }}</code>
-
-            <!-- Per-target facts sit in their own line under the id: the
-                 account today, weight and live usage when balancing lands. -->
-            <div class="target-facts">
-              <label class="sr-only" :for="`target-account-${target.uid}`">
-                {{ t("groups.dialog.accountLabel", { target: target.model }) }}
-              </label>
-              <select
-                :id="`target-account-${target.uid}`"
-                class="select"
-                :class="{ invalid: isMissingAccount(target) }"
-                :value="target.account_id ?? ''"
-                :disabled="saving || deleting || accountsPending(target.model)"
-                @change="onAccountChange(index, $event)"
-              >
-                <option
-                  v-for="option in accountOptions(target)"
-                  :key="option.value"
-                  :value="option.value"
-                  :disabled="option.disabled"
-                >
-                  {{ option.label }}
-                </option>
-              </select>
-              <span v-if="isMissingAccount(target)" class="target-warning">
-                {{ t("groups.account.skipped") }}
-              </span>
-            </div>
-
-            <div class="target-actions">
-              <AppButton
-                icon-only
-                size="sm"
-                variant="ghost"
-                :label="t('groups.dialog.moveUp', { target: target.model })"
-                :disabled="index === 0 || saving || deleting"
-                @click="move(index, index - 1)"
-              >
-                <template #icon><ActionIcon name="arrow-up" /></template>
-              </AppButton>
-              <AppButton
-                icon-only
-                size="sm"
-                variant="ghost"
-                :label="t('groups.dialog.moveDown', { target: target.model })"
-                :disabled="index === targets.length - 1 || saving || deleting"
-                @click="move(index, index + 1)"
-              >
-                <template #icon><ActionIcon name="arrow-down" /></template>
-              </AppButton>
-              <!-- Labelled, not a glyph: the row's subject goes in the
-                   accessible name because "Remove" repeats down the list. -->
-              <AppButton
-                size="sm"
-                variant="ghost"
-                :label="t('groups.dialog.removeTarget', { target: target.model })"
-                :disabled="saving || deleting"
-                @click="removeTarget(index)"
-              >
-                {{ t("action.remove") }}
-              </AppButton>
-            </div>
-          </li>
-        </ol>
-        <p v-else class="field-hint">{{ t("groups.dialog.targetsEmpty") }}</p>
-
-        <p v-if="targetError" class="field-error" role="alert">{{ targetError }}</p>
-      </fieldset>
-
-      <FormField
-        v-slot="field"
-        :label="t('groups.dialog.addLabel')"
-        :hint="t('groups.dialog.addHint')"
-      >
-        <div class="add">
+    <div class="panes">
+      <!-- Left: the picker. Name on top, then the inverted L. -->
+      <section class="pane">
+        <FormField
+          v-slot="field"
+          :label="t('groups.dialog.nameLabel')"
+          :hint="t('groups.dialog.nameHint')"
+          :error="nameError ?? undefined"
+        >
           <TextInput
             :id="field.id"
-            v-model="query"
-            type="search"
+            v-model="name"
             mono
-            :placeholder="t('groups.dialog.addPlaceholder')"
+            :placeholder="t('groups.dialog.namePlaceholder')"
             :described-by="field.describedBy"
+            :invalid="field.invalid"
             :disabled="saving || deleting"
-            @enter="addFromQuery"
+            @enter="submit"
           />
-          <AppButton
-            :label="addCandidate ? t('groups.dialog.addTarget', { target: addCandidate }) : undefined"
-            :disabled="!addCandidate || saving || deleting"
-            @click="addFromQuery"
+        </FormField>
+
+        <div class="picker">
+          <!-- Scrolls sideways rather than wrapping, so the region below never
+               moves as the endpoint list grows. -->
+          <SectionNav
+            class="picker-tabs"
+            :items="tabs"
+            :active="activeTab"
+            :label="t('groups.dialog.providersLabel')"
+            @select="selectedTab = $event"
+          />
+
+          <!-- The panel the tabs point at: SectionNav's `aria-controls` is
+               `panel-<id>`, and only the selected one is ever in the DOM. -->
+          <div
+            :id="`panel-${activeTab}`"
+            class="picker-body"
+            role="tabpanel"
+            :aria-label="activeTabLabel"
           >
-            {{ t("groups.dialog.add") }}
-          </AppButton>
+            <!-- The rail. Buttons, not a listbox: each one is a filter the
+                 model list answers, and its pressed state is the selection. -->
+            <div class="rail" role="group" :aria-label="t('groups.dialog.accountsLabel')">
+              <p v-if="railPending" class="rail-note" role="status">{{ t("app.loading") }}</p>
+              <p v-else-if="!rail.length" class="rail-note">
+                {{ t("groups.dialog.accountsEmpty") }}
+              </p>
+              <button
+                v-for="account in rail"
+                :key="account.id"
+                type="button"
+                class="rail-item"
+                :class="{ active: account.id === selectedAccountId }"
+                :aria-pressed="account.id === selectedAccountId"
+                :disabled="saving || deleting"
+                @click="selectedAccountId = account.id"
+              >
+                <span class="rail-name">{{ account.label }}</span>
+                <span v-if="account.hint" class="rail-hint mono">{{ account.hint }}</span>
+              </button>
+            </div>
+
+            <!-- The models an account can run, plus the way in for the ids no
+                 catalog lists. -->
+            <div class="models">
+              <template v-if="selectedAccount">
+                <label class="models-search">
+                  <span class="sr-only">{{ t("action.search") }}</span>
+                  <TextInput
+                    v-model="query"
+                    type="search"
+                    :placeholder="t('groups.dialog.searchPlaceholder')"
+                    :disabled="saving || deleting"
+                  />
+                </label>
+
+                <ul v-if="tabModels.length" class="models-list">
+                  <li v-for="model in tabModels" :key="model.id">
+                    <!-- The accessible name carries both halves of what the
+                         click means: this model, on this account. -->
+                    <AppButton
+                      size="sm"
+                      variant="ghost"
+                      class="model"
+                      :label="
+                        t('groups.dialog.addModelOn', {
+                          model: model.id,
+                          account: selectedAccount.label,
+                        })
+                      "
+                      :disabled="saving || deleting"
+                      @click="addTarget(model.id)"
+                    >
+                      <code class="mono model-id">{{ model.id }}</code>
+                      <Badge v-if="isAdded(model.id)" tone="ok">
+                        {{ t("groups.dialog.added") }}
+                      </Badge>
+                      <span v-else class="model-name">{{ model.display_name }}</span>
+                    </AppButton>
+                  </li>
+                </ul>
+                <p v-else-if="trimmedQuery" class="note">
+                  {{ t("groups.dialog.noMatches", { query: trimmedQuery }) }}
+                </p>
+                <p v-else class="note">{{ t("groups.dialog.modelsEmpty") }}</p>
+
+                <!-- Free text, always available: the server validates only the
+                     prefix, so an id the catalog never listed is legitimate. -->
+                <div class="manual">
+                  <label class="manual-field">
+                    <span class="sr-only">{{ t("groups.dialog.manualLabel") }}</span>
+                    <TextInput
+                      v-model="manual"
+                      mono
+                      :placeholder="t('groups.dialog.manualPlaceholder')"
+                      :disabled="saving || deleting"
+                      @enter="addManual"
+                    />
+                  </label>
+                  <AppButton
+                    size="sm"
+                    :label="manualId ? t('groups.dialog.addTarget', { target: manualId }) : undefined"
+                    :disabled="!manualId || saving || deleting"
+                    @click="addManual"
+                  >
+                    {{ t("groups.dialog.add") }}
+                  </AppButton>
+                </div>
+                <p class="note manual-note">
+                  <template v-if="manualId">
+                    {{ t("groups.dialog.manualPreview", { id: manualId }) }}
+                  </template>
+                  <template v-else>{{ t("groups.dialog.manualHint") }}</template>
+                </p>
+              </template>
+
+              <EmptyState
+                v-else-if="!railPending && !rail.length"
+                compact
+                :title="t('groups.dialog.railEmpty.title')"
+                :body="t('groups.dialog.railEmpty.body', { page: t('providers.title') })"
+              />
+
+              <p v-else-if="!railPending" class="note pick-note">
+                {{ t("groups.dialog.pickAccount") }}
+              </p>
+            </div>
+          </div>
         </div>
-      </FormField>
+      </section>
 
-      <!-- Filtered client-side over the catalog the page already holds, so a
-           keystroke costs nothing. -->
-      <ul v-if="suggestions.length" class="suggestions">
-        <li v-for="model in suggestions" :key="model.id">
-          <AppButton
-            size="sm"
-            variant="ghost"
-            class="suggestion"
-            :label="t('groups.dialog.addTarget', { target: model.id })"
-            :disabled="saving || deleting"
-            @click="addTarget(model.id)"
-          >
-            <code class="mono suggestion-id">{{ model.id }}</code>
-            <span class="suggestion-name">{{ model.display_name }}</span>
-          </AppButton>
-        </li>
-      </ul>
-      <p v-else-if="trimmedQuery" class="field-hint">
-        {{ t("groups.dialog.noMatches", { query: trimmedQuery }) }}
-      </p>
+      <!-- Right: what the group actually is, in the order it is tried. -->
+      <section class="pane">
+        <!-- A real fieldset/legend so the list's name reaches assistive tech
+             natively, matching the endpoint dialog's models block. -->
+        <fieldset class="fieldset">
+          <legend class="field-label">{{ t("groups.dialog.targetsLabel") }}</legend>
+          <p class="field-hint">{{ t("groups.dialog.targetsHint") }}</p>
 
-      <Banner v-if="error" tone="error">{{ error }}</Banner>
+          <!-- The position is the routing rule, so it is real text in the row
+               rather than a list marker: `list-style: none` drops list semantics
+               in Safari, and the number is the one thing that must survive. -->
+          <ol v-if="targets.length" class="targets">
+            <li v-for="(target, index) in targets" :key="target.uid" class="target">
+              <span class="pos tabular">{{ index + 1 }}</span>
+              <code class="mono target-id" :title="target.model">{{ target.model }}</code>
 
-      <!-- Outside the list above so it survives its rerender. -->
-      <span class="sr-only" role="status" aria-live="polite">{{ announcement }}</span>
+              <div class="target-actions">
+                <AppButton
+                  icon-only
+                  size="sm"
+                  variant="ghost"
+                  :label="t('groups.dialog.moveUp', { target: target.model })"
+                  :disabled="index === 0 || saving || deleting"
+                  @click="move(index, index - 1)"
+                >
+                  <template #icon><ActionIcon name="arrow-up" /></template>
+                </AppButton>
+                <AppButton
+                  icon-only
+                  size="sm"
+                  variant="ghost"
+                  :label="t('groups.dialog.moveDown', { target: target.model })"
+                  :disabled="index === targets.length - 1 || saving || deleting"
+                  @click="move(index, index + 1)"
+                >
+                  <template #icon><ActionIcon name="arrow-down" /></template>
+                </AppButton>
+                <!-- Labelled, not a glyph: the row's subject goes in the
+                     accessible name because "Remove" repeats down the list. -->
+                <AppButton
+                  size="sm"
+                  variant="ghost"
+                  :label="t('groups.dialog.removeTarget', { target: target.model })"
+                  :disabled="saving || deleting"
+                  @click="removeTarget(index)"
+                >
+                  {{ t("action.remove") }}
+                </AppButton>
+              </div>
+
+              <!-- Per-target facts sit in their own line under the id: the
+                   account today, weight and live usage when balancing lands. -->
+              <div class="target-facts">
+                <template v-if="isMissingAccount(target)">
+                  <Badge tone="warn">{{ t("groups.account.missing") }}</Badge>
+                  <label class="sr-only" :for="`target-account-${target.uid}`">
+                    {{ t("groups.dialog.accountLabel", { target: target.model }) }}
+                  </label>
+                  <select
+                    :id="`target-account-${target.uid}`"
+                    class="select"
+                    :value="target.account_id ?? ''"
+                    :disabled="saving || deleting"
+                    @change="onAccountChange(index, $event)"
+                  >
+                    <option
+                      v-for="option in repickOptions(target)"
+                      :key="option.value"
+                      :value="option.value"
+                      :disabled="option.disabled"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <span class="target-warning">{{ t("groups.account.skipped") }}</span>
+                </template>
+                <Badge v-else-if="target.account_id" tone="neutral">
+                  {{ pinnedLabel(target) }}
+                </Badge>
+                <!-- Made before this design, or by the API directly: the whole
+                     pool, still valid, still shown for what it is. -->
+                <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
+              </div>
+            </li>
+          </ol>
+          <p v-else class="field-hint">{{ t("groups.dialog.targetsEmpty") }}</p>
+
+          <p v-if="targetError" class="field-error" role="alert">{{ targetError }}</p>
+        </fieldset>
+
+        <Banner v-if="error" tone="error">{{ error }}</Banner>
+
+        <!-- Outside the list above so it survives its rerender. -->
+        <span class="sr-only" role="status" aria-live="polite">{{ announcement }}</span>
+      </section>
     </div>
 
     <template #footer>
@@ -634,11 +826,217 @@ async function remove() {
 </template>
 
 <style scoped>
-.body {
+/* Pick on the left, order on the right. The picker gets the wider share: it
+   holds three regions, the right pane holds one list. */
+.panes {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.pane {
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
+  min-width: 0;
 }
+
+/* --- Picker -------------------------------------------------------------- */
+
+/* One framed region so the tabs, the rail, and the list read as one control
+   rather than three stacked widgets. */
+.picker {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.picker-tabs {
+  flex-shrink: 0;
+  padding: 0 var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The inverted L: rail down the left, models filling the rest. A declared
+   height, not a content-driven one — the two regions scroll inside it, so the
+   dialog's own height never depends on how many models a provider lists. */
+.picker-body {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  height: 264px;
+  min-height: 0;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.rail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex-shrink: 0;
+  padding: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.rail-item:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* Selection is a filled pill *and* a weight step — the fill alone is a ~2%
+   luminance delta and reads as noise (docs/admin-ui.md § Scales). */
+.rail-item.active {
+  background: var(--hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+  font-weight: var(--weight-medium);
+}
+
+.rail-item:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.rail-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+}
+
+.rail-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: var(--text-2xs);
+}
+
+.rail-note {
+  margin: 0;
+  padding: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+
+.models {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.models-search {
+  display: block;
+  flex-shrink: 0;
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The one region that grows with its data, so it is the one that scrolls. */
+.models-list {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  margin: 0;
+  padding: var(--space-1);
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+
+/* A full-width row rather than a pill: the id is what the user reads down the
+   list, so the button is shaped to it. Selected through the list so these
+   outrank AppButton's own single-class rules rather than depending on style
+   order. */
+.models-list :deep(.model) {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+/* The default slot lands in one flex item, so the id/name split is set up
+   inside it. */
+.models-list :deep(.model .btn-label) {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  min-width: 0;
+  font-weight: var(--weight-normal);
+}
+
+.model-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-name {
+  flex-shrink: 0;
+  color: var(--muted);
+  font-size: var(--text-2xs);
+}
+
+.manual {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  padding: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.manual-field {
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+
+.note {
+  margin: 0;
+  padding: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.manual-note {
+  flex-shrink: 0;
+  padding-top: 0;
+}
+
+/* Nothing picked yet: the region says what to do instead of standing empty. */
+.pick-note {
+  margin: auto;
+  text-align: center;
+}
+
+/* --- Selected targets ---------------------------------------------------- */
 
 /* A fieldset's default margin, padding, and border are browser chrome this
    design does not use — the legend alone carries the grouping. */
@@ -648,6 +1046,7 @@ async function remove() {
   margin: 0;
   padding: 0;
   border: none;
+  min-width: 0;
 }
 
 .field-label {
@@ -674,13 +1073,14 @@ async function remove() {
   color: var(--danger);
 }
 
-/* --- Ordered targets ----------------------------------------------------- */
-
 .targets {
   display: grid;
   gap: var(--space-1);
   margin: 0;
   padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
 }
 
@@ -716,6 +1116,14 @@ async function remove() {
   color: var(--text);
 }
 
+.target-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  grid-column: 3;
+  grid-row: 1;
+}
+
 .target-facts {
   display: flex;
   align-items: center;
@@ -725,22 +1133,14 @@ async function remove() {
   min-width: 0;
 }
 
-.target-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  grid-column: 3;
-  grid-row: 1;
-}
-
-/* TextInput's control spec at the small size, so the account select sits level
+/* TextInput's control spec at the small size, so the re-pick select sits level
    with the ghost buttons sharing its row. */
 .select {
   max-width: 100%;
   min-width: 0;
   height: 28px;
   padding: 0 var(--space-2);
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--warn-border);
   border-radius: var(--radius-sm);
   background: var(--surface);
   color: var(--text);
@@ -759,73 +1159,10 @@ async function remove() {
   cursor: not-allowed;
 }
 
-/* A pin whose account is gone: the border carries the tone, the sentence
-   beside it carries the meaning — color is never the only signal. */
-.select.invalid {
-  border-color: var(--warn-border);
-  color: var(--warn);
-}
-
 .target-warning {
   color: var(--warn);
   font-size: var(--text-2xs);
   overflow-wrap: anywhere;
-}
-
-/* --- Picker -------------------------------------------------------------- */
-
-.add {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-}
-
-/* Bounded so a long catalog cannot push Save out of reach; the search is how
-   the rest of it is reached. */
-.suggestions {
-  display: grid;
-  gap: 2px;
-  margin: 0;
-  padding: 0;
-  max-height: 168px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  list-style: none;
-}
-
-/* A full-width row rather than a pill: the id is what the user is reading down
-   the list, so the button is shaped to it. Selected through the list so these
-   outrank AppButton's own single-class rules rather than depending on style
-   order. */
-.suggestions :deep(.suggestion) {
-  width: 100%;
-  justify-content: flex-start;
-}
-
-/* The default slot lands in one flex item, so the id/name split is set up
-   inside it. */
-.suggestions :deep(.suggestion .btn-label) {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-3);
-  width: 100%;
-  min-width: 0;
-  font-weight: var(--weight-normal);
-}
-
-.suggestion-id {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.suggestion-name {
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: var(--text-2xs);
 }
 
 /* The footer packs its buttons to the right; the auto margin is what separates
@@ -834,8 +1171,52 @@ async function remove() {
   margin-right: auto;
 }
 
-/* A small button's touch height here, and 16px type so iOS Safari does not zoom
-   the dialog when the select takes focus. */
+/* Below the sheet breakpoint the two panes stack — picker above, selected list
+   below — and the inverted L flattens into two rows: the rail becomes a chip
+   strip under the tabs, because a 128px column is width a phone does not have
+   to give. */
+@media (max-width: 640px) {
+  .panes {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-4);
+  }
+
+  .picker-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 300px;
+  }
+
+  .rail {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--space-1);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;
+  }
+
+  .rail::-webkit-scrollbar {
+    display: none;
+  }
+
+  .rail-item {
+    min-height: 34px;
+    border-color: var(--border);
+    border-radius: var(--radius-full);
+    white-space: nowrap;
+  }
+
+  .rail-name,
+  .rail-hint {
+    overflow: visible;
+  }
+}
+
+/* Touch targets: the select matches what a small button gets here, and 16px
+   type so iOS Safari does not zoom the sheet when it takes focus. */
 @media (pointer: coarse) {
   .select {
     min-height: 34px;

@@ -304,17 +304,33 @@ export const en = {
   "groups.dialog.targetsLabel": "Targets",
   "groups.dialog.targetsHint":
     "Requests try these in order and use the first one that can take them. A target pinned to an account uses only that account; the rest use the whole provider.",
-  "groups.dialog.targetsEmpty": "Add at least one model below.",
-  // The account dimension. "Any account" is the unpinned default — the
-  // provider's own pool and priority — and reads the same in the list and the
-  // picker so the two surfaces name one thing once.
+  "groups.dialog.targetsEmpty": "Pick an account, then choose the models it should serve.",
+  // The account dimension. "Any account" is the unpinned state the picker no
+  // longer creates but older groups still hold — the provider's own pool and
+  // priority — and it reads the same on the list page and here.
   "groups.account.any": "Any account",
   "groups.account.missing": "Account removed",
   "groups.account.skipped": "Skipped until you pick another account",
   "groups.dialog.accountLabel": "Account for {target}",
-  "groups.dialog.addLabel": "Add a target",
-  "groups.dialog.addPlaceholder": "Search models",
-  "groups.dialog.addHint": "Not in the list? Type the full model id and add it.",
+  // --- Picker: providers across the top, accounts down the side, models in
+  // the middle. Each label names the region it heads, so the three read as one
+  // path rather than three unrelated lists.
+  "groups.dialog.providersLabel": "Providers",
+  "groups.dialog.accountsLabel": "Accounts",
+  "groups.dialog.accountsEmpty": "No accounts",
+  "groups.dialog.railEmpty.title": "No accounts here",
+  "groups.dialog.railEmpty.body": "Bind one on the {page} page and it shows up here.",
+  "groups.dialog.pickAccount": "Pick an account to see what it can run.",
+  "groups.dialog.searchPlaceholder": "Search models",
+  "groups.dialog.modelsEmpty": "This provider lists no models. Add one by id below.",
+  "groups.dialog.addModelOn": "Add {model} on {account}",
+  "groups.dialog.added": "Added",
+  // The way in for ids no catalog lists — the whole of codex, and anything an
+  // upstream added since the catalog was cached.
+  "groups.dialog.manualLabel": "Model id",
+  "groups.dialog.manualPlaceholder": "model id",
+  "groups.dialog.manualHint": "Not listed? Type the id the upstream uses.",
+  "groups.dialog.manualPreview": "Adds {id}",
   "groups.dialog.add": "Add",
   "groups.dialog.addTarget": "Add {target}",
   "groups.dialog.noMatches": "No models match \"{query}\"",
@@ -331,7 +347,7 @@ export const en = {
   // A model may appear twice as long as the two entries use different
   // accounts, so the message says how to make the second one legal.
   "groups.error.targetDuplicate":
-    "That model and account are already in this group. Pin one of them to a different account to add it twice.",
+    "That model is already in this group on this account. Pick another account to add it again.",
   "groups.error.targetsMax": "A group holds at most {max} models",
   "groups.error.save": "Couldn't save the group",
   "groups.error.delete": "Couldn't delete the group",

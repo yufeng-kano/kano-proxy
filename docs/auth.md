@@ -119,7 +119,7 @@ Custom providers (BYO OpenAI-/Anthropic-compatible endpoint — see [providers.m
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/custom-providers` | List the user's custom providers; masked key + computed status, never the raw key |
+| GET | `/api/custom-providers` | List the user's custom providers; masked key + computed status, never the raw key. Each row also carries `account_id` — the id of the provider's single `upstream_accounts` row — so the Groups picker can pin a target to a custom endpoint's key like any other account ([admin-ui.md](./admin-ui.md) § Groups page); `null` if the account row is somehow missing |
 | POST | `/api/custom-providers` | Create — body `{name, slug, format, base_url, api_key, models_mode?, manual_models?}`; inserts the provider row plus one `upstream_accounts` row |
 | PUT | `/api/custom-providers/:id` | Update — body `{name?, base_url?, api_key?, models_mode?, manual_models?}`; `slug`/`format` are immutable (`400` if a differing value is sent); omitted or empty `api_key` keeps the stored key; a non-empty `api_key` re-encrypts and replaces it in place (same account row) |
 | DELETE | `/api/custom-providers/:id` | Deletes the provider row and all its `upstream_accounts` rows (code-level cascade), then best-effort clears their bench keys |

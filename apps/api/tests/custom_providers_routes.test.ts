@@ -103,6 +103,30 @@ describe("POST /api/custom-providers (create)", () => {
     })
     expect(json.key_mask).toBe("sk-ups…alue")
     expect(JSON.stringify(json)).not.toContain(validCreateBody.api_key)
+    // docs/auth.md: account_id is the provider's single upstream_accounts row
+    // (its stored API key) — the Groups picker pins targets to it.
+    expect(json.account_id).toBe(db.rows("upstream_accounts")[0]!.id)
+  })
+
+  it("account_id is null when the provider's account row is somehow missing", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createProvider(env, cookie))
+
+    // Simulate the account row going missing without the provider row itself
+    // being deleted (should never happen via the normal API, but the field
+    // must still degrade to null rather than throw).
+    const accounts = db.rows("upstream_accounts")
+    accounts.splice(
+      accounts.findIndex((r) => r.id === created.account_id),
+      1,
+    )
+
+    const res = await customProviderRoutes.request("/", req("GET", cookie), env)
+    const json = await readJson(res)
+    expect(json.providers[0].account_id).toBeNull()
   })
 
   it("stores the api key encrypted, decryptable back to the original value", async () => {
@@ -309,6 +333,7 @@ describe("GET /api/custom-providers (list)", () => {
     expect(json.providers).toHaveLength(1)
     expect(json.providers[0]).toMatchObject({ slug: "my-endpoint", status: "active" })
     expect(json.providers[0].key_mask).toBe("sk-ups…alue")
+    expect(json.providers[0].account_id).toBe(db.rows("upstream_accounts")[0]!.id)
     expect(JSON.stringify(json)).not.toContain(validCreateBody.api_key)
   })
 
@@ -527,6 +552,8 @@ describe("PUT /api/custom-providers/:id (update)", () => {
     expect(json.name).toBe("Renamed")
     expect(json.base_url).toBe("https://new-upstream.example.com/v1")
     expect(json.key_mask).toBe("sk-ups…alue")
+    // Same account row throughout — updates replace the key in place.
+    expect(json.account_id).toBe(db.rows("upstream_accounts")[0]!.id)
 
     const cred = await decryptJson<StoredCredential>(
       TOKEN_KEY,

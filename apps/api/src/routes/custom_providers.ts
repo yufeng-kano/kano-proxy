@@ -104,6 +104,12 @@ async function toListItem(
     manual_models: parseManualModels(row.manual_models_json),
     sort_order: row.sort_order,
     key_mask: keyMaskFromAccount(accounts[0]),
+    // The provider's single upstream_accounts row (its stored API key) —
+    // lets the Groups picker pin a target to this endpoint's key like any
+    // other account (docs/auth.md). null if the account row is somehow
+    // missing. Reuses the `accounts` fetch already done above for
+    // status/key_mask — no extra query.
+    account_id: accounts[0]?.id ?? null,
     status,
     created_at: row.created_at,
     updated_at: row.updated_at,
