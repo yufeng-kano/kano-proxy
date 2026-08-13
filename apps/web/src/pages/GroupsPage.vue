@@ -18,6 +18,7 @@ import ModelGroupDialog from "@/components/ModelGroupDialog.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
+import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
 import DataTable from "@/components/ui/DataTable.vue"
 import type { Column } from "@/components/ui/DataTable.vue"
@@ -33,7 +34,7 @@ import {
   readModelsCache,
   writeModelsCache,
 } from "@/services/cache"
-import type { CatalogModel, ModelGroup } from "@/types"
+import type { CatalogModel, ModelGroup, ModelGroupTarget } from "@/types"
 
 const { t, format } = useI18n()
 const { user } = useAuth()
@@ -61,6 +62,24 @@ const columns = computed<Column<ModelGroup>[]>(() => [
   { key: "updated", header: t("groups.column.updated"), width: "132px" },
   { key: "edit", header: "", srHeader: t("action.edit"), align: "end", width: "56px" },
 ])
+
+/**
+ * The same model may appear twice on two different accounts, so the row key is
+ * the pair — behind its position, which is the one part that stays unique
+ * whatever the list holds.
+ */
+function targetKey(target: ModelGroupTarget, index: number): string {
+  return `${index}:${target.model}:${target.account_id ?? ""}`
+}
+
+/**
+ * A pinned account the server could not resolve at read time: `account_id` set,
+ * no label. The target is skipped at request time (docs/providers.md § Model
+ * groups), so the row says so rather than showing the group as healthy.
+ */
+function isMissingAccount(target: ModelGroupTarget): boolean {
+  return !!target.account_id && !target.account_label
+}
 
 onMounted(() => void load())
 
@@ -208,12 +227,34 @@ async function copyName(name: string) {
         <!-- Priority order, numbered: the position is the routing rule, so it
              is real text in the row — visible when the card layout takes over
              below 768px, and read out where `list-style: none` costs Safari
-             its list semantics. -->
+             its list semantics.
+
+             Each entry is position + model + its account, the account as a tag
+             so the later balancing facts (weight, live usage) join it as more
+             tags on the same line instead of forcing a new shape. -->
         <template #cell-targets="{ row }">
           <ol class="targets">
-            <li v-for="(target, index) in row.targets" :key="target" class="target">
+            <li
+              v-for="(target, index) in row.targets"
+              :key="targetKey(target, index)"
+              class="target"
+            >
               <span class="pos tabular">{{ index + 1 }}</span>
-              <code class="mono">{{ target }}</code>
+              <span class="target-body">
+                <code class="mono">{{ target.model }}</code>
+                <span class="facts">
+                  <!-- A pin whose account is gone: warned, and told what it
+                       costs — that target is skipped at request time. -->
+                  <template v-if="isMissingAccount(target)">
+                    <Badge tone="warn">{{ t("groups.account.missing") }}</Badge>
+                    <span class="fact-note">{{ t("groups.account.skipped") }}</span>
+                  </template>
+                  <Badge v-else-if="target.account_label" tone="neutral">
+                    {{ target.account_label }}
+                  </Badge>
+                  <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
+                </span>
+              </span>
             </li>
           </ol>
         </template>
@@ -329,6 +370,32 @@ async function copyName(name: string) {
   align-items: baseline;
   gap: var(--space-2);
   min-width: 0;
+}
+
+/* The model and its facts travel together, so a wrapped run never leaves an
+   account tag stranded under the *next* target's id. */
+.target-body {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+
+/* One tag today (the account); weight and live usage join it here when
+   balancing lands, which is why it is a container of its own rather than a tag
+   dropped straight beside the id. */
+.facts {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.fact-note {
+  color: var(--warn);
+  font-size: var(--text-2xs);
 }
 
 .pos {

@@ -303,8 +303,15 @@ export const en = {
   "groups.dialog.nameHint": "Clients send this as the model id, on both base URLs.",
   "groups.dialog.targetsLabel": "Targets",
   "groups.dialog.targetsHint":
-    "Requests try these in order and use the first one with an account that can take them.",
+    "Requests try these in order and use the first one that can take them. A target pinned to an account uses only that account; the rest use the whole provider.",
   "groups.dialog.targetsEmpty": "Add at least one model below.",
+  // The account dimension. "Any account" is the unpinned default — the
+  // provider's own pool and priority — and reads the same in the list and the
+  // picker so the two surfaces name one thing once.
+  "groups.account.any": "Any account",
+  "groups.account.missing": "Account removed",
+  "groups.account.skipped": "Skipped until you pick another account",
+  "groups.dialog.accountLabel": "Account for {target}",
   "groups.dialog.addLabel": "Add a target",
   "groups.dialog.addPlaceholder": "Search models",
   "groups.dialog.addHint": "Not in the list? Type the full model id and add it.",
@@ -321,7 +328,10 @@ export const en = {
   "groups.error.nameWhitespace": "A name can't contain spaces",
   "groups.error.nameSlash": "A name can't contain \"/\"",
   "groups.error.targetFormat": "Use a full model id in the form {example}",
-  "groups.error.targetDuplicate": "That model is already in this group",
+  // A model may appear twice as long as the two entries use different
+  // accounts, so the message says how to make the second one legal.
+  "groups.error.targetDuplicate":
+    "That model and account are already in this group. Pin one of them to a different account to add it twice.",
   "groups.error.targetsMax": "A group holds at most {max} models",
   "groups.error.save": "Couldn't save the group",
   "groups.error.delete": "Couldn't delete the group",

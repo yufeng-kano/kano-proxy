@@ -136,8 +136,8 @@ Bare-name model aliases → ordered `provider/model` targets (contract: [provide
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/model-groups` | List the user's groups: `{id, name, targets, created_at, updated_at}` each, `targets` a `provider/model` string array in priority order |
-| POST | `/api/model-groups` | Create — body `{name, targets}`. Validation: name trimmed, 1–128 chars, no whitespace, no `/`, unique per user; `targets` 1–20 entries, each parses as `provider/model` with a prefix that is a builtin or one of the caller's custom slugs, no duplicates; max 50 groups per user. `400` with a field-level message on any violation |
+| GET | `/api/model-groups` | List the user's groups: `{id, name, targets, created_at, updated_at}` each. `targets` is the priority-ordered array of `{model, account_id, account_label}` — `account_id` `null` for an unpinned (whole-pool) target; `account_label` is resolved at read time for display (`custom_label` \|\| upstream `label`, `null` when unpinned or the account no longer exists) and is **never** stored |
+| POST | `/api/model-groups` | Create — body `{name, targets}`. Each target is `{model, account_id?}` or a bare `"provider/model"` string (shorthand for `{model}`). Validation: name trimmed, 1–128 chars, no whitespace, no `/`, unique per user; `targets` 1–20 entries, each `model` parses as `provider/model` with a prefix that is a builtin or one of the caller's custom slugs; `account_id`, when present, must be an `upstream_accounts` row owned by the caller whose `provider` matches the target's prefix; no duplicate `model`+`account_id` pairs; max 50 groups per user. `400` with a field-level message on any violation |
 | PUT | `/api/model-groups/:id` | Update — body `{name?, targets?}`; `name` **is** renameable (unlike a custom provider slug); `targets`, when present, replaces the whole ordered list (no per-entry patching — the order is the semantics). Same validation as create. 404 when the id is not the caller's |
 | DELETE | `/api/model-groups/:id` | Delete. Requests already in flight finish; the next request for that name is `invalid_model` |
 

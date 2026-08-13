@@ -199,4 +199,135 @@ describe("resolveModel — model groups", () => {
     const resolved = await resolveModel(env, "user_1", "opus")
     expect(resolved?.provider).toBe("grok")
   })
+
+  it("v3.0.0 string-shorthand rows still resolve unpinned, same as before", async () => {
+    const db = new FakeD1()
+    // Bare strings, not {model, account_id} objects — the pre-pinning wire shape.
+    seedGroup(db, { targets_json: JSON.stringify(["claude-code/claude-opus-5"]) })
+    seedAccount(db, "claude-code")
+    const resolved = await resolveModel(envWith(db), "user_1", "opus")
+    expect(resolved).toMatchObject({ provider: "claude-code", upstreamModel: "claude-opus-5" })
+    expect(resolved?.pinnedAccountId).toBeUndefined()
+  })
+
+  describe("account pinning (docs/providers.md § Model groups \"Account pinning\")", () => {
+    it("a pinned target with a usable account is selected; resolved carries pinnedAccountId", async () => {
+      const db = new FakeD1()
+      const acc = seedAccount(db, "claude-code")
+      seedGroup(db, {
+        targets_json: JSON.stringify([{ model: "claude-code/claude-opus-5", account_id: acc }]),
+      })
+      const resolved = await resolveModel(envWith(db), "user_1", "opus")
+      expect(resolved).toMatchObject({
+        provider: "claude-code",
+        upstreamModel: "claude-opus-5",
+        pinnedAccountId: acc,
+      })
+    })
+
+    it("a pinned target bypasses the pool's own priority — a lower-priority pinned account still wins when it's first in the group", async () => {
+      const db = new FakeD1()
+      // Two claude-code accounts; the pool's own priority order would prefer
+      // whichever has the higher `priority`, but group order pins the low-
+      // priority one explicitly and it must still be the one selected.
+      const highPriority = seedAccount(db, "claude-code")
+      const lowPriority = seedAccount(db, "claude-code")
+      seedGroup(db, {
+        targets_json: JSON.stringify([{ model: "claude-code/claude-opus-5", account_id: lowPriority }]),
+      })
+      void highPriority
+      const resolved = await resolveModel(envWith(db), "user_1", "opus")
+      expect(resolved?.pinnedAccountId).toBe(lowPriority)
+    })
+
+    it("a benched pinned target is skipped in favor of the next target, even though the provider's pool has other usable accounts", async () => {
+      const db = new FakeD1()
+      const env = envWith(db)
+      const pinned = seedAccount(db, "claude-code")
+      // A sibling claude-code account exists and is NOT benched — but
+      // failover to it is disabled for a pinned target, so it must not win.
+      seedAccount(db, "claude-code")
+      seedAccount(db, "grok")
+      await markBenched(env, "user_1", "claude-code", pinned, 300_000)
+      seedGroup(db, {
+        targets_json: JSON.stringify([
+          { model: "claude-code/claude-opus-5", account_id: pinned },
+          "grok/grok-4.5",
+        ]),
+      })
+      const resolved = await resolveModel(env, "user_1", "opus")
+      expect(resolved?.provider).toBe("grok")
+      expect(resolved?.pinnedAccountId).toBeUndefined()
+    })
+
+    it("a pinned target whose account was deleted is skipped in favor of the next target", async () => {
+      const db = new FakeD1()
+      seedAccount(db, "grok")
+      seedGroup(db, {
+        targets_json: JSON.stringify([
+          { model: "claude-code/claude-opus-5", account_id: "acc_never_existed" },
+          "grok/grok-4.5",
+        ]),
+      })
+      const resolved = await resolveModel(envWith(db), "user_1", "opus")
+      expect(resolved?.provider).toBe("grok")
+    })
+
+    it("a pinned target whose account belongs to a different provider than claimed is treated as unusable", async () => {
+      const db = new FakeD1()
+      // acc belongs to "grok", but the target claims "claude-code" — should
+      // never happen via the write-time validated REST path, but resolution
+      // still defends against it rather than trusting the stored pin blindly.
+      const grokAcc = seedAccount(db, "grok")
+      seedAccount(db, "codex")
+      seedGroup(db, {
+        targets_json: JSON.stringify([
+          { model: "claude-code/claude-opus-5", account_id: grokAcc },
+          "codex/gpt-5.2",
+        ]),
+      })
+      const resolved = await resolveModel(envWith(db), "user_1", "opus")
+      expect(resolved?.provider).toBe("codex")
+    })
+
+    it("all pinned/unpinned targets unavailable: the fallback still dispatches the first resolvable target with any bound account", async () => {
+      const db = new FakeD1()
+      const env = envWith(db)
+      const pinned = seedAccount(db, "claude-code")
+      const grokAcc = seedAccount(db, "grok")
+      await markBenched(env, "user_1", "claude-code", pinned, 300_000)
+      await markBenched(env, "user_1", "grok", grokAcc, 300_000)
+      seedGroup(db, {
+        targets_json: JSON.stringify([
+          { model: "claude-code/claude-opus-5", account_id: pinned },
+          "grok/grok-4.5",
+        ]),
+      })
+      const resolved = await resolveModel(env, "user_1", "opus")
+      // First resolvable target wins the "any bound account" fallback — the
+      // pinned target still counts as "has an account" (just benched).
+      expect(resolved?.provider).toBe("claude-code")
+      expect(resolved?.pinnedAccountId).toBe(pinned)
+    })
+
+    it("a group mixing a pinned claude-code target, an unpinned grok target, and a pinned custom-provider target — order is the routing authority across accounts, not just providers", async () => {
+      const db = new FakeD1()
+      seedCustomProvider(db, "official-api", "openai")
+      const ccAcc1 = seedAccount(db, "claude-code")
+      const ccAcc2 = seedAccount(db, "claude-code")
+      const customAcc = seedAccount(db, "official-api")
+      void ccAcc2
+      // Order: pinned claude-code acc #1, then the same provider's acc #2
+      // never gets a look-in unless #1 fails, then a pinned custom endpoint.
+      seedGroup(db, {
+        targets_json: JSON.stringify([
+          { model: "claude-code/claude-opus-5", account_id: ccAcc1 },
+          { model: "official-api/gpt-4o", account_id: customAcc },
+        ]),
+      })
+      const resolved = await resolveModel(envWith(db), "user_1", "opus")
+      expect(resolved?.provider).toBe("claude-code")
+      expect(resolved?.pinnedAccountId).toBe(ccAcc1)
+    })
+  })
 })

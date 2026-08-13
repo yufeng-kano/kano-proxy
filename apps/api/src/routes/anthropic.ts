@@ -99,6 +99,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       adapter: resolved.adapter,
       waitUntil: (p) => c.executionCtx.waitUntil(p),
       groupName: resolved.group?.name,
+      pinnedAccountId: resolved.pinnedAccountId,
     })
   }
 
@@ -153,6 +154,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       adapter: resolved.adapter,
       waitUntil: (p) => c.executionCtx.waitUntil(p),
       groupName: resolved.group?.name,
+      pinnedAccountId: resolved.pinnedAccountId,
     })
   }
 
@@ -167,6 +169,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     affinity,
     waitUntil: (p) => c.executionCtx.waitUntil(p),
     groupName: resolved.group?.name,
+    pinnedAccountId: resolved.pinnedAccountId,
   })
 })
 
@@ -241,6 +244,7 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     endpoint: "count_tokens",
     waitUntil: (p) => c.executionCtx.waitUntil(p),
     groupName: resolved.group?.name,
+    pinnedAccountId: resolved.pinnedAccountId,
   })
 })
 

@@ -141,6 +141,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
     adapter: resolved.adapter,
     waitUntil: (p) => c.executionCtx.waitUntil(p),
     groupName: resolved.group?.name,
+    pinnedAccountId: resolved.pinnedAccountId,
     req: {
       model: modelRaw,
       rawModel: modelRaw,

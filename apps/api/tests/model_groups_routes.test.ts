@@ -49,6 +49,37 @@ function seedCustomProvider(db: FakeD1, userId: string, slug: string): void {
   ])
 }
 
+function seedAccount(
+  db: FakeD1,
+  opts: { id: string; userId: string; provider: string; label?: string | null; customLabel?: string | null },
+): void {
+  db.seed("upstream_accounts", [
+    {
+      id: opts.id,
+      user_id: opts.userId,
+      provider: opts.provider,
+      external_account_id: null,
+      label: opts.label ?? null,
+      custom_label: opts.customLabel ?? null,
+      priority: 1,
+      encrypted_payload: "encrypted",
+      account_meta_json: null,
+      usage_snapshot_json: null,
+      usage_fetched_at: null,
+      usage_fetching_at: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    },
+  ])
+}
+
+/** Simulate account deletion — removes the row in place, same array the db module reads/writes. */
+function deleteAccount(db: FakeD1, accountId: string): void {
+  const rows = db.rows("upstream_accounts")
+  const idx = rows.findIndex((r) => r.id === accountId)
+  if (idx !== -1) rows.splice(idx, 1)
+}
+
 async function cookieFor(env: Env, userId: string): Promise<string> {
   const { cookie } = await createSession(env, userId)
   return cookie.split(";")[0]!
@@ -98,7 +129,10 @@ describe("GET /api/model-groups", () => {
     expect(json.groups).toHaveLength(1)
     expect(json.groups[0]).toMatchObject({
       name: "opus",
-      targets: ["claude-code/claude-opus-5", "grok/grok-4.5"],
+      targets: [
+        { model: "claude-code/claude-opus-5", account_id: null, account_label: null },
+        { model: "grok/grok-4.5", account_id: null, account_label: null },
+      ],
     })
   })
 
@@ -132,7 +166,10 @@ describe("POST /api/model-groups (create)", () => {
     const res = await createGroup(env, cookie)
     expect(res.status).toBe(201)
     const json = await readJson(res)
-    expect(json).toMatchObject({ name: "opus", targets: ["claude-code/claude-opus-5"] })
+    expect(json).toMatchObject({
+      name: "opus",
+      targets: [{ model: "claude-code/claude-opus-5", account_id: null, account_label: null }],
+    })
     expect(typeof json.id).toBe("string")
   })
 
@@ -315,7 +352,9 @@ describe("PUT /api/model-groups/:id (update)", () => {
     expect(res.status).toBe(200)
     const json = await readJson(res)
     expect(json.name).toBe("renamed-opus")
-    expect(json.targets).toEqual(["claude-code/claude-opus-5"])
+    expect(json.targets).toEqual([
+      { model: "claude-code/claude-opus-5", account_id: null, account_label: null },
+    ])
   })
 
   it("replaces the whole targets list (no per-entry patching)", async () => {
@@ -336,7 +375,7 @@ describe("PUT /api/model-groups/:id (update)", () => {
     )
     expect(res.status).toBe(200)
     const json = await readJson(res)
-    expect(json.targets).toEqual(["codex/gpt-5.2"])
+    expect(json.targets).toEqual([{ model: "codex/gpt-5.2", account_id: null, account_label: null }])
     expect(json.name).toBe("opus")
   })
 
@@ -368,6 +407,183 @@ describe("PUT /api/model-groups/:id (update)", () => {
       env,
     )
     expect(res.status).toBe(400)
+  })
+})
+
+describe("account pinning (docs/auth.md § Model groups, docs/providers.md § Model groups \"Account pinning\")", () => {
+  it("accepts a target pinned to an account the caller owns whose provider matches", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    seedAccount(db, { id: "acc_1", userId: "user_1", provider: "claude-code" })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createGroup(env, cookie, {
+      targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_1" }],
+    })
+    expect(res.status).toBe(201)
+    const json = await readJson(res)
+    expect(json.targets).toEqual([
+      { model: "claude-code/claude-opus-5", account_id: "acc_1", account_label: null },
+    ])
+  })
+
+  it("rejects an account_id belonging to another user (foreign account) with 400", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    seedUser(db, "user_2")
+    seedAccount(db, { id: "acc_other", userId: "user_2", provider: "claude-code" })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createGroup(env, cookie, {
+      targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_other" }],
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("rejects an account_id whose provider doesn't match the target's prefix with 400", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    seedAccount(db, { id: "acc_grok", userId: "user_1", provider: "grok" })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createGroup(env, cookie, {
+      // acc_grok belongs to "grok", not "claude-code" — mismatch.
+      targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_grok" }],
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("rejects a nonexistent account_id with 400", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createGroup(env, cookie, {
+      targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_never_existed" }],
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("allows the same model pinned to two different accounts as two targets", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    seedAccount(db, { id: "acc_1", userId: "user_1", provider: "claude-code" })
+    seedAccount(db, { id: "acc_2", userId: "user_1", provider: "claude-code" })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createGroup(env, cookie, {
+      targets: [
+        { model: "claude-code/claude-opus-5", account_id: "acc_1" },
+        { model: "claude-code/claude-opus-5", account_id: "acc_2" },
+      ],
+    })
+    expect(res.status).toBe(201)
+    const json = await readJson(res)
+    expect(json.targets).toHaveLength(2)
+  })
+
+  it("rejects a duplicate (model, account_id) pair with 400", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    seedAccount(db, { id: "acc_1", userId: "user_1", provider: "claude-code" })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createGroup(env, cookie, {
+      targets: [
+        { model: "claude-code/claude-opus-5", account_id: "acc_1" },
+        { model: "claude-code/claude-opus-5", account_id: "acc_1" },
+      ],
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("PUT validates a pinned account_id the same way as create", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createGroup(env, cookie))
+    const res = await modelGroupRoutes.request(
+      `/${created.id}`,
+      req("PUT", cookie, {
+        targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_never_existed" }],
+      }),
+      env,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  describe("account_label enrichment (read-time, never stored)", () => {
+    it("custom_label wins over upstream label", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      seedAccount(db, {
+        id: "acc_1",
+        userId: "user_1",
+        provider: "claude-code",
+        label: "upstream@example.com",
+        customLabel: "My Opus Account",
+      })
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, {
+        targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_1" }],
+      })
+      const json = await readJson(res)
+      expect(json.targets[0].account_label).toBe("My Opus Account")
+    })
+
+    it("falls back to upstream label when there is no custom_label", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      seedAccount(db, {
+        id: "acc_1",
+        userId: "user_1",
+        provider: "claude-code",
+        label: "upstream@example.com",
+      })
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie, {
+        targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_1" }],
+      })
+      const json = await readJson(res)
+      expect(json.targets[0].account_label).toBe("upstream@example.com")
+    })
+
+    it("is null for an unpinned target", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const res = await createGroup(env, cookie)
+      const json = await readJson(res)
+      expect(json.targets[0].account_label).toBeNull()
+    })
+
+    it("is null when the pinned account has since been deleted — target still carries the stale account_id", async () => {
+      const db = new FakeD1()
+      seedUser(db)
+      seedAccount(db, { id: "acc_1", userId: "user_1", provider: "claude-code", label: "gone@example.com" })
+      const env = buildEnv(db)
+      const cookie = await cookieFor(env, "user_1")
+      const created = await readJson(
+        await createGroup(env, cookie, {
+          targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_1" }],
+        }),
+      )
+      expect(created.targets[0].account_label).toBe("gone@example.com")
+
+      deleteAccount(db, "acc_1")
+
+      const list = await readJson(await modelGroupRoutes.request("/", req("GET", cookie), env))
+      const group = list.groups.find((g: any) => g.id === created.id)
+      expect(group.targets[0]).toEqual({
+        model: "claude-code/claude-opus-5",
+        account_id: "acc_1",
+        account_label: null,
+      })
+    })
   })
 })
 

@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import type { HonoEnv } from "../auth/session"
 import { loadSessionUser } from "../auth/session"
+import { getAccount } from "../db/accounts"
 import { listCustomProviders } from "../db/custom_providers"
 import {
   countModelGroups,
@@ -10,6 +11,7 @@ import {
   listModelGroups,
   parseGroupTargets,
   updateModelGroupFields,
+  type GroupTarget,
   type ModelGroupRow,
 } from "../db/model_groups"
 import { isProviderId } from "../env"
@@ -36,11 +38,48 @@ async function prefixResolver(db: D1Database, userId: string): Promise<(prefix: 
   return (prefix: string) => isProviderId(prefix) || slugs.has(prefix)
 }
 
-function toListItem(row: ModelGroupRow): Record<string, unknown> {
+/**
+ * A pinned `account_id` must be an `upstream_accounts` row owned by the
+ * caller whose `provider` matches the target's prefix (docs/auth.md §
+ * Model groups) — never another user's row, and never a row that quietly
+ * belongs to a different provider than the target claims.
+ */
+function accountResolver(db: D1Database, userId: string): (accountId: string, provider: string) => Promise<boolean> {
+  return async (accountId, provider) => {
+    const row = await getAccount(db, userId, accountId)
+    return !!row && row.provider === provider
+  }
+}
+
+/**
+ * Read-time display label for a pinned target — `custom_label` wins over
+ * upstream `label` (same convention as the accounts list resolver), `null`
+ * when unpinned or the account no longer exists. Never stored.
+ */
+async function accountLabel(db: D1Database, userId: string, accountId: string | null): Promise<string | null> {
+  if (!accountId) return null
+  const row = await getAccount(db, userId, accountId)
+  if (!row) return null
+  return row.custom_label || row.label || null
+}
+
+async function toListItem(
+  db: D1Database,
+  userId: string,
+  row: ModelGroupRow,
+): Promise<Record<string, unknown>> {
+  const targets = parseGroupTargets(row.targets_json)
+  const enriched = await Promise.all(
+    targets.map(async (t) => ({
+      model: t.model,
+      account_id: t.account_id,
+      account_label: await accountLabel(db, userId, t.account_id),
+    })),
+  )
   return {
     id: row.id,
     name: row.name,
-    targets: parseGroupTargets(row.targets_json),
+    targets: enriched,
     created_at: row.created_at,
     updated_at: row.updated_at,
   }
@@ -50,7 +89,8 @@ modelGroupRoutes.get("/", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
   const rows = await listModelGroups(c.env.DB, user.id)
-  return c.json({ groups: rows.map(toListItem) })
+  const groups = await Promise.all(rows.map((r) => toListItem(c.env.DB, user.id, r)))
+  return c.json({ groups })
 })
 
 modelGroupRoutes.post("/", async (c) => {
@@ -69,7 +109,8 @@ modelGroupRoutes.post("/", async (c) => {
   if (nameErr) return c.json({ error: nameErr }, 400)
 
   const resolvePrefix = await prefixResolver(c.env.DB, user.id)
-  const targetsRes = validateGroupTargets(body.targets, resolvePrefix)
+  const resolveAccount = accountResolver(c.env.DB, user.id)
+  const targetsRes = await validateGroupTargets(body.targets, resolvePrefix, resolveAccount)
   if (!targetsRes.ok) return c.json({ error: targetsRes.error }, 400)
 
   const count = await countModelGroups(c.env.DB, user.id)
@@ -87,7 +128,7 @@ modelGroupRoutes.post("/", async (c) => {
     name,
     targets: targetsRes.targets,
   })
-  return c.json(toListItem(row), 201)
+  return c.json(await toListItem(c.env.DB, user.id, row), 201)
 })
 
 modelGroupRoutes.put("/:id", async (c) => {
@@ -115,17 +156,18 @@ modelGroupRoutes.put("/:id", async (c) => {
     }
   }
 
-  let targets: string[] | undefined
+  let targets: GroupTarget[] | undefined
   if (body.targets !== undefined) {
     const resolvePrefix = await prefixResolver(c.env.DB, user.id)
-    const res = validateGroupTargets(body.targets, resolvePrefix)
+    const resolveAccount = accountResolver(c.env.DB, user.id)
+    const res = await validateGroupTargets(body.targets, resolvePrefix, resolveAccount)
     if (!res.ok) return c.json({ error: res.error }, 400)
     targets = res.targets
   }
 
   await updateModelGroupFields(c.env.DB, id, { name, targets })
   const updated = await getModelGroupById(c.env.DB, user.id, id)
-  return c.json(toListItem(updated ?? existing))
+  return c.json(await toListItem(c.env.DB, user.id, updated ?? existing))
 })
 
 modelGroupRoutes.delete("/:id", async (c) => {

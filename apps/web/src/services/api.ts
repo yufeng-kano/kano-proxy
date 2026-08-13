@@ -10,6 +10,7 @@ import type {
   CustomProviderTestResult,
   LoginStart,
   ModelGroup,
+  ModelGroupTargetInput,
   ModelsResponse,
   ProviderId,
   SpendLimitInterval,
@@ -313,9 +314,14 @@ export async function listModelGroups(): Promise<ModelGroup[]> {
   return data.groups
 }
 
+/**
+ * Targets go up as `{model, account_id}` objects. A bare string is still
+ * accepted by the API as shorthand for an unpinned target, but sending objects
+ * keeps the pin explicit — including when it is deliberately null.
+ */
 export async function createModelGroup(body: {
   name: string
-  targets: string[]
+  targets: ModelGroupTargetInput[]
 }): Promise<ModelGroup> {
   return request<ModelGroup>("/api/model-groups", {
     method: "POST",
@@ -329,7 +335,7 @@ export async function createModelGroup(body: {
  */
 export async function updateModelGroup(
   id: string,
-  body: { name?: string; targets?: string[] },
+  body: { name?: string; targets?: ModelGroupTargetInput[] },
 ): Promise<ModelGroup> {
   return request<ModelGroup>(`/api/model-groups/${encodeURIComponent(id)}`, {
     method: "PUT",

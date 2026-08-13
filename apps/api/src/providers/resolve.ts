@@ -1,6 +1,6 @@
+import { getAccount, listAccounts } from "../db/accounts"
 import { getCustomProviderBySlug, type CustomProviderRow } from "../db/custom_providers"
-import { getModelGroupByName, parseGroupTargets } from "../db/model_groups"
-import { listAccounts } from "../db/accounts"
+import { getModelGroupByName, parseGroupTargets, type GroupTarget } from "../db/model_groups"
 import type { Env, ProviderId } from "../env"
 import { isProviderId } from "../env"
 import { isBenched } from "../pool/bench"
@@ -21,6 +21,13 @@ export type ResolvedModel = {
   customProvider?: CustomProviderRow
   /** Present only when `model` was a model-group bare name that expanded to this target. */
   group?: { name: string }
+  /**
+   * Present only when the chosen group target pinned a specific
+   * `upstream_accounts` row (docs/providers.md § Model groups "Account
+   * pinning") — dispatch must acquire exactly this account and never fail
+   * over to a sibling in the same provider's pool.
+   */
+  pinnedAccountId?: string
 }
 
 type ResolvableTarget = {
@@ -28,27 +35,42 @@ type ResolvableTarget = {
   upstreamModel: string
   isBuiltin: boolean
   customProvider?: CustomProviderRow
+  /** Pinned `upstream_accounts` id from the group target, or `null` for a whole-pool (unpinned) target. */
+  accountId: string | null
 }
 
 /**
- * Split one group target string into a resolvable provider/adapter, scoped to
- * `userId` the same way the top-level slash path resolves a prefix — a
- * target whose prefix no longer resolves (e.g. a deleted custom provider) is
- * simply omitted by the caller.
+ * Split one group target's `model` string into a resolvable provider/adapter,
+ * scoped to `userId` the same way the top-level slash path resolves a prefix
+ * — a target whose prefix no longer resolves (e.g. a deleted custom
+ * provider) is simply omitted by the caller. The target's `account_id`
+ * (pinning) rides along untouched; it is validated for existence/bench state
+ * later, in `pickGroupTarget`.
  */
 async function resolveGroupTarget(
   env: Env,
   userId: string,
-  target: string,
+  target: GroupTarget,
 ): Promise<ResolvableTarget | null> {
-  const split = splitModelId(target)
+  const split = splitModelId(target.model)
   if (!split) return null
   if (isProviderId(split.prefix)) {
-    return { provider: split.prefix, upstreamModel: split.upstreamModel, isBuiltin: true }
+    return {
+      provider: split.prefix,
+      upstreamModel: split.upstreamModel,
+      isBuiltin: true,
+      accountId: target.account_id,
+    }
   }
   const row = await getCustomProviderBySlug(env.DB, userId, split.prefix)
   if (!row) return null
-  return { provider: row.slug, upstreamModel: split.upstreamModel, isBuiltin: false, customProvider: row }
+  return {
+    provider: row.slug,
+    upstreamModel: split.upstreamModel,
+    isBuiltin: false,
+    customProvider: row,
+    accountId: target.account_id,
+  }
 }
 
 function adapterFor(target: ResolvableTarget): ProviderAdapter {
@@ -58,8 +80,42 @@ function adapterFor(target: ResolvableTarget): ProviderAdapter {
 }
 
 /**
+ * Per-target usability (docs/providers.md § Model groups "Account pinning"):
+ * pinned = that exact `upstream_accounts` row exists (owned by `userId`,
+ * `provider` matching the target) and is not benched; unpinned = the
+ * provider's pool has ≥1 bound, non-benched account. A pinned account that
+ * was deleted, or whose row now belongs to a different provider (should
+ * never happen — `upstream_accounts.provider` is immutable — but checked
+ * defensively the same way write-time validation does), reads as no bound
+ * account at all for this target, same as an empty pool.
+ */
+async function groupTargetUsability(
+  env: Env,
+  userId: string,
+  target: ResolvableTarget,
+): Promise<{ hasAccounts: boolean; hasUsable: boolean }> {
+  if (target.accountId) {
+    const row = await getAccount(env.DB, userId, target.accountId)
+    if (!row || row.provider !== target.provider) return { hasAccounts: false, hasUsable: false }
+    const benched = await isBenched(env, userId, target.provider, row.id)
+    return { hasAccounts: true, hasUsable: !benched }
+  }
+  const rows = await listAccounts(env.DB, userId, target.provider)
+  let hasUsable = false
+  for (const row of rows) {
+    if (!(await isBenched(env, userId, target.provider, row.id))) {
+      hasUsable = true
+      break
+    }
+  }
+  return { hasAccounts: rows.length > 0, hasUsable }
+}
+
+/**
  * Ordered-priority target walk (docs/providers.md § Model groups):
- * 1. First resolvable target with ≥1 bound, non-benched account wins.
+ * 1. First resolvable target with ≥1 bound, non-benched account wins
+ *    (pinned targets check exactly their one account — see
+ *    `groupTargetUsability`).
  * 2. All resolvable targets' pools benched (or empty) → first resolvable
  *    target that has any bound account (dispatched anyway, yielding the
  *    normal 503/`upstream_unavailable` path).
@@ -72,19 +128,7 @@ async function pickGroupTarget(
   userId: string,
   resolvedTargets: ResolvableTarget[],
 ): Promise<ResolvableTarget> {
-  const info = await Promise.all(
-    resolvedTargets.map(async (t) => {
-      const rows = await listAccounts(env.DB, userId, t.provider)
-      let hasUsable = false
-      for (const row of rows) {
-        if (!(await isBenched(env, userId, t.provider, row.id))) {
-          hasUsable = true
-          break
-        }
-      }
-      return { hasAccounts: rows.length > 0, hasUsable }
-    }),
-  )
+  const info = await Promise.all(resolvedTargets.map((t) => groupTargetUsability(env, userId, t)))
   let idx = info.findIndex((i) => i.hasUsable)
   if (idx === -1) idx = info.findIndex((i) => i.hasAccounts)
   if (idx === -1) idx = 0
@@ -170,5 +214,6 @@ async function resolveGroupModel(
     isBuiltin: chosen.isBuiltin,
     customProvider: chosen.customProvider,
     group: { name: group.name },
+    pinnedAccountId: chosen.accountId ?? undefined,
   }
 }

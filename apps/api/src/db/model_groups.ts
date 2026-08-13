@@ -9,6 +9,14 @@ export type ModelGroupRow = {
   updated_at: string
 }
 
+/**
+ * Normalized target shape (docs/database.md `model_groups.targets_json`):
+ * `account_id` pins the target to one `upstream_accounts` row — `null` for
+ * an unpinned (whole-pool) target. No FK; a deleted account just makes the
+ * target skip at resolve time, mirroring the custom-provider convention.
+ */
+export type GroupTarget = { model: string; account_id: string | null }
+
 export async function listModelGroups(db: D1Database, userId: string): Promise<ModelGroupRow[]> {
   const res = await db
     .prepare(`SELECT * FROM model_groups WHERE user_id = ? ORDER BY created_at ASC`)
@@ -54,7 +62,7 @@ export async function countModelGroups(db: D1Database, userId: string): Promise<
 
 export async function insertModelGroup(
   db: D1Database,
-  input: { userId: string; name: string; targets: string[] },
+  input: { userId: string; name: string; targets: GroupTarget[] },
 ): Promise<ModelGroupRow> {
   const id = newId("mgrp")
   const ts = nowIso()
@@ -83,7 +91,7 @@ export async function insertModelGroup(
 export async function updateModelGroupFields(
   db: D1Database,
   id: string,
-  patch: { name?: string; targets?: string[] },
+  patch: { name?: string; targets?: GroupTarget[] },
 ): Promise<void> {
   const ts = nowIso()
   await db
@@ -107,23 +115,33 @@ export async function deleteModelGroup(db: D1Database, userId: string, id: strin
 }
 
 /**
- * Tolerant parse: today every entry is a plain `"provider/model"` string, but
- * the column is documented to tolerate later per-target object fields (future
- * balancing weights) without a schema rewrite — an object entry's `model`
- * field is read instead. Anything else is dropped rather than throwing, so a
- * malformed row degrades to fewer targets instead of a 500.
+ * Tolerant parse, normalizing every entry to `{model, account_id}`:
+ * - A plain `"provider/model"` string (v3.0.0 rows, and still-accepted wire
+ *   shorthand) is `{model: entry, account_id: null}`.
+ * - An object entry reads `model` (string) and optional `account_id`
+ *   (string; anything else, including `null`/absent, normalizes to `null`).
+ *   Future per-target fields (balancing weights) are simply ignored here,
+ *   not stripped from storage — this parser only ever reads, never rewrites
+ *   `targets_json`.
+ * Anything else (non-string `model`, or an entry that's neither a string nor
+ * an object) is dropped rather than throwing, so a malformed row degrades to
+ * fewer targets instead of a 500.
  */
-export function parseGroupTargets(json: string | null): string[] {
+export function parseGroupTargets(json: string | null): GroupTarget[] {
   if (!json) return []
   try {
     const arr = JSON.parse(json) as unknown
     if (!Array.isArray(arr)) return []
-    const out: string[] = []
+    const out: GroupTarget[] = []
     for (const entry of arr) {
       if (typeof entry === "string") {
-        out.push(entry)
-      } else if (entry && typeof entry === "object" && typeof (entry as { model?: unknown }).model === "string") {
-        out.push((entry as { model: string }).model)
+        out.push({ model: entry, account_id: null })
+        continue
+      }
+      if (entry && typeof entry === "object" && typeof (entry as { model?: unknown }).model === "string") {
+        const obj = entry as { model: string; account_id?: unknown }
+        const accountId = typeof obj.account_id === "string" && obj.account_id ? obj.account_id : null
+        out.push({ model: obj.model, account_id: accountId })
       }
     }
     return out

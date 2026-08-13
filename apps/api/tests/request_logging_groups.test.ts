@@ -70,7 +70,7 @@ async function seedAccount(db: FakeD1, opts: { userId: string; provider: string 
 
 function seedGroup(
   db: FakeD1,
-  opts: { userId: string; name: string; targets: string[] },
+  opts: { userId: string; name: string; targets: unknown[] },
 ): void {
   db.seed("model_groups", [
     {
@@ -78,6 +78,31 @@ function seedGroup(
       user_id: opts.userId,
       name: opts.name,
       targets_json: JSON.stringify(opts.targets),
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    },
+  ])
+}
+
+/** Distinguishable-credential account, for asserting exactly which account's token reached the wire. */
+async function seedAccountWithToken(
+  db: FakeD1,
+  opts: { id: string; userId: string; provider: string; accessToken: string; priority?: number },
+): Promise<void> {
+  const encrypted = await encryptJson(TOKEN_KEY, { access_token: opts.accessToken })
+  db.seed("upstream_accounts", [
+    {
+      id: opts.id,
+      user_id: opts.userId,
+      provider: opts.provider,
+      external_account_id: null,
+      label: opts.provider,
+      priority: opts.priority ?? 1,
+      encrypted_payload: encrypted,
+      account_meta_json: null,
+      usage_snapshot_json: null,
+      usage_fetched_at: null,
+      usage_fetching_at: null,
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
     },
@@ -362,5 +387,223 @@ describe("/anthropic/v1/messages — model group dispatch", () => {
       error_code: "invalid_model",
       group_name: null,
     })
+  })
+})
+
+describe("account pinning — dispatch actually uses exactly the pinned account (docs/providers.md § Model groups \"Account pinning\")", () => {
+  it("openai surface: the pinned account's credential reaches the wire, not a higher-priority sibling's", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    // Higher priority would normally win an unpinned pool acquire — pinning
+    // must bypass that and use the low-priority account the group names.
+    await seedAccountWithToken(db, {
+      id: "acc_high",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-high-priority",
+      priority: 10,
+    })
+    await seedAccountWithToken(db, {
+      id: "acc_low",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-low-priority",
+      priority: 1,
+    })
+    seedGroup(db, {
+      userId: "user_1",
+      name: "opus",
+      targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_low" }],
+    })
+
+    let capturedAuth: string | null = null
+    let callCount = 0
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      callCount++
+      capturedAuth = (init?.headers as Record<string, string> | undefined)?.authorization ?? null
+      return new Response(
+        JSON.stringify({
+          id: "msg_1",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200 },
+      )
+    }) as typeof fetch
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "opus", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    expect(callCount).toBe(1)
+    expect(capturedAuth).toBe("Bearer token-low-priority")
+  })
+
+  it("anthropic surface: same pinning — the pinned account's credential reaches the wire", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedAccountWithToken(db, {
+      id: "acc_high",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-high-priority",
+      priority: 10,
+    })
+    await seedAccountWithToken(db, {
+      id: "acc_low",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-low-priority",
+      priority: 1,
+    })
+    seedGroup(db, {
+      userId: "user_1",
+      name: "opus",
+      targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_low" }],
+    })
+
+    let capturedAuth: string | null = null
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      capturedAuth = (init?.headers as Record<string, string> | undefined)?.authorization ?? null
+      return new Response(
+        JSON.stringify({
+          id: "msg_1",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200 },
+      )
+    }) as typeof fetch
+
+    const res = await app.request(
+      "/anthropic/v1/messages",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "opus",
+          max_tokens: 100,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    expect(capturedAuth).toBe("Bearer token-low-priority")
+  })
+
+  it("failover is disabled for a pinned target: a benched pinned account never falls over to a usable sibling — exactly one upstream call, the sibling's token never sent", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedAccountWithToken(db, {
+      id: "acc_pinned",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-pinned",
+    })
+    await seedAccountWithToken(db, {
+      id: "acc_sibling",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-sibling",
+    })
+    seedGroup(db, {
+      userId: "user_1",
+      name: "opus",
+      targets: [{ model: "claude-code/claude-opus-5", account_id: "acc_pinned" }],
+    })
+
+    const seenAuth: string[] = []
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string> | undefined)?.authorization ?? ""
+      seenAuth.push(auth)
+      // Upstream rate-limits the pinned account — benchable, would normally
+      // trigger failover to a sibling in an unpinned pool.
+      return new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429 })
+    }) as typeof fetch
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "opus", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    // The pinned account's own 429 passes straight through — no synthesized
+    // upstream_unavailable, and critically, no second attempt on the sibling.
+    expect(res.status).toBe(429)
+    expect(seenAuth).toEqual(["Bearer token-pinned"])
+
+    const rows = db.rows("request_logs")
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      provider: "claude-code",
+      model: "claude-code/claude-opus-5",
+      group_name: "opus",
+      status_code: 429,
+      error_code: "upstream_error",
+    })
+  })
+
+  it("an unpinned target in the same group still fails over normally within its own pool", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedAccountWithToken(db, {
+      id: "acc_first",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-first",
+      priority: 10,
+    })
+    await seedAccountWithToken(db, {
+      id: "acc_second",
+      userId: "user_1",
+      provider: "claude-code",
+      accessToken: "token-second",
+      priority: 1,
+    })
+    // Unpinned target — ordinary pool failover still applies.
+    seedGroup(db, { userId: "user_1", name: "opus", targets: ["claude-code/claude-opus-5"] })
+
+    const seenAuth: string[] = []
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      const auth = (init?.headers as Record<string, string> | undefined)?.authorization ?? ""
+      seenAuth.push(auth)
+      if (auth === "Bearer token-first") {
+        return new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429 })
+      }
+      return new Response(
+        JSON.stringify({
+          id: "msg_1",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+        }),
+        { status: 200 },
+      )
+    }) as typeof fetch
+
+    const res = await app.request(
+      "/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "opus", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    expect(seenAuth).toEqual(["Bearer token-first", "Bearer token-second"])
   })
 })

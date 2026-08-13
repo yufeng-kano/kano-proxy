@@ -98,7 +98,7 @@ User-defined bare-name model aliases → ordered `provider/model` target lists (
 | id | TEXT PK | |
 | user_id | TEXT FK | `ON DELETE CASCADE` |
 | name | TEXT | the callable bare model id: trimmed, 1–128 chars, no whitespace, no `/`; **mutable** (rename allowed — nothing references it) |
-| targets_json | TEXT | JSON array of `provider/model` strings, array order = priority. Parse must tolerate later per-target object fields (future balancing weights) |
+| targets_json | TEXT | JSON array of target objects `{model: "provider/model", account_id?}`, array order = priority; `account_id` (nullable) pins the target to one `upstream_accounts` row — no FK, a deleted account makes the target skip at resolve time, mirroring the custom-provider convention. Bare strings are accepted as `{model}` shorthand (v3.0.0 rows). Parse must tolerate further per-target fields (future balancing weights) |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 

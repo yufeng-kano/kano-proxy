@@ -6,7 +6,7 @@ import {
   type AcquiredAccount,
 } from "../pool/acquire"
 import { earliestBenchExpiry } from "../pool/bench"
-import { listAccounts } from "../db/accounts"
+import { getAccount, listAccounts, type AccountRow } from "../db/accounts"
 import { getAdapter } from "../providers"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import { logRequest } from "../logging/request_log"
@@ -36,6 +36,28 @@ export type WaitUntil = (promise: Promise<unknown>) => void
  */
 function canonicalModelId(provider: string, upstreamModel: string): string {
   return `${provider}/${upstreamModel}`
+}
+
+/**
+ * The accounts this request may draw from for the "no account bound at all"
+ * (400 `no_upstream_account`) vs "bound but unavailable right now" (503 +
+ * `Retry-After`) decision, and for the `Retry-After` bench-expiry lookup.
+ * Restricted to exactly the pinned account when a model-group target pinned
+ * one (docs/providers.md § Model groups "Account pinning": failover is
+ * disabled for a pinned target, so its "pool" is that one account, not the
+ * whole provider) — a deleted or foreign-provider pinned account reads as no
+ * bound account at all, same as an empty pool. Unpinned requests are
+ * byte-identical to the unrestricted `listAccounts` call this replaces.
+ */
+async function boundAccountsFor(
+  env: Env,
+  userId: string,
+  provider: string,
+  pinnedAccountId?: string,
+): Promise<AccountRow[]> {
+  if (!pinnedAccountId) return listAccounts(env.DB, userId, provider)
+  const row = await getAccount(env.DB, userId, pinnedAccountId)
+  return row && row.provider === provider ? [row] : []
 }
 
 /** No real upstream chunk for this long tears the stream down — docs/api.md "Streaming". */
@@ -178,6 +200,8 @@ export async function dispatchChatCompletions(
     idleTimeoutMs?: number
     /** The model-group alias this request was addressed to, if any — logged alongside the expanded canonical model (docs/database.md `request_logs.group_name`). */
     groupName?: string
+    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. */
+    pinnedAccountId?: string
   },
 ): Promise<Response> {
   if (opts.req.stream) {
@@ -201,6 +225,7 @@ async function dispatchChatCompletionsEager(
     waitUntil: WaitUntil
     idleTimeoutMs?: number
     groupName?: string
+    pinnedAccountId?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -222,7 +247,7 @@ async function dispatchChatCompletionsEager(
       for (let attempt = 0; attempt < 8; attempt++) {
         if (ctl.cancelled()) return
 
-        const account = await acquireAccount(env, opts.userId, opts.provider, exclude)
+        const account = await acquireAccount(env, opts.userId, opts.provider, exclude, opts.pinnedAccountId)
         if (ctl.cancelled()) return
 
         if (!account) {
@@ -240,7 +265,7 @@ async function dispatchChatCompletionsEager(
             )
             return
           }
-          const boundAccounts = await listAccounts(env.DB, opts.userId, opts.provider)
+          const boundAccounts = await boundAccountsFor(env, opts.userId, opts.provider, opts.pinnedAccountId)
           headersLatencyMs = Date.now() - started
           if (boundAccounts.length === 0) {
             forcedErrorCode = "no_upstream_account"
@@ -386,6 +411,7 @@ async function dispatchChatCompletionsLegacy(
     waitUntil: WaitUntil
     idleTimeoutMs?: number
     groupName?: string
+    pinnedAccountId?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -396,7 +422,7 @@ async function dispatchChatCompletionsLegacy(
   let used: AcquiredAccount | null = null
 
   for (let attempt = 0; attempt < 8; attempt++) {
-    const account = await acquireAccount(env, opts.userId, opts.provider, exclude)
+    const account = await acquireAccount(env, opts.userId, opts.provider, exclude, opts.pinnedAccountId)
     if (!account) {
       if (lastResponse) {
         await logRequest(env, {
@@ -415,7 +441,7 @@ async function dispatchChatCompletionsLegacy(
       // Distinguish "never bound" (fatal, 400) from "bound but every one is
       // benched or undecryptable right now" (transient, 503 + Retry-After)
       // — docs/api.md "Errors".
-      const boundAccounts = await listAccounts(env.DB, opts.userId, opts.provider)
+      const boundAccounts = await boundAccountsFor(env, opts.userId, opts.provider, opts.pinnedAccountId)
       if (boundAccounts.length === 0) {
         await logRequest(env, {
           userId: opts.userId,
@@ -589,6 +615,8 @@ export async function dispatchAnthropicMessages(
     idleTimeoutMs?: number
     /** The model-group alias this request was addressed to, if any (docs/database.md `request_logs.group_name`). */
     groupName?: string
+    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. Applies to `count_tokens` too — same loop. */
+    pinnedAccountId?: string
   },
 ): Promise<Response> {
   const endpoint = opts.endpoint ?? "messages"
@@ -612,6 +640,7 @@ async function dispatchAnthropicMessagesEager(
     waitUntil: WaitUntil
     idleTimeoutMs?: number
     groupName?: string
+    pinnedAccountId?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -639,7 +668,7 @@ async function dispatchAnthropicMessagesEager(
       for (let i = 0; i < 8; i++) {
         if (ctl.cancelled()) return
 
-        const account = await acquireAccount(env, opts.userId, provider, exclude)
+        const account = await acquireAccount(env, opts.userId, provider, exclude, opts.pinnedAccountId)
         if (ctl.cancelled()) return
 
         if (!account) {
@@ -655,7 +684,7 @@ async function dispatchAnthropicMessagesEager(
             )
             return
           }
-          const boundAccounts = await listAccounts(env.DB, opts.userId, provider)
+          const boundAccounts = await boundAccountsFor(env, opts.userId, provider, opts.pinnedAccountId)
           headersLatencyMs = Date.now() - started
           if (boundAccounts.length === 0) {
             forcedErrorCode = "no_upstream_account"
@@ -780,6 +809,7 @@ async function dispatchAnthropicMessagesLegacy(
     waitUntil: WaitUntil
     idleTimeoutMs?: number
     groupName?: string
+    pinnedAccountId?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -797,7 +827,7 @@ async function dispatchAnthropicMessagesLegacy(
   const exclude = new Set<string>()
   let last: Response | null = null
   for (let i = 0; i < 8; i++) {
-    const account = await acquireAccount(env, opts.userId, provider, exclude)
+    const account = await acquireAccount(env, opts.userId, provider, exclude, opts.pinnedAccountId)
     if (!account) {
       if (last) {
         await logRequest(env, {
@@ -813,7 +843,7 @@ async function dispatchAnthropicMessagesLegacy(
         return last
       }
       // Same 400-vs-503 split as dispatchChatCompletions above.
-      const boundAccounts = await listAccounts(env.DB, opts.userId, provider)
+      const boundAccounts = await boundAccountsFor(env, opts.userId, provider, opts.pinnedAccountId)
       if (boundAccounts.length === 0) {
         await logRequest(env, {
           userId: opts.userId,
@@ -969,6 +999,8 @@ export async function dispatchAnthropicViaOpenAI(
     waitUntil: WaitUntil
     /** The model-group alias this request was addressed to, if any (docs/database.md `request_logs.group_name`). */
     groupName?: string
+    /** Model-group account pinning (docs/providers.md § Model groups): restrict acquire/failover to exactly this `upstream_accounts` row. */
+    pinnedAccountId?: string
   },
 ): Promise<Response> {
   const {
@@ -1001,6 +1033,7 @@ export async function dispatchAnthropicViaOpenAI(
     adapter: opts.adapter,
     waitUntil: opts.waitUntil,
     groupName: opts.groupName,
+    pinnedAccountId: opts.pinnedAccountId,
     req: {
       model: opts.rawModel,
       rawModel: opts.rawModel,

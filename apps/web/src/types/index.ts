@@ -146,18 +146,42 @@ export type CustomProvider = {
 }
 
 /**
+ * One target of a model group.
+ *
+ * `account_id` null means the provider's whole pool, with its own priority and
+ * failover. A pinned target dispatches on exactly that account and is skipped
+ * when it is paused or gone (docs/providers.md § Model groups).
+ *
+ * `account_label` is resolved at read time and never stored — so an entry with
+ * an `account_id` but a **null** label is a pin whose account no longer
+ * exists. That combination is a state the UI has to show, not drop.
+ */
+export type ModelGroupTarget = {
+  /** `provider/model` id this target dispatches. */
+  model: string
+  account_id: string | null
+  account_label: string | null
+}
+
+/**
  * A user-defined model group: a bare name (no `/`) that expands to an ordered
- * list of `provider/model` targets. `GET /api/model-groups` item shape — see
- * docs/providers.md § Model groups.
+ * list of targets. `GET /api/model-groups` item shape — see docs/providers.md
+ * § Model groups.
  */
 export type ModelGroup = {
   id: string
   /** The model id clients send. Bare by contract, so it can never collide with a `provider/model` id. */
   name: string
-  /** Ordered `provider/model` targets — array order **is** priority. */
-  targets: string[]
+  /** Ordered targets — array order **is** priority. */
+  targets: ModelGroupTarget[]
   created_at: string
   updated_at: string
+}
+
+/** What a write sends per target: the label is read-only, so it never goes back up. */
+export type ModelGroupTargetInput = {
+  model: string
+  account_id: string | null
 }
 
 /** Server-side limits, mirrored client-side so a violation is caught before the request (docs/auth.md § Model groups). */

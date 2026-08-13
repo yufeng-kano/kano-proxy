@@ -36,16 +36,26 @@ export function shouldBenchStatus(status: number): boolean {
  * `provider` is a builtin `ProviderId` or a custom provider's slug — pool
  * semantics (acquire/bench/promote) are identical for both, so this layer
  * is typed as `string` rather than duplicated per kind.
+ *
+ * `pinnedAccountId` (model-group account pinning, docs/providers.md §
+ * Model groups "Account pinning"): when set, the candidate set collapses to
+ * that one account id — the pool's own priority is bypassed and, because
+ * dispatch's failover loop re-calls this with the tried id added to
+ * `exclude`, the pinned account never fails over to a sibling: the next call
+ * finds its only candidate already excluded and returns empty, same as an
+ * exhausted single-account pool.
  */
 export async function listUsableAccounts(
   env: Env,
   userId: string,
   provider: string,
   exclude: Set<string> = new Set(),
+  pinnedAccountId?: string,
 ): Promise<AccountRow[]> {
   const rows = await listAccounts(env.DB, userId, provider)
   const out: AccountRow[] = []
   for (const row of rows) {
+    if (pinnedAccountId && row.id !== pinnedAccountId) continue
     if (exclude.has(row.id)) continue
     if (await isBenched(env, userId, provider, row.id)) continue
     out.push(row)
@@ -58,8 +68,9 @@ export async function acquireAccount(
   userId: string,
   provider: string,
   exclude: Set<string> = new Set(),
+  pinnedAccountId?: string,
 ): Promise<AcquiredAccount | null> {
-  const candidates = await listUsableAccounts(env, userId, provider, exclude)
+  const candidates = await listUsableAccounts(env, userId, provider, exclude, pinnedAccountId)
   for (const row of candidates) {
     try {
       const credential = await decryptJson<StoredCredential>(
