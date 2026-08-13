@@ -58,7 +58,8 @@ anthropicRoutes.post("/v1/messages", async (c) => {
         type: "error",
         error: {
           type: "invalid_request_error",
-          message: "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5)",
+          message:
+            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group names",
         },
       },
       400,
@@ -93,10 +94,11 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       apiKeyId,
       body: upstreamBody,
       headers,
-      model: resolved.raw,
+      model: `${resolved.provider}/${resolved.upstreamModel}`,
       provider: resolved.provider,
       adapter: resolved.adapter,
       waitUntil: (p) => c.executionCtx.waitUntil(p),
+      groupName: resolved.group?.name,
     })
   }
 
@@ -110,10 +112,11 @@ anthropicRoutes.post("/v1/messages", async (c) => {
         userId,
         apiKeyId,
         provider: resolved.provider,
-        model: resolved.raw,
+        model: `${resolved.provider}/${resolved.upstreamModel}`,
         statusCode: 400,
         latencyMs: Date.now() - started,
         errorCode: "loop_detected",
+        groupName: resolved.group?.name ?? null,
       }),
     )
     return c.json(
@@ -145,10 +148,11 @@ anthropicRoutes.post("/v1/messages", async (c) => {
       apiKeyId,
       body: upstreamBody,
       headers,
-      model: resolved.raw,
+      model: `${resolved.provider}/${resolved.upstreamModel}`,
       provider: resolved.provider,
       adapter: resolved.adapter,
       waitUntil: (p) => c.executionCtx.waitUntil(p),
+      groupName: resolved.group?.name,
     })
   }
 
@@ -162,6 +166,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     body,
     affinity,
     waitUntil: (p) => c.executionCtx.waitUntil(p),
+    groupName: resolved.group?.name,
   })
 })
 
@@ -197,7 +202,8 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
         type: "error",
         error: {
           type: "invalid_request_error",
-          message: "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5)",
+          message:
+            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group names",
         },
       },
       400,
@@ -229,11 +235,12 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     apiKeyId,
     body: upstreamBody,
     headers,
-    model: resolved.raw,
+    model: `${resolved.provider}/${resolved.upstreamModel}`,
     provider: resolved.provider,
     adapter: resolved.adapter,
     endpoint: "count_tokens",
     waitUntil: (p) => c.executionCtx.waitUntil(p),
+    groupName: resolved.group?.name,
   })
 })
 

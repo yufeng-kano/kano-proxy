@@ -11,6 +11,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 | `/overview` | Usage and cache-rate dashboard over `request_logs` |
 | `/providers` | Connected subscription accounts (Claude / Codex / Grok) and custom endpoints, one section per provider |
 | `/models` | Searchable catalog of `provider/model` ids, grouped by provider |
+| `/groups` | Model groups: bare-name aliases → ordered `provider/model` targets |
 | `/keys` | Create / revoke API keys, plus the client connection details |
 | `/changelog` | Published GitHub Releases, newest first ([changelog.md](./changelog.md)) |
 
@@ -64,7 +65,7 @@ Four breakpoints, and no more: `640` (phone), `768` (tables), `1080` (shell), `1
 | ≥ 1080px | Full sidebar (248px) + content |
 | < 1080px | Sidebar becomes a slide-in drawer behind a header menu button |
 
-No icon rail and no bottom tab bar. With five destinations the text labels are what make the nav scannable, so a rail would trade legibility for width the content does not need; a bottom bar would cost 56px of the scarcest axis on a phone and read as a mobile app rather than a web app.
+No icon rail and no bottom tab bar. With six destinations the text labels are what make the nav scannable, so a rail would trade legibility for width the content does not need; a bottom bar would cost 56px of the scarcest axis on a phone and read as a mobile app rather than a web app.
 
 - Tables below 768px render as stacked cards (label + value rows), not horizontal scroll — a horizontally scrolling table on a phone hides the columns that matter. `DataTable` does this; a hand-rolled table does not.
 - Stat tiles reflow on **container** width, not viewport width: the sidebar's presence changes the content width, and a viewport media query gets that wrong at every shell state. The hero (cache rate) spans two columns until the layout drops to two.
@@ -216,6 +217,23 @@ Custom endpoints (`GET /api/custom-providers` — see [auth.md](./auth.md)):
 - A search box filters across every group by model id and display name; a provider filter in the header narrows to one group. Both are client-side over already-loaded data — no request per keystroke. The active filter persists as a view preference.
 - Session API: `GET /api/models` (`?refresh=true` bypasses the 1h server KV cache). Client-facing `GET /openai/v1/models` and `GET /anthropic/v1/models` return the same live catalog; ids are always `provider/upstream`.
 - Copy model id as `provider/upstream` — works on **both** OpenAI and Anthropic bases. The row's copy control is an icon button in a fixed-width right-aligned column, and confirms in place by swapping to a check; the whole row is also click-to-copy, so the pointer target is the row rather than a 28px square.
+
+## Groups page
+
+Route `/groups`, nav item **Groups** between Models and Keys. Data: `GET /api/model-groups` ([auth.md](./auth.md)), cache-first under `kano-proxy:model-groups:{userId}` with the standard 90s TTL and logout sweep. Contract: [providers.md](./providers.md) § Model groups.
+
+- **One bounded card** filling the content region (same as Keys/Models), list scrolling inside with a sticky header. Columns: **Name**, **Targets**, **Updated**, then the unlabelled trailing edit column — the Keys-page pattern, not the Providers edit-gate (groups are few and editing is the page's whole job).
+- **Name is the model id.** The row's name cell is click-to-copy with the same in-place check confirmation as the Models page — the bare name is exactly what the client puts in `model`, so copying it is the row's primary read action.
+- **Targets** render as the ordered `provider/model` list in priority order (first = tried first). On narrow widths the DataTable card fallback keeps the order readable as a numbered stack.
+- **Create group** button in the sticky page header opens the dialog; **Edit** (pencil, ghost) sits in the trailing column; **Delete lives inside the edit dialog** as the destructive footer action, confirm-first — same reasoning as key revoke: rare, irreversible, one deliberate step.
+- **Create/edit dialog:**
+  - Name field with microcopy stating it becomes a model id callable on both bases; client-side validation mirrors the server rule (1–128 chars, no whitespace, no `/`) with inline errors, server field errors rendered inline too.
+  - **Target builder:** a searchable picker over the already-loaded catalog (`GET /api/models` via the shared cache — client-side filter, no request per keystroke) plus free-text entry for ids the catalog doesn't list (the server validates only the prefix; unknown upstream ids are legitimate). Adding appends to the ordered list.
+  - Each target row: **Move up / Move down** (disabled at the ends, accessible names `Move {target} up`, position announced via live region) and **Remove**. Buttons are the baseline; a drag handle, if added, is decoration on top — same rule as custom-endpoint reordering.
+  - Microcopy above the list states the semantics in one line: requests try targets in this order and use the first one with a usable account.
+  - Save is disabled until ≥1 target; duplicates are rejected inline at add time rather than at save.
+- **Empty state** explains the two jobs (map a hard-coded client model name; join the same model across accounts) with a Create group action.
+- **Models page:** the catalog's fixed `group` section renders with a localized **Groups** section label; its rows copy the bare name (the row's id **is** the copyable model id — no `provider/` prefix). No UI code change should special-case beyond the label: sections stay dynamic.
 
 ## Keys page
 

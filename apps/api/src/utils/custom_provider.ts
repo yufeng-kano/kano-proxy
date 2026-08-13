@@ -27,6 +27,9 @@ export const RESERVED_SLUGS = new Set([
   "accounts",
   "kano",
   "kano-proxy",
+  "group",
+  "groups",
+  "model-groups",
 ])
 
 // Lowercase alphanumeric + hyphens, must start and end alphanumeric, 2-32 chars total.

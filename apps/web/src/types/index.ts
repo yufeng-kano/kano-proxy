@@ -145,6 +145,25 @@ export type CustomProvider = {
   updated_at: string
 }
 
+/**
+ * A user-defined model group: a bare name (no `/`) that expands to an ordered
+ * list of `provider/model` targets. `GET /api/model-groups` item shape — see
+ * docs/providers.md § Model groups.
+ */
+export type ModelGroup = {
+  id: string
+  /** The model id clients send. Bare by contract, so it can never collide with a `provider/model` id. */
+  name: string
+  /** Ordered `provider/model` targets — array order **is** priority. */
+  targets: string[]
+  created_at: string
+  updated_at: string
+}
+
+/** Server-side limits, mirrored client-side so a violation is caught before the request (docs/auth.md § Model groups). */
+export const MODEL_GROUP_NAME_MAX = 128
+export const MODEL_GROUP_TARGETS_MAX = 20
+
 /** `POST /api/custom-providers/test` result — always HTTP 200. */
 export type CustomProviderTestResult = {
   ok: boolean

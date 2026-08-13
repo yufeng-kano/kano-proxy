@@ -9,6 +9,7 @@ import type { Env, ProviderId } from "../env"
 import { PROVIDERS } from "../env"
 import { listAccounts } from "../db/accounts"
 import { listCustomProviders, type CustomProviderRow } from "../db/custom_providers"
+import { listModelGroups } from "../db/model_groups"
 import { decryptJson } from "../crypto/token_crypto"
 import type { StoredCredential } from "../pool/acquire"
 import { isBenched } from "../pool/bench"
@@ -245,6 +246,25 @@ async function fetchCustomProviderModels(
 }
 
 /**
+ * Model groups (docs/providers.md § Model groups): one cheap D1 read, no KV
+ * cache needed. Listed regardless of current target usability — groups are
+ * user config, never fabricated, and never expanded into their targets here.
+ */
+async function fetchModelGroups(env: Env, userId: string): Promise<ProviderModelsSection> {
+  const rows = await listModelGroups(env.DB, userId)
+  const models: CatalogModel[] = rows.map((row) => ({
+    id: row.name,
+    provider: "group",
+    upstream: row.name,
+    display_name: row.name,
+    available: true,
+    owned_by: "group",
+    object: "model" as const,
+  }))
+  return { provider: "group", models, error: null, cached: false }
+}
+
+/**
  * Live models for a user. Only providers with bound accounts are queried.
  * `availableOnly` is kept for API shape; all returned models are available.
  */
@@ -268,6 +288,8 @@ export async function listModelsForUser(
   for (const row of customRows) {
     sections.push(await fetchCustomProviderModels(env, userId, row, force))
   }
+
+  sections.push(await fetchModelGroups(env, userId))
 
   const models = sections.flatMap((s) => s.models)
   // availableOnly has no extra filter: we never invent unavailable catalog rows

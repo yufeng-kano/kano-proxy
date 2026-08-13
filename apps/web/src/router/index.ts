@@ -44,6 +44,11 @@ const router = createRouter({
       component: () => import("@/pages/ProvidersPage.vue"),
     },
     {
+      path: "/groups",
+      name: "groups",
+      component: () => import("@/pages/GroupsPage.vue"),
+    },
+    {
       path: "/keys",
       name: "keys",
       component: () => import("@/pages/KeysPage.vue"),

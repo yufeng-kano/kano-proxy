@@ -26,6 +26,18 @@ import {
 /** Keeps a Worker invocation alive for a deferred `logRequest` past the returned Response — `c.executionCtx.waitUntil` in production, a test double in tests. */
 export type WaitUntil = (promise: Promise<unknown>) => void
 
+/**
+ * `request_logs.model`/`provider` always store the expanded canonical
+ * target, never a model-group alias — reconstructed the same way
+ * `splitModelId` builds `raw` (prefix + "/" + rest), so this is
+ * byte-identical to `req.rawModel` whenever the client sent a direct
+ * `provider/model` id and only diverges when a group expanded it
+ * (docs/api.md "Model routing").
+ */
+function canonicalModelId(provider: string, upstreamModel: string): string {
+  return `${provider}/${upstreamModel}`
+}
+
 /** No real upstream chunk for this long tears the stream down — docs/api.md "Streaming". */
 const DEFAULT_IDLE_TIMEOUT_MS = 120_000
 
@@ -164,6 +176,8 @@ export async function dispatchChatCompletions(
     waitUntil: WaitUntil
     /** Testability hook for the streaming idle timeout; defaults to 120_000. */
     idleTimeoutMs?: number
+    /** The model-group alias this request was addressed to, if any — logged alongside the expanded canonical model (docs/database.md `request_logs.group_name`). */
+    groupName?: string
   },
 ): Promise<Response> {
   if (opts.req.stream) {
@@ -186,6 +200,7 @@ async function dispatchChatCompletionsEager(
     req: ChatCompletionRequest & { rawModel: string }
     waitUntil: WaitUntil
     idleTimeoutMs?: number
+    groupName?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -336,11 +351,12 @@ async function dispatchChatCompletionsEager(
             userId: opts.userId,
             apiKeyId: opts.apiKeyId,
             provider: opts.provider,
-            model: opts.req.rawModel,
+            model: canonicalModelId(opts.provider, opts.req.upstreamModel),
             accountId,
             statusCode: 200,
             latencyMs,
             errorCode,
+            groupName: opts.groupName ?? null,
             ...usageFields(usage),
           }),
         )
@@ -369,6 +385,7 @@ async function dispatchChatCompletionsLegacy(
     req: ChatCompletionRequest & { rawModel: string }
     waitUntil: WaitUntil
     idleTimeoutMs?: number
+    groupName?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -386,11 +403,12 @@ async function dispatchChatCompletionsLegacy(
           userId: opts.userId,
           apiKeyId: opts.apiKeyId,
           provider: opts.provider,
-          model: opts.req.rawModel,
+          model: canonicalModelId(opts.provider, opts.req.upstreamModel),
           accountId: used?.row.id,
           statusCode: lastResponse.status,
           latencyMs: Date.now() - started,
           errorCode: "upstream_error",
+          groupName: opts.groupName ?? null,
         })
         return lastResponse
       }
@@ -403,10 +421,11 @@ async function dispatchChatCompletionsLegacy(
           userId: opts.userId,
           apiKeyId: opts.apiKeyId,
           provider: opts.provider,
-          model: opts.req.rawModel,
+          model: canonicalModelId(opts.provider, opts.req.upstreamModel),
           statusCode: 400,
           latencyMs: Date.now() - started,
           errorCode: "no_upstream_account",
+          groupName: opts.groupName ?? null,
         })
         return Response.json(
           {
@@ -429,10 +448,11 @@ async function dispatchChatCompletionsLegacy(
         userId: opts.userId,
         apiKeyId: opts.apiKeyId,
         provider: opts.provider,
-        model: opts.req.rawModel,
+        model: canonicalModelId(opts.provider, opts.req.upstreamModel),
         statusCode: 503,
         latencyMs: Date.now() - started,
         errorCode: "upstream_unavailable",
+        groupName: opts.groupName ?? null,
       })
       return upstreamUnavailableResponse(
         { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
@@ -478,11 +498,12 @@ async function dispatchChatCompletionsLegacy(
               userId: opts.userId,
               apiKeyId: opts.apiKeyId,
               provider: opts.provider,
-              model: opts.req.rawModel,
+              model: canonicalModelId(opts.provider, opts.req.upstreamModel),
               accountId: account.row.id,
               statusCode: res.status,
               latencyMs,
               errorCode,
+              groupName: opts.groupName ?? null,
               ...usageFields(usage),
             }),
           )
@@ -507,10 +528,11 @@ async function dispatchChatCompletionsLegacy(
       userId: opts.userId,
       apiKeyId: opts.apiKeyId,
       provider: opts.provider,
-      model: opts.req.rawModel,
+      model: canonicalModelId(opts.provider, opts.req.upstreamModel),
       accountId: account.row.id,
       statusCode: res.status,
       latencyMs,
+      groupName: opts.groupName ?? null,
       ...usageFields(usage),
     })
     return new Response(text, {
@@ -527,10 +549,11 @@ async function dispatchChatCompletionsLegacy(
     userId: opts.userId,
     apiKeyId: opts.apiKeyId,
     provider: opts.provider,
-    model: opts.req.rawModel,
+    model: canonicalModelId(opts.provider, opts.req.upstreamModel),
     statusCode: 503,
     latencyMs: Date.now() - started,
     errorCode: "upstream_unavailable",
+    groupName: opts.groupName ?? null,
   })
   return upstreamUnavailableResponse(
     { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
@@ -554,6 +577,7 @@ export async function dispatchAnthropicMessages(
     apiKeyId: string | null
     body: unknown
     headers: Headers
+    /** Canonical `provider/upstreamModel` for `request_logs.model` — never a group alias. */
     model: string
     /** Builtin `ProviderId` or a custom provider's slug. Defaults to claude-code. */
     provider?: string
@@ -563,6 +587,8 @@ export async function dispatchAnthropicMessages(
     waitUntil: WaitUntil
     /** Testability hook for the streaming idle timeout; defaults to 120_000. */
     idleTimeoutMs?: number
+    /** The model-group alias this request was addressed to, if any (docs/database.md `request_logs.group_name`). */
+    groupName?: string
   },
 ): Promise<Response> {
   const endpoint = opts.endpoint ?? "messages"
@@ -585,6 +611,7 @@ async function dispatchAnthropicMessagesEager(
     endpoint?: "messages" | "count_tokens"
     waitUntil: WaitUntil
     idleTimeoutMs?: number
+    groupName?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -725,6 +752,7 @@ async function dispatchAnthropicMessagesEager(
             statusCode: 200,
             latencyMs,
             errorCode,
+            groupName: opts.groupName ?? null,
             ...usageFields(usage),
           }),
         )
@@ -751,6 +779,7 @@ async function dispatchAnthropicMessagesLegacy(
     endpoint?: "messages" | "count_tokens"
     waitUntil: WaitUntil
     idleTimeoutMs?: number
+    groupName?: string
   },
 ): Promise<Response> {
   const started = Date.now()
@@ -779,6 +808,7 @@ async function dispatchAnthropicMessagesLegacy(
           statusCode: last.status,
           latencyMs: Date.now() - started,
           errorCode: "upstream_error",
+          groupName: opts.groupName ?? null,
         })
         return last
       }
@@ -793,6 +823,7 @@ async function dispatchAnthropicMessagesLegacy(
           statusCode: 400,
           latencyMs: Date.now() - started,
           errorCode: "no_upstream_account",
+          groupName: opts.groupName ?? null,
         })
         return Response.json(
           {
@@ -819,6 +850,7 @@ async function dispatchAnthropicMessagesLegacy(
         statusCode: 503,
         latencyMs: Date.now() - started,
         errorCode: "upstream_unavailable",
+        groupName: opts.groupName ?? null,
       })
       return upstreamUnavailableResponse(
         { type: "error", error: { type: "api_error", message: "upstream_unavailable" } },
@@ -870,6 +902,7 @@ async function dispatchAnthropicMessagesLegacy(
               statusCode: res.status,
               latencyMs,
               errorCode,
+              groupName: opts.groupName ?? null,
               ...usageFields(usage),
             }),
           )
@@ -901,6 +934,7 @@ async function dispatchAnthropicMessagesLegacy(
       accountId: account.row.id,
       statusCode: res.status,
       latencyMs,
+      groupName: opts.groupName ?? null,
       ...usageFields(usage),
     })
     return res
@@ -933,6 +967,8 @@ export async function dispatchAnthropicViaOpenAI(
     body: Record<string, unknown>
     affinity?: ChatCompletionRequest["affinity"]
     waitUntil: WaitUntil
+    /** The model-group alias this request was addressed to, if any (docs/database.md `request_logs.group_name`). */
+    groupName?: string
   },
 ): Promise<Response> {
   const {
@@ -964,6 +1000,7 @@ export async function dispatchAnthropicViaOpenAI(
     provider: opts.provider,
     adapter: opts.adapter,
     waitUntil: opts.waitUntil,
+    groupName: opts.groupName,
     req: {
       model: opts.rawModel,
       rawModel: opts.rawModel,

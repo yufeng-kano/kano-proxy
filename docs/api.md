@@ -44,7 +44,7 @@ Supported fields:
 
 | Field | Behavior |
 |-------|----------|
-| `model` | Required. `provider/model` |
+| `model` | Required. `provider/model`, or the bare name of one of the caller's model groups (see "Model routing") |
 | `messages` | Required |
 | `stream` | boolean; default false |
 | `max_tokens` / `max_completion_tokens` | Forwarded as provider max output for `grok` and `claude-code`. **Never forwarded to `codex`** — the ChatGPT Codex backend rejects a top-level `max_output_tokens` with HTTP 400 `"Unsupported parameter"` for every verified OAuth model, so the field is accepted from the client but intentionally dropped before the upstream Responses call |
@@ -129,7 +129,7 @@ Pure passthrough paths (`grok` and custom `format=openai` on `/openai/v1`; nativ
 
 ### `GET /openai/v1/models`
 
-Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key owner has bound. Ids are `provider/upstream_id`. Claude Code and Grok come from live upstream `/models`. Codex comes from the ChatGPT `backend-api/codex/models` endpoint, falling back to the public catalog mirror when the edge bot-walls the Worker (see [providers.md](./providers.md)). Empty for a provider when the user has no usable account for it. The user's custom providers are appended after the builtins — manual list, or live + cache + fallback for `models_mode=auto` (see [providers.md](./providers.md)).
+Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key owner has bound. Ids are `provider/upstream_id`, plus one entry per model group with the bare group name as its id (`owned_by: "group"`). Claude Code and Grok come from live upstream `/models`. Codex comes from the ChatGPT `backend-api/codex/models` endpoint, falling back to the public catalog mirror when the edge bot-walls the Worker (see [providers.md](./providers.md)). Empty for a provider when the user has no usable account for it. The user's custom providers are appended after the builtins — manual list, or live + cache + fallback for `models_mode=auto` (see [providers.md](./providers.md)).
 
 ## Anthropic surface
 
@@ -145,7 +145,7 @@ Same providers as the OpenAI surface. Model id is always `provider/upstream` (no
 | custom, `format=anthropic` | Native **passthrough** to `{base_url}/v1/messages`, same shape as `claude-code` (auth inject, `model` rewritten to the bare upstream id, `cache_control`/`thinking` never touched) but with **none** of the Claude-Code-OAuth specifics: no system prepend, no auto-added effort beta, no fixed base betas — `anthropic-beta` is forwarded verbatim from the client (or omitted) and `anthropic-version` defaults to `2023-06-01` only when the client sends none. |
 | custom, `format=openai` | Same conversion path as `grok`/`codex` (`cache_control` stripped, tool/vision conversion identical), landing on the custom-openai adapter's `chatCompletions()` instead of a builtin one. |
 
-`model` **must** be `provider/upstream` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, or `<slug>/<upstream>` for a custom endpoint). Bare ids → `400` `invalid_model`. A slug that doesn't match one of the caller's own custom providers is the same `400 invalid_model` as an unknown builtin — a custom slug never resolves cross-user.
+`model` **must** be `provider/upstream` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, or `<slug>/<upstream>` for a custom endpoint) — or the bare name of one of the caller's **model groups**, which expands to such a target before dispatch (see "Model routing"). Any other bare id → `400` `invalid_model`. A slug that doesn't match one of the caller's own custom providers is the same `400 invalid_model` as an unknown builtin — a custom slug (and a group name) never resolves cross-user.
 
 Converted streams follow the Anthropic content-block contract: blocks are strictly
 sequential (one open at a time, dense ascending indices, never reopened). Because an
@@ -166,7 +166,7 @@ complete at the end of the turn. `usage` is taken from the upstream final chunk
 
 ### `POST /anthropic/v1/messages/count_tokens`
 
-Parses the body the same way as `/v1/messages` — same `model` requirement, same `400` envelopes for invalid JSON / invalid model id.
+Parses the body the same way as `/v1/messages` — same `model` requirement, same `400` envelopes for invalid JSON / invalid model id. A model-group name expands first and follows its resolved target's row below.
 
 | `model` provider | Behavior |
 |------------------|----------|
@@ -177,7 +177,7 @@ Parses the body the same way as `/v1/messages` — same `model` requirement, sam
 
 ### `GET /anthropic/v1/models`
 
-Same live catalog as `GET /openai/v1/models` for the key owner: all providers with usable accounts, including the user's custom providers appended after the builtins. Envelope is Anthropic-ish `{ data: [{ id, display_name, type: "model" }] }` with `id` = `provider/upstream`.
+Same live catalog as `GET /openai/v1/models` for the key owner: all providers with usable accounts, including the user's custom providers appended after the builtins, and their model groups (bare-name ids). Envelope is Anthropic-ish `{ data: [{ id, display_name, type: "model" }] }` with `id` = `provider/upstream` (or the bare group name).
 
 ### Future
 
@@ -185,12 +185,15 @@ Same host keeps `/anthropic/*` for additional Anthropic routes if needed; do not
 
 ## Model routing
 
-1. Parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id, split on the **first** `/` only — an upstream id may itself contain further `/`). Required on **both** surfaces.
-2. If `provider` is a builtin `ProviderId`, use it directly. Otherwise look it up as a custom provider slug, scoped to the authenticated user (`custom_providers` table) — never resolves another user's slug.
-3. Resolve user’s pool for that provider (or custom slug).
-4. `acquire()` usable account; on 401/402/403/429 bench and try next (402 = billing/credit exhaustion — e.g. OpenRouter's `402 Insufficient credits` — the account is unusable until topped up, so retrying it per-request just burns a failing upstream round-trip).
-5. No usable account → error (below).
-6. No provider match at all (not a builtin id, not one of the caller's custom slugs) → `400 invalid_model`.
+1. A `model` string **without any `/`** is a candidate **model group** name: look it up in `model_groups` scoped to the authenticated user; on a hit, expand to the first usable `provider/model` target (ordered-priority walk — full selection contract in [providers.md](./providers.md) § Model groups) and continue below with that target. A miss is `400 invalid_model`. Applies identically on **both** surfaces.
+2. Otherwise parse `provider` from `model` (`provider/rest` → provider, rest = upstream model id, split on the **first** `/` only — an upstream id may itself contain further `/`).
+3. If `provider` is a builtin `ProviderId`, use it directly. Otherwise look it up as a custom provider slug, scoped to the authenticated user (`custom_providers` table) — never resolves another user's slug.
+4. Resolve user’s pool for that provider (or custom slug).
+5. `acquire()` usable account; on 401/402/403/429 bench and try next (402 = billing/credit exhaustion — e.g. OpenRouter's `402 Insufficient credits` — the account is unusable until topped up, so retrying it per-request just burns a failing upstream round-trip).
+6. No usable account → error (below).
+7. No provider match at all (not a builtin id, not one of the caller's custom slugs, not one of their group names) → `400 invalid_model`.
+
+A group-expanded request is indistinguishable from a direct one past step 1: the resolved provider's own rules (reasoning ceiling, prompt cache, betas, loop guard, `count_tokens` support) all follow the **target**, not the group. Client-visible `model` fields echo the group name the client sent; `request_logs` stores the expanded canonical id plus `group_name` ([database.md](./database.md)).
 
 ## `reasoning_effort`
 

@@ -17,6 +17,8 @@ export async function logRequest(
     cacheReadInputTokens?: number | null
     cacheCreationInputTokens?: number | null
     errorCode?: string | null
+    /** The model-group alias this request was addressed to, if any (docs/database.md `request_logs.group_name`). `model`/`provider` above always store the expanded canonical target. */
+    groupName?: string | null
   },
 ): Promise<void> {
   try {
@@ -41,8 +43,8 @@ export async function logRequest(
       `INSERT INTO request_logs
        (id, user_id, api_key_id, provider, model, account_id, status_code, latency_ms,
         prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-        cost, error_code, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        cost, error_code, group_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         newId("log"),
@@ -59,6 +61,7 @@ export async function logRequest(
         entry.cacheCreationInputTokens ?? null,
         cost,
         entry.errorCode ?? null,
+        entry.groupName ?? null,
         nowIso(),
       )
       .run()

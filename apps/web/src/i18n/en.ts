@@ -32,6 +32,7 @@ export const en = {
   "nav.overview": "Overview",
   "nav.providers": "Providers",
   "nav.models": "Models",
+  "nav.groups": "Groups",
   "nav.keys": "API keys",
   "nav.changelog": "Changelog",
 
@@ -273,7 +274,57 @@ export const en = {
     "Add model ids to this endpoint, or let it load them automatically.",
   "models.group.emptyCodex":
     "This provider doesn't publish a model list — use the model id from your ChatGPT plan.",
+  // The catalog's fixed `group` section. Every other section is named by the
+  // provider it came from; this one is the user's own names, so it gets a label.
+  "models.section.groups": "Groups",
   "models.error.load": "Couldn't load models",
+
+  // --- Groups -------------------------------------------------------------
+  "groups.title": "Groups",
+  "groups.subtitle": "Your own model names, pointed at real models",
+  "groups.create": "Create group",
+  "groups.column.name": "Name",
+  "groups.column.targets": "Targets",
+  "groups.column.updated": "Updated",
+  // Accessible names for the row controls: several rows offer the same two
+  // words, so the group's name goes in the name. Each contains the visible
+  // label verbatim (WCAG 2.5.3) — the name itself, and "Edit".
+  "groups.copyName": "Copy {name}",
+  "groups.editGroup": "Edit {name}",
+  "groups.empty.title": "No groups yet",
+  "groups.empty.body":
+    "A group gives a model your own name. Point a client's fixed model id at whatever you actually run, or gather one model from several accounts and endpoints behind a single name.",
+  "groups.delete": "Delete group",
+  "groups.deleteConfirm": "Delete this group? Requests using its name stop working immediately.",
+  "groups.dialog.editTitle": "Edit group",
+  "groups.dialog.save": "Save changes",
+  "groups.dialog.nameLabel": "Name",
+  "groups.dialog.namePlaceholder": "my-model",
+  "groups.dialog.nameHint": "Clients send this as the model id, on both base URLs.",
+  "groups.dialog.targetsLabel": "Targets",
+  "groups.dialog.targetsHint":
+    "Requests try these in order and use the first one with an account that can take them.",
+  "groups.dialog.targetsEmpty": "Add at least one model below.",
+  "groups.dialog.addLabel": "Add a target",
+  "groups.dialog.addPlaceholder": "Search models",
+  "groups.dialog.addHint": "Not in the list? Type the full model id and add it.",
+  "groups.dialog.add": "Add",
+  "groups.dialog.addTarget": "Add {target}",
+  "groups.dialog.noMatches": "No models match \"{query}\"",
+  "groups.dialog.moveUp": "Move {target} up",
+  "groups.dialog.moveDown": "Move {target} down",
+  "groups.dialog.moved": "{target} is now {position} of {total}",
+  "groups.dialog.removeTarget": "Remove {target}",
+  "groups.error.load": "Couldn't load your groups",
+  "groups.error.name": "Enter a name",
+  "groups.error.nameLength": "Use {max} characters or fewer",
+  "groups.error.nameWhitespace": "A name can't contain spaces",
+  "groups.error.nameSlash": "A name can't contain \"/\"",
+  "groups.error.targetFormat": "Use a full model id in the form {example}",
+  "groups.error.targetDuplicate": "That model is already in this group",
+  "groups.error.targetsMax": "A group holds at most {max} models",
+  "groups.error.save": "Couldn't save the group",
+  "groups.error.delete": "Couldn't delete the group",
 
   // --- API keys -----------------------------------------------------------
   "keys.title": "API keys",

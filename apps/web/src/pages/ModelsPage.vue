@@ -13,9 +13,10 @@
  *
  * Groups are built from whatever the response lists, not from a fixed set: the
  * three builtins in their declared order, then one group per custom endpoint,
- * then — defensively — any prefix belonging to neither, so a stale cache right
+ * then — defensively — any section belonging to neither, so a stale cache right
  * after an endpoint was deleted still renders its models instead of dropping
- * them silently.
+ * them silently. The catalog's fixed `group` section (the user's own model
+ * groups) arrives through that last branch and needs nothing but a label.
  */
 import { computed, onMounted, ref } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
@@ -99,6 +100,14 @@ const GROUP_EMPTY_KEY: Record<EmptyKind, MessageKey> = {
  */
 const ALL = "__all__"
 
+/**
+ * The catalog's fixed section for model groups (docs/providers.md § Model
+ * groups). Its rows are bare names, not `provider/model` ids, so it is the one
+ * section whose label cannot come from a provider — hence this lookup, and
+ * nothing else, special-cases it.
+ */
+const GROUP_SECTION = "group"
+
 const models = ref<CatalogModel[]>([])
 const providerMeta = ref<ModelsResponse["providers"]>([])
 const loading = ref(true)
@@ -111,16 +120,18 @@ const selected = ref<string>(getModelsPrefs().provider ?? ALL)
 
 let copyTimer: number | undefined
 
-/** Split on the first "/" only — an upstream id may itself contain further "/". */
-function prefixOf(id: string): string {
-  const i = id.indexOf("/")
-  return i === -1 ? id : id.slice(0, i)
+/** A section's visible name — the raw key unless the catalog named it for us. */
+function sectionLabel(key: string): string {
+  return key === GROUP_SECTION ? t("models.section.groups") : key
 }
 
 const groups = computed<ModelGroup[]>(() => {
+  // Keyed on each row's own `provider`, not on the text before its first "/":
+  // a group's id is a bare name, so a prefix split would file every group under
+  // a section of its own.
   const byPrefix = new Map<string, CatalogModel[]>()
   for (const m of models.value) {
-    const key = prefixOf(m.id)
+    const key = m.provider
     const list = byPrefix.get(key)
     if (list) list.push(m)
     else byPrefix.set(key, [m])
@@ -161,13 +172,14 @@ const groups = computed<ModelGroup[]>(() => {
     })
   }
 
-  // 3. Defensive: a prefix matching neither a builtin nor a known endpoint
-  // (a stale cache right after a deletion) still renders.
+  // 3. Whatever else the response listed: the fixed `group` section, and
+  // defensively a prefix matching neither a builtin nor a known endpoint (a
+  // stale cache right after a deletion) so its models still render.
   for (const [key, list] of byPrefix) {
     if (seen.has(key)) continue
     out.push({
       key,
-      name: key,
+      name: sectionLabel(key),
       blurb: null,
       formatBadge: null,
       models: list,

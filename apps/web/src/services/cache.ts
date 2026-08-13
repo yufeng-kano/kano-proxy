@@ -25,6 +25,7 @@ import type {
   CatalogModel,
   ChangelogResponse,
   CustomProvider,
+  ModelGroup,
   ModelsResponse,
   ProviderId,
   UsageDays,
@@ -48,6 +49,7 @@ export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
 const ACCOUNTS_PREFIX = "kano-proxy:accounts:"
 const MODELS_PREFIX = "kano-proxy:models:"
 const CUSTOM_PROVIDERS_PREFIX = "kano-proxy:custom-providers:"
+const MODEL_GROUPS_PREFIX = "kano-proxy:model-groups:"
 const USAGE_PREFIX = "kano-proxy:usage:"
 /**
  * Deliberately the whole key, with **no user id** appended — unlike every
@@ -75,6 +77,10 @@ function modelsKey(userId: string): string {
 
 function customProvidersKey(userId: string): string {
   return `${CUSTOM_PROVIDERS_PREFIX}${userId}`
+}
+
+function modelGroupsKey(userId: string): string {
+  return `${MODEL_GROUPS_PREFIX}${userId}`
 }
 
 function usageKey(userId: string, days: UsageDays): string {
@@ -150,9 +156,9 @@ export function writeAccountsCache(
 }
 
 /**
- * Clears every server-data cache (accounts, models, custom providers, usage,
- * changelog) — used on logout, so nothing the previous user's session fetched
- * survives on disk for the next person on the machine.
+ * Clears every server-data cache (accounts, models, custom providers, model
+ * groups, usage, changelog) — used on logout, so nothing the previous user's
+ * session fetched survives on disk for the next person on the machine.
  *
  * Sweeps `sessionStorage` as well as `localStorage`: entries written before
  * these caches moved to localStorage may still be sitting there in a
@@ -190,6 +196,10 @@ function sweepStore(store: Storage, userId?: string | null): void {
       }
       if (k.startsWith(CUSTOM_PROVIDERS_PREFIX)) {
         if (userId && k !== customProvidersKey(userId)) continue
+        keys.push(k)
+      }
+      if (k.startsWith(MODEL_GROUPS_PREFIX)) {
+        if (userId && k !== modelGroupsKey(userId)) continue
         keys.push(k)
       }
       if (k.startsWith(USAGE_PREFIX)) {
@@ -256,6 +266,35 @@ export function writeCustomProvidersCache(
 ): void {
   if (!userId) return
   writeTimed(customProvidersKey(userId), data)
+}
+
+/**
+ * Model groups cache. Names and targets only — a group is user config, and
+ * the response carries nothing secret to keep off disk.
+ */
+export function readModelGroupsCache(
+  userId: string | null | undefined,
+): ModelGroup[] | null {
+  if (!userId) return null
+  return readTimed<ModelGroup[]>(modelGroupsKey(userId))?.data ?? null
+}
+
+export function isModelGroupsCacheFresh(
+  userId: string | null | undefined,
+  ttlMs = CACHE_TTL_MS,
+): boolean {
+  if (!userId) return false
+  const entry = readTimed<ModelGroup[]>(modelGroupsKey(userId))
+  if (!entry) return false
+  return Date.now() - entry.savedAt < ttlMs
+}
+
+export function writeModelGroupsCache(
+  userId: string | null | undefined,
+  data: ModelGroup[],
+): void {
+  if (!userId) return
+  writeTimed(modelGroupsKey(userId), data)
 }
 
 /**

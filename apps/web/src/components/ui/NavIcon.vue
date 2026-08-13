@@ -4,12 +4,14 @@
  *
  * A 16px stroked set on a 16px grid, drawn to one spec (1.4 stroke, round
  * caps and joins) so they read as one family. Inline rather than an icon
- * dependency: five glyphs do not justify a package, and a remote sprite would
+ * dependency: six glyphs do not justify a package, and a remote sprite would
  * be a render-blocking request for chrome that must paint immediately.
  *
  * Always decorative — every nav item ships a text label beside it.
  */
-defineProps<{ name: "overview" | "providers" | "models" | "keys" | "changelog" }>()
+defineProps<{
+  name: "overview" | "providers" | "models" | "groups" | "keys" | "changelog"
+}>()
 </script>
 
 <template>
@@ -42,6 +44,15 @@ defineProps<{ name: "overview" | "providers" | "models" | "keys" | "changelog" }
       <circle cx="12" cy="8" r="2" />
       <circle cx="4" cy="12" r="2" />
       <path d="M5.75 5L10.25 7M5.75 11L10.25 9" />
+    </template>
+
+    <!-- Groups: one name on the left fanning out to the models it stands for -->
+    <template v-else-if="name === 'groups'">
+      <rect x="1.25" y="5.75" width="4.5" height="4.5" rx="1.5" />
+      <path d="M5.75 8H8" />
+      <path d="M8 8V5.5A1.5 1.5 0 019.5 4H14" />
+      <path d="M8 8h6" />
+      <path d="M8 8v2.5A1.5 1.5 0 009.5 12H14" />
     </template>
 
     <!-- Keys -->

@@ -89,6 +89,21 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 `UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-KV-bench convention as `upstream_accounts`, over that provider's account row(s).
 
+### `model_groups`
+
+User-defined bare-name model aliases → ordered `provider/model` target lists (full contract in [providers.md](./providers.md) § Model groups). Added in `0008_model_groups.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | |
+| user_id | TEXT FK | `ON DELETE CASCADE` |
+| name | TEXT | the callable bare model id: trimmed, 1–128 chars, no whitespace, no `/`; **mutable** (rename allowed — nothing references it) |
+| targets_json | TEXT | JSON array of `provider/model` strings, array order = priority. Parse must tolerate later per-target object fields (future balancing weights) |
+| created_at | TEXT | |
+| updated_at | TEXT | |
+
+`UNIQUE(user_id, name)`. Targets are validated at write time (prefix must be a builtin or the caller's own custom slug; never a bare name, so groups cannot nest). No `status` column — usability is computed per-request from the targets' pools.
+
 ### `usage_snapshots` — **deprecated, never used**
 
 Created by `0001_init.sql` as an "optional cache", never read or written by any code. The 60s usage cache it anticipated now lives in the `upstream_accounts` columns above; a separate table would cost one extra write per refresh and a second query per read, for nothing. Left in place rather than dropped — an empty table is free, and a `DROP TABLE` migration is a schema change with no benefit. **Do not build on it.**
@@ -119,6 +134,7 @@ Created by `0001_init.sql` as an "optional cache", never read or written by any 
 | cache_creation_input_tokens | INTEGER | nullable; cache-write tokens, from Anthropic `cache_creation_input_tokens`, OpenAI-compatible `prompt_tokens_details.cache_write_tokens`, or the proxy's conversion extension |
 | cost | REAL | nullable; estimated USD cost computed at write time from the LiteLLM price table ([pricing.md](./pricing.md)); `NULL` = unpriced/unknown, never 0-as-guess |
 | error_code | TEXT | nullable |
+| group_name | TEXT | nullable; the model group the request was addressed to, when it came through one (`0008_model_groups.sql`). `provider`/`model` always store the **expanded** target so pricing and Overview aggregation stay canonical; this column preserves the alias for future per-group reporting |
 | created_at | TEXT | |
 
 **No message content, no prompts, no completions.**

@@ -10,6 +10,7 @@ import { authRoutes } from "./routes/auth"
 import { changelogRoutes } from "./routes/changelog"
 import { customProviderRoutes } from "./routes/custom_providers"
 import { keysRoutes } from "./routes/keys"
+import { modelGroupRoutes } from "./routes/model_groups"
 import { modelsRoutes } from "./routes/models"
 import { openaiRoutes } from "./routes/openai"
 import { providerRoutes } from "./routes/providers"
@@ -58,6 +59,7 @@ app.route("/api/keys", keysRoutes)
 app.route("/api/models", modelsRoutes)
 app.route("/api/providers", providerRoutes)
 app.route("/api/custom-providers", customProviderRoutes)
+app.route("/api/model-groups", modelGroupRoutes)
 app.route("/api/usage", usageRoutes)
 app.route("/api/changelog", changelogRoutes)
 

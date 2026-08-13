@@ -401,6 +401,23 @@ describe("GET /api/usage/summary", () => {
     const env = buildEnv(db)
     const cookie = await cookieFor(env, "user_1")
 
+    // Relative to the real wall clock, not a hardcoded date, so this stays
+    // green regardless of when it runs (days=7 below is a window off
+    // Date.now() in the route). Floored to UTC midnight first so the two
+    // "same calendar day" rows and the "next calendar day" row can't drift
+    // across a day boundary depending on what hour the test happens to run
+    // at; day1 sits 3 days back (well inside 7) and day2 = day1 + exactly
+    // 24h (still well inside 7, and always the next calendar date — a UTC
+    // day is always 24h, no DST to fight).
+    const today = new Date()
+    const day1 = new Date(
+      Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - 3, 9, 0, 0),
+    )
+    const day1Later = new Date(day1.getTime() + 30 * 60_000) // same day, +30min
+    const day2 = new Date(day1.getTime() + 24 * 60 * 60_000) // next calendar day
+    const day1Bucket = day1.toISOString().slice(0, 10)
+    const day2Bucket = day2.toISOString().slice(0, 10)
+
     seedLog(db, {
       user_id: "user_1",
       provider: "claude-code",
@@ -411,7 +428,7 @@ describe("GET /api/usage/summary", () => {
       completion_tokens: 40,
       cache_read_input_tokens: 20,
       cache_creation_input_tokens: 0,
-      created_at: "2026-08-02T09:00:00.000Z",
+      created_at: day1.toISOString(),
     })
     seedLog(db, {
       user_id: "user_1",
@@ -424,7 +441,7 @@ describe("GET /api/usage/summary", () => {
       cache_read_input_tokens: null,
       cache_creation_input_tokens: null,
       error_code: "upstream_error",
-      created_at: "2026-08-02T09:30:00.000Z",
+      created_at: day1Later.toISOString(),
     })
     seedLog(db, {
       user_id: "user_1",
@@ -437,7 +454,7 @@ describe("GET /api/usage/summary", () => {
       completion_tokens: null,
       cache_read_input_tokens: null,
       cache_creation_input_tokens: null,
-      created_at: "2026-08-03T09:00:00.000Z",
+      created_at: day2.toISOString(),
     })
 
     const res = await usageRoutes.request("/summary?days=7", req(cookie), env)
@@ -460,10 +477,10 @@ describe("GET /api/usage/summary", () => {
     expect(claude).toMatchObject({ model: "claude-code/claude-opus-5", requests: 2, errors: 0 })
     const grok = json.models.find((m) => m.provider === "grok")!
     expect(grok).toMatchObject({ model: "grok/grok-4.5", requests: 1, errors: 1 })
-    // 2026-08-02 holds two models (claude-code + grok) -> two points, not one.
+    // day1 holds two models (claude-code + grok) -> two points, not one.
     expect(json.series).toEqual([
       {
-        bucket: "2026-08-02",
+        bucket: day1Bucket,
         provider: "claude-code",
         model: "claude-code/claude-opus-5",
         requests: 1,
@@ -474,7 +491,7 @@ describe("GET /api/usage/summary", () => {
         cost: null,
       },
       {
-        bucket: "2026-08-02",
+        bucket: day1Bucket,
         provider: "grok",
         model: "grok/grok-4.5",
         requests: 1,
@@ -485,7 +502,7 @@ describe("GET /api/usage/summary", () => {
         cost: null,
       },
       {
-        bucket: "2026-08-03",
+        bucket: day2Bucket,
         provider: "claude-code",
         model: "claude-code/claude-opus-5",
         requests: 1,

@@ -128,6 +128,19 @@ Custom providers (BYO OpenAI-/Anthropic-compatible endpoint — see [providers.m
 
 The API key is **never** echoed back on any of these routes — `GET`/`POST`/`PUT` responses carry only `key_mask` (first 6 + `…` + last 4 of the plaintext key). Same session-cookie auth as `/api/providers/*`; same origin-locked CORS (see below).
 
+## Model groups
+
+Bare-name model aliases → ordered `provider/model` targets (contract: [providers.md](./providers.md) § Model groups; UI: [admin-ui.md](./admin-ui.md) § Groups page). Same session-cookie auth and origin-locked CORS as every `/api/*` route.
+
+### Management routes (session required)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/model-groups` | List the user's groups: `{id, name, targets, created_at, updated_at}` each, `targets` a `provider/model` string array in priority order |
+| POST | `/api/model-groups` | Create — body `{name, targets}`. Validation: name trimmed, 1–128 chars, no whitespace, no `/`, unique per user; `targets` 1–20 entries, each parses as `provider/model` with a prefix that is a builtin or one of the caller's custom slugs, no duplicates; max 50 groups per user. `400` with a field-level message on any violation |
+| PUT | `/api/model-groups/:id` | Update — body `{name?, targets?}`; `name` **is** renameable (unlike a custom provider slug); `targets`, when present, replaces the whole ordered list (no per-entry patching — the order is the semantics). Same validation as create. 404 when the id is not the caller's |
+| DELETE | `/api/model-groups/:id` | Delete. Requests already in flight finish; the next request for that name is `invalid_model` |
+
 ## Encryption
 
 - `TOKEN_ENCRYPTION_KEY`: 32-byte key (base64) for AES-GCM of refresh/access tokens in D1.

@@ -58,7 +58,8 @@ openaiRoutes.post("/chat/completions", async (c) => {
     return c.json(
       {
         error: {
-          message: "model must be provider/model (e.g. claude-code/claude-opus-5)",
+          message:
+            "model must be provider/model (e.g. claude-code/claude-opus-5) or one of your model group names",
           code: "invalid_model",
         },
       },
@@ -88,10 +89,11 @@ openaiRoutes.post("/chat/completions", async (c) => {
           userId,
           apiKeyId,
           provider: resolved.provider,
-          model: modelRaw,
+          model: `${resolved.provider}/${resolved.upstreamModel}`,
           statusCode: 400,
           latencyMs: Date.now() - started,
           errorCode: "loop_detected",
+          groupName: resolved.group?.name ?? null,
         }),
       )
       return c.json(
@@ -138,6 +140,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
     provider: resolved.provider,
     adapter: resolved.adapter,
     waitUntil: (p) => c.executionCtx.waitUntil(p),
+    groupName: resolved.group?.name,
     req: {
       model: modelRaw,
       rawModel: modelRaw,

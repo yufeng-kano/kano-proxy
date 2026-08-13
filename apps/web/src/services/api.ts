@@ -9,6 +9,7 @@ import type {
   CustomProviderModelsMode,
   CustomProviderTestResult,
   LoginStart,
+  ModelGroup,
   ModelsResponse,
   ProviderId,
   SpendLimitInterval,
@@ -301,6 +302,44 @@ export async function testCustomProvider(
   return request<CustomProviderTestResult>("/api/custom-providers/test", {
     method: "POST",
     body: JSON.stringify(body),
+  })
+}
+
+// Model groups — bare-name aliases over ordered provider/model targets.
+// Session-cookie auth, same as the routes above. See docs/auth.md § Model groups.
+
+export async function listModelGroups(): Promise<ModelGroup[]> {
+  const data = await request<{ groups: ModelGroup[] }>("/api/model-groups")
+  return data.groups
+}
+
+export async function createModelGroup(body: {
+  name: string
+  targets: string[]
+}): Promise<ModelGroup> {
+  return request<ModelGroup>("/api/model-groups", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+/**
+ * `targets`, when sent, replaces the whole ordered list — there is no
+ * per-entry patching, because the order *is* the routing priority.
+ */
+export async function updateModelGroup(
+  id: string,
+  body: { name?: string; targets?: string[] },
+): Promise<ModelGroup> {
+  return request<ModelGroup>(`/api/model-groups/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function deleteModelGroup(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/model-groups/${encodeURIComponent(id)}`, {
+    method: "DELETE",
   })
 }
 
