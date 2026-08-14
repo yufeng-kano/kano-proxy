@@ -236,6 +236,23 @@ function makeFormatters() {
         timeStyle: "short",
       }).format(d)
     },
+    /**
+     * Log-line timestamp: "Mar 4, 15:04:05". Compact enough for a column, and
+     * to the second — two requests a moment apart are told apart by the
+     * seconds, which `dateTime` drops, and the year is noise in a list whose
+     * rows are all from the retention window.
+     */
+    timestamp(value: string | Date | null | undefined): string {
+      const d = toDate(value)
+      if (!d) return EM_DASH
+      return new Intl.DateTimeFormat(tag(), {
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+      }).format(d)
+    },
     /** Axis-tick label: "3 PM" for hourly buckets, "Mar 4" for daily ones. */
     bucketLabel(date: Date, hourly: boolean): string {
       return new Intl.DateTimeFormat(

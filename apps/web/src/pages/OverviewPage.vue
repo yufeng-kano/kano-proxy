@@ -24,7 +24,6 @@ import {
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
-import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
 import DataTable, { type Column } from "@/components/ui/DataTable.vue"
 import EmptyState from "@/components/ui/EmptyState.vue"
@@ -210,21 +209,16 @@ const latencyStat = computed(() => format.duration(totals.value?.avg_latency_ms)
 // ---------------------------------------------------------------------------
 // By model table
 //
-// The only consumer of `summary.models`, and the only surface that renders its
-// full (model, account, alias) split — every other Overview surface (the metric
-// cards' top-model lists, the three charts, the detail modal) is built from
-// `summary.series`, which stays per-model, so none of them can double-count
-// these finer rows (docs/admin-ui.md § Series shape).
+// The only consumer of `summary.models` — the same (provider, model) grain as
+// `summary.series`, which every other Overview surface (the metric cards'
+// top-model lists, the three charts, the detail modal) is built from. The
+// per-request account and alias detail lives on the Logs page
+// (docs/admin-ui.md § Series shape).
 // ---------------------------------------------------------------------------
 const modelRows = computed<ModelUsageRow[]>(() => summary.value?.models ?? [])
 
 const modelColumns = computed<Column<ModelUsageRow>[]>(() => [
   { key: "model", header: t("overview.models.model"), value: (row) => row.model },
-  {
-    key: "account",
-    header: t("overview.models.account"),
-    value: (row) => row.account_label ?? "",
-  },
   {
     key: "requests",
     header: t("overview.models.requests"),
@@ -278,22 +272,9 @@ const modelColumns = computed<Column<ModelUsageRow>[]>(() => [
   },
 ])
 
-/**
- * One row per (model, account, alias) split, so the key is all three — the
- * same model now appears once per account it ran on and once per alias it was
- * called by.
- */
+/** One row per (provider, model) — the model id is the whole identity. */
 function modelRowKey(row: ModelUsageRow): string {
-  return `${row.model} ${row.account_id ?? ""} ${row.group_name ?? ""}`
-}
-
-/**
- * An account the server could not name at read time: `account_id` set, no
- * label. It has been deleted since it served these requests — which happened
- * all the same, so the row stays and says which part of it is gone.
- */
-function isRemovedAccount(row: ModelUsageRow): boolean {
-  return row.account_id !== null && row.account_label === null
+  return row.model
 }
 
 /** Cache coverage caveat, per model — partial data is annotated, never mixed silently. */
@@ -420,29 +401,8 @@ function coverageNote(row: ModelUsageRow): string | null {
               :row-key="modelRowKey"
               :caption="t('overview.tab.models')"
             >
-              <!-- The alias travels with the model id: this row is what the
-                   group actually dispatched, which is the question the split
-                   exists to answer. -->
               <template #cell-model="{ row }">
-                <span class="model-cell">
-                  <span class="mono model-id">{{ row.model }}</span>
-                  <Badge v-if="row.group_name" tone="neutral">
-                    {{ t("overview.models.via", { alias: row.group_name }) }}
-                  </Badge>
-                </span>
-              </template>
-              <!-- Which account served these requests. An account since
-                   deleted is named as that rather than left blank; a row that
-                   never had one (a request rejected before dispatch) has
-                   nothing to name. -->
-              <template #cell-account="{ row }">
-                <Badge v-if="isRemovedAccount(row)" tone="warn">
-                  {{ t("overview.models.accountRemoved") }}
-                </Badge>
-                <span v-else-if="row.account_label" class="account">
-                  {{ row.account_label }}
-                </span>
-                <span v-else class="account-none">—</span>
+                <span class="mono model-id">{{ row.model }}</span>
               </template>
               <template #cell-cacheRate="{ row }">
                 <span class="tabular">{{ format.percent(row.cache_rate) }}</span>
@@ -559,26 +519,8 @@ function coverageNote(row: ModelUsageRow): string | null {
   height: 240px;
 }
 
-/* The id and its alias tag wrap together rather than the tag stranding on a
-   line of its own in a narrow column. */
-.model-cell {
-  display: inline-flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-2);
-  min-width: 0;
-}
-
 .model-id {
   color: var(--text);
-}
-
-.account {
-  color: var(--text-secondary);
-}
-
-.account-none {
-  color: var(--faint);
 }
 
 .coverage {

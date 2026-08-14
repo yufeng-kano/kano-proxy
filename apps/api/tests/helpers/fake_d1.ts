@@ -102,18 +102,36 @@ type WhereCond =
   | { kind: "isNull"; col: string; negated: boolean }
   | { kind: "notIn"; col: string; paramStart: number; count: number }
   | { kind: "or"; branches: WhereCond[] }
+  | { kind: "and"; branches: WhereCond[] }
 
 /**
  * Parses one AND-term. Bracketed alternatives (`(a IS NULL OR a < ?)` — the
  * usage lock's compare-and-swap) recurse, so parameter positions stay in
  * left-to-right order across the whole clause.
  */
+function stripOuterParens(value: string): string | null {
+  if (!value.startsWith("(") || !value.endsWith(")")) return null
+  let depth = 0
+  for (let i = 0; i < value.length; i++) {
+    if (value[i] === "(") depth++
+    if (value[i] === ")") depth--
+    if (depth === 0 && i < value.length - 1) return null
+  }
+  return depth === 0 ? value.slice(1, -1) : null
+}
+
 function parseCond(cond: string, next: () => number): WhereCond {
-  const grouped = cond.match(/^\((.+)\)$/s)
-  if (grouped && splitTopLevel(grouped[1]!, /^\s+OR\s+/i).length > 1) {
+  const grouped = stripOuterParens(cond)
+  if (grouped && splitTopLevel(grouped, /^\s+OR\s+/i).length > 1) {
     return {
       kind: "or",
-      branches: splitTopLevel(grouped[1]!, /^\s+OR\s+/i).map((b) => parseCond(b.trim(), next)),
+      branches: splitTopLevel(grouped, /^\s+OR\s+/i).map((b) => parseCond(b.trim(), next)),
+    }
+  }
+  if (grouped && splitTopLevel(grouped, /^\s+AND\s+/i).length > 1) {
+    return {
+      kind: "and",
+      branches: splitTopLevel(grouped, /^\s+AND\s+/i).map((b) => parseCond(b.trim(), next)),
     }
   }
   const cmp = cond.match(/^(\w+)\s*(=|>=|<)\s*\?$/)
@@ -132,6 +150,7 @@ function parseCond(cond: string, next: () => number): WhereCond {
 
 function evalCond(c: WhereCond, row: Row, params: unknown[]): boolean {
   if (c.kind === "or") return c.branches.some((b) => evalCond(b, row, params))
+  if (c.kind === "and") return c.branches.every((b) => evalCond(b, row, params))
   if (c.kind === "isNull") {
     const isNull = row[c.col] === null || row[c.col] === undefined
     return c.negated ? !isNull : isNull
@@ -226,10 +245,11 @@ function execute(
     return { rows: [{ s: sum }] }
   }
 
-  m = sql.match(/^SELECT .+? FROM (\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER BY\s+(.+))?$/i)
+  m = sql.match(/^SELECT .+? FROM (\w+)(?:\s+WHERE\s+(.+?))?(?:\s+ORDER BY\s+(.+?))?(?:\s+LIMIT\s+\?)?$/i)
   if (m) {
     let rows = filterRows(db.rows(m[1]!), m[2], params)
     if (m[3]) rows = sortRows(rows, m[3]!)
+    if (/\s+LIMIT\s+\?$/i.test(sql)) rows = rows.slice(0, Number(params.at(-1)))
     return { rows }
   }
 

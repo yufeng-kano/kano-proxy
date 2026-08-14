@@ -25,6 +25,7 @@ import type {
   CatalogModel,
   ChangelogResponse,
   CustomProvider,
+  LogsResponse,
   ModelGroup,
   ModelsResponse,
   ProviderId,
@@ -49,8 +50,11 @@ export const CACHE_TTL_MS = 90_000
  * summaries split their per-model rows by account and group alias, and model
  * groups grew `routing` — a v6 entry has neither, so the By-model table would
  * hold rows with no account and the group rows no current-route indicator.
+ * v8: the usage summary's per-model rows went back to one row per (provider,
+ * model) — a v7 entry holds the account/alias split, which would double-count
+ * every model the By-model table now shows once.
  */
-const CACHE_SCHEMA_VERSION = 7
+const CACHE_SCHEMA_VERSION = 8
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
@@ -60,6 +64,7 @@ const MODELS_PREFIX = "kano-proxy:models:"
 const CUSTOM_PROVIDERS_PREFIX = "kano-proxy:custom-providers:"
 const MODEL_GROUPS_PREFIX = "kano-proxy:model-groups:"
 const USAGE_PREFIX = "kano-proxy:usage:"
+const LOGS_PREFIX = "kano-proxy:logs:"
 /**
  * Deliberately the whole key, with **no user id** appended — unlike every
  * other prefix here. Release notes are identical for every operator and hold
@@ -94,6 +99,10 @@ function modelGroupsKey(userId: string): string {
 
 function usageKey(userId: string, days: UsageDays): string {
   return `${USAGE_PREFIX}${userId}:${days}`
+}
+
+function logsKey(userId: string): string {
+  return `${LOGS_PREFIX}${userId}`
 }
 
 /**
@@ -213,6 +222,10 @@ function sweepStore(store: Storage, userId?: string | null): void {
       }
       if (k.startsWith(USAGE_PREFIX)) {
         if (userId && !k.startsWith(`${USAGE_PREFIX}${userId}:`)) continue
+        keys.push(k)
+      }
+      if (k.startsWith(LOGS_PREFIX)) {
+        if (userId && k !== logsKey(userId)) continue
         keys.push(k)
       }
     }
@@ -337,6 +350,36 @@ export function writeUsageSummaryCache(
 ): void {
   if (!userId) return
   writeTimed(usageKey(userId, days), data)
+}
+
+/**
+ * Request log cache — the **first page of the unfiltered view** only
+ * (docs/admin-ui.md § Logs page). A filtered view is one of arbitrarily many
+ * and a Load-more page is a slice of a list that has moved on by the next
+ * visit, so neither is worth keeping on disk. The rows carry no prompts,
+ * completions, or keys — only ids, model names, and counts.
+ */
+export function readLogsCache(userId: string | null | undefined): LogsResponse | null {
+  if (!userId) return null
+  return readTimed<LogsResponse>(logsKey(userId))?.data ?? null
+}
+
+export function isLogsCacheFresh(
+  userId: string | null | undefined,
+  ttlMs = CACHE_TTL_MS,
+): boolean {
+  if (!userId) return false
+  const entry = readTimed<LogsResponse>(logsKey(userId))
+  if (!entry) return false
+  return Date.now() - entry.savedAt < ttlMs
+}
+
+export function writeLogsCache(
+  userId: string | null | undefined,
+  data: LogsResponse,
+): void {
+  if (!userId) return
+  writeTimed(logsKey(userId), data)
 }
 
 /**

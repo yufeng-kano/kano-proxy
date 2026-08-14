@@ -5,9 +5,9 @@
  * That one holds server payloads: user-id-scoped, wrapped in versioned data
  * envelopes, swept on logout. This one holds only enum-ish UI choices and
  * integers — last route, scroll offsets, the Overview range / chart view /
- * table toggle, the Models provider filter — under a single unscoped key that
- * survives sign-out, so a reopened tab lands where the user left off (see
- * docs/admin-ui.md § View preferences).
+ * table toggle, the Models and Logs provider filters — under a single unscoped
+ * key that survives sign-out, so a reopened tab lands where the user left off
+ * (see docs/admin-ui.md § View preferences).
  *
  * Nothing user-identifying goes in here: no tokens, no session state, no
  * email, no server response. That is why it needs neither the user-id scoping
@@ -46,6 +46,10 @@ export type Prefs = {
     /** Provider tab the Providers page is on; null = all. Free-form like models.provider. */
     tab: string | null
   }
+  logs: {
+    /** Provider the Logs page is filtered to; null = all. Free-form like models.provider. */
+    provider: string | null
+  }
 }
 
 function defaults(): Prefs {
@@ -55,6 +59,7 @@ function defaults(): Prefs {
     overview: { days: 7, chartView: "tokens" },
     models: { provider: null },
     providers: { tab: null },
+    logs: { provider: null },
   }
 }
 
@@ -110,6 +115,15 @@ function parse(raw: string): Prefs {
     const { tab } = parsed.providers
     if (typeof tab === "string" && tab.length > 0 && tab.length <= 64) {
       base.providers.tab = tab
+    }
+  }
+
+  if (isRecord(parsed.logs)) {
+    const { provider } = parsed.logs
+    // Same shape-and-length check as models.provider: a slug is user-defined,
+    // and one deleted since this was written resolves to "all" at the page.
+    if (typeof provider === "string" && provider.length > 0 && provider.length <= 64) {
+      base.logs.provider = provider
     }
   }
   return base
@@ -188,6 +202,14 @@ export function setProvidersPrefs(patch: Partial<Prefs["providers"]>): void {
 
 export function getProvidersPrefs(): Prefs["providers"] {
   return readPrefs().providers
+}
+
+export function setLogsPrefs(patch: Partial<Prefs["logs"]>): void {
+  patchPrefs((p) => ({ ...p, logs: { ...p.logs, ...patch } }))
+}
+
+export function getLogsPrefs(): Prefs["logs"] {
+  return readPrefs().logs
 }
 
 /**

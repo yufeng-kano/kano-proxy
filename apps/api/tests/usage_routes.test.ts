@@ -122,34 +122,32 @@ describe("summarizeUsageRows", () => {
     expect(out.totals.cache_rate).toBeNull()
   })
 
-  it("groups models[] by provider, model, account and group alias, with account labels", () => {
+  it("groups models[] by provider and model across accounts and group aliases", () => {
     const rows = [
       row({ account_id: "acc_1", group_name: "opus", prompt_tokens: 10, completion_tokens: 5 }),
       row({ provider: "grok", model: "grok/grok-4.5", prompt_tokens: 100, completion_tokens: 50 }),
       row({ account_id: "acc_1", group_name: "opus", prompt_tokens: 20, completion_tokens: 5 }),
       row({ account_id: "acc_2", group_name: null, prompt_tokens: 5, completion_tokens: 5 }),
     ]
-    const out = summarizeUsageRows(rows, 7, "from", new Map([["acc_1", "Primary"]])) as SummaryJson
-    expect(out.models).toHaveLength(3)
+    const out = summarizeUsageRows(rows, 7, "from") as SummaryJson
+    expect(out.models).toHaveLength(2)
     expect(out.models[0]).toMatchObject({
       provider: "grok",
       model: "grok/grok-4.5",
-      account_id: null,
-      account_label: null,
-      group_name: null,
       requests: 1,
     })
     expect(out.models[1]).toMatchObject({
       provider: "claude-code",
       model: "claude-code/claude-opus-5",
-      account_id: "acc_1",
-      account_label: "Primary",
-      group_name: "opus",
-      requests: 2,
-      prompt_tokens: 30,
-      completion_tokens: 10,
+      requests: 3,
+      prompt_tokens: 35,
+      completion_tokens: 15,
     })
-    expect(out.models[2]).toMatchObject({ account_id: "acc_2", account_label: null, group_name: null })
+    for (const model of out.models) {
+      expect(model.account_id).toBeUndefined()
+      expect(model.account_label).toBeUndefined()
+      expect(model.group_name).toBeUndefined()
+    }
     expect(out.models[0]!.avg_latency_ms).toBeUndefined()
   })
 
@@ -370,36 +368,6 @@ describe("GET /api/usage/summary", () => {
     const json = (await res.json()) as SummaryJson
     expect(json.totals.requests).toBe(1)
     expect(json.totals.prompt_tokens).toBe(10)
-  })
-
-  it("returns null account_label for a live account with no labels", async () => {
-    const db = new FakeD1()
-    seedUser(db)
-    seedLog(db, { user_id: "user_1", account_id: "acc_unlabeled" })
-    db.seed("upstream_accounts", [
-      {
-        id: "acc_unlabeled",
-        user_id: "user_1",
-        provider: "claude-code",
-        external_account_id: null,
-        label: null,
-        custom_label: null,
-        priority: 1,
-        encrypted_payload: "encrypted",
-        account_meta_json: null,
-        usage_snapshot_json: null,
-        usage_fetched_at: null,
-        usage_fetching_at: null,
-        created_at: "2026-01-01T00:00:00.000Z",
-        updated_at: "2026-01-01T00:00:00.000Z",
-      },
-    ])
-    const env = buildEnv(db)
-    const cookie = await cookieFor(env, "user_1")
-
-    const res = await usageRoutes.request("/summary?days=30", req(cookie), env)
-    const json = (await res.json()) as SummaryJson
-    expect(json.models[0]).toMatchObject({ account_id: "acc_unlabeled", account_label: null })
   })
 
   it("excludes rows created before the `from` window (boundary)", async () => {

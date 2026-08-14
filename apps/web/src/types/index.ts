@@ -295,26 +295,16 @@ export type UsageTotals = {
  * One row of the per-model breakdown. `model` is the full "provider/upstream"
  * id.
  *
- * The breakdown is finer than the series: one row per **(provider, model,
- * account_id, group_name)**, so the same model appears once per account and
- * once per alias it was addressed by (docs/admin-ui.md § Series shape). Every
- * field below is a sum or a count, so any surface that wants per-model totals
- * re-aggregates these rows exactly — but the charts and the metric cards read
- * `series[]`, which stays per-model, and only the By-model table renders the
- * split.
+ * Same **(provider, model)** grain as the series, summed over the whole range:
+ * requests served by different accounts, and requests addressed through a
+ * group alias, fold into one row (docs/admin-ui.md § Series shape). The
+ * per-request account and alias detail lives on the Logs page. Every field
+ * below is a sum or a count, so any surface that wants per-model totals
+ * re-aggregates these rows exactly.
  */
 export type ModelUsageRow = {
   provider: string
   model: string
-  /** Account that served these requests; `null` when the log row has none. */
-  account_id: string | null
-  /**
-   * Display label resolved at read time and never stored — so `account_id` set
-   * with a **null** label is an account that has since been deleted.
-   */
-  account_label: string | null
-  /** The group alias the requests were addressed to; `null` for direct calls. */
-  group_name: string | null
   requests: number
   errors: number
   prompt_tokens: number
@@ -357,6 +347,57 @@ export type UsageSummary = {
   /** Sorted by total tokens desc (server-side). */
   models: ModelUsageRow[]
   series: UsageSeriesPoint[]
+}
+
+// Request log explorer — GET /api/logs. See docs/admin-ui.md § Logs page.
+
+/**
+ * Which kind of upstream served the request: a builtin subscription pool
+ * (`oauth`) or a custom endpoint (`api`). Derived server-side from the
+ * provider, never stored — so the client keeps no builtin list of its own.
+ */
+export type LogUsageType = "oauth" | "api"
+
+/**
+ * One `request_logs` row, as the log explorer reads it.
+ *
+ * Nullable fields are *unreported*, not zero (docs/database.md): a token count
+ * or a cost of `null` renders as an em dash, never as 0. `account_label` and
+ * `api_key_name` are resolved at read time and never stored, so an id set with
+ * a **null** name is a record deleted since the request ran — a state the UI
+ * has to show, not drop.
+ */
+export type RequestLogRow = {
+  id: string
+  created_at: string
+  provider: string
+  /** Canonical `provider/model` id — the expanded target, even when a group alias was called. */
+  model: string
+  /** The group alias the client addressed; `null` for a direct call. */
+  group_name: string | null
+  account_id: string | null
+  account_label: string | null
+  api_key_id: string | null
+  api_key_name: string | null
+  usage_type: LogUsageType
+  status_code: number
+  /** Last upstream status seen; `null` when no upstream answered (docs/logging.md). */
+  upstream_status: number | null
+  error_code: string | null
+  latency_ms: number
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  cache_read_input_tokens: number | null
+  cache_creation_input_tokens: number | null
+  /** Estimated USD, filled at read time; `null` = unpriced (docs/pricing.md). */
+  cost: number | null
+}
+
+export type LogsResponse = {
+  /** Newest first. */
+  rows: RequestLogRow[]
+  /** Opaque keyset token for the next page; `null` = end of the list. Never parsed client-side. */
+  next_cursor: string | null
 }
 
 // Changelog — GET /api/changelog. See docs/changelog.md.

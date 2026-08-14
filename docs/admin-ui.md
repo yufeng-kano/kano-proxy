@@ -9,6 +9,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 | `/` | Redirect to overview or login |
 | `/login` | Google sign-in (split brand panel + sign-in panel) |
 | `/overview` | Usage and cache-rate dashboard over `request_logs` |
+| `/logs` | Per-request log explorer over `request_logs` — newest first, cursor-paged |
 | `/providers` | Connected subscription accounts (Claude / Codex / Grok) and custom endpoints, one section per provider |
 | `/models` | Searchable catalog of `provider/model` ids, grouped by provider |
 | `/groups` | Model groups: bare-name aliases → ordered `provider/model` targets |
@@ -65,7 +66,7 @@ Three breakpoints, and no more: `640` (phone), `768` (tables), `1080` (shell). T
 | ≥ 1080px | Full sidebar (248px) + content |
 | < 1080px | Sidebar becomes a slide-in drawer behind a header menu button |
 
-No icon rail and no bottom tab bar. With six destinations the text labels are what make the nav scannable, so a rail would trade legibility for width the content does not need; a bottom bar would cost 56px of the scarcest axis on a phone and read as a mobile app rather than a web app.
+No icon rail and no bottom tab bar. With seven destinations the text labels are what make the nav scannable, so a rail would trade legibility for width the content does not need; a bottom bar would cost 56px of the scarcest axis on a phone and read as a mobile app rather than a web app.
 
 - Tables below 768px render as stacked cards (label + value rows), not horizontal scroll — a horizontally scrolling table on a phone hides the columns that matter. `DataTable` does this; a hand-rolled table does not.
 - Stat tiles reflow on **container** width, not viewport width: the sidebar's presence changes the content width, and a viewport media query gets that wrong at every shell state. The hero (cache rate) spans two columns until the layout drops to two.
@@ -151,7 +152,7 @@ A background poll against upstream billing APIs must not run for a page nobody i
 
 Server **data** caches (above) and **view preferences** — what the user picked, not what the server said — both persist in `localStorage`, but stay separate modules: data entries are user-id-scoped versioned envelopes swept on logout, while preferences live under a single `kano-proxy:prefs` key that survives logout so a reopened tab lands where the user left off.
 
-- Stored: last visited route path, per-route scroll offset **of the content region**, the Overview range (24h/7d/30d) and activity view (tokens / requests / cache / models), and the Providers and Models pages' active provider tab.
+- Stored: last visited route path, per-route scroll offset **of the content region**, the Overview range (24h/7d/30d) and activity view (tokens / requests / cache / models), and the Providers, Models, and Logs pages' active provider filter.
 - **Never** stores tokens, session state, emails, or any server payload — only enum-ish UI choices and integers. Unlike the server-data caches it is therefore **not** user-id scoped and **not** swept on logout: it holds nothing user-identifying, and a shared machine reveals only a route name.
 - Every read is validated against the current allowed values and falls back to the default on anything unexpected (stale schema, hand-edited storage, removed route). A malformed blob is discarded, never trusted.
 - Restore-on-boot only replays a route the router still knows and the signed-in user may see; the auth guard runs unchanged, so a persisted path never bypasses login.
@@ -166,7 +167,7 @@ Route `/overview`; signed-in `/` redirects here. Data source: `GET /api/usage/su
 - **Activity card** (row 2): one card, sub-tabs — **Tokens** / **Requests** / **Cache** / **By model**:
   - **Tokens** (default), **Requests**: full-width stacked-column chart of that metric per bucket, one segment per model.
   - **Cache**: stacked cached vs uncached input tokens per bucket (two fixed series: `--chart-input` cached, `--chart-input-soft` uncached), so cache savings read at a glance.
-  - **By model**: the detailed table — requests, errors, input/output tokens, cache read/write, cache rate, spend; sorted by total tokens desc, scrolling inside the card with a sticky header. When cache data covers only part of a model's requests, the coverage is annotated instead of silently mixed. Each row is one **(model, account, group-alias)** split: an **Account** column shows the serving account's display label (resolved server-side from `request_logs.account_id`; a deleted account renders a localized removed-account tag, a `NULL` account renders `—`), and a row whose requests were addressed to a model-group alias carries a localized "via {alias}" tag by the model id — this is what makes group traffic auditable ("which account/model actually served my alias") without leaving the dashboard.
+  - **By model**: the detailed table — requests, errors, input/output tokens, cache read/write, cache rate, spend; one row per **(provider, model)**, sorted by total tokens desc, scrolling inside the card with a sticky header. When cache data covers only part of a model's requests, the coverage is annotated instead of silently mixed. Requests addressed through a model-group alias count toward the **expanded** target's row, and traffic is summed across accounts — the dashboard aggregates what actually ran; the per-request account/alias detail lives on the [Logs page](#logs-page).
   - The card header carries the range's error count and average latency as compact secondary stats, so those metrics survived the tile removal.
 - Charts are hand-rolled inline SVG — **no charting dependency**; colors/typography from `styles.css` tokens only, legible in both themes. One shared `BarChart` primitive draws every stacked-column view (mini and full): dotted horizontal grid, nice ticks, thinned x labels (never rotated), fixed plot height, measured viewBox. Model identity uses `--series-1..6` + `--series-other`, assigned by the model's rank in the range totals so a model keeps its color across buckets and across the three metrics. Every chart ships a legend (full size), a hover/focus tooltip, and a table twin (the detail modal / By-model tab) so identity and values are never color-only.
 - Requests without usage data (`NULL` token fields — see [database.md](./database.md)) count toward request/error totals but are skipped by token/cache aggregates; the UI surfaces that coverage rather than hiding it.
@@ -175,7 +176,22 @@ Route `/overview`; signed-in `/` redirects here. Data source: `GET /api/usage/su
 
 `series[]` carries a per-model dimension so every stacked view needs no second request. Each point is one `(bucket, provider, model)` group: `bucket`, `provider`, `model`, `requests`, `prompt_tokens`, `completion_tokens`, `cache_read_input_tokens`, `cache_known_requests`, `cost` (estimated USD for that group, `null` when wholly unpriced). Sparse — only groups with at least one row; the client zero-fills the bucket grid and folds the model tail into "Other". Bucket-level totals are the client-side sum over a bucket's model points, not a separate field.
 
-The `models[]` breakdown is finer-grained than the series: one entry per **(provider, model, account_id, group_name)**, each also carrying `account_label` (resolved at read time — `custom_label` \|\| upstream label, `null` when the account was deleted or the row has no account) and `group_name` (the alias the request was addressed to, `null` for direct calls). Charts and the metric cards' top-model lists aggregate these entries client-side back to per-model totals (the fields are all sums and counts, so re-aggregation is exact); only the By-model table renders the full split. `account_label` is display data like the Providers page's — non-secret, cached under the same versioned envelope (bump `CACHE_SCHEMA_VERSION` when this shape changes so stale envelopes read as a miss). Series stays per-model: a per-account chart dimension would multiply series colors without a question it answers.
+The `models[]` breakdown is the same **(provider, model)** grain as the series, summed over the whole range: rows served by different accounts and rows addressed via a group alias fold into one entry — the summary carries no account or alias dimension at all (that per-request detail is the Logs page's job, `GET /api/logs`). A per-account/per-alias split multiplied table rows without a question the dashboard answers. Any change to this response shape bumps `CACHE_SCHEMA_VERSION` so stale cached envelopes read as a miss.
+
+## Logs page
+
+Route `/logs`, nav item **Logs** directly below Overview. Data source: `GET /api/logs` (session auth, [auth.md](./auth.md)) — a newest-first, cursor-paged listing of the caller's own `request_logs` rows. This is the per-request companion to Overview's aggregates: the account and group-alias detail the By-model table folds away lives here, as does the error evidence (`error_code`, `upstream_status`) that previously required `wrangler d1 execute --remote`.
+
+- **No live-provider scoping** — unlike the usage summary, rows from since-deleted custom endpoints and invalid-model junk prefixes still render. It is a log; hiding rows hurts diagnosis.
+- **One bounded card** filling the content region (same as Keys/Models), rows scrolling inside with a sticky header; a **Load more** control at the list's end appends the next page.
+- **Columns**: Time, Model (canonical `provider/model`, with the localized "via {alias}" tag when `group_name` is set), Account (resolved label; removed-account tag when the id no longer resolves; `—` when `NULL`), Type, Status, Input, Cache read, Cache write, Output, Cost, Latency. Numeric columns follow the shared centering rule; secondary columns hide on mobile (DataTable's card fallback carries the rest).
+- **Type** is derived server-side, never stored: `oauth` when `provider` is a builtin subscription pool, `api` otherwise (custom endpoints, including deleted ones) — the client keeps no builtin list of its own.
+- **Status** is never color-only: success rows show the HTTP status quietly; failure rows show the `error_code` as a badge. `upstream_status` renders in the row detail, since `status_code` alone hides it for eager streams ([logging.md](./logging.md)).
+- **Row detail**: clicking a row opens a modal with the row's full fields — timestamps, ids, API key name, `status_code` / `upstream_status` / `error_code`, the token and cost breakdown. There is no message content to show and none is fetched ([logging.md](./logging.md)).
+- **Filters** in the sticky header, both applied server-side: a provider filter (All + builtins + the user's live custom slugs; persists as a view preference like Models') and an errors-only toggle (`error_code` set or `status_code >= 400`).
+- **Pagination**: keyset cursor over `(created_at, id)` descending, page size 50 (max 100), covered by `request_logs_user_created_idx`. The response returns `{rows, next_cursor}`; a `null` cursor means the end.
+- Cache-first like every page: the **first page of the unfiltered view** caches under `kano-proxy:logs:{userId}` (standard 90s TTL, versioned envelope, logout sweep); filtered views and Load more results are fetched, not cached.
+- `cost` NULLs are filled at read time with the shared price-table resolver, same as the summary ([pricing.md](./pricing.md)); a row that stays unpriced renders `—`, never `$0.00`.
 
 ## Providers page
 

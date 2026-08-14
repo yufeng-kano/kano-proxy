@@ -82,4 +82,4 @@ Rules:
 - `count_tokens` requests log a row like any other request but never carry token fields (their response is an estimate, not consumption).
 - Wherever an OpenAI-shaped `usage` is normalized into `completion_tokens` (this table's `grok`/custom-openai row, and the `/anthropic`-surface conversion's `output_tokens`), `usage.completion_tokens_details.reasoning_tokens` is added in when the upstream reports it, so a reasoning-heavy turn is not under-counted. In practice this only ever fires for `grok` (`include_reasoning: true`, see [api.md](./api.md)) and any custom openai-format upstream that happens to report the same field — codex's own Responses-shaped usage has no equivalent and is unaffected.
 
-The Overview page aggregates these rows via `GET /api/usage/summary` (see [auth.md](./auth.md), [admin-ui.md](./admin-ui.md)).
+The Overview page aggregates these rows via `GET /api/usage/summary`, and the Logs page lists them per request via `GET /api/logs` (see [auth.md](./auth.md), [admin-ui.md](./admin-ui.md)).

@@ -9,6 +9,7 @@ import type {
   CustomProviderModelsMode,
   CustomProviderTestResult,
   LoginStart,
+  LogsResponse,
   ModelGroup,
   ModelGroupTargetInput,
   ModelsResponse,
@@ -399,6 +400,30 @@ export async function deleteModelGroup(id: string): Promise<void> {
 /** Aggregates over `request_logs` for the trailing `days` window. No server-side KV cache to bypass (D1 read is cheap and per-user), so there is no `refresh` param. */
 export async function getUsageSummary(days: UsageDays = 7): Promise<UsageSummary> {
   return request<UsageSummary>(`/api/usage/summary?days=${days}`)
+}
+
+// Request logs — session auth. See docs/admin-ui.md § Logs page.
+
+/**
+ * One page of the caller's own `request_logs` rows, newest first. `cursor` is
+ * the previous page's `next_cursor` and is passed straight back — it is opaque
+ * by contract, so nothing here reads inside it.
+ */
+export async function listLogs(params?: {
+  limit?: number
+  cursor?: string
+  /** Exact provider slug; omitted = every provider, including deleted ones. */
+  provider?: string
+  /** Only rows that failed (`error_code` set or `status_code >= 400`). */
+  errorsOnly?: boolean
+}): Promise<LogsResponse> {
+  const q = new URLSearchParams()
+  if (params?.limit !== undefined) q.set("limit", String(params.limit))
+  if (params?.cursor) q.set("cursor", params.cursor)
+  if (params?.provider) q.set("provider", params.provider)
+  if (params?.errorsOnly) q.set("errors", "1")
+  const query = q.toString()
+  return request<LogsResponse>(`/api/logs${query ? `?${query}` : ""}`)
 }
 
 // Changelog — session auth. See docs/changelog.md.

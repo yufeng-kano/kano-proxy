@@ -27,8 +27,6 @@ const ALLOWED_DAYS = new Set([1, 7, 30])
 type UsageLogRow = {
   provider: string
   model: string
-  account_id: string | null
-  group_name: string | null
   status_code: number
   latency_ms: number
   prompt_tokens: number | null
@@ -111,32 +109,18 @@ function accumulate(rows: UsageLogRow[]): Totals {
 type ModelTotals = {
   provider: string
   model: string
-  account_id: string | null
-  account_label: string | null
-  group_name: string | null
 } & Omit<Totals, "avg_latency_ms">
 
-/** Per (provider, model, account_id, group_name) breakdown, sorted by prompt+completion tokens desc. */
-function modelBreakdown(rows: UsageLogRow[], accountLabels: Map<string, string | null>): ModelTotals[] {
-  // The map key is only ever used for grouping identity, never parsed back
-  // apart — each value is carried alongside it in the group itself, so no
-  // separator choice can collide with an upstream model id. NULL dimensions
-  // use sentinels distinct from strings, including an empty string.
-  const groups = new Map<
-    string,
-    { provider: string; model: string; account_id: string | null; group_name: string | null; rows: UsageLogRow[] }
-  >()
+/** Per (provider, model) breakdown, sorted by prompt+completion tokens desc. */
+function modelBreakdown(rows: UsageLogRow[]): ModelTotals[] {
+  // The key is only used for grouping identity, never parsed back apart, so no
+  // separator choice can collide with an upstream model id.
+  const groups = new Map<string, { provider: string; model: string; rows: UsageLogRow[] }>()
   for (const row of rows) {
-    const key = `${row.provider}\u0000${row.model}\u0000${row.account_id === null ? "<null>" : `s:${row.account_id}`}\u0000${row.group_name === null ? "<null>" : `s:${row.group_name}`}`
+    const key = `${row.provider}\u0000${row.model}`
     let group = groups.get(key)
     if (!group) {
-      group = {
-        provider: row.provider,
-        model: row.model,
-        account_id: row.account_id,
-        group_name: row.group_name,
-        rows: [],
-      }
+      group = { provider: row.provider, model: row.model, rows: [] }
       groups.set(key, group)
     }
     group.rows.push(row)
@@ -144,14 +128,7 @@ function modelBreakdown(rows: UsageLogRow[], accountLabels: Map<string, string |
   const out: ModelTotals[] = []
   for (const group of groups.values()) {
     const { avg_latency_ms: _avgLatencyMs, ...rest } = accumulate(group.rows)
-    out.push({
-      provider: group.provider,
-      model: group.model,
-      account_id: group.account_id,
-      account_label: group.account_id === null ? null : accountLabels.get(group.account_id) ?? null,
-      group_name: group.group_name,
-      ...rest,
-    })
+    out.push({ provider: group.provider, model: group.model, ...rest })
   }
   out.sort((a, b) => b.prompt_tokens + b.completion_tokens - (a.prompt_tokens + a.completion_tokens))
   return out
@@ -242,7 +219,16 @@ export function filterToLiveProviders(
  * time, so pre-migration history still prices (docs/pricing.md). Stored
  * costs are never overwritten; a row that stays unpriced stays null.
  */
-export function fillEstimatedCosts(rows: UsageLogRow[], table: PriceTable | null): UsageLogRow[] {
+type CostLogRow = {
+  model: string
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  cache_read_input_tokens: number | null
+  cache_creation_input_tokens: number | null
+  cost: number | null
+}
+
+export function fillEstimatedCosts<T extends CostLogRow>(rows: T[], table: PriceTable | null): T[] {
   if (!table) return rows
   return rows.map((row) => {
     if (row.cost != null) return row
@@ -264,13 +250,12 @@ export function summarizeUsageRows(
   rows: UsageLogRow[],
   days: number,
   from: string,
-  accountLabels: Map<string, string | null> = new Map(),
 ): Record<string, unknown> {
   return {
     days,
     from,
     totals: accumulate(rows),
-    models: modelBreakdown(rows, accountLabels),
+    models: modelBreakdown(rows),
     series: buildSeries(rows, days),
   }
 }
@@ -287,7 +272,7 @@ usageRoutes.get("/summary", async (c) => {
 
   const from = new Date(Date.now() - days * 86_400_000).toISOString()
   const res = await c.env.DB.prepare(
-    `SELECT provider, model, account_id, group_name, status_code, latency_ms, prompt_tokens, completion_tokens,
+    `SELECT provider, model, status_code, latency_ms, prompt_tokens, completion_tokens,
             cache_read_input_tokens, cache_creation_input_tokens, cost, created_at
      FROM request_logs
      WHERE user_id = ? AND created_at >= ?
@@ -309,14 +294,5 @@ usageRoutes.get("/summary", async (c) => {
   let table = await getPriceTable(c.env)
   if (!table || !hasSourceTaggedPriceTables()) table = await refreshPriceTable(c.env)
   const priced = fillEstimatedCosts(scoped, table)
-  const accounts = await c.env.DB.prepare(
-    `SELECT id, custom_label, label FROM upstream_accounts WHERE user_id = ?`,
-  )
-    .bind(user.id)
-    .all<{ id: string; custom_label: string | null; label: string | null }>()
-  const accountLabels = new Map(
-    (accounts.results ?? []).map((account) => [account.id, account.custom_label || account.label || null]),
-  )
-
-  return c.json(summarizeUsageRows(priced, days, from, accountLabels))
+  return c.json(summarizeUsageRows(priced, days, from))
 })

@@ -30,6 +30,7 @@ export const en = {
 
   // --- Navigation ---------------------------------------------------------
   "nav.overview": "Overview",
+  "nav.logs": "Logs",
   "nav.providers": "Providers",
   "nav.models": "Models",
   "nav.groups": "Groups",
@@ -112,13 +113,6 @@ export const en = {
   "overview.detail.sum": "Sum",
   "overview.detail.caption": "{metric} per model over the range",
   "overview.models.model": "Model",
-  // The (model, account, alias) split. "via" names the alias a client actually
-  // sent, so a group's traffic can be told apart from a direct call to the same
-  // model; "Account removed" is the account that served it and is no longer
-  // connected — the requests still happened, so the row stays.
-  "overview.models.account": "Account",
-  "overview.models.via": "via {alias}",
-  "overview.models.accountRemoved": "Account removed",
   "overview.models.requests": "Requests",
   "overview.models.errors": "Errors",
   "overview.models.input": "Input",
@@ -130,6 +124,55 @@ export const en = {
   "overview.models.coverage": "on {known} of {total}",
   "overview.models.empty": "No model activity in this range",
   "overview.error.load": "Couldn't load your usage",
+
+  // --- Logs ---------------------------------------------------------------
+  "logs.title": "Logs",
+  "logs.subtitle": "Every request, newest first",
+  // Filters. "Errors" is the whole second option, so the group's name has to
+  // say what is being narrowed rather than repeating one of its options.
+  "logs.filter.provider": "Provider",
+  "logs.filter.allProviders": "All providers",
+  "logs.filter.show": "Show",
+  "logs.filter.showAll": "All",
+  "logs.filter.showErrors": "Errors",
+  "logs.column.time": "Time",
+  "logs.column.model": "Model",
+  "logs.column.account": "Account",
+  "logs.column.type": "Type",
+  "logs.column.status": "Status",
+  "logs.column.input": "Input",
+  "logs.column.cacheRead": "Cache read",
+  "logs.column.cacheWrite": "Cache write",
+  "logs.column.output": "Output",
+  "logs.column.cost": "Cost",
+  "logs.column.latency": "Latency",
+  // "via" names the alias the client actually sent, so a group's traffic reads
+  // apart from a direct call to the same model; "Account removed" is an
+  // account that has since been disconnected — the request still ran, so the
+  // row stays and says which part of it is gone.
+  "logs.via": "via {alias}",
+  "logs.accountRemoved": "Account removed",
+  "logs.type.oauth": "OAuth",
+  "logs.type.api": "API",
+  // The row's own control: the visible text is the timestamp, so the name it
+  // is given has to contain it verbatim (WCAG 2.5.3).
+  "logs.openDetail": "Details for {time}",
+  "logs.loadMore": "Load more",
+  "logs.detail.title": "Request detail",
+  "logs.detail.id": "Request id",
+  "logs.detail.provider": "Provider",
+  "logs.detail.alias": "Alias",
+  "logs.detail.account": "Account",
+  "logs.detail.apiKey": "API key",
+  "logs.detail.keyRemoved": "Key removed",
+  "logs.detail.upstreamStatus": "Upstream status",
+  "logs.detail.error": "Error",
+  "logs.empty.title": "No requests yet",
+  "logs.empty.body": "Once your clients start calling, every request shows up here.",
+  "logs.noResults.title": "No matching requests",
+  "logs.noResults.body": "Nothing matches the filters you picked.",
+  "logs.error.load": "Couldn't load your requests",
+  "logs.error.loadMore": "Couldn't load more requests",
 
   // --- Providers ----------------------------------------------------------
   "providers.title": "Providers",
