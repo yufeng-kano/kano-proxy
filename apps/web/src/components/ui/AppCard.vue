@@ -115,8 +115,33 @@ defineSlots<{
   padding: var(--space-5);
 }
 
+/*
+ * A flush body's content reaches the card's edge, so it also reaches the card's
+ * corners — and a child's background paints *over* the parent's rounded one. A
+ * table's sticky header is opaque by necessity (see DataTable), so a headerless
+ * card of rows shipped square top corners inside a rounded card. The body
+ * therefore carries the radius itself, on whichever ends it actually reaches,
+ * and clips to it. One pixel smaller than the card's: the border sits outside
+ * this box, and matching it exactly leaves a hairline of card showing through
+ * the curve.
+ */
 .card-body.flush {
   padding: 0;
+  overflow: hidden;
+}
+
+.card-body.flush:first-child {
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
+}
+
+.card-body.flush:last-child {
+  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
+}
+
+/* Both ends — the card is nothing but its body. Needs its own rule: the two
+   above would otherwise cancel each other's corners out. */
+.card-body.flush:first-child:last-child {
+  border-radius: calc(var(--radius) - 1px);
 }
 
 /* In a filling card the body is the scroll region. */
