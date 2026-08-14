@@ -31,6 +31,9 @@ export type CandidateFacts = {
   usable: boolean
   /** Epoch-ms this candidate is known unusable until (bench and/or an exhausted usage window), or `null` when nothing currently constrains it. */
   unusableUntil: number | null
+  /** Individual stored-state components behind `unusableUntil`, for route indicators. */
+  benchUntil: number | null
+  usageWindowUntil: number | null
 }
 
 export type OrderedCandidate = { candidate: RoutingCandidate; facts: CandidateFacts }

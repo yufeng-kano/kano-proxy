@@ -116,7 +116,7 @@ describe("candidateFacts", () => {
   it("neither benched nor limited: usable, unusableUntil null", async () => {
     const env = envWith(fakeKV())
     const facts = await candidateFacts(env, "user_1", candidateFor(accountRow()))
-    expect(facts).toEqual({ usable: true, unusableUntil: null })
+    expect(facts).toEqual({ usable: true, unusableUntil: null, benchUntil: null, usageWindowUntil: null })
   })
 
   it("benched only: unusable until the bench expiry", async () => {
@@ -138,7 +138,12 @@ describe("candidateFacts", () => {
       ]),
     })
     const facts = await candidateFacts(env, "user_1", candidateFor(row), now)
-    expect(facts).toEqual({ usable: false, unusableUntil: Date.parse("2026-06-01T05:00:00.000Z") })
+    expect(facts).toEqual({
+      usable: false,
+      unusableUntil: Date.parse("2026-06-01T05:00:00.000Z"),
+      benchUntil: null,
+      usageWindowUntil: Date.parse("2026-06-01T05:00:00.000Z"),
+    })
   })
 
   it("both benched and limited: unusable until whichever is later", async () => {

@@ -232,6 +232,7 @@ This flattens what used to be two layers (group target walk + in-pool acquire lo
 - `ordered`: keep candidate order — target index, then pool priority. Exactly the pre-refactor behavior.
 - Future strategies (usage-balanced, spend-aware) are additional implementations of the same narrow interface, selected by those config fields — no dispatch changes. The strategy context carries the API key id so a future balancer can implement session stickiness (switching accounts mid-conversation lands on a cold prompt cache — the reason balancing is deliberately not shipped yet).
 - Fallback when nothing is usable is unchanged in spirit: every candidate unusable → dispatch the first candidate that has an account anyway, so the client gets the normal `503 upstream_unavailable` + `Retry-After` (computed from the earliest bench/limit expiry across the candidates); no candidate has any bound account → `no_upstream_account`; nothing resolves at all → `invalid_model`.
+- **Mid-walk exhaustion is the same condition.** When every candidate the walk reached bench-failed and the list ran dry, dispatch synthesizes the same `503` + earliest-recovery `Retry-After` (recomputed after the walk's own benches) instead of passing the last upstream response through verbatim. One account's raw `429` — whose `Retry-After` can point at its weekly reset, days out — must never speak for a pool that recovers sooner: a downstream failover client honoring that header cools this whole gateway off for one account's window (observed 2026-08-14, 2.3 days). Non-bench statuses still pass through immediately, untouched ([api.md](./api.md) § Errors).
 
 **Penalties (feedback).** What a failed upstream response costs the account, decided in one place:
 
@@ -243,6 +244,8 @@ This flattens what used to be two layers (group target walk + in-pool acquire lo
 | Any other non-2xx | no bench; passthrough / in-stream error, as before |
 
 Failover never crosses users. Custom providers participate identically (pooled under their slug; `provider_settings` rows keyed by the slug).
+
+The same facts also power the admin **current-route indicator**: `GET /api/model-groups` computes per-target usability and the target the ordered walk would pick right now from stored state only (KV bench + usage snapshots — never a synchronous upstream call), so the Groups page shows exactly what the router itself would decide with the same information ([auth.md](./auth.md), [admin-ui.md](./admin-ui.md) § Groups page).
 
 ## Catalog
 

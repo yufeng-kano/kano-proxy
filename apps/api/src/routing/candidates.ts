@@ -52,7 +52,7 @@ function adapterFor(isBuiltin: boolean, provider: string, customProvider?: Custo
  * scoped to `userId` — a target whose prefix no longer resolves (e.g. a
  * deleted custom provider) returns `null` and is simply omitted.
  */
-async function resolveTargetPrefix(
+export async function resolveTargetPrefix(
   env: Env,
   userId: string,
   targetIndex: number,
@@ -131,7 +131,7 @@ async function pinnedCandidateFor(
 }
 
 /** Candidates for one already-resolved target, honoring pinning. */
-async function candidatesForTarget(env: Env, userId: string, target: ResolvedTarget): Promise<RoutingCandidate[]> {
+export async function candidatesForTarget(env: Env, userId: string, target: ResolvedTarget): Promise<RoutingCandidate[]> {
   if (target.accountId) {
     const c = await pinnedCandidateFor(env, userId, target)
     return c ? [c] : []

@@ -726,6 +726,74 @@ describe("dispatchAnthropicMessages — all-benched pool → 503 + Retry-After, 
   })
 })
 
+describe("dispatch candidate-walk exhaustion", () => {
+  it("turns two OpenAI 429s into the standard non-stream 503 and keeps the last candidate in the log", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions() {
+        return new Response('{"error":{"message":"limited"}}', { status: 429 })
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {},
+      req: { model: "grok/grok-4.5", rawModel: "grok/grok-4.5", upstreamModel: "grok-4.5", messages: [], rawBody: {} },
+    })
+
+    expect(res.status).toBe(503)
+    expect(res.headers.get("retry-after")).not.toBeNull()
+    expect(await res.json()).toMatchObject({ error: { code: "upstream_unavailable" } })
+    expect(db.rows("request_logs")[0]).toMatchObject({ account_id: "acc_2", status_code: 503, error_code: "upstream_unavailable" })
+  })
+
+  it("turns two OpenAI 429s into the standard eager-stream terminal error frame", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    const { waitUntil, drain } = collectWaitUntil()
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions() {
+        return new Response('{"error":{"message":"limited"}}', { status: 429 })
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil,
+      req: { model: "grok/grok-4.5", rawModel: "grok/grok-4.5", upstreamModel: "grok-4.5", messages: [], stream: true, rawBody: {} },
+    })
+
+    expect(res.status).toBe(200)
+    expect(await drainBody(res.body)).toContain('"code":"upstream_unavailable"')
+    await drain()
+    expect(db.rows("request_logs")[0]).toMatchObject({ account_id: "acc_2", error_code: "upstream_unavailable" })
+  })
+
+  it("passes a non-bench 400 through verbatim without trying a later candidate", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    let calls = 0
+    const res = await dispatchChatCompletions(buildEnv(db), {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", waitUntil: () => {},
+      adapter: {
+        id: "grok",
+        async chatCompletions() {
+          calls++
+          return new Response("upstream says no", { status: 400, headers: { "content-type": "text/plain" } })
+        },
+      },
+      req: { model: "grok/grok-4.5", rawModel: "grok/grok-4.5", upstreamModel: "grok-4.5", messages: [], rawBody: {} },
+    })
+
+    expect(res.status).toBe(400)
+    expect(await res.text()).toBe("upstream says no")
+    expect(calls).toBe(1)
+  })
+})
+
 describe("dispatchChatCompletions — bottom-of-loop 503 also carries Retry-After (Item 2)", () => {
   it("8 consecutive 429s from a pool of 8 accounts exhaust the loop; the final 503 carries Retry-After from the just-benched accounts", async () => {
     const db = new FakeD1()

@@ -52,7 +52,12 @@ export async function candidateFacts(
   const windowUntil = usageWindowUnusableUntil(candidate.account, now)
   const unusableUntil =
     benchUntil === null ? windowUntil : windowUntil === null ? benchUntil : Math.max(benchUntil, windowUntil)
-  return { usable: unusableUntil === null, unusableUntil }
+  return {
+    usable: unusableUntil === null,
+    unusableUntil,
+    benchUntil,
+    usageWindowUntil: windowUntil,
+  }
 }
 
 /** Facts for a whole candidate list, in the same order — one KV read per candidate, in parallel. */

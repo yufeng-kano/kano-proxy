@@ -387,17 +387,14 @@ async function dispatchChatCompletionsEager(env: Env, opts: ChatCompletionsOpts)
 
       headersLatencyMs = Date.now() - started
       if (ranOutOfCandidates && lastResponse) {
-        // Ran out of candidates (mirrors the old `acquireAccount` returning
-        // null after everyone tried is excluded) — pass the last upstream
-        // response through verbatim rather than synthesizing 503.
-        forcedErrorCode = "upstream_error"
-        const text = await safeResponseText(lastResponse)
+        try {
+          await lastResponse.body?.cancel()
+        } catch {
+          /* */
+        }
+        forcedErrorCode = "upstream_unavailable"
         ctl.fail(
-          openaiStreamErrorFrame(
-            messageFromUpstreamErrorBody(text, "upstream error"),
-            openaiErrorTypeFromBody(text),
-            "upstream_error",
-          ),
+          openaiStreamErrorFrame("All upstream accounts unavailable", "api_error", "upstream_unavailable"),
         )
         return
       }
@@ -588,20 +585,27 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
   }
 
   if (ranOutOfCandidates && lastResponse && lastCandidate) {
-    // Ran out of candidates — pass the last upstream response through
-    // verbatim, exactly like the old `acquireAccount`-returns-null path.
+    try {
+      await lastResponse.body?.cancel()
+    } catch {
+      /* */
+    }
+    const untilMs = await recomputeUnavailableUntil(env, opts.userId, plan.ordered.slice(0, idx))
     await logRequest(env, {
       userId: opts.userId,
       apiKeyId: opts.apiKeyId,
       provider: lastCandidate.provider,
       model: canonicalModelId(lastCandidate.provider, lastCandidate.upstreamModel),
       accountId: lastCandidate.account.id,
-      statusCode: lastResponse.status,
+      statusCode: 503,
       latencyMs: Date.now() - started,
-      errorCode: "upstream_error",
+      errorCode: "upstream_unavailable",
       groupName: opts.groupName ?? null,
     })
-    return lastResponse
+    return upstreamUnavailableResponse(
+      { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
+      untilMs,
+    )
   }
 
   // Attempt cap reached with only bench continues (or the remainder of the
@@ -819,14 +823,13 @@ async function dispatchAnthropicMessagesEager(env: Env, opts: AnthropicMessagesO
 
       headersLatencyMs = Date.now() - started
       if (ranOutOfCandidates && lastResponse) {
-        forcedErrorCode = "upstream_error"
-        const text = await safeResponseText(lastResponse)
-        ctl.fail(
-          anthropicStreamErrorFrame(
-            messageFromUpstreamErrorBody(text, "upstream error"),
-            anthropicErrorTypeFromBody(text),
-          ),
-        )
+        try {
+          await lastResponse.body?.cancel()
+        } catch {
+          /* */
+        }
+        forcedErrorCode = "upstream_unavailable"
+        ctl.fail(anthropicStreamErrorFrame("upstream_unavailable", "api_error"))
         return
       }
       forcedErrorCode = "upstream_unavailable"
@@ -1022,18 +1025,27 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
   }
 
   if (ranOutOfCandidates && lastResponse && lastCandidate) {
+    try {
+      await lastResponse.body?.cancel()
+    } catch {
+      /* */
+    }
+    const untilMs = await recomputeUnavailableUntil(env, opts.userId, plan.ordered.slice(0, idx))
     await logRequest(env, {
       userId: opts.userId,
       apiKeyId: opts.apiKeyId,
       provider: lastCandidate.provider,
       model: canonicalModelId(lastCandidate.provider, lastCandidate.upstreamModel),
       accountId: lastCandidate.account.id,
-      statusCode: lastResponse.status,
+      statusCode: 503,
       latencyMs: Date.now() - started,
-      errorCode: "upstream_error",
+      errorCode: "upstream_unavailable",
       groupName: opts.groupName ?? null,
     })
-    return lastResponse
+    return upstreamUnavailableResponse(
+      { type: "error", error: { type: "api_error", message: "upstream_unavailable" } },
+      untilMs,
+    )
   }
 
   const untilMs = await recomputeUnavailableUntil(env, opts.userId, plan.ordered.slice(0, idx))

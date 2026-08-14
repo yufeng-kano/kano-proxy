@@ -17,7 +17,10 @@ import {
   type GroupTarget,
   type ModelGroupRow,
 } from "../db/model_groups"
-import { isProviderId } from "../env"
+import { isProviderId, type Env } from "../env"
+import { candidatesForTarget, resolveTargetPrefix } from "../routing/candidates"
+import { candidateFactsList, earliestUnusableUntil } from "../routing/facts"
+import type { CandidateFacts } from "../routing/types"
 import { DEFAULT_STRATEGY } from "../routing/strategy"
 import {
   MAX_MODEL_GROUPS_PER_USER,
@@ -69,20 +72,53 @@ async function accountLabel(db: D1Database, userId: string, accountId: string | 
   return row.custom_label || row.label || null
 }
 
-async function toListItem(
-  db: D1Database,
-  userId: string,
-  row: ModelGroupRow,
-): Promise<Record<string, unknown>> {
-  const aliasRows = await listAliasesForGroup(db, row.id)
+type TargetRouting = {
+  usable: boolean
+  reason: "benched" | "limit" | "unresolved" | "no_account" | null
+  unusable_until: string | null
+}
+
+function reasonForFacts(facts: CandidateFacts): "benched" | "limit" {
+  // A bench that lasts at least as long as the usage window is the effective
+  // blocker. This also makes equal expiries deterministic.
+  if (facts.benchUntil !== null && (facts.usageWindowUntil === null || facts.benchUntil > facts.usageWindowUntil)) {
+    return "benched"
+  }
+  return "limit"
+}
+
+async function routingForTarget(env: Env, userId: string, index: number, target: GroupTarget): Promise<TargetRouting> {
+  const resolved = await resolveTargetPrefix(env, userId, index, target)
+  if (!resolved) return { usable: false, reason: "unresolved", unusable_until: null }
+
+  const candidates = await candidatesForTarget(env, userId, resolved)
+  if (candidates.length === 0) return { usable: false, reason: "no_account", unusable_until: null }
+
+  const facts = await candidateFactsList(env, userId, candidates)
+  if (facts.some((fact) => fact.usable)) return { usable: true, reason: null, unusable_until: null }
+
+  const untilMs = earliestUnusableUntil(facts)
+  const blockingFact = facts.find((fact) => fact.unusableUntil === untilMs)!
+  return {
+    usable: false,
+    reason: reasonForFacts(blockingFact),
+    unusable_until: untilMs === null ? null : new Date(untilMs).toISOString(),
+  }
+}
+
+async function toListItem(env: Env, userId: string, row: ModelGroupRow): Promise<Record<string, unknown>> {
+  const aliasRows = await listAliasesForGroup(env.DB, row.id)
   const targets = parseGroupTargets(row.targets_json)
-  const enriched = await Promise.all(
-    targets.map(async (t) => ({
-      model: t.model,
-      account_id: t.account_id,
-      account_label: await accountLabel(db, userId, t.account_id),
-    })),
-  )
+  const [enriched, routingTargets] = await Promise.all([
+    Promise.all(
+      targets.map(async (t) => ({
+        model: t.model,
+        account_id: t.account_id,
+        account_label: await accountLabel(env.DB, userId, t.account_id),
+      })),
+    ),
+    Promise.all(targets.map((target, index) => routingForTarget(env, userId, index, target))),
+  ])
   return {
     id: row.id,
     name: row.name,
@@ -93,6 +129,13 @@ async function toListItem(
     // identical since `ordered` is the only writable value, but the read
     // API should still surface exactly what's stored.
     strategy: row.strategy ?? DEFAULT_STRATEGY,
+    routing: {
+      current_target_index: (() => {
+        const index = routingTargets.findIndex((target) => target.usable)
+        return index === -1 ? null : index
+      })(),
+      targets: routingTargets,
+    },
     created_at: row.created_at,
     updated_at: row.updated_at,
   }
@@ -102,7 +145,7 @@ modelGroupRoutes.get("/", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
   const rows = await listModelGroups(c.env.DB, user.id)
-  const groups = await Promise.all(rows.map((r) => toListItem(c.env.DB, user.id, r)))
+  const groups = await Promise.all(rows.map((r) => toListItem(c.env, user.id, r)))
   return c.json({ groups })
 })
 
@@ -158,7 +201,7 @@ modelGroupRoutes.post("/", async (c) => {
     strategy: strategy as string,
   })
   await replaceAliases(c.env.DB, { userId: user.id, groupId: row.id, aliases: aliasesRes.aliases })
-  return c.json(await toListItem(c.env.DB, user.id, row), 201)
+  return c.json(await toListItem(c.env, user.id, row), 201)
 })
 
 modelGroupRoutes.put("/:id", async (c) => {
@@ -220,7 +263,7 @@ modelGroupRoutes.put("/:id", async (c) => {
     await replaceAliases(c.env.DB, { userId: user.id, groupId: id, aliases })
   }
   const updated = await getModelGroupById(c.env.DB, user.id, id)
-  return c.json(await toListItem(c.env.DB, user.id, updated ?? existing))
+  return c.json(await toListItem(c.env, user.id, updated ?? existing))
 })
 
 modelGroupRoutes.delete("/:id", async (c) => {

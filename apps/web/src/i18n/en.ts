@@ -110,6 +110,13 @@ export const en = {
   "overview.detail.sum": "Sum",
   "overview.detail.caption": "{metric} per model over the range",
   "overview.models.model": "Model",
+  // The (model, account, alias) split. "via" names the alias a client actually
+  // sent, so a group's traffic can be told apart from a direct call to the same
+  // model; "Account removed" is the account that served it and is no longer
+  // connected — the requests still happened, so the row stays.
+  "overview.models.account": "Account",
+  "overview.models.via": "via {alias}",
+  "overview.models.accountRemoved": "Account removed",
   "overview.models.requests": "Requests",
   "overview.models.errors": "Errors",
   "overview.models.input": "Input",
@@ -337,6 +344,16 @@ export const en = {
   "groups.account.any": "Any account",
   "groups.account.missing": "Account removed",
   "groups.account.skipped": "Skipped until you pick another account",
+  // --- Where the next request goes. "Current" marks the target the group
+  // would dispatch to right now; the rest say why a target is being skipped,
+  // in the user's terms ("Paused", not "benched") and with the time it comes
+  // back where that is known.
+  "groups.route.current": "Current",
+  "groups.route.limitUntil": "Limit reached · resumes {when}",
+  "groups.route.pausedUntil": "Paused · resumes {when}",
+  "groups.route.unavailable": "Unavailable",
+  "groups.route.unresolved": "This model can't be reached anymore",
+  "groups.route.noAccount": "No account can take this",
   "groups.dialog.accountLabel": "Account for {target}",
   // --- Picker: providers across the top, accounts down the side, models in
   // the middle. Each label names the region it heads, so the three read as one

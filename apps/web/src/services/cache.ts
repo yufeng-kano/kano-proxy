@@ -45,9 +45,12 @@ export const CACHE_TTL_MS = 90_000
  * grew `account_id` — a v4 entry has none, so the Groups picker would show
  * every endpoint as having no account to pin. v6: a model group's `name` became
  * a display label and its callable ids moved to `aliases` — a v5 entry has no
- * aliases, so every row would render an empty Aliases column.
+ * aliases, so every row would render an empty Aliases column. v7: usage
+ * summaries split their per-model rows by account and group alias, and model
+ * groups grew `routing` — a v6 entry has neither, so the By-model table would
+ * hold rows with no account and the group rows no current-route indicator.
  */
-const CACHE_SCHEMA_VERSION = 6
+const CACHE_SCHEMA_VERSION = 7
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

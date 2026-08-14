@@ -34,7 +34,12 @@ import {
   readModelsCache,
   writeModelsCache,
 } from "@/services/cache"
-import type { CatalogModel, ModelGroup, ModelGroupTarget } from "@/types"
+import type {
+  CatalogModel,
+  ModelGroup,
+  ModelGroupTarget,
+  ModelGroupTargetRouting,
+} from "@/types"
 
 const { t, format } = useI18n()
 const { user } = useAuth()
@@ -82,6 +87,66 @@ function targetKey(target: ModelGroupTarget, index: number): string {
  */
 function isMissingAccount(target: ModelGroupTarget): boolean {
   return !!target.account_id && !target.account_label
+}
+
+/**
+ * Current-route indicator (docs/admin-ui.md § Groups page). `routing` is
+ * index-aligned with `targets` and computed from the same stored facts
+ * dispatch uses, so it says what the next request would actually do.
+ *
+ * It is optional throughout: a cache entry written before the field existed
+ * has none, and the rows then render exactly as they used to instead of
+ * breaking on a missing index.
+ */
+function routingFor(group: ModelGroup, index: number): ModelGroupTargetRouting | null {
+  return group.routing?.targets?.[index] ?? null
+}
+
+function isCurrentTarget(group: ModelGroup, index: number): boolean {
+  return group.routing?.current_target_index === index
+}
+
+function isUnusable(group: ModelGroup, index: number): boolean {
+  return routingFor(group, index)?.usable === false
+}
+
+/**
+ * Why this target cannot take a request, in the user's own terms — the text is
+ * the state, the warning tone only reinforces it.
+ *
+ * Without `routing` (stale cache) the one fact the payload still carries is a
+ * pin whose account is gone, which keeps its long-standing note.
+ */
+function unusableReason(group: ModelGroup, target: ModelGroupTarget, index: number): string | null {
+  const routing = routingFor(group, index)
+  if (!routing) return isMissingAccount(target) ? t("groups.account.skipped") : null
+  if (routing.usable) return null
+
+  const until = routing.unusable_until
+  switch (routing.reason) {
+    case "limit":
+      return until
+        ? t("groups.route.limitUntil", { when: format.relative(until) })
+        : t("groups.route.unavailable")
+    case "benched":
+      return until
+        ? t("groups.route.pausedUntil", { when: format.relative(until) })
+        : t("groups.route.unavailable")
+    case "unresolved":
+      return t("groups.route.unresolved")
+    // A pin whose account is gone is the same fact the account tag beside it
+    // already names, so that case keeps the note that says how to fix it.
+    case "no_account":
+      return isMissingAccount(target) ? t("groups.account.skipped") : t("groups.route.noAccount")
+    default:
+      return t("groups.route.unavailable")
+  }
+}
+
+/** Exact recovery time behind the relative one, same as the Updated column. */
+function unusableTitle(group: ModelGroup, index: number): string | undefined {
+  const until = routingFor(group, index)?.unusable_until
+  return until ? format.dateTime(until) : undefined
 }
 
 onMounted(() => void load())
@@ -243,28 +308,44 @@ async function copyAlias(alias: string) {
 
              Each entry is position + model + its account, the account as a tag
              so the later balancing facts (weight, live usage) join it as more
-             tags on the same line instead of forcing a new shape. -->
+             tags on the same line instead of forcing a new shape.
+
+             The routing facts join them there: a Current badge on the target
+             the next request would take, and a reason on any target that
+             cannot take one. -->
         <template #cell-targets="{ row }">
           <ol class="targets">
             <li
               v-for="(target, index) in row.targets"
               :key="targetKey(target, index)"
               class="target"
+              :class="{ unusable: isUnusable(row, index) }"
             >
               <span class="pos tabular">{{ index + 1 }}</span>
               <span class="target-body">
                 <code class="mono">{{ target.model }}</code>
                 <span class="facts">
-                  <!-- A pin whose account is gone: warned, and told what it
-                       costs — that target is skipped at request time. -->
-                  <template v-if="isMissingAccount(target)">
-                    <Badge tone="warn">{{ t("groups.account.missing") }}</Badge>
-                    <span class="fact-note">{{ t("groups.account.skipped") }}</span>
-                  </template>
+                  <!-- A pin whose account is gone still has to say which slot
+                       is broken — there is no label left to print. -->
+                  <Badge v-if="isMissingAccount(target)" tone="warn">
+                    {{ t("groups.account.missing") }}
+                  </Badge>
                   <Badge v-else-if="target.account_label" tone="neutral">
                     {{ target.account_label }}
                   </Badge>
                   <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
+
+                  <!-- What the next request would actually do. -->
+                  <Badge v-if="isCurrentTarget(row, index)" tone="accent">
+                    {{ t("groups.route.current") }}
+                  </Badge>
+                  <span
+                    v-if="unusableReason(row, target, index)"
+                    class="fact-note"
+                    :title="unusableTitle(row, index)"
+                  >
+                    {{ unusableReason(row, target, index) }}
+                  </span>
                 </span>
               </span>
             </li>
@@ -425,6 +506,13 @@ async function copyAlias(alias: string) {
   flex-wrap: wrap;
   gap: var(--space-1);
   min-width: 0;
+}
+
+/* A target that cannot take a request reads quieter than the ones that can.
+   The reason text beside it is what states that; the tone only reinforces it,
+   so the row still says everything with the colors stripped out. */
+.target.unusable .mono {
+  color: var(--faint);
 }
 
 .fact-note {

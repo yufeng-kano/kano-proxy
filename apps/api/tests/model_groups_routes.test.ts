@@ -158,6 +158,74 @@ describe("GET /api/model-groups", () => {
     const json = await readJson(res)
     expect(json.groups).toHaveLength(0)
   })
+
+  it("reports stored-state routing for resolved, unresolved, empty and pooled targets", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    seedCustomProvider(db, "user_1", "deleted-endpoint")
+    seedCustomProvider(db, "user_1", "empty-endpoint")
+    seedAccount(db, { id: "limited", userId: "user_1", provider: "claude-code" })
+    seedAccount(db, { id: "healthy", userId: "user_1", provider: "grok" })
+    seedAccount(db, { id: "pool-limited", userId: "user_1", provider: "codex" })
+    seedAccount(db, { id: "pool-healthy", userId: "user_1", provider: "codex" })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const reset = new Date(Date.now() + 60_000).toISOString()
+    for (const id of ["limited", "pool-limited"]) {
+      db.rows("upstream_accounts").find((row) => row.id === id)!.usage_snapshot_json = JSON.stringify({
+        windows: [{ utilization: 100, resets_at: reset }], error: null, stale: false, edgeBlocked: false,
+      })
+    }
+    await createGroup(env, cookie, {
+      targets: [
+        { model: "claude-code/first", account_id: "limited" },
+        { model: "grok/second", account_id: "healthy" },
+        "deleted-endpoint/model",
+        "codex/pooled",
+      ],
+    })
+    // Preserve formerly valid stored targets the write-time validator would reject today.
+    db.rows("custom_providers").splice(0, 1)
+    const group = db.rows("model_groups")[0]!
+    group.targets_json = JSON.stringify([
+      { model: "claude-code/first", account_id: "limited" },
+      { model: "grok/second", account_id: "healthy" },
+      { model: "deleted-endpoint/model", account_id: null },
+      { model: "claude-code/missing", account_id: "gone" },
+      { model: "codex/pooled", account_id: null },
+      { model: "empty-endpoint/no-pool", account_id: null },
+    ])
+
+    const json = await readJson(await modelGroupRoutes.request("/", req("GET", cookie), env))
+    expect(json.groups[0].routing).toMatchObject({
+      current_target_index: 1,
+      targets: [
+        { usable: false, reason: "limit", unusable_until: reset },
+        { usable: true, reason: null, unusable_until: null },
+        { usable: false, reason: "unresolved", unusable_until: null },
+        { usable: false, reason: "no_account", unusable_until: null },
+        { usable: true, reason: null, unusable_until: null },
+        { usable: false, reason: "no_account", unusable_until: null },
+      ],
+    })
+  })
+
+  it("labels a longer bench as benched when both bench and limit apply", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    seedAccount(db, { id: "acc", userId: "user_1", provider: "claude-code" })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const reset = Date.now() + 60_000
+    db.rows("upstream_accounts")[0]!.usage_snapshot_json = JSON.stringify({
+      windows: [{ utilization: 100, resets_at: new Date(reset).toISOString() }], error: null, stale: false, edgeBlocked: false,
+    })
+    await env.BENCH.put(`bench:user_1:claude-code:acc`, String(reset + 60_000))
+    await createGroup(env, cookie, { targets: [{ model: "claude-code/model", account_id: "acc" }] })
+
+    const json = await readJson(await modelGroupRoutes.request("/", req("GET", cookie), env))
+    expect(json.groups[0].routing.targets[0]).toMatchObject({ usable: false, reason: "benched" })
+  })
 })
 
 describe("POST /api/model-groups (create)", () => {

@@ -190,6 +190,32 @@ export type ModelGroupTarget = {
   account_label: string | null
 }
 
+/** Why a target cannot take a request right now; `null` while it can. */
+export type ModelGroupTargetReason = "benched" | "limit" | "unresolved" | "no_account"
+
+/**
+ * One target's live routing state, index-aligned with `targets`.
+ *
+ * `unusable_until` is an ISO timestamp, or `null` when the recovery time is
+ * unknown (and always for `unresolved` / `no_account`, which no clock fixes).
+ */
+export type ModelGroupTargetRouting = {
+  usable: boolean
+  reason: ModelGroupTargetReason | null
+  unusable_until: string | null
+}
+
+/**
+ * The current-route indicator (docs/admin-ui.md § Groups page): what the
+ * ordered walk would dispatch right now, computed server-side from the same
+ * stored facts dispatch uses. `current_target_index` is `null` when no target
+ * is usable.
+ */
+export type ModelGroupRouting = {
+  current_target_index: number | null
+  targets: ModelGroupTargetRouting[]
+}
+
 /**
  * A user-defined model group: one or more callable bare-name **aliases** over
  * an ordered list of targets. `GET /api/model-groups` item shape — see
@@ -208,6 +234,12 @@ export type ModelGroup = {
   targets: ModelGroupTarget[]
   /** How the group orders its targets. Absent (old cache entry) reads as `ordered`. */
   strategy?: RoutingStrategy
+  /**
+   * Live routing state per target. Optional because a cache entry written
+   * before the field existed has none — the rows then render without the
+   * current/unusable markers rather than breaking.
+   */
+  routing?: ModelGroupRouting
   created_at: string
   updated_at: string
 }
@@ -259,10 +291,30 @@ export type UsageTotals = {
   cost_known_requests: number
 }
 
-/** One row of the per-model breakdown. `model` is the full "provider/upstream" id. */
+/**
+ * One row of the per-model breakdown. `model` is the full "provider/upstream"
+ * id.
+ *
+ * The breakdown is finer than the series: one row per **(provider, model,
+ * account_id, group_name)**, so the same model appears once per account and
+ * once per alias it was addressed by (docs/admin-ui.md § Series shape). Every
+ * field below is a sum or a count, so any surface that wants per-model totals
+ * re-aggregates these rows exactly — but the charts and the metric cards read
+ * `series[]`, which stays per-model, and only the By-model table renders the
+ * split.
+ */
 export type ModelUsageRow = {
   provider: string
   model: string
+  /** Account that served these requests; `null` when the log row has none. */
+  account_id: string | null
+  /**
+   * Display label resolved at read time and never stored — so `account_id` set
+   * with a **null** label is an account that has since been deleted.
+   */
+  account_label: string | null
+  /** The group alias the requests were addressed to; `null` for direct calls. */
+  group_name: string | null
   requests: number
   errors: number
   prompt_tokens: number

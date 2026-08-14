@@ -620,9 +620,9 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
       buildEnv(db),
       execCtx,
     )
-    // The pinned account's own 429 passes straight through — no synthesized
-    // upstream_unavailable, and critically, no second attempt on the sibling.
-    expect(res.status).toBe(429)
+    // The one pinned candidate exhausted the walk, so it synthesizes the
+    // standard unavailable response; pinning still prevents a sibling retry.
+    expect(res.status).toBe(503)
     expect(seenAuth).toEqual(["Bearer token-pinned"])
 
     const rows = db.rows("request_logs")
@@ -631,8 +631,8 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
       provider: "claude-code",
       model: "claude-code/claude-opus-5",
       group_name: "opus",
-      status_code: 429,
-      error_code: "upstream_error",
+      status_code: 503,
+      error_code: "upstream_unavailable",
     })
   })
 
