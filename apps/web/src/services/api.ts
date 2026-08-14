@@ -191,6 +191,17 @@ export async function promoteAccount(
   )
 }
 
+/** Clears the KV bench so the account is eligible again. Not a lock. */
+export async function unpauseAccount(
+  provider: ProviderId,
+  id: string,
+): Promise<void> {
+  await request<{ ok: boolean }>(
+    `/api/providers/${provider}/accounts/${encodeURIComponent(id)}/unpause`,
+    { method: "POST" },
+  )
+}
+
 /** Display-only rename. `null` clears it and the row falls back to the upstream identity. */
 export async function renameAccount(
   provider: ProviderId,
@@ -305,6 +316,14 @@ export async function deleteCustomProvider(id: string): Promise<void> {
   await request<{ ok: boolean }>(`/api/custom-providers/${encodeURIComponent(id)}`, {
     method: "DELETE",
   })
+}
+
+/** Clears the KV bench so the endpoint is eligible again. Not a lock. */
+export async function unpauseCustomProvider(id: string): Promise<void> {
+  await request<{ ok: boolean }>(
+    `/api/custom-providers/${encodeURIComponent(id)}/unpause`,
+    { method: "POST" },
+  )
 }
 
 /**

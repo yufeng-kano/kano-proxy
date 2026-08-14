@@ -35,6 +35,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  resume: []
   edit: []
   remove: []
   moveUp: []
@@ -172,6 +173,15 @@ async function runTest() {
             <template #icon><ActionIcon name="arrow-down" /></template>
           </AppButton>
         </template>
+        <AppButton
+          v-if="provider.status === 'benched'"
+          size="sm"
+          :label="t('custom.resumeEndpoint', { name: provider.name })"
+          :disabled="busy || testing"
+          @click="emit('resume')"
+        >
+          {{ t("action.resume") }}
+        </AppButton>
         <AppButton
           size="sm"
           :label="t('custom.testEndpoint', { name: provider.name })"

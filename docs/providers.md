@@ -7,8 +7,9 @@ Per `(user_id, provider)`:
 1. **List** accounts with priority and metadata  
 2. **Acquire** highest-priority non-benched credential (refresh if needed)  
 3. **Bench** on upstream auth/limit/edge-timeout failures (KV) — statuses and durations in § Routing module below  
-4. **Promote** / **Remove**  
-5. **Usage snapshot** — cached **60s server-side in D1** on the `upstream_accounts` row, behind a single-flight lock. See "Usage cache" below.
+4. **Unpause** — operator clears that KV bench so the account is eligible again (admin REST; does not rewrite usage windows). See "Manual unpause" below.  
+5. **Promote** / **Remove**  
+6. **Usage snapshot** — cached **60s server-side in D1** on the `upstream_accounts` row, behind a single-flight lock. See "Usage cache" below.
 
 Timeouts: do not permanently shrink the pool on transport timeout alone when avoidable; prefer per-request exclude + retry.
 
@@ -244,6 +245,13 @@ This flattens what used to be two layers (group target walk + in-pool acquire lo
 | Any other non-2xx | no bench; passthrough / in-stream error, as before |
 
 Failover never crosses users. Custom providers participate identically (pooled under their slug; `provider_settings` rows keyed by the slug).
+
+**Manual unpause.** The operator can clear a bench immediately without waiting for its TTL — `POST /api/providers/:provider/accounts/:id/unpause` for a builtin account, `POST /api/custom-providers/:id/unpause` for a custom endpoint (clears every account row of that slug; one key today). Both are session-auth admin routes ([auth.md](./auth.md)); UI: [admin-ui.md](./admin-ui.md) § Providers page. The write is `clearBench` only — delete the KV key:
+
+- Idempotent: already-unpaused is still `200 {ok: true}`.
+- Does **not** rewrite `usage_snapshot_json`. A window still at `utilization ≥ 100` keeps the candidate unusable until that window's `resets_at` — that is a **limit**, not a pause (Providers shows Resume only for `status: "benched"`; Groups still shows "limit" for the window). Unpausing a 429-until-weekly-reset bench therefore restores the row's Paused badge but does not override a still-exhausted usage fact.
+- The next bench-status upstream response (401/402/403/429/520/522/524) re-benches as usual. Unpause is not a permanent override and does not change priority, tokens, or labels.
+- 404 when the id is not the caller's, or (builtins) the account's `provider` does not match the path.
 
 The same facts also power the admin **current-route indicator**: `GET /api/model-groups` computes per-target usability and the target the ordered walk would pick right now from stored state only (KV bench + usage snapshots — never a synchronous upstream call), so the Groups page shows exactly what the router itself would decide with the same information ([auth.md](./auth.md), [admin-ui.md](./admin-ui.md) § Groups page).
 

@@ -36,6 +36,8 @@ import {
   promoteAccount,
   removeAccount,
   setProviderStrategy,
+  unpauseAccount,
+  unpauseCustomProvider,
 } from "@/services/api"
 import { getProvidersPrefs, setProvidersPrefs } from "@/services/prefs"
 import {
@@ -246,6 +248,19 @@ async function refreshAll() {
   }
 }
 
+async function onResume(provider: ProviderId, id: string) {
+  busyId.value = id
+  actionError.value = null
+  try {
+    await unpauseAccount(provider, id)
+    await loadProvider(provider, { refresh: true })
+  } catch {
+    actionError.value = t("providers.error.resume")
+  } finally {
+    busyId.value = null
+  }
+}
+
 async function onPromote(provider: ProviderId, id: string) {
   busyId.value = id
   actionError.value = null
@@ -423,6 +438,19 @@ async function onCustomDragEnd() {
   await moveCustomProvider(from, to)
 }
 
+async function onResumeCustom(provider: CustomProvider) {
+  customBusyId.value = provider.id
+  actionError.value = null
+  try {
+    await unpauseCustomProvider(provider.id)
+    await customProviders.load({ refresh: true })
+  } catch {
+    actionError.value = t("custom.error.resume")
+  } finally {
+    customBusyId.value = null
+  }
+}
+
 async function onRemoveCustomProvider(provider: CustomProvider) {
   if (!confirm(t("custom.removeConfirm", { name: provider.name }))) return
   customBusyId.value = provider.id
@@ -569,6 +597,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               :account="account"
               :busy="busyId === account.id"
               :editing="isEditing(pid)"
+              @resume="onResume(pid, account.id)"
               @promote="onPromote(pid, account.id)"
               @rename="renaming = { provider: pid, account, identity: $event }"
               @remove="onRemove(pid, account.id)"
@@ -641,6 +670,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               :can-move-up="index > 0"
               :can-move-down="index < customProviders.state.data.length - 1"
               :dragging="draggingCustomId === provider.id"
+              @resume="onResumeCustom(provider)"
               @edit="openEditCustomDialog(provider)"
               @remove="onRemoveCustomProvider(provider)"
               @move-up="moveCustomProvider(index, index - 1)"

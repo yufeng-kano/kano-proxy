@@ -12,6 +12,7 @@ import {
 import { parseCodeHashState } from "../auth/pkce"
 import {
   acquireUsageLock,
+  getAccount,
   insertAccount,
   isUsageFresh,
   listAccounts,
@@ -31,7 +32,7 @@ import {
 import { fetchAndPersistUsage } from "../providers/usage_refresh"
 import { encryptJson } from "../crypto/token_crypto"
 import { isProviderId, type ProviderId } from "../env"
-import { isBenched } from "../pool/bench"
+import { clearBench, isBenched } from "../pool/bench"
 import type { StoredCredential } from "../pool/acquire"
 import { getAdapter } from "../providers"
 import { newId, nowIso } from "../utils/id"
@@ -258,6 +259,17 @@ providerRoutes.post("/:provider/accounts/:id/promote", async (c) => {
   if (!user) return c.json({ error: "unauthorized" }, 401)
   const ok = await promoteAccount(c.env.DB, user.id, c.req.param("id"))
   if (!ok) return c.json({ error: "not found" }, 404)
+  return c.json({ ok: true })
+})
+
+providerRoutes.post("/:provider/accounts/:id/unpause", async (c) => {
+  const user = await requireUser(c)
+  if (!user) return c.json({ error: "unauthorized" }, 401)
+  const provider = parseProvider(c.req.param("provider"))
+  if (!provider) return c.json({ error: "invalid provider" }, 400)
+  const row = await getAccount(c.env.DB, user.id, c.req.param("id"))
+  if (!row || row.provider !== provider) return c.json({ error: "not found" }, 404)
+  await clearBench(c.env, user.id, provider, row.id)
   return c.json({ ok: true })
 })
 

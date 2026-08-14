@@ -103,6 +103,7 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 | POST | `/api/providers/:provider/login/:id/complete` |
 | GET | `/api/providers/:provider/login/:id` |
 | POST | `/api/providers/:provider/accounts/:id/promote` |
+| POST | `/api/providers/:provider/accounts/:id/unpause` |
 | PATCH | `/api/providers/:provider/accounts/:id` |
 | DELETE | `/api/providers/:provider/accounts/:id` |
 | POST | `/api/providers/:provider/accounts/import` |
@@ -111,6 +112,8 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 `:provider` ∈ `claude-code` | `codex` | `grok`. `accounts/import` is a manual credential-ingest route (bootstrapping / tests) — same shape as a completed OAuth login, but the caller supplies `access_token` (and optional `refresh_token` / `expires_at` / `account_id` / `email` / `label`) directly instead of running the OAuth dance.
 
 `PATCH /api/providers/:provider/accounts/:id` renames an account: body `{custom_label: string | null}`, trimmed, max 64 chars, `null`/`""` clears it and falls back to the upstream identity. It touches **only** `custom_label` — never tokens, priority, or the upstream-synced `label` (see [database.md](./database.md)) — and returns `{ok: true, custom_label}`. 404 when the id is not the caller's.
+
+`POST /api/providers/:provider/accounts/:id/unpause` clears the KV bench for that account so it is eligible for acquire again ([providers.md](./providers.md) § Routing module "Manual unpause"). Session required. Returns `{ok: true}`. Idempotent when the account is not currently benched. 404 when the id is not the caller's **or** the row's `provider` does not match the path. Does not rewrite usage snapshots, tokens, priority, or labels — a still-exhausted usage window keeps the account unusable for routing until `resets_at`. The next bench-status upstream response re-benches it.
 
 `PATCH /api/providers/:provider` sets the pool's routing strategy: body `{strategy}` — `ordered` is the only accepted value today, anything else is `400` ([providers.md](./providers.md) § Routing module). Upserts the `provider_settings` row ([database.md](./database.md)) and returns `{ok: true, strategy}`. The current value rides on `GET /api/providers/:provider/accounts` as a top-level `strategy` field (defaulting to `ordered` when no row exists) — no separate read route.
 
@@ -126,6 +129,7 @@ Custom providers (BYO OpenAI-/Anthropic-compatible endpoint — see [providers.m
 | POST | `/api/custom-providers` | Create — body `{name, slug, format, base_url, api_key, models_mode?, manual_models?}`; inserts the provider row plus one `upstream_accounts` row |
 | PUT | `/api/custom-providers/:id` | Update — body `{name?, base_url?, api_key?, models_mode?, manual_models?}`; `slug`/`format` are immutable (`400` if a differing value is sent); omitted or empty `api_key` keeps the stored key; a non-empty `api_key` re-encrypts and replaces it in place (same account row) |
 | DELETE | `/api/custom-providers/:id` | Deletes the provider row and all its `upstream_accounts` rows (code-level cascade), then best-effort clears their bench keys |
+| POST | `/api/custom-providers/:id/unpause` | Clears the KV bench on every `upstream_accounts` row of that endpoint (one key today). `{ok: true}`. Idempotent when none are benched. 404 if the id is not the caller's. Same contract as the builtin unpause: does not touch the stored key, and the next bench-status upstream response re-benches |
 | PUT | `/api/custom-providers/order` | Reorder for display — body `{ids: string[]}` listing **every** one of the user's custom provider ids exactly once, in the desired order; renumbers `sort_order` densely in one transaction. `400` on a missing/extra/duplicate/foreign id (no partial write). Display only — routing is unaffected |
 | POST | `/api/custom-providers/test` | Connectivity probe — body either `{format, base_url, api_key}` (pre-save) or `{id, base_url?}` (saved provider, uses its stored key); always `200` with `{ok, ...}` — see [providers.md](./providers.md) for the outcome mapping |
 

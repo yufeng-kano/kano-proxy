@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createSession } from "../src/auth/session"
 import { decryptJson, encryptJson } from "../src/crypto/token_crypto"
 import type { Env } from "../src/env"
+import { benchKey, isBenched, markBenched } from "../src/pool/bench"
 import { providerRoutes } from "../src/routes/providers"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
@@ -59,7 +60,12 @@ async function readJson(res: Response): Promise<any> {
 async function seedAccount(
   db: FakeD1,
   userId: string,
-  opts: { id?: string; label?: string | null; customLabel?: string | null } = {},
+  opts: {
+    id?: string
+    label?: string | null
+    customLabel?: string | null
+    provider?: string
+  } = {},
 ): Promise<string> {
   const id = opts.id ?? "acc_1"
   const encryptedPayload = await encryptJson(TOKEN_KEY, { access_token: "tok_test" })
@@ -67,7 +73,7 @@ async function seedAccount(
     {
       id,
       user_id: userId,
-      provider: "claude-code",
+      provider: opts.provider ?? "claude-code",
       external_account_id: null,
       label: opts.label ?? "old-upstream-label",
       custom_label: opts.customLabel ?? null,
@@ -885,5 +891,130 @@ describe("PATCH /api/providers/:provider (docs/providers.md § Routing module)",
       await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
     )
     expect(afterPatch.strategy).toBe("ordered")
+  })
+})
+
+describe("POST /api/providers/:provider/accounts/:id/unpause", () => {
+  it("requires authentication", async () => {
+    const db = new FakeD1()
+    const env = buildEnv(db)
+
+    const res = await providerRoutes.request(
+      "/claude-code/accounts/acc_1/unpause",
+      req("POST"),
+      env,
+    )
+    expect(res.status).toBe(401)
+  })
+
+  it("400s on an invalid provider", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const res = await providerRoutes.request(
+      "/my-endpoint/accounts/acc_1/unpause",
+      req("POST", cookie),
+      env,
+    )
+    expect(res.status).toBe(400)
+    expect(await readJson(res)).toEqual({ error: "invalid provider" })
+  })
+
+  it("404s for a missing account id", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const res = await providerRoutes.request(
+      "/claude-code/accounts/acc_missing/unpause",
+      req("POST", cookie),
+      env,
+    )
+    expect(res.status).toBe(404)
+    expect(await readJson(res)).toEqual({ error: "not found" })
+  })
+
+  it("404s for another user's account id", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    seedUser(db, "user_2")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const accountId = await seedAccount(db, "user_2", { id: "acc_user_2" })
+    await markBenched(env, "user_2", "claude-code", accountId)
+
+    const res = await providerRoutes.request(
+      `/claude-code/accounts/${accountId}/unpause`,
+      req("POST", cookie),
+      env,
+    )
+    expect(res.status).toBe(404)
+    expect(await readJson(res)).toEqual({ error: "not found" })
+    expect(await isBenched(env, "user_2", "claude-code", accountId)).toBe(true)
+  })
+
+  it("404s when the account's provider does not match the path", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const accountId = await seedAccount(db, "user_1", { provider: "grok" })
+    await markBenched(env, "user_1", "grok", accountId)
+
+    const res = await providerRoutes.request(
+      `/claude-code/accounts/${accountId}/unpause`,
+      req("POST", cookie),
+      env,
+    )
+    expect(res.status).toBe(404)
+    expect(await readJson(res)).toEqual({ error: "not found" })
+    expect(await isBenched(env, "user_1", "grok", accountId)).toBe(true)
+    expect(await env.BENCH.get(benchKey("user_1", "claude-code", accountId))).toBeNull()
+  })
+
+  it("200 deletes the bench key and GET /accounts no longer reports benched", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const accountId = await seedAccount(db, "user_1")
+    await markBenched(env, "user_1", "claude-code", accountId)
+    expect(await isBenched(env, "user_1", "claude-code", accountId)).toBe(true)
+
+    const res = await providerRoutes.request(
+      `/claude-code/accounts/${accountId}/unpause`,
+      req("POST", cookie),
+      env,
+    )
+    expect(res.status).toBe(200)
+    expect(await readJson(res)).toEqual({ ok: true })
+    expect(await isBenched(env, "user_1", "claude-code", accountId)).toBe(false)
+    expect(await env.BENCH.get(benchKey("user_1", "claude-code", accountId))).toBeNull()
+
+    stubClaudeUsage("stored@example.com")
+    const get = await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
+    expect(get.status).toBe(200)
+    const json = await readJson(get)
+    expect(json.accounts[0].status).not.toBe("benched")
+  })
+
+  it("200 when the account is not currently benched", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const accountId = await seedAccount(db, "user_1")
+    expect(await isBenched(env, "user_1", "claude-code", accountId)).toBe(false)
+
+    const res = await providerRoutes.request(
+      `/claude-code/accounts/${accountId}/unpause`,
+      req("POST", cookie),
+      env,
+    )
+    expect(res.status).toBe(200)
+    expect(await readJson(res)).toEqual({ ok: true })
   })
 })

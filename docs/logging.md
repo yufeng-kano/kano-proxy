@@ -4,7 +4,7 @@
 
 - Auth events: login success/fail (user id / email), logout
 - Request metadata: user_id, api_key_id, provider, model, account_id, status, latency_ms, prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens, cost (estimated USD, [pricing.md](./pricing.md)), error_code
-- Pool: bench, promote, remove (ids only)
+- Pool: bench, unpause, promote, remove (ids only)
 
 ## Error codes
 

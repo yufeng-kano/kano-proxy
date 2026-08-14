@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { customProviderRoutes } from "../src/routes/custom_providers"
 import { createSession } from "../src/auth/session"
 import { decryptJson } from "../src/crypto/token_crypto"
-import { markBenched } from "../src/pool/bench"
+import { isBenched, markBenched } from "../src/pool/bench"
 import type { StoredCredential } from "../src/pool/acquire"
 import type { Env } from "../src/env"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
@@ -702,6 +702,82 @@ describe("DELETE /api/custom-providers/:id", () => {
     expect(res.status).toBe(404)
     expect(db.rows("custom_providers")).toHaveLength(1)
     expect(db.rows("upstream_accounts")).toHaveLength(1)
+  })
+})
+
+describe("POST /api/custom-providers/:id/unpause", () => {
+  it("requires auth", async () => {
+    const db = new FakeD1()
+    const res = await customProviderRoutes.request("/cprov_1/unpause", { method: "POST" }, buildEnv(db))
+    expect(res.status).toBe(401)
+  })
+
+  it("404s for an unknown id", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await customProviderRoutes.request("/nonexistent/unpause", req("POST", cookie), env)
+    expect(res.status).toBe(404)
+    expect(await readJson(res)).toEqual({ error: "not found" })
+  })
+
+  it("404s when the id belongs to another user", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    seedUser(db, "user_2")
+    const env = buildEnv(db)
+    const cookie1 = await cookieFor(env, "user_1")
+    const cookie2 = await cookieFor(env, "user_2")
+    const createRes = await createProvider(env, cookie1)
+    const { id } = await readJson(createRes)
+    const accountId = db.rows("upstream_accounts")[0]!.id as string
+    await markBenched(env, "user_1", "my-endpoint", accountId)
+
+    const res = await customProviderRoutes.request("/" + id + "/unpause", req("POST", cookie2), env)
+    expect(res.status).toBe(404)
+    expect(await readJson(res)).toEqual({ error: "not found" })
+    expect(await isBenched(env, "user_1", "my-endpoint", accountId)).toBe(true)
+  })
+
+  it("200 clears the bench and GET / reports status active", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const createRes = await createProvider(env, cookie)
+    const { id } = await readJson(createRes)
+    const accountId = db.rows("upstream_accounts")[0]!.id as string
+    const storedKey = db.rows("upstream_accounts")[0]!.encrypted_payload
+    await markBenched(env, "user_1", "my-endpoint", accountId)
+
+    const benched = await customProviderRoutes.request("/", req("GET", cookie), env)
+    expect((await readJson(benched)).providers[0].status).toBe("benched")
+
+    const res = await customProviderRoutes.request("/" + id + "/unpause", req("POST", cookie), env)
+    expect(res.status).toBe(200)
+    expect(await readJson(res)).toEqual({ ok: true })
+    expect(await isBenched(env, "user_1", "my-endpoint", accountId)).toBe(false)
+    expect(db.rows("upstream_accounts")[0]!.encrypted_payload).toBe(storedKey)
+
+    const listed = await customProviderRoutes.request("/", req("GET", cookie), env)
+    expect((await readJson(listed)).providers[0].status).toBe("active")
+  })
+
+  it("200 when the provider is not currently benched", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const createRes = await createProvider(env, cookie)
+    const { id } = await readJson(createRes)
+
+    const res = await customProviderRoutes.request("/" + id + "/unpause", req("POST", cookie), env)
+    expect(res.status).toBe(200)
+    expect(await readJson(res)).toEqual({ ok: true })
+
+    const listed = await customProviderRoutes.request("/", req("GET", cookie), env)
+    expect((await readJson(listed)).providers[0].status).toBe("active")
   })
 })
 

@@ -350,6 +350,20 @@ customProviderRoutes.delete("/:id", async (c) => {
   return c.json({ ok: true })
 })
 
+customProviderRoutes.post("/:id/unpause", async (c) => {
+  const user = await requireUser(c)
+  if (!user) return c.json({ error: "unauthorized" }, 401)
+  const id = c.req.param("id")
+  const existing = await getCustomProviderById(c.env.DB, user.id, id)
+  if (!existing) return c.json({ error: "not found" }, 404)
+
+  const accounts = await listAccounts(c.env.DB, user.id, existing.slug)
+  for (const acc of accounts) {
+    await clearBench(c.env, user.id, existing.slug, acc.id)
+  }
+  return c.json({ ok: true })
+})
+
 type TestResult = {
   ok: boolean
   models_count?: number | null

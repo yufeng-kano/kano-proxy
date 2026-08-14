@@ -47,8 +47,10 @@ export const en = {
   "action.dismiss": "Dismiss",
   // Visible text for the row actions. Their accessible names name the row's
   // subject too (`providers.account.*`, `custom.*Endpoint`) — the same three
-  // words repeat down a list, so the label alone does not say which account.
-  // Those names must contain these words verbatim (WCAG 2.5.3).
+  // words (Resume, Rename, Remove) repeat down a list, so the label alone
+  // does not say which account. Those names must contain these words
+  // verbatim (WCAG 2.5.3).
+  "action.resume": "Resume",
   "action.rename": "Rename",
   "action.remove": "Remove",
   "action.edit": "Edit",
@@ -138,8 +140,10 @@ export const en = {
   // One gate per section, so its name is the section's — not a row's.
   "providers.section.edit": "Edit {section}",
   "providers.section.doneEditing": "Done editing {section}",
-  // Accessible names; the buttons' visible text is `providers.account.primary`
-  // and `action.rename` / `action.remove`, which these repeat verbatim.
+  // Accessible names; the buttons' visible text is `providers.account.primary`,
+  // `action.resume`, and `action.rename` / `action.remove`, which these
+  // repeat verbatim.
+  "providers.account.resume": "Resume {name}",
   "providers.account.promote": "Make {name} primary",
   "providers.account.primary": "Primary",
   "providers.account.rename": "Rename {name}",
@@ -158,6 +162,7 @@ export const en = {
   "providers.empty.title": "No {provider} account yet",
   "providers.empty.body": "Connect one to start routing {provider} models.",
   "providers.error.load": "Couldn't load {provider} accounts",
+  "providers.error.resume": "Couldn't resume the account",
   "providers.error.promote": "Couldn't change the primary account",
   "providers.error.remove": "Couldn't remove the account",
   "providers.error.rename": "Couldn't rename the account",
@@ -212,6 +217,7 @@ export const en = {
 
   // --- Custom endpoints ---------------------------------------------------
   "custom.add": "Add endpoint",
+  "custom.resumeEndpoint": "Resume {name}",
   "custom.testEndpoint": "Test {name}",
   "custom.editEndpoint": "Edit {name}",
   "custom.removeEndpoint": "Remove {name}",
@@ -270,6 +276,7 @@ export const en = {
   "custom.error.baseUrlHttps": "The URL must start with https://",
   "custom.error.apiKey": "Enter an API key",
   "custom.error.save": "Couldn't save the endpoint",
+  "custom.error.resume": "Couldn't resume the endpoint",
   "custom.error.remove": "Couldn't remove the endpoint",
   "custom.error.load": "Couldn't load your endpoints",
 

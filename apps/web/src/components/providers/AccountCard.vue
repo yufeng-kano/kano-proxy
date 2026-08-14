@@ -27,6 +27,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  resume: []
   promote: []
   /** Carries the upstream identity: the dialog shows what a blank name falls back to. */
   rename: [identity: string]
@@ -146,6 +147,15 @@ const windows = computed(() => props.account.usage?.windows ?? [])
            removes the account. `label` carries the account name for the
            accessible name, since several rows show the same three words. -->
       <div v-if="editing" class="actions">
+        <AppButton
+          v-if="account.status === 'benched'"
+          size="sm"
+          :label="t('providers.account.resume', { name: displayName })"
+          :disabled="busy"
+          @click="emit('resume')"
+        >
+          {{ t("action.resume") }}
+        </AppButton>
         <AppButton
           v-if="account.status !== 'active'"
           size="sm"
