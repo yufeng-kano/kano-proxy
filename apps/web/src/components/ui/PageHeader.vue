@@ -45,29 +45,29 @@ defineSlots<{
 
 <style scoped>
 /**
- * Spans exactly the content column — the same left and right edges as the
- * cards below it. It bleeds *upward* only: cancelling the region's top padding
- * is what lets the blur reach the top edge once the header is stuck, with no
- * sliver of scrolling content showing above it.
+ * The frost spans the content region, not just the card column. Cancelling
+ * the region's top padding lets the blur reach the top edge once the header
+ * is stuck; cancelling `--page-gutter` lets the wash and bottom rule run
+ * from the sidebar edge to the region's far edge. The same gutter comes back
+ * as padding so title, actions, and section nav stay on the card column —
+ * a header whose words run wider than the cards reads as two page widths
+ * stacked; a wash that stops at the cards reads as a strip that does not
+ * cover the page.
  *
- * It deliberately does not cancel the horizontal gutter. A header running
- * wider than the content beneath it reads as two different page widths stacked
- * on top of each other, and its title stops lining up with the first column of
- * the table it heads.
- *
- * The top value is AppShell's own, inherited rather than restated — two copies
- * would disagree at whichever breakpoint someone updated only one of them.
- * The fallback keeps the component usable outside the shell (and honest if the
- * property is ever renamed).
+ * Both values are AppShell's own, inherited rather than restated — two
+ * copies would disagree at whichever breakpoint someone updated only one
+ * of them. The fallbacks keep the component usable outside the shell
+ * (and honest if a property is ever renamed).
  */
 .page-header {
   --top: var(--page-top, var(--space-6));
+  --gutter: var(--page-gutter, var(--space-8));
 
   position: sticky;
   top: 0;
   z-index: 10;
-  margin: calc(var(--top) * -1) 0 var(--space-5);
-  padding: var(--top) 0 0;
+  margin: calc(var(--top) * -1) calc(var(--gutter) * -1) var(--space-5);
+  padding: var(--top) var(--gutter) 0;
   background: var(--topbar-bg);
   backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--border);
