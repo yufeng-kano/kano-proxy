@@ -50,7 +50,7 @@ defineSlots<{
  * is stuck; cancelling `--page-gutter` lets the wash and bottom rule run
  * from the sidebar edge to the region's far edge. The same gutter comes back
  * as padding so title, actions, and section nav stay on the card column —
- * the gutter is the shell's `--space-4`, shared with the cards, not a
+ * the gutter is the shell's `--space-2`, shared with the cards, not a
  * tighter header-only inset. A header whose words run wider than the
  * cards reads as two page widths stacked; a wash that stops at the cards
  * reads as a strip that does not cover the page.
@@ -62,7 +62,7 @@ defineSlots<{
  */
 .page-header {
   --top: var(--page-top, var(--space-6));
-  --gutter: var(--page-gutter, var(--space-4));
+  --gutter: var(--page-gutter, var(--space-2));
 
   position: sticky;
   top: 0;

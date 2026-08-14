@@ -47,7 +47,7 @@ const version = computed(() => changelog.value?.current ?? "")
 /** Server-computed — a local build ahead of the newest release is not an update. */
 const updateAvailable = computed(() => changelog.value?.updateAvailable === true)
 
-const userLabel = computed(() => user.value?.email || user.value?.name || "")
+const userLabel = computed(() => user.value?.name?.trim() || "")
 
 // The badge is part of the signed-in shell, so it loads once the session is
 // known. The composable dedupes against the Changelog page's own load when
@@ -443,8 +443,6 @@ async function onSignOut() {
   border-radius: var(--radius-sm);
   object-fit: cover;
   border: 1px solid var(--border);
-  /* Keeps a colorful profile photo from being the loudest thing in the chrome. */
-  filter: grayscale(1);
 }
 
 .avatar-fallback {
@@ -454,7 +452,6 @@ async function onSignOut() {
   color: var(--muted);
   font-size: var(--text-xs);
   font-weight: var(--weight-semibold);
-  filter: none;
 }
 
 .user-label {
@@ -526,11 +523,11 @@ async function onSignOut() {
  * as padding: PageHeader has to cancel it with a negative margin so its blur
  * reaches the region's edges, and a second hardcoded copy would silently
  * disagree if the shell's value ever changed. Inheritance makes this the
- * single source of truth for both. The gutter is `--space-4` at every width —
+ * single source of truth for both. The gutter is `--space-2` at every width —
  * it is not a fourth breakpoint.
  */
 .content-inner {
-  --page-gutter: var(--space-4);
+  --page-gutter: var(--space-2);
   --page-top: var(--space-6);
   /* The safe-area inset lives *inside* this value rather than being applied
      separately, so every consumer stays correct without knowing about it: the
