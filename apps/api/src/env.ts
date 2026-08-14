@@ -15,6 +15,8 @@ export type Env = {
   CODEX_RELAY_URL?: string
   CODEX_RELAY_SA_KEY?: string
   REQUEST_LOG_RETENTION_DAYS?: string
+  /** Per-attempt wait for upstream response headers; invalid or absent uses 180 seconds. */
+  UPSTREAM_FIRST_BYTE_TIMEOUT_MS?: string
   GITHUB_REPO?: string
   GITHUB_TOKEN?: string
 }

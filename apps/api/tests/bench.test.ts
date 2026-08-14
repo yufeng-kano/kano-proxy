@@ -1,89 +1,57 @@
 import { describe, expect, it } from "vitest"
-import { benchKey, benchedUntil, earliestBenchExpiry, isBenched, markBenched } from "../src/pool/bench"
+import { benchedUntil, clearBench, earliestBenchExpiry, isBenched, markBenched } from "../src/pool/bench"
 import type { Env } from "../src/env"
-import { fakeKV } from "./helpers/fake_d1"
+import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
-describe("benchKey", () => {
-  it("formats stable KV key", () => {
-    expect(benchKey("user_1", "claude-code", "acct_9")).toBe(
-      "bench:user_1:claude-code:acct_9",
-    )
-  })
-
-  it("includes provider and account segments", () => {
-    const k = benchKey("u", "grok", "a")
-    expect(k.startsWith("bench:")).toBe(true)
-    expect(k.split(":")).toEqual(["bench", "u", "grok", "a"])
-  })
-})
-
-function buildEnv(): Env {
-  return { BENCH: fakeKV() } as unknown as Env
+function buildEnv(db: FakeD1): Env {
+  return { DB: db as unknown as D1Database, BENCH: fakeKV() } as Env
 }
 
-describe("benchedUntil", () => {
-  it("returns null when the account was never benched", async () => {
-    const env = buildEnv()
-    expect(await benchedUntil(env, "user_1", "grok", "acc_1")).toBeNull()
+function seedAccount(db: FakeD1, id: string, benchUntil: string | null = null): void {
+  db.seed("upstream_accounts", [
+    { id, user_id: "user_1", provider: "grok", bench_until: benchUntil, bench_reason: null },
+  ])
+}
+
+describe("D1 bench state", () => {
+  it("returns null for a never-benched or expired account without deleting the expired value", async () => {
+    const db = new FakeD1()
+    seedAccount(db, "fresh")
+    seedAccount(db, "expired", new Date(Date.now() - 1_000).toISOString())
+    const env = buildEnv(db)
+    expect(await benchedUntil(env, "user_1", "grok", "fresh")).toBeNull()
+    expect(await benchedUntil(env, "user_1", "grok", "expired")).toBeNull()
+    expect(db.rows("upstream_accounts").find((row) => row.id === "expired")?.bench_until).not.toBeNull()
   })
 
-  it("returns the stored epoch-ms while the bench is still active", async () => {
-    const env = buildEnv()
-    const until = Date.now() + 60_000
-    await env.BENCH.put(benchKey("user_1", "grok", "acc_1"), String(until))
-    expect(await benchedUntil(env, "user_1", "grok", "acc_1")).toBe(until)
+  it("writes monotonically so a short concurrent penalty cannot shorten a longer bench", async () => {
+    const db = new FakeD1()
+    const longUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
+    seedAccount(db, "acc_1", longUntil)
+    const env = buildEnv(db)
+    await markBenched(env, "user_1", "grok", "acc_1", 30_000, "429")
+    const row = db.rows("upstream_accounts")[0]!
+    expect(row.bench_until).toBe(longUntil)
+    expect(row.bench_reason).toBeNull()
   })
 
-  it("returns null and deletes an expired key (same cleanup isBenched used to do inline)", async () => {
-    const env = buildEnv()
-    const key = benchKey("user_1", "grok", "acc_1")
-    await env.BENCH.put(key, String(Date.now() - 1_000))
-    expect(await benchedUntil(env, "user_1", "grok", "acc_1")).toBeNull()
-    expect(await env.BENCH.get(key)).toBeNull()
-  })
-})
-
-describe("isBenched (now backed by benchedUntil)", () => {
-  it("true right after markBenched, matching the stored cooldown", async () => {
-    const env = buildEnv()
-    await markBenched(env, "user_1", "grok", "acc_1", 60_000)
-    expect(await isBenched(env, "user_1", "grok", "acc_1")).toBe(true)
-  })
-
-  it("false for an account with no bench entry", async () => {
-    const env = buildEnv()
+  it("clears both bench fields idempotently", async () => {
+    const db = new FakeD1()
+    seedAccount(db, "acc_1", new Date(Date.now() + 60_000).toISOString())
+    db.rows("upstream_accounts")[0]!.bench_reason = "429"
+    const env = buildEnv(db)
+    await clearBench(env, "user_1", "grok", "acc_1")
+    await clearBench(env, "user_1", "grok", "acc_1")
+    expect(db.rows("upstream_accounts")[0]).toMatchObject({ bench_until: null, bench_reason: null })
     expect(await isBenched(env, "user_1", "grok", "acc_1")).toBe(false)
   })
-})
 
-describe("earliestBenchExpiry", () => {
-  it("returns null for an empty id list", async () => {
-    const env = buildEnv()
-    expect(await earliestBenchExpiry(env, "user_1", "grok", [])).toBeNull()
-  })
-
-  it("returns null when none of the given ids are currently benched", async () => {
-    const env = buildEnv()
-    expect(await earliestBenchExpiry(env, "user_1", "grok", ["acc_1", "acc_2"])).toBeNull()
-  })
-
-  it("returns the EARLIEST expiry across several benched accounts, not the first or last id", async () => {
-    const env = buildEnv()
+  it("returns the earliest current expiry", async () => {
+    const db = new FakeD1()
     const now = Date.now()
-    await env.BENCH.put(benchKey("user_1", "grok", "acc_1"), String(now + 120_000))
-    await env.BENCH.put(benchKey("user_1", "grok", "acc_2"), String(now + 30_000))
-    await env.BENCH.put(benchKey("user_1", "grok", "acc_3"), String(now + 90_000))
-    expect(
-      await earliestBenchExpiry(env, "user_1", "grok", ["acc_1", "acc_2", "acc_3"]),
-    ).toBe(now + 30_000)
-  })
-
-  it("ignores ids with no bench entry mixed in with benched ones", async () => {
-    const env = buildEnv()
-    const until = Date.now() + 30_000
-    await env.BENCH.put(benchKey("user_1", "grok", "acc_2"), String(until))
-    expect(
-      await earliestBenchExpiry(env, "user_1", "grok", ["acc_1", "acc_2", "acc_3"]),
-    ).toBe(until)
+    seedAccount(db, "acc_1", new Date(now + 120_000).toISOString())
+    seedAccount(db, "acc_2", new Date(now + 30_000).toISOString())
+    seedAccount(db, "acc_3", new Date(now + 90_000).toISOString())
+    expect(await earliestBenchExpiry(buildEnv(db), "user_1", "grok", ["acc_1", "acc_2", "acc_3"])).toBe(now + 30_000)
   })
 })

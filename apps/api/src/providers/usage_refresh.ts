@@ -12,6 +12,7 @@
 import { decryptJson } from "../crypto/token_crypto"
 import {
   acquireUsageLock,
+  getAccount,
   isUsageFresh,
   releaseUsageLock,
   updateAccountIdentity,
@@ -96,5 +97,12 @@ export async function refreshAccountUsageInBackground(
   if (isUsageFresh(row)) return
   const lockToken = await acquireUsageLock(env.DB, row.id)
   if (!lockToken) return
-  await fetchAndPersistUsage(env, row, adapter, lockToken)
+  // Dispatch may have refreshed this account after it loaded `row`; use the
+  // post-lock D1 row so fetchUsage never sends a stale credential.
+  const freshRow = await getAccount(env.DB, row.user_id, row.id)
+  if (!freshRow) {
+    await releaseUsageLock(env.DB, row.id, lockToken)
+    return
+  }
+  await fetchAndPersistUsage(env, freshRow, adapter, lockToken)
 }

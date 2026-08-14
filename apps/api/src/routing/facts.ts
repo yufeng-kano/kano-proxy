@@ -3,7 +3,7 @@
  * "Facts") — computed from stored state ONLY. Dispatch never makes a
  * synchronous upstream call to learn these; the two sources are:
  *
- * - Bench state (KV `BENCH`, as before).
+ * - Bench state from the already-loaded D1 account row.
  * - Usage windows from the account row's stored `usage_snapshot_json`: any
  *   window with `utilization >= 100` marks the candidate unusable until
  *   that window's `resets_at`. Precision is bounded by snapshot freshness,
@@ -15,7 +15,7 @@
  */
 import { readUsageSnapshot, type AccountRow } from "../db/accounts"
 import type { Env } from "../env"
-import { benchedUntil } from "../pool/bench"
+import { benchUntilFromRow } from "../pool/bench"
 import type { CandidateFacts, RoutingCandidate } from "./types"
 
 /**
@@ -48,7 +48,9 @@ export async function candidateFacts(
   candidate: RoutingCandidate,
   now = Date.now(),
 ): Promise<CandidateFacts> {
-  const benchUntil = await benchedUntil(env, userId, candidate.provider, candidate.account.id)
+  void env
+  void userId
+  const benchUntil = benchUntilFromRow(candidate.account, now)
   const windowUntil = usageWindowUnusableUntil(candidate.account, now)
   const unusableUntil =
     benchUntil === null ? windowUntil : windowUntil === null ? benchUntil : Math.max(benchUntil, windowUntil)
@@ -60,7 +62,7 @@ export async function candidateFacts(
   }
 }
 
-/** Facts for a whole candidate list, in the same order — one KV read per candidate, in parallel. */
+/** Facts for a whole candidate list, in the same order, from loaded D1 rows. */
 export async function candidateFactsList(
   env: Env,
   userId: string,

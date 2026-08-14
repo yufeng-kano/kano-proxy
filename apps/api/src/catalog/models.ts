@@ -12,7 +12,7 @@ import { listCustomProviders, type CustomProviderRow } from "../db/custom_provid
 import { listAliasesForGroup, listModelGroups } from "../db/model_groups"
 import { decryptJson } from "../crypto/token_crypto"
 import type { StoredCredential } from "../pool/acquire"
-import { isBenched } from "../pool/bench"
+import { benchUntilFromRow } from "../pool/bench"
 import { getAdapter } from "../providers"
 import { createCustomAnthropicAdapter } from "../providers/custom_anthropic"
 import { createCustomOpenAIAdapter } from "../providers/custom_openai"
@@ -98,7 +98,7 @@ async function pickUsableAccount(
 ): Promise<{ row: Awaited<ReturnType<typeof listAccounts>>[0]; credential: StoredCredential } | null> {
   const rows = await listAccounts(env.DB, userId, provider)
   for (const row of rows) {
-    if (await isBenched(env, userId, provider, row.id)) continue
+    if (benchUntilFromRow(row) !== null) continue
     try {
       const credential = await decryptJson<StoredCredential>(
         env.TOKEN_ENCRYPTION_KEY,

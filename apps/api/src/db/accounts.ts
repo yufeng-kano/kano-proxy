@@ -13,6 +13,11 @@ export type AccountRow = {
   usage_snapshot_json: string | null
   usage_fetched_at: string | null
   usage_fetching_at: string | null
+  bench_until?: string | null
+  bench_reason?: string | null
+  refreshing_at?: string | null
+  edge_strikes?: number
+  edge_strike_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -49,6 +54,40 @@ export async function getAccount(
       .bind(accountId, userId)
       .first<AccountRow>()) ?? null
   )
+}
+
+export const EDGE_STRIKE_WINDOW_MS = 10 * 60 * 1000
+
+/**
+ * Atomically record one upstream edge-timeout strike. A stale prior strike
+ * restarts at one; the third fresh strike resets to zero and returns true so
+ * the caller can apply the 30s bench. `RETURNING` ties that decision to this
+ * exact write, so concurrent timeouts cannot both bench or lose a strike.
+ */
+export async function recordEdgeTimeoutStrike(
+  db: D1Database,
+  userId: string,
+  provider: string,
+  accountId: string,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const at = new Date(now).toISOString()
+  const staleBefore = new Date(now - EDGE_STRIKE_WINDOW_MS).toISOString()
+  const row = await db
+    .prepare(
+      `UPDATE upstream_accounts
+       SET edge_strikes = CASE
+             WHEN edge_strike_at IS NULL OR edge_strike_at < ? THEN 1
+             WHEN edge_strikes >= 2 THEN 0
+             ELSE edge_strikes + 1
+           END,
+           edge_strike_at = ?, updated_at = ?
+       WHERE id = ? AND user_id = ? AND provider = ?
+       RETURNING edge_strikes`,
+    )
+    .bind(staleBefore, at, at, accountId, userId, provider)
+    .first<{ edge_strikes: number }>()
+  return row?.edge_strikes === 0
 }
 
 /** Set or clear the user-owned display name without changing upstream identity. */
@@ -123,6 +162,9 @@ export async function insertAccount(
     usage_snapshot_json: null,
     usage_fetched_at: null,
     usage_fetching_at: null,
+    bench_until: null,
+    bench_reason: null,
+    refreshing_at: null,
     created_at: ts,
     updated_at: ts,
   }
@@ -270,6 +312,51 @@ export async function releaseUsageLock(
       `UPDATE upstream_accounts
        SET usage_fetching_at = NULL
        WHERE id = ? AND usage_fetching_at = ?`,
+    )
+    .bind(accountId, token)
+    .run()
+}
+
+/** OAuth refresh single-flight uses the same 30s breakable CAS pattern as usage. */
+export async function acquireRefreshLock(db: D1Database, accountId: string): Promise<string | null> {
+  const token = nowIso()
+  const breakBefore = new Date(Date.now() - USAGE_LOCK_TTL_MS).toISOString()
+  const res = await db
+    .prepare(
+      `UPDATE upstream_accounts
+       SET refreshing_at = ?
+       WHERE id = ? AND (refreshing_at IS NULL OR refreshing_at < ?)`,
+    )
+    .bind(token, accountId, breakBefore)
+    .run()
+  return (res.meta.changes ?? 0) > 0 ? token : null
+}
+
+/** Persist a refreshed credential and release only the lock this caller owns. */
+export async function writeRefreshedCredential(
+  db: D1Database,
+  accountId: string,
+  token: string,
+  encryptedPayload: string,
+): Promise<boolean> {
+  const res = await db
+    .prepare(
+      `UPDATE upstream_accounts
+       SET encrypted_payload = ?, refreshing_at = NULL, updated_at = ?
+       WHERE id = ? AND refreshing_at = ?`,
+    )
+    .bind(encryptedPayload, nowIso(), accountId, token)
+    .run()
+  return (res.meta.changes ?? 0) > 0
+}
+
+/** Release a failed OAuth refresh without changing its previous credential. */
+export async function releaseRefreshLock(db: D1Database, accountId: string, token: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE upstream_accounts
+       SET refreshing_at = NULL
+       WHERE id = ? AND refreshing_at = ?`,
     )
     .bind(accountId, token)
     .run()

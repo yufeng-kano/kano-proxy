@@ -6,21 +6,27 @@
  * |---|---|
  * | 401/403 (auth), 402 (billing) | bench 300s |
  * | 429 (rate limit) | bench until the upstream reset when derivable — reset headers, else the earliest exhausted window's `resets_at`, else 300s; capped at 7 days |
- * | 520/522/524 (upstream edge failed/timed out before first byte) | bench 300s |
- * | anything else non-2xx | no bench — passthrough / in-stream error, unchanged |
+ * | 520/522/524 (upstream edge failed/timed out before first byte) | request-local exclusion; the third fresh strike benches 30s |
+】【。json?】【”】【】【：】【“】【assistant to=functions.Edit  北京赛车计划 天天中彩票粤რება՞ւրջ  大发时时彩怎么  天天彩票中奖json】【：】【“】【{ * | anything else non-2xx | no bench — passthrough / in-stream error, unchanged |
  *
- * All benched outcomes mean "try the next candidate"; the caller (dispatch)
- * owns that walk and just calls `markBenched(..., penalty.cooldownMs)`.
+ * Bench outcomes and edge-timeout exclusions both continue to the next
+ * candidate; dispatch owns the walk and strike persistence.
  */
 import { readUsageSnapshot, type AccountRow } from "../db/accounts"
 
 const DEFAULT_COOLDOWN_MS = 300_000
+export const EDGE_TIMEOUT_COOLDOWN_MS = 30_000
 const MAX_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000
 
 const AUTH_BILLING_STATUSES = new Set([401, 402, 403])
 const EDGE_TIMEOUT_STATUSES = new Set([520, 522, 524])
 
 export type Penalty = { cooldownMs: number }
+
+/** 520/522/524 always fail over, but only record a persistent strike. */
+export function isEdgeTimeoutStatus(status: number): boolean {
+  return EDGE_TIMEOUT_STATUSES.has(status)
+}
 
 function clampCooldown(ms: number): number {
   return Math.min(MAX_COOLDOWN_MS, Math.max(0, ms))
@@ -79,9 +85,7 @@ export function penaltyForOutcome(
   account: AccountRow,
   now: number = Date.now(),
 ): Penalty | null {
-  if (AUTH_BILLING_STATUSES.has(status) || EDGE_TIMEOUT_STATUSES.has(status)) {
-    return { cooldownMs: DEFAULT_COOLDOWN_MS }
-  }
+  if (AUTH_BILLING_STATUSES.has(status)) return { cooldownMs: DEFAULT_COOLDOWN_MS }
   if (status === 429) {
     return { cooldownMs: rateLimitCooldownMs(headers, account, now) }
   }
@@ -90,5 +94,5 @@ export function penaltyForOutcome(
 
 /** Same status set `penaltyForOutcome` benches on — kept for call sites that only need the yes/no check. */
 export function isBenchStatus(status: number): boolean {
-  return AUTH_BILLING_STATUSES.has(status) || EDGE_TIMEOUT_STATUSES.has(status) || status === 429
+  return AUTH_BILLING_STATUSES.has(status) || status === 429
 }

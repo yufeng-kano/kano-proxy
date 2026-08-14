@@ -23,6 +23,7 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
     account: AcquiredAccount,
     body: unknown,
     headers: Headers,
+    signal?: AbortSignal,
   ): Promise<Response> {
     const raw = typeof body === "object" && body ? { ...(body as Record<string, unknown>) } : {}
     const h: Record<string, string> = {
@@ -32,21 +33,21 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
     }
     const beta = headers.get("anthropic-beta")
     if (beta) h["anthropic-beta"] = beta
-    return fetch(url, { method: "POST", headers: h, body: JSON.stringify(raw) })
+    return fetch(url, { method: "POST", headers: h, body: JSON.stringify(raw), signal })
   }
 
   return {
     id: row.slug,
 
-    async messages(_env, account, body, headers) {
-      return forwardNative(`${base}/v1/messages`, account, body, headers)
+    async messages(_env, account, body, headers, extras) {
+      return forwardNative(`${base}/v1/messages`, account, body, headers, extras?.signal)
     },
 
-    async countTokens(_env, account, body, headers) {
-      return forwardNative(`${base}/v1/messages/count_tokens`, account, body, headers)
+    async countTokens(_env, account, body, headers, extras) {
+      return forwardNative(`${base}/v1/messages/count_tokens`, account, body, headers, extras?.signal)
     },
 
-    async chatCompletions(_env, account, req) {
+    async chatCompletions(_env, account, req, extras) {
       const anthropicBody = openaiToAnthropicMessages({
         model: req.upstreamModel,
         messages: req.messages,
@@ -69,6 +70,7 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
           "anthropic-version": DEFAULT_ANTHROPIC_VERSION,
         },
         body: JSON.stringify(anthropicBody),
+        signal: extras?.signal,
       })
 
       if (req.stream) {

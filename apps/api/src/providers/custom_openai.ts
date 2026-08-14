@@ -18,7 +18,7 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
   return {
     id: row.slug,
 
-    async chatCompletions(_env, account, req) {
+    async chatCompletions(_env, account, req, extras) {
       const upstreamBody = { ...req.rawBody, model: req.upstreamModel }
       return fetch(`${base}/chat/completions`, {
         method: "POST",
@@ -27,6 +27,7 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
           "content-type": "application/json",
         },
         body: JSON.stringify(upstreamBody),
+        signal: extras?.signal,
       })
     },
 

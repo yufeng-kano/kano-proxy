@@ -58,12 +58,17 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 | usage_snapshot_json | TEXT | nullable; last successful usage read — `{windows, error, stale, edgeBlocked}` (`0006_account_usage_cache.sql`) |
 | usage_fetched_at | TEXT | nullable; when `usage_snapshot_json` was written. Drives the 60s server-side TTL |
 | usage_fetching_at | TEXT | nullable; lock holder's timestamp while an upstream fetch is in flight (`NULL` = free) |
+| bench_until | TEXT | nullable; ISO time until which this account is benched (`0011_bench_and_refresh_state.sql`). `NULL` or past = not benched — expired values are compared at read, never proactively deleted. Writes are **monotonic**: a bench write only lands when it extends (`bench_until IS NULL OR bench_until < new`), so a shorter concurrent penalty can never truncate a longer one. Replaces the KV `BENCH` namespace ([providers.md](./providers.md) § Routing module) |
+| bench_reason | TEXT | nullable; content-free cause of the current bench — the upstream status as text (`"429"`, `"524"`, …) or `"refresh_failed"`. Written with `bench_until`, nulled by unpause |
+| refreshing_at | TEXT | nullable; OAuth refresh single-flight lock, same CAS pattern as `usage_fetching_at` (30s breakable) — see [providers.md](./providers.md) § OAuth refresh single-flight |
+| edge_strikes | INTEGER | `NOT NULL DEFAULT 0`; consecutive upstream edge-timeout (520/522/524) strikes. Incremented atomically on each edge-timeout; the 3rd within 10 minutes benches 30s and resets to 0 ([providers.md](./providers.md) § Penalties). Never written on success |
+| edge_strike_at | TEXT | nullable; time of the last edge-timeout strike. A value older than 10 minutes stales the count — the next increment restarts at 1 |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
 `label` and `custom_label` are two different jobs and must not be merged: `label` is a cache of upstream identity (the accounts read overwrites it whenever the upstream email/display name changes), so a rename written there survives only until the next poll. `custom_label` is user intent — set by `PATCH /api/providers/:provider/accounts/:id`, cleared by sending `null`/`""`, and read first by the display-name resolver.
 
-**There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / benched / unusable" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order plus the KV bench state (`pool/bench.ts`, `BENCH` namespace), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02.)
+**There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / benched / unusable" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order plus the bench columns above (`pool/bench.ts`), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02. Bench state lived in the KV `BENCH` namespace until `0011` — moved to these D1 columns because KV's eventual consistency made bench state flap across requests, its 1-write/sec-per-key limit made the bench key a hotspot under bursts, and the account row is already read on every dispatch, so the columns ride along with zero extra reads.)
 
 Unique optional: `(user_id, provider, external_account_id)` when known.
 
@@ -162,6 +167,7 @@ Created by `0001_init.sql` as an "optional cache", never read or written by any 
 | cache_creation_input_tokens | INTEGER | nullable; cache-write tokens, from Anthropic `cache_creation_input_tokens`, OpenAI-compatible `prompt_tokens_details.cache_write_tokens`, or the proxy's conversion extension |
 | cost | REAL | nullable; estimated USD cost computed at write time from the LiteLLM price table ([pricing.md](./pricing.md)); `NULL` = unpriced/unknown, never 0-as-guess |
 | error_code | TEXT | nullable |
+| upstream_status | INTEGER | nullable; the last upstream HTTP status observed while serving this request (`0011_bench_and_refresh_state.sql`). `NULL` = no upstream response (pre-dispatch failure, transport failure before headers). Diagnoses what `status_code` hides: an eager stream logs `status_code: 200` and a synthesized `503` masks the bench-status that exhausted the pool — this column keeps the real upstream answer (see [logging.md](./logging.md)) |
 | group_name | TEXT | nullable; the group **alias** the request was addressed to, when it came through one (`0008_model_groups.sql`; alias semantics since `0009`). `provider`/`model` always store the **expanded** target so pricing and Overview aggregation stay canonical; this column preserves the alias for future per-group reporting |
 | created_at | TEXT | |
 
@@ -188,8 +194,8 @@ Cloudflare titles: `kano-proxy-bench`, `kano-proxy-cache`. Bindings in Worker co
 
 | Binding | Cloudflare title | Use |
 |---------|------------------|-----|
-| `BENCH` | `kano-proxy-bench` | `userId:provider:accountId` → bench-until epoch (TTL ~300s) |
-| `CACHE` | `kano-proxy-cache` | usage snapshots, models list cache |
+| `BENCH` | `kano-proxy-bench` | **Deprecated since `0011`** — bench state moved to `upstream_accounts.bench_until`/`bench_reason` (see above). The binding stays declared so existing configs keep deploying, but no code path reads or writes it; remove the namespace in a later cleanup |
+| `CACHE` | `kano-proxy-cache` | models list cache, codex/grok reasoning replay cache |
 
 D1 database name: **`kano-proxy`** (Worker script name is also `kano-proxy`).
 

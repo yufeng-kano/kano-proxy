@@ -8,13 +8,14 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { encryptJson } from "../src/crypto/token_crypto"
+import { recordEdgeTimeoutStrike } from "../src/db/accounts"
 import type { Env } from "../src/env"
 import {
   dispatchAnthropicMessages,
   dispatchAnthropicViaOpenAI,
   dispatchChatCompletions,
 } from "../src/proxy/dispatch"
-import { benchKey, isBenched } from "../src/pool/bench"
+import { isBenched } from "../src/pool/bench"
 import { getAdapter } from "../src/providers"
 import type { ProviderAdapter } from "../src/providers/types"
 import type { RoutingCandidate } from "../src/routing/types"
@@ -23,6 +24,12 @@ import { FakeD1, fakeKV } from "./helpers/fake_d1"
 afterEach(() => {
   vi.useRealTimers()
 })
+
+function waitForAbort(signal: AbortSignal): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true })
+  })
+}
 
 const TOKEN_KEY = "test-token-encryption-key-not-secret"
 
@@ -51,6 +58,11 @@ async function seedAccount(db: FakeD1, opts: { userId: string; provider: string 
       usage_snapshot_json: null,
       usage_fetched_at: null,
       usage_fetching_at: null,
+      bench_until: null,
+      bench_reason: null,
+      refreshing_at: null,
+      edge_strikes: 0,
+      edge_strike_at: null,
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
     },
@@ -79,6 +91,11 @@ async function seedAccounts(
       usage_snapshot_json: null,
       usage_fetched_at: null,
       usage_fetching_at: null,
+      bench_until: null,
+      bench_reason: null,
+      refreshing_at: null,
+      edge_strikes: 0,
+      edge_strike_at: null,
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
     })),
@@ -101,6 +118,11 @@ function seedUndecryptableAccount(db: FakeD1, opts: { userId: string; provider: 
       usage_snapshot_json: null,
       usage_fetched_at: null,
       usage_fetching_at: null,
+      bench_until: null,
+      bench_reason: null,
+      refreshing_at: null,
+      edge_strikes: 0,
+      edge_strike_at: null,
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
     },
@@ -476,6 +498,164 @@ describe("dispatchAnthropicViaOpenAI → codex — nothing over 64 chars reaches
   })
 })
 
+describe("dispatch edge-timeout strikes", () => {
+  function edgeTimeoutAdapter(statusForFirst: () => number): ProviderAdapter {
+    return {
+      id: "grok",
+      async chatCompletions(_env, account) {
+        if (account.row.id === "acc_1") return new Response("edge failed", { status: statusForFirst() })
+        return Response.json({ choices: [{ message: { content: "ok" } }] })
+      },
+    }
+  }
+
+  function request() {
+    return {
+      model: "grok/grok-4.5",
+      rawModel: "grok/grok-4.5",
+      upstreamModel: "grok-4.5",
+      messages: [],
+      rawBody: {},
+    }
+  }
+
+  it("first and second 524s fail over locally without benching the account for the next request", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    const calls: string[] = []
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions(_env, account) {
+        calls.push(account.row.id)
+        return account.row.id === "acc_1"
+          ? new Response("edge failed", { status: 524 })
+          : Response.json({ choices: [{ message: { content: "ok" } }] })
+      },
+    }
+
+    for (const expectedStrikes of [1, 2]) {
+      const res = await dispatchChatCompletions(env, {
+        userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {}, req: request(),
+      })
+      expect(res.status).toBe(200)
+      expect(await isBenched(env, "user_1", "grok", "acc_1")).toBe(false)
+      expect(db.rows("upstream_accounts")[0]).toMatchObject({ edge_strikes: expectedStrikes, bench_until: null })
+    }
+    expect(calls).toEqual(["acc_1", "acc_2", "acc_1", "acc_2"])
+  })
+
+  it("the third edge-timeout within ten minutes benches 30s with its status and resets strikes", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    const adapter = edgeTimeoutAdapter(() => 524)
+
+    for (let i = 0; i < 3; i++) {
+      const res = await dispatchChatCompletions(env, {
+        userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {}, req: request(),
+      })
+      expect(res.status).toBe(200)
+    }
+
+    const account = db.rows("upstream_accounts")[0]!
+    expect(account).toMatchObject({ edge_strikes: 0, bench_reason: "524" })
+    expect(Date.parse(account.bench_until as string) - Date.now()).toBeGreaterThan(0)
+    expect(Date.parse(account.bench_until as string) - Date.now()).toBeLessThanOrEqual(30_000)
+  })
+
+  it("a stale strike restarts the counter at one", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    const now = Date.parse("2026-06-01T00:00:00.000Z")
+    const account = db.rows("upstream_accounts")[0]!
+    account.edge_strikes = 2
+    account.edge_strike_at = new Date(now - 10 * 60_000 - 1).toISOString()
+
+    expect(await recordEdgeTimeoutStrike(db as unknown as D1Database, "user_1", "grok", "acc_grok", now)).toBe(false)
+    expect(account).toMatchObject({ edge_strikes: 1, edge_strike_at: new Date(now).toISOString() })
+  })
+
+  it("concurrent fresh strikes produce exactly one third-strike bench decision", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    const now = Date.parse("2026-06-01T00:00:00.000Z")
+    const account = db.rows("upstream_accounts")[0]!
+    account.edge_strikes = 1
+    account.edge_strike_at = new Date(now - 1).toISOString()
+
+    const outcomes = await Promise.all([
+      recordEdgeTimeoutStrike(db as unknown as D1Database, "user_1", "grok", "acc_grok", now),
+      recordEdgeTimeoutStrike(db as unknown as D1Database, "user_1", "grok", "acc_grok", now),
+    ])
+    expect(outcomes).toEqual([false, true])
+    expect(account).toMatchObject({ edge_strikes: 0 })
+  })
+
+  it("mixed 522, 524, and 520 statuses share the same strike counter", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    const statuses = [522, 524, 520]
+    const adapter = edgeTimeoutAdapter(() => statuses.shift()!)
+
+    for (let i = 0; i < 3; i++) {
+      const res = await dispatchChatCompletions(env, {
+        userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {}, req: request(),
+      })
+      expect(res.status).toBe(200)
+    }
+    expect(db.rows("upstream_accounts")[0]).toMatchObject({ edge_strikes: 0, bench_reason: "520" })
+  })
+
+  it("a strike-persistence failure still fails over and completes the request", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    env.DB = {
+      prepare(sql: string) {
+        if (sql.includes("edge_strikes")) throw new Error("D1 unavailable")
+        return db.prepare(sql)
+      },
+    } as unknown as D1Database
+    const adapter = edgeTimeoutAdapter(() => 524)
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {}, req: request(),
+    })
+    expect(res.status).toBe(200)
+    expect(db.rows("upstream_accounts")[0]).toMatchObject({ edge_strikes: 0, bench_until: null })
+  })
+})
+
+describe("dispatch first-byte timeout", () => {
+  it("uses the configured deadline, fails over without benching, and logs the successful upstream status", async () => {
+    const db = new FakeD1()
+    await seedAccounts(db, { userId: "user_1", provider: "grok", ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    env.UPSTREAM_FIRST_BYTE_TIMEOUT_MS = "20"
+    const calls: string[] = []
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions(_env, account, _req, extras) {
+        calls.push(account.row.id)
+        if (account.row.id === "acc_1") return waitForAbort(extras!.signal!)
+        return Response.json({ choices: [{ message: { content: "ok" } }] })
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {},
+      req: { model: "grok/grok-4.5", rawModel: "grok/grok-4.5", upstreamModel: "grok-4.5", messages: [], rawBody: {} },
+    })
+
+    expect(res.status).toBe(200)
+    expect(calls).toEqual(["acc_1", "acc_2"])
+    expect(await isBenched(env, "user_1", "grok", "acc_1")).toBe(false)
+    expect(db.rows("request_logs")[0]).toMatchObject({ upstream_status: 200 })
+  })
+})
+
 describe("dispatchChatCompletions — 402 benches the account and fails over (Item 1)", () => {
   it("an upstream 402 (e.g. OpenRouter 'Insufficient credits') benches that account; the loop retries the next one and succeeds", async () => {
     const db = new FakeD1()
@@ -533,6 +713,42 @@ describe("dispatchChatCompletions — 402 benches the account and fails over (It
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ provider, status_code: 200, account_id: "acc_2" })
   })
+
+  it("continues the failover walk when bench persistence fails", async () => {
+    const db = new FakeD1()
+    const provider = "openrouter"
+    await seedAccounts(db, { userId: "user_1", provider, ids: ["acc_1", "acc_2"] })
+    const env = buildEnv(db)
+    const originalDb = env.DB
+    env.DB = {
+      prepare(sql: string) {
+        if (sql.includes("SET bench_until")) throw new Error("D1 unavailable")
+        return originalDb.prepare(sql)
+      },
+    } as D1Database
+    const calls: string[] = []
+    const adapter: ProviderAdapter = {
+      id: provider,
+      async chatCompletions(_env, account) {
+        calls.push(account.row.id)
+        return calls.length === 1
+          ? new Response("limited", { status: 429 })
+          : Response.json({ choices: [{ message: { content: "ok" } }] })
+      },
+    }
+
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider,
+      adapter,
+      waitUntil: () => {},
+      req: { model: `${provider}/model`, rawModel: `${provider}/model`, upstreamModel: "model", messages: [], rawBody: {} },
+    })
+
+    expect(res.status).toBe(200)
+    expect(calls).toEqual(["acc_1", "acc_2"])
+  })
 })
 
 describe("dispatchChatCompletions — all-benched pool → 503 + Retry-After, not a fatal 400 (Item 2)", () => {
@@ -580,8 +796,8 @@ describe("dispatchChatCompletions — all-benched pool → 503 + Retry-After, no
     const now = Date.now()
     // acc_2's cooldown (45s) is earlier than acc_1's (120s) — the header
     // must reflect the EARLIEST expiry across the pool, not the first row.
-    await env.BENCH.put(benchKey("user_1", provider, "acc_1"), String(now + 120_000))
-    await env.BENCH.put(benchKey("user_1", provider, "acc_2"), String(now + 45_000))
+    db.rows("upstream_accounts").find((row) => row.id === "acc_1")!.bench_until = new Date(now + 120_000).toISOString()
+    db.rows("upstream_accounts").find((row) => row.id === "acc_2")!.bench_until = new Date(now + 45_000).toISOString()
 
     const res = await dispatchChatCompletions(env, {
       userId: "user_1",
@@ -674,8 +890,8 @@ describe("dispatchAnthropicMessages — all-benched pool → 503 + Retry-After, 
     vi.useFakeTimers()
     vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"))
     const now = Date.now()
-    await env.BENCH.put(benchKey("user_1", provider, "acc_1"), String(now + 300_000))
-    await env.BENCH.put(benchKey("user_1", provider, "acc_2"), String(now + 10_000))
+    db.rows("upstream_accounts").find((row) => row.id === "acc_1")!.bench_until = new Date(now + 300_000).toISOString()
+    db.rows("upstream_accounts").find((row) => row.id === "acc_2")!.bench_until = new Date(now + 10_000).toISOString()
 
     const res = await dispatchAnthropicMessages(env, {
       userId: "user_1",
@@ -726,6 +942,44 @@ describe("dispatchAnthropicMessages — all-benched pool → 503 + Retry-After, 
   })
 })
 
+describe("dispatch eager terminal errors and 529", () => {
+  it("turns a pre-output adapter throw into a structured OpenAI SSE error frame", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions() { throw new Error("adapter failed") },
+    }
+    const res = await dispatchChatCompletions(buildEnv(db), {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {},
+      req: { model: "grok/grok-4.5", rawModel: "grok/grok-4.5", upstreamModel: "grok-4.5", messages: [], stream: true, rawBody: {} },
+    })
+    await expect(drainBody(res.body)).resolves.toContain('"type":"api_error"')
+  })
+
+  it("retries a 529 once on the same account, then passes through without benching", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    const env = buildEnv(db)
+    let calls = 0
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions() {
+        calls++
+        return new Response("overloaded", { status: 529 })
+      },
+    }
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", adapter, waitUntil: () => {},
+      req: { model: "grok/grok-4.5", rawModel: "grok/grok-4.5", upstreamModel: "grok-4.5", messages: [], rawBody: {} },
+    })
+    expect(res.status).toBe(529)
+    expect(calls).toBe(2)
+    expect(await isBenched(env, "user_1", "grok", "acc_grok")).toBe(false)
+    expect(db.rows("request_logs")[0]).toMatchObject({ upstream_status: 529 })
+  })
+})
+
 describe("dispatch candidate-walk exhaustion", () => {
   it("turns two OpenAI 429s into the standard non-stream 503 and keeps the last candidate in the log", async () => {
     const db = new FakeD1()
@@ -746,7 +1000,7 @@ describe("dispatch candidate-walk exhaustion", () => {
     expect(res.status).toBe(503)
     expect(res.headers.get("retry-after")).not.toBeNull()
     expect(await res.json()).toMatchObject({ error: { code: "upstream_unavailable" } })
-    expect(db.rows("request_logs")[0]).toMatchObject({ account_id: "acc_2", status_code: 503, error_code: "upstream_unavailable" })
+    expect(db.rows("request_logs")[0]).toMatchObject({ account_id: "acc_2", status_code: 503, error_code: "upstream_unavailable", upstream_status: 429 })
   })
 
   it("turns two OpenAI 429s into the standard eager-stream terminal error frame", async () => {
@@ -833,7 +1087,7 @@ describe("dispatchChatCompletions — bottom-of-loop 503 also carries Retry-Afte
     })
 
     expect(res.status).toBe(503)
-    expect(res.headers.get("retry-after")).toBe("300")
+    expect(res.headers.get("retry-after")).toBe("60")
     const rows = db.rows("request_logs")
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ status_code: 503, error_code: "upstream_unavailable" })
@@ -1017,54 +1271,6 @@ describe("dispatchAnthropicMessages — eager streaming commit", () => {
   })
 })
 
-describe("dispatchChatCompletions — 520/522/524 (upstream edge failure) benches and fails over", () => {
-  it.each([520, 522, 524])(
-    "a %d benches that account and the loop retries the next one — arrives as a response status before anything streamed, so in-request failover is safe",
-    async (status) => {
-      const db = new FakeD1()
-      const provider = "grok"
-      await seedAccounts(db, { userId: "user_1", provider, ids: ["acc_1", "acc_2"] })
-      const env = buildEnv(db)
-
-      const calls: string[] = []
-      const adapter: ProviderAdapter = {
-        id: provider,
-        async chatCompletions(_env, account) {
-          calls.push(account.row.id)
-          if (calls.length === 1) {
-            return new Response("upstream edge failure", { status })
-          }
-          return new Response(
-            JSON.stringify({
-              choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          )
-        },
-      }
-
-      const res = await dispatchChatCompletions(env, {
-        userId: "user_1",
-        apiKeyId: "key_1",
-        provider,
-        adapter,
-        waitUntil: () => {},
-        req: {
-          model: `${provider}/some-model`,
-          rawModel: `${provider}/some-model`,
-          upstreamModel: "some-model",
-          messages: [{ role: "user", content: "hi" }],
-          rawBody: {},
-        },
-      })
-
-      expect(res.status).toBe(200)
-      expect(calls).toEqual(["acc_1", "acc_2"])
-      expect(await isBenched(env, "user_1", provider, "acc_1")).toBe(true)
-      expect(await isBenched(env, "user_1", provider, "acc_2")).toBe(false)
-    },
-  )
-})
 
 describe("routing module facts — limit-aware skip integration", () => {
   function seedAccountsWithSnapshots(
@@ -1273,7 +1479,7 @@ describe("routing module facts — limit-aware skip integration", () => {
     })
 
     expect(res.status).toBe(503)
-    expect(res.headers.get("retry-after")).toBe(String(Math.ceil((Date.parse(future) - Date.now()) / 1000)))
+    expect(res.headers.get("retry-after")).toBe("60")
   })
 })
 

@@ -9,6 +9,8 @@ import {
 } from "../src/providers/codex"
 import type { Env } from "../src/env"
 import type { AcquiredAccount } from "../src/pool/acquire"
+import { encryptJson, decryptJson } from "../src/crypto/token_crypto"
+import { FakeD1 } from "./helpers/fake_d1"
 import { fetchCodexUsageJson, windowsFromCodexPayload } from "../src/providers/codex_usage"
 import { anthropicToOpenAIChatRequest } from "../src/proxy/openai_anthropic"
 
@@ -53,6 +55,49 @@ async function captureCodexRequest(req: Parameters<typeof codexAdapter.chatCompl
   await codexAdapter.chatCompletions(mockEnv(), codexAccount, req)
   return captured!
 }
+
+describe("codex OAuth refresh single-flight", () => {
+  it("refreshes one expired account once and gives the loser the winner's persisted credential", async () => {
+    const db = new FakeD1()
+    const tokenKey = "refresh-single-flight-test-key"
+    const expired = {
+      access_token: "old-access",
+      refresh_token: "old-refresh",
+      expires_at: new Date(Date.now() - 60_000).toISOString(),
+    }
+    const encrypted = await encryptJson(tokenKey, expired)
+    const row = { ...codexAccount.row, encrypted_payload: encrypted, refreshing_at: null }
+    db.seed("upstream_accounts", [row])
+    const env = { DB: db as unknown as D1Database, TOKEN_ENCRYPTION_KEY: tokenKey } as Env
+    let refreshCalls = 0
+    let releaseRefresh: (() => void) | undefined
+    const refreshStarted = new Promise<void>((resolve) => {
+      releaseRefresh = resolve
+    })
+    let refreshEntered: (() => void) | undefined
+    const entered = new Promise<void>((resolve) => {
+      refreshEntered = resolve
+    })
+    globalThis.fetch = (async () => {
+      refreshCalls++
+      refreshEntered!()
+      await refreshStarted
+      return Response.json({ access_token: "winner-access", refresh_token: "winner-refresh", expires_in: 3600 })
+    }) as typeof fetch
+
+    const staleAccount = { row, credential: expired }
+    const winner = codexAdapter.refreshIfNeeded!(env, staleAccount)
+    await entered
+    const loser = codexAdapter.refreshIfNeeded!(env, staleAccount)
+    releaseRefresh!()
+    const [winnerAccount, loserAccount] = await Promise.all([winner, loser])
+
+    expect(refreshCalls).toBe(1)
+    expect(winnerAccount.credential.access_token).toBe("winner-access")
+    expect(loserAccount.credential.access_token).toBe("winner-access")
+    expect((await decryptJson<typeof expired>(tokenKey, db.rows("upstream_accounts")[0]!.encrypted_payload as string)).access_token).toBe("winner-access")
+  })
+})
 
 describe("codex upstream request headers", () => {
   const baseReq = {

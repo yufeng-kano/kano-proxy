@@ -233,6 +233,30 @@ function execute(
     return { rows }
   }
 
+  // Atomic 520/522/524 strike feedback: this deliberately mirrors the one
+  // conditional UPDATE used in production, including its returned resulting
+  // count. Keep it explicit rather than making this test helper a SQL engine.
+  if (
+    /^UPDATE upstream_accounts SET edge_strikes = CASE WHEN edge_strike_at IS NULL OR edge_strike_at < \? THEN 1 WHEN edge_strikes >= 2 THEN 0 ELSE edge_strikes \+ 1 END, edge_strike_at = \?, updated_at = \? WHERE id = \? AND user_id = \? AND provider = \? RETURNING edge_strikes$/i.test(sql)
+  ) {
+    const [staleBefore, at, updatedAt, accountId, userId, provider] = params
+    const rows = db.rows("upstream_accounts").filter(
+      (row) => row.id === accountId && row.user_id === userId && row.provider === provider,
+    )
+    for (const row of rows) {
+      const priorAt = row.edge_strike_at
+      row.edge_strikes =
+        priorAt === null || priorAt === undefined || (priorAt as string) < (staleBefore as string)
+          ? 1
+          : Number(row.edge_strikes ?? 0) >= 2
+            ? 0
+            : Number(row.edge_strikes ?? 0) + 1
+      row.edge_strike_at = at
+      row.updated_at = updatedAt
+    }
+    return { rows: rows.map((row) => ({ edge_strikes: row.edge_strikes })), changes: rows.length }
+  }
+
   m = sql.match(/^UPDATE (\w+) SET (.+) WHERE (.+)$/i)
   if (m) {
     const table = m[1]!

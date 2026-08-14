@@ -21,7 +21,7 @@ import {
 } from "../db/custom_providers"
 import { decryptJson, encryptJson } from "../crypto/token_crypto"
 import type { Env } from "../env"
-import { isBenched, clearBench } from "../pool/bench"
+import { benchUntilFromRow, clearBench } from "../pool/bench"
 import type { StoredCredential } from "../pool/acquire"
 import {
   MAX_CUSTOM_PROVIDERS_PER_USER,
@@ -65,16 +65,8 @@ function hostsFromRequest(c: {
 }
 
 /** Only two states surfaced for custom cards — no standby/unusable nuance. */
-async function computeStatus(
-  env: Env,
-  userId: string,
-  slug: string,
-  accounts: AccountRow[],
-): Promise<"active" | "benched"> {
-  for (const a of accounts) {
-    if (!(await isBenched(env, userId, slug, a.id))) return "active"
-  }
-  return "benched"
+function computeStatus(accounts: AccountRow[]): "active" | "benched" {
+  return accounts.some((account) => benchUntilFromRow(account) === null) ? "active" : "benched"
 }
 
 function keyMaskFromAccount(row: AccountRow | undefined): string | null {
@@ -93,7 +85,7 @@ async function toListItem(
   row: CustomProviderRow,
 ): Promise<Record<string, unknown>> {
   const accounts = await listAccounts(env.DB, userId, row.slug)
-  const status = await computeStatus(env, userId, row.slug, accounts)
+  const status = computeStatus(accounts)
   return {
     id: row.id,
     slug: row.slug,

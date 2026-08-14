@@ -1,4 +1,5 @@
 import { decryptJson } from "../crypto/token_crypto"
+import { recordEdgeTimeoutStrike } from "../db/accounts"
 import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env, ProviderId } from "../env"
 import { markBenched } from "../pool/bench"
@@ -8,7 +9,11 @@ import { refreshAccountUsageInBackground } from "../providers/usage_refresh"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import { poolCandidates } from "../routing/candidates"
 import { candidateFactsList, earliestUnusableUntil } from "../routing/facts"
-import { penaltyForOutcome } from "../routing/feedback"
+import {
+  EDGE_TIMEOUT_COOLDOWN_MS,
+  isEdgeTimeoutStatus,
+  penaltyForOutcome,
+} from "../routing/feedback"
 import { normalizeStrategy, orderCandidates } from "../routing/strategy"
 import type { RoutingCandidate } from "../routing/types"
 import { logRequest } from "../logging/request_log"
@@ -74,9 +79,79 @@ function streamCloseErrorCode(reason: StreamCloseReason, complete: boolean): str
   return "incomplete_stream"
 }
 
-/** `Retry-After` header value (integer seconds, minimum 1) from a future epoch-ms bench-expiry. */
+/** Per-attempt upstream response-header deadline (docs/api.md "Keepalive and idle timeout"). */
+const DEFAULT_FIRST_BYTE_TIMEOUT_MS = 180_000
+
+/** Invalid, absent, or non-positive environment values use the documented default. */
+function firstByteTimeoutMs(env: Env): number {
+  const parsed = Number(env.UPSTREAM_FIRST_BYTE_TIMEOUT_MS)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_FIRST_BYTE_TIMEOUT_MS
+}
+
+/** Wait only for upstream response headers, and always release the timer once fetch resolves or rejects. */
+async function withFirstByteTimeout<T>(
+  env: Env,
+  attempt: (signal: AbortSignal) => Promise<T>,
+): Promise<{ value: T } | { timedOut: true }> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, firstByteTimeoutMs(env))
+  try {
+    return { value: await attempt(controller.signal) }
+  } catch (error) {
+    if (timedOut) return { timedOut: true }
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 function retryAfterSeconds(untilMs: number): number {
-  return Math.max(1, Math.ceil((untilMs - Date.now()) / 1000))
+  return Math.min(60, Math.max(1, Math.ceil((untilMs - Date.now()) / 1000)))
+}
+
+function retryMarker(status: number, errorCode?: string | null): HeadersInit | undefined {
+  if (status === 503 && errorCode === "upstream_unavailable") return { "x-should-retry": "true" }
+  if (
+    (status === 400 && (errorCode === "no_upstream_account" || errorCode === "invalid_model" || errorCode === "loop_detected")) ||
+    (status === 429 && errorCode === "spend_limit_exceeded")
+  ) return { "x-should-retry": "false" }
+  return undefined
+}
+
+type TimedUpstreamResponse = { response: Response; timedOut: false } | { response: null; timedOut: true }
+
+async function fetchUpstreamResponse(
+  env: Env,
+  attempt: (signal: AbortSignal) => Promise<Response>,
+): Promise<TimedUpstreamResponse> {
+  const result = await withFirstByteTimeout(env, attempt)
+  return "timedOut" in result ? { response: null, timedOut: true } : { response: result.value, timedOut: false }
+}
+
+function waitForOverloadRetry(): Promise<void> {
+  // Jitter keeps concurrent overloaded calls from immediately synchronizing;
+  // zero is intentionally allowed in unit tests that stub the retry response.
+  return new Promise((resolve) => setTimeout(resolve, 900 + Math.floor(Math.random() * 200)))
+}
+
+/** A 529 is transient fleet overload, so retry this account exactly once without benching it. */
+async function retry529Once(
+  call: () => Promise<TimedUpstreamResponse>,
+): Promise<TimedUpstreamResponse> {
+  let result = await call()
+  if (result.timedOut || result.response.status !== 529) return result
+  try {
+    await result.response.body?.cancel()
+  } catch {
+    /* exhausted 529 body is irrelevant */
+  }
+  await waitForOverloadRetry()
+  result = await call()
+  return result
 }
 
 /**
@@ -87,9 +162,9 @@ function retryAfterSeconds(untilMs: number): number {
  * currently unusable, or the 8-attempt walk exhausted the ones that were.
  */
 function upstreamUnavailableResponse(body: Record<string, unknown>, untilMs: number | null): Response {
-  const init: ResponseInit = { status: 503 }
-  if (untilMs !== null) init.headers = { "retry-after": String(retryAfterSeconds(untilMs)) }
-  return Response.json(body, init)
+  const headers = new Headers(retryMarker(503, "upstream_unavailable"))
+  if (untilMs !== null) headers.set("retry-after", String(retryAfterSeconds(untilMs)))
+  return Response.json(body, { status: 503, headers })
 }
 
 /** OpenAI SSE terminal error frame (eager commit / stall pattern). */
@@ -230,6 +305,66 @@ async function acquireCandidate(env: Env, candidate: RoutingCandidate): Promise<
   }
 }
 
+/** Bench persistence is feedback, never a reason to abort an in-flight failover walk. */
+async function persistBench(
+  env: Env,
+  userId: string,
+  candidate: RoutingCandidate,
+  cooldownMs: number,
+  upstreamStatus: number,
+): Promise<void> {
+  try {
+    await markBenched(env, userId, candidate.provider, candidate.account.id, cooldownMs, String(upstreamStatus))
+  } catch (error) {
+    console.error("Failed to persist account bench", {
+      accountId: candidate.account.id,
+      provider: candidate.provider,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/**
+ * Edge-timeout feedback is non-fatal just like bench persistence. Every edge
+ * status remains excluded from this walk; only the atomic third strike earns a
+ * bench. Returning false therefore covers strikes 1–2 and a failed write.
+ */
+async function persistEdgeTimeoutStrike(
+  env: Env,
+  userId: string,
+  candidate: RoutingCandidate,
+): Promise<boolean> {
+  try {
+    return await recordEdgeTimeoutStrike(env.DB, userId, candidate.provider, candidate.account.id)
+  } catch (error) {
+    console.error("Failed to persist edge-timeout strike", {
+      accountId: candidate.account.id,
+      provider: candidate.provider,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
+/** Apply feedback and decide whether this pre-stream response must fail over. */
+async function shouldFailOverForResponse(
+  env: Env,
+  userId: string,
+  candidate: RoutingCandidate,
+  response: Response,
+): Promise<boolean> {
+  if (isEdgeTimeoutStatus(response.status)) {
+    if (await persistEdgeTimeoutStrike(env, userId, candidate)) {
+      await persistBench(env, userId, candidate, EDGE_TIMEOUT_COOLDOWN_MS, response.status)
+    }
+    return true
+  }
+  const penalty = penaltyForOutcome(response.status, response.headers, candidate.account)
+  if (!penalty) return false
+  await persistBench(env, userId, candidate, penalty.cooldownMs, response.status)
+  return true
+}
+
 export async function dispatchChatCompletions(
   env: Env,
   opts: {
@@ -276,6 +411,7 @@ async function dispatchChatCompletionsEager(env: Env, opts: ChatCompletionsOpts)
   let usedUpstreamModel = opts.req.upstreamModel
   /** TTFB into the pipe, or time until terminal fail/cancel if earlier. */
   let headersLatencyMs: number | null = null
+  let lastUpstreamStatus: number | null = null
   const sniffer = createOpenAISseUsageSniffer()
 
   const body = streamWithEagerProducer(
@@ -326,12 +462,27 @@ async function dispatchChatCompletionsEager(env: Env, opts: ChatCompletionsOpts)
         usedUpstreamModel = candidate.upstreamModel
         accountId = candidate.account.id
 
-        const res = await candidate.adapter.chatCompletions(
-          env,
-          acquired,
-          { ...opts.req, upstreamModel: candidate.upstreamModel },
-          { apiKeyId: opts.apiKeyId, waitUntil: opts.waitUntil },
-        )
+        let fetched: TimedUpstreamResponse
+        try {
+          fetched = await retry529Once(() =>
+            fetchUpstreamResponse(env, (signal) =>
+              candidate.adapter.chatCompletions(
+                env,
+                acquired,
+                { ...opts.req, upstreamModel: candidate.upstreamModel },
+                { apiKeyId: opts.apiKeyId, waitUntil: opts.waitUntil, signal },
+              ),
+            ),
+          )
+        } catch {
+          headersLatencyMs = Date.now() - started
+          forcedErrorCode = "upstream_error"
+          ctl.fail(openaiStreamErrorFrame("upstream error", "api_error", "upstream_error"))
+          return
+        }
+        if (fetched.timedOut) continue
+        const res = fetched.response
+        lastUpstreamStatus = res.status
         opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
         if (ctl.cancelled()) {
           try {
@@ -342,9 +493,7 @@ async function dispatchChatCompletionsEager(env: Env, opts: ChatCompletionsOpts)
           return
         }
 
-        const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
-        if (penalty) {
-          await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
+        if (await shouldFailOverForResponse(env, opts.userId, candidate, res)) {
           if (lastResponse) {
             try {
               await lastResponse.body?.cancel()
@@ -407,6 +556,7 @@ async function dispatchChatCompletionsEager(env: Env, opts: ChatCompletionsOpts)
     },
     undefined,
     {
+      errorFrame: openaiStreamErrorFrame("upstream error", "api_error", "upstream_error"),
       onClose: (reason) => {
         const usage = sniffer.finish()
         const errorCode =
@@ -422,6 +572,7 @@ async function dispatchChatCompletionsEager(env: Env, opts: ChatCompletionsOpts)
             statusCode: 200,
             latencyMs,
             errorCode,
+            upstreamStatus: lastUpstreamStatus,
             groupName: opts.groupName ?? null,
             ...usageFields(usage),
           }),
@@ -465,7 +616,7 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
           code: "no_upstream_account",
         },
       },
-      { status: 400 },
+      { status: 400, headers: retryMarker(400, "no_upstream_account") },
     )
   }
   if (plan.kind === "unavailable") {
@@ -487,6 +638,7 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
 
   let lastResponse: Response | null = null
   let lastCandidate: RoutingCandidate | null = null
+  let lastUpstreamStatus: number | null = null
   let idx = 0
   let attempts = 0
   let ranOutOfCandidates = false
@@ -502,17 +654,39 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
     if (!acquired) continue
     attempts++
 
-    const res = await candidate.adapter.chatCompletions(
-      env,
-      acquired,
-      { ...opts.req, upstreamModel: candidate.upstreamModel },
-      { apiKeyId: opts.apiKeyId, waitUntil: opts.waitUntil },
-    )
+    let fetched: TimedUpstreamResponse
+    try {
+      fetched = await retry529Once(() =>
+        fetchUpstreamResponse(env, (signal) =>
+          candidate.adapter.chatCompletions(
+            env,
+            acquired,
+            { ...opts.req, upstreamModel: candidate.upstreamModel },
+            { apiKeyId: opts.apiKeyId, waitUntil: opts.waitUntil, signal },
+          ),
+        ),
+      )
+    } catch {
+      const latencyMs = Date.now() - started
+      await logRequest(env, {
+        userId: opts.userId,
+        apiKeyId: opts.apiKeyId,
+        provider: candidate.provider,
+        model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+        accountId: candidate.account.id,
+        statusCode: 502,
+        latencyMs,
+        errorCode: "upstream_error",
+        groupName: opts.groupName ?? null,
+      })
+      return Response.json({ error: { message: "upstream error", code: "upstream_error" } }, { status: 502 })
+    }
+    if (fetched.timedOut) continue
+    const res = fetched.response
+    lastUpstreamStatus = res.status
     opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
 
-    const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
-    if (penalty) {
-      await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
+    if (await shouldFailOverForResponse(env, opts.userId, candidate, res)) {
       if (lastResponse) {
         try {
           await lastResponse.body?.cancel()
@@ -546,6 +720,7 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
               statusCode: res.status,
               latencyMs,
               errorCode,
+              upstreamStatus: res.status,
               groupName: opts.groupName ?? null,
               ...usageFields(usage),
             }),
@@ -575,6 +750,7 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
       accountId: candidate.account.id,
       statusCode: res.status,
       latencyMs,
+      upstreamStatus: res.status,
       groupName: opts.groupName ?? null,
       ...usageFields(usage),
     })
@@ -600,6 +776,7 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
       statusCode: 503,
       latencyMs: Date.now() - started,
       errorCode: "upstream_unavailable",
+      upstreamStatus: lastUpstreamStatus,
       groupName: opts.groupName ?? null,
     })
     return upstreamUnavailableResponse(
@@ -620,6 +797,7 @@ async function dispatchChatCompletionsLegacy(env: Env, opts: ChatCompletionsOpts
     statusCode: 503,
     latencyMs: Date.now() - started,
     errorCode: "upstream_unavailable",
+    upstreamStatus: lastUpstreamStatus,
     groupName: opts.groupName ?? null,
   })
   return upstreamUnavailableResponse(
@@ -726,6 +904,7 @@ async function dispatchAnthropicMessagesEager(env: Env, opts: AnthropicMessagesO
   let accountId: string | undefined
   let usedProvider = provider
   let headersLatencyMs: number | null = null
+  let lastUpstreamStatus: number | null = null
   const sniffer = createAnthropicSseUsageSniffer()
 
   const body = streamWithEagerProducer(
@@ -768,9 +947,25 @@ async function dispatchAnthropicMessagesEager(env: Env, opts: AnthropicMessagesO
         usedProvider = candidate.provider
         accountId = candidate.account.id
 
-        const res = await call(env, acquired, bodyForCandidate(opts.body, candidate.upstreamModel), opts.headers, {
-          waitUntil: opts.waitUntil,
-        })
+        let fetched: TimedUpstreamResponse
+        try {
+          fetched = await retry529Once(() =>
+            fetchUpstreamResponse(env, (signal) =>
+              call(env, acquired, bodyForCandidate(opts.body, candidate.upstreamModel), opts.headers, {
+                waitUntil: opts.waitUntil,
+                signal,
+              }),
+            ),
+          )
+        } catch {
+          headersLatencyMs = Date.now() - started
+          forcedErrorCode = "upstream_error"
+          ctl.fail(anthropicStreamErrorFrame("upstream error", "api_error"))
+          return
+        }
+        if (fetched.timedOut) continue
+        const res = fetched.response
+        lastUpstreamStatus = res.status
         opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
         if (ctl.cancelled()) {
           try {
@@ -781,9 +976,7 @@ async function dispatchAnthropicMessagesEager(env: Env, opts: AnthropicMessagesO
           return
         }
 
-        const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
-        if (penalty) {
-          await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
+        if (await shouldFailOverForResponse(env, opts.userId, candidate, res)) {
           if (lastResponse) {
             try {
               await lastResponse.body?.cancel()
@@ -837,6 +1030,7 @@ async function dispatchAnthropicMessagesEager(env: Env, opts: AnthropicMessagesO
     },
     undefined,
     {
+      errorFrame: anthropicStreamErrorFrame("upstream error", "api_error"),
       onClose: (reason) => {
         const usage = sniffer.finish()
         const errorCode =
@@ -852,6 +1046,7 @@ async function dispatchAnthropicMessagesEager(env: Env, opts: AnthropicMessagesO
             statusCode: 200,
             latencyMs,
             errorCode,
+            upstreamStatus: lastUpstreamStatus,
             groupName: opts.groupName ?? null,
             ...usageFields(usage),
           }),
@@ -904,7 +1099,7 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
         type: "error",
         error: { type: "invalid_request_error", message: `No usable ${provider} account` },
       },
-      { status: 400 },
+      { status: 400, headers: retryMarker(400, "no_upstream_account") },
     )
   }
   if (plan.kind === "unavailable") {
@@ -926,6 +1121,7 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
 
   let lastResponse: Response | null = null
   let lastCandidate: RoutingCandidate | null = null
+  let lastUpstreamStatus: number | null = null
   let idx = 0
   let attempts = 0
   let ranOutOfCandidates = false
@@ -943,14 +1139,40 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
     if (!acquired) continue
     attempts++
 
-    const res = await call(env, acquired, bodyForCandidate(opts.body, candidate.upstreamModel), opts.headers, {
-      waitUntil: opts.waitUntil,
-    })
+    let fetched: TimedUpstreamResponse
+    try {
+      fetched = await retry529Once(() =>
+        fetchUpstreamResponse(env, (signal) =>
+          call(env, acquired, bodyForCandidate(opts.body, candidate.upstreamModel), opts.headers, {
+            waitUntil: opts.waitUntil,
+            signal,
+          }),
+        ),
+      )
+    } catch {
+      const latencyMs = Date.now() - started
+      await logRequest(env, {
+        userId: opts.userId,
+        apiKeyId: opts.apiKeyId,
+        provider: candidate.provider,
+        model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+        accountId: candidate.account.id,
+        statusCode: 502,
+        latencyMs,
+        errorCode: "upstream_error",
+        groupName: opts.groupName ?? null,
+      })
+      return Response.json(
+        { type: "error", error: { type: "api_error", message: "upstream error" } },
+        { status: 502 },
+      )
+    }
+    if (fetched.timedOut) continue
+    const res = fetched.response
+    lastUpstreamStatus = res.status
     opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
 
-    const penalty = penaltyForOutcome(res.status, res.headers, candidate.account)
-    if (penalty) {
-      await markBenched(env, opts.userId, candidate.provider, candidate.account.id, penalty.cooldownMs)
+    if (await shouldFailOverForResponse(env, opts.userId, candidate, res)) {
       if (lastResponse) {
         try {
           await lastResponse.body?.cancel()
@@ -986,6 +1208,7 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
               statusCode: res.status,
               latencyMs,
               errorCode,
+              upstreamStatus: res.status,
               groupName: opts.groupName ?? null,
               ...usageFields(usage),
             }),
@@ -1018,6 +1241,7 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
       accountId: candidate.account.id,
       statusCode: res.status,
       latencyMs,
+      upstreamStatus: res.status,
       groupName: opts.groupName ?? null,
       ...usageFields(usage),
     })
@@ -1040,6 +1264,7 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
       statusCode: 503,
       latencyMs: Date.now() - started,
       errorCode: "upstream_unavailable",
+      upstreamStatus: lastUpstreamStatus,
       groupName: opts.groupName ?? null,
     })
     return upstreamUnavailableResponse(
@@ -1057,6 +1282,7 @@ async function dispatchAnthropicMessagesLegacy(env: Env, opts: AnthropicMessages
     statusCode: 503,
     latencyMs: Date.now() - started,
     errorCode: "upstream_unavailable",
+    upstreamStatus: lastUpstreamStatus,
     groupName: opts.groupName ?? null,
   })
   return upstreamUnavailableResponse(

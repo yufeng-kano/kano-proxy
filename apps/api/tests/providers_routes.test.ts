@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest"
 import { createSession } from "../src/auth/session"
 import { decryptJson, encryptJson } from "../src/crypto/token_crypto"
 import type { Env } from "../src/env"
-import { benchKey, isBenched, markBenched } from "../src/pool/bench"
+import { isBenched, markBenched } from "../src/pool/bench"
 import { providerRoutes } from "../src/routes/providers"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
@@ -972,10 +972,9 @@ describe("POST /api/providers/:provider/accounts/:id/unpause", () => {
     expect(res.status).toBe(404)
     expect(await readJson(res)).toEqual({ error: "not found" })
     expect(await isBenched(env, "user_1", "grok", accountId)).toBe(true)
-    expect(await env.BENCH.get(benchKey("user_1", "claude-code", accountId))).toBeNull()
   })
 
-  it("200 deletes the bench key and GET /accounts no longer reports benched", async () => {
+  it("200 nulls the bench columns and GET /accounts no longer reports benched", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)
@@ -992,7 +991,7 @@ describe("POST /api/providers/:provider/accounts/:id/unpause", () => {
     expect(res.status).toBe(200)
     expect(await readJson(res)).toEqual({ ok: true })
     expect(await isBenched(env, "user_1", "claude-code", accountId)).toBe(false)
-    expect(await env.BENCH.get(benchKey("user_1", "claude-code", accountId))).toBeNull()
+    expect(db.rows("upstream_accounts")[0]).toMatchObject({ bench_until: null, bench_reason: null })
 
     stubClaudeUsage("stored@example.com")
     const get = await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)

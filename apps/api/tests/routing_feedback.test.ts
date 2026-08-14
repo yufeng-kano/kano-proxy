@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest"
 import type { AccountRow } from "../src/db/accounts"
-import { penaltyForOutcome, isBenchStatus } from "../src/routing/feedback"
+import { isEdgeTimeoutStatus, penaltyForOutcome, isBenchStatus } from "../src/routing/feedback"
 
 function accountRow(overrides: Partial<AccountRow> = {}): AccountRow {
   return {
@@ -29,13 +29,20 @@ function accountRow(overrides: Partial<AccountRow> = {}): AccountRow {
 const NOW = Date.parse("2026-06-01T00:00:00.000Z")
 
 describe("isBenchStatus / penaltyForOutcome — status classification", () => {
-  it.each([401, 402, 403, 429, 520, 522, 524])("benches on %d", (status) => {
+  it.each([401, 402, 403, 429])("benches on %d", (status) => {
     expect(isBenchStatus(status)).toBe(true)
     expect(penaltyForOutcome(status, new Headers(), accountRow(), NOW)).not.toBeNull()
   })
 
+  it.each([520, 522, 524])("records a request-local edge-timeout strike on %d", (status) => {
+    expect(isEdgeTimeoutStatus(status)).toBe(true)
+    expect(isBenchStatus(status)).toBe(false)
+    expect(penaltyForOutcome(status, new Headers(), accountRow(), NOW)).toBeNull()
+  })
+
   it.each([200, 400, 404, 408, 409, 422, 500, 502, 503])("does not bench on %d", (status) => {
     expect(isBenchStatus(status)).toBe(false)
+    expect(isEdgeTimeoutStatus(status)).toBe(false)
     expect(penaltyForOutcome(status, new Headers(), accountRow(), NOW)).toBeNull()
   })
 
@@ -45,11 +52,6 @@ describe("isBenchStatus / penaltyForOutcome — status classification", () => {
     }
   })
 
-  it("520/522/524 (upstream edge failure) bench for a flat 300s", () => {
-    for (const status of [520, 522, 524]) {
-      expect(penaltyForOutcome(status, new Headers(), accountRow(), NOW)).toEqual({ cooldownMs: 300_000 })
-    }
-  })
 })
 
 describe("429 — reset-aware cooldown", () => {

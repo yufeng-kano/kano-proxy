@@ -1,7 +1,7 @@
 import type { Env } from "../env"
 import type { AcquiredAccount } from "../pool/acquire"
-import { saveCredential } from "../pool/acquire"
 import { mapReasoning } from "../utils/reasoning"
+import { refreshOAuthCredential } from "./refresh"
 import type { ChatCompletionRequest, ProviderAdapter, UsageWindow } from "./types"
 import { openaiToAnthropicMessages, anthropicToOpenAIResponse } from "../proxy/openai_anthropic"
 
@@ -43,40 +43,37 @@ function clientId(env: Env): string {
   return env.CLAUDE_CODE_OAUTH_CLIENT_ID || DEFAULT_CLIENT_ID
 }
 
-async function refreshClaude(
-  env: Env,
-  account: AcquiredAccount,
-): Promise<AcquiredAccount> {
-  const { credential } = account
-  if (!credential.refresh_token) return account
-  const exp = credential.expires_at ? Date.parse(credential.expires_at) : 0
-  if (exp && exp - 60_000 > Date.now()) return account
-
-  const res = await fetch(OAUTH_TOKEN, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "refresh_token",
-      refresh_token: credential.refresh_token,
-      client_id: credential.client_id || clientId(env),
-    }),
-  })
-  if (!res.ok) return account
-  const json = (await res.json()) as {
-    access_token: string
-    refresh_token?: string
-    expires_in?: number
-  }
-  const next = {
-    ...credential,
-    access_token: json.access_token,
-    refresh_token: json.refresh_token ?? credential.refresh_token,
-    expires_at: json.expires_in
-      ? new Date(Date.now() + json.expires_in * 1000).toISOString()
-      : credential.expires_at,
-  }
-  await saveCredential(env, account.row.id, next)
-  return { row: account.row, credential: next }
+async function refreshClaude(env: Env, account: AcquiredAccount): Promise<AcquiredAccount> {
+  return refreshOAuthCredential(
+    env,
+    account,
+    (credential) => {
+      if (!credential.refresh_token) return false
+      const exp = credential.expires_at ? Date.parse(credential.expires_at) : 0
+      return !exp || exp - 60_000 <= Date.now()
+    },
+    async (credential) => {
+      const res = await fetch(OAUTH_TOKEN, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          grant_type: "refresh_token",
+          refresh_token: credential.refresh_token,
+          client_id: credential.client_id || clientId(env),
+        }),
+      })
+      if (!res.ok) return null
+      const json = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number }
+      return {
+        ...credential,
+        access_token: json.access_token,
+        refresh_token: json.refresh_token ?? credential.refresh_token,
+        expires_at: json.expires_in
+          ? new Date(Date.now() + json.expires_in * 1000).toISOString()
+          : credential.expires_at,
+      }
+    },
+  )
 }
 
 const EFFORT_BETA = "effort-2025-11-24"
@@ -171,6 +168,7 @@ async function forwardToAnthropic(
   account: AcquiredAccount,
   body: unknown,
   headers: Headers,
+  signal?: AbortSignal,
 ): Promise<Response> {
   const acc = await refreshClaude(env, account)
   const raw = typeof body === "object" && body ? { ...(body as object) } : {}
@@ -187,6 +185,7 @@ async function forwardToAnthropic(
       ...clientFingerprint(headers),
     },
     body: JSON.stringify(patched),
+    signal,
   })
 }
 
@@ -229,21 +228,22 @@ export const claudeCodeAdapter: ProviderAdapter = {
     }
   },
 
-  async messages(env, account, body, headers) {
-    return forwardToAnthropic(`${ANTHROPIC_API}/v1/messages`, env, account, body, headers)
+  async messages(env, account, body, headers, extras) {
+    return forwardToAnthropic(`${ANTHROPIC_API}/v1/messages`, env, account, body, headers, extras?.signal)
   },
 
-  async countTokens(env, account, body, headers) {
+  async countTokens(env, account, body, headers, extras) {
     return forwardToAnthropic(
       `${ANTHROPIC_API}/v1/messages/count_tokens`,
       env,
       account,
       body,
       headers,
+      extras?.signal,
     )
   },
 
-  async chatCompletions(env, account, req) {
+  async chatCompletions(env, account, req, extras) {
     const acc = await refreshClaude(env, account)
     const mapped = mapReasoning("claude-code", req.reasoning_effort)
     const anthropicBody = openaiToAnthropicMessages({
@@ -274,6 +274,7 @@ export const claudeCodeAdapter: ProviderAdapter = {
         ...clientFingerprint(),
       },
       body: JSON.stringify(withSystem),
+      signal: extras?.signal,
     })
 
     if (req.stream) {

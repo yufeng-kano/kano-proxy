@@ -25,7 +25,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 
 - **API / proxy:** Cloudflare Workers (TypeScript)
 - **Web:** Vue 3 + Vite + TypeScript on Cloudflare Pages
-- **Data:** D1 (relational), KV (rate-limit / bench / short cache), Durable Objects only if pool coordination requires it
+- **Data:** D1 (relational state), KV (rate-limit / short cache; deprecated BENCH binding retained for config compatibility), Durable Objects only if pool coordination requires it
 - **Codex egress relay:** Deno container on Google Cloud Run (us-central1) — the single approved non-Cloudflare component; see [codex-relay.md](./codex-relay.md)
 - **Envs:** local + production only
 

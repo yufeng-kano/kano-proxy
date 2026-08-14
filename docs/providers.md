@@ -6,8 +6,8 @@ Per `(user_id, provider)`:
 
 1. **List** accounts with priority and metadata  
 2. **Acquire** highest-priority non-benched credential (refresh if needed)  
-3. **Bench** on upstream auth/limit/edge-timeout failures (KV) — statuses and durations in § Routing module below  
-4. **Unpause** — operator clears that KV bench so the account is eligible again (admin REST; does not rewrite usage windows). See "Manual unpause" below.  
+3. **Bench** on upstream auth/limit/edge-timeout failures — stored on the account row (`bench_until`/`bench_reason`, D1; see [database.md](./database.md)) — statuses and durations in § Routing module below
+4. **Unpause** — operator nulls that bench so the account is eligible again (admin REST; does not rewrite usage windows). See "Manual unpause" below.
 5. **Promote** / **Remove**  
 6. **Usage snapshot** — cached **60s server-side in D1** on the `upstream_accounts` row, behind a single-flight lock. See "Usage cache" below.
 
@@ -41,6 +41,17 @@ UPDATE upstream_accounts SET usage_fetching_at = ?now
 **Why not a cron trigger.** Polling upstream on a schedule would run 24/7 whether or not anyone is looking, multiplying upstream calls against the same rate limits this cache exists to respect. The demand-driven model — nobody watching, nothing fetched — is the cheaper one; the frontend reinforces it by stopping its poll whenever the page is hidden ([admin-ui.md](./admin-ui.md)).
 
 Two providers make the saving concrete: grok's `fetchUsage` is two upstream calls plus a possible token refresh, and codex usage egresses through the paid Cloud Run relay ([codex-relay.md](./codex-relay.md)).
+
+## OAuth refresh single-flight (per-account)
+
+Claude Code opens up to ~21 concurrent streams from one process (main session + up to 20 subagents), all on the same upstream account. Before 2026-08-14, every one of those requests independently checked token expiry and called the provider's refresh endpoint with the **same refresh token** — no lock, no version check, last write wins. If the provider rotates refresh tokens (single-use), every loser of that race is left holding a dead credential; its next upstream call 401s, which is a bench status, so a refresh stampede could pause the account with nothing wrong upstream. The background usage refresh compounded it by decrypting the **pre-refresh** row captured at dispatch and refreshing again.
+
+The fix is the same CAS pattern as the usage single-flight, on its own column (`refreshing_at`, [database.md](./database.md)):
+
+- **Claim**: conditional `UPDATE … SET refreshing_at = ?now WHERE id = ? AND (refreshing_at IS NULL OR refreshing_at < ?now_minus_30s)`; `changes === 1` wins and refreshes. The `< now-30s` clause breaks a lock orphaned by a dead Worker.
+- **Losers re-read instead of refreshing**: poll the row briefly (a few short-delay re-reads) for the winner's fresh credential and use it. If the wait runs out and the lock has gone free with the credential still expired, claim and refresh; as a last resort (lock still held, credential still expired after the wait) proceed with the old credential rather than deadlocking — the upstream 401 path is the existing fallback.
+- **Persist + release is compare-and-release**: the refreshed payload write and `refreshing_at = NULL` happen in one statement conditioned on holding the lock, mirroring the usage-cache release rule. On refresh failure, release the lock and keep the old payload.
+- **Background usage refresh re-reads** the account row after acquiring the usage lock — never operates on the row captured before dispatch's own refresh.
 
 ## Claude Code
 
@@ -224,7 +235,7 @@ This flattens what used to be two layers (group target walk + in-pool acquire lo
 
 **Facts.** Each candidate carries usability facts, computed from stored state only — the dispatch path never makes a synchronous upstream call for them:
 
-- **Bench state** (KV `BENCH`, as before).
+- **Bench state** from the account row's `bench_until` (D1, [database.md](./database.md)) — the row is already loaded to build candidates, so bench reads cost nothing extra. Expired values compare as not-benched at read time; nothing deletes them. (Bench lived in KV until `0011`; KV's eventual consistency made a fresh bench invisible to the next request — observed as an account "flapping" benched/usable — and its 1-write/sec-per-key limit made the key a hotspot exactly when a burst of failures all tried to bench the same account.)
 - **Usage windows** from the account row's stored `usage_snapshot_json`: any window (5h, Week, …) with `utilization ≥ 100` marks the candidate **unusable until that window's `resets_at`**. This is the proactive "limit hit → next account until the window resets" switch, and it is per-window: a 5h-limited account comes back when its 5h window resets, a week-limited one when the week resets. Precision is bounded by snapshot freshness; the skip self-expires at `resets_at` even if the snapshot has gone stale, so a stale snapshot can never bench an account past its real reset.
 - To keep snapshots warm while traffic flows, dispatch fires a **background** usage refresh (`waitUntil`) through the existing 60s-TTL single-flight cache — ≤1 upstream usage call per account per 60s, zero added client latency, and nothing fetched when there is no traffic (same demand-driven argument as the admin-page cache above).
 
@@ -241,19 +252,24 @@ This flattens what used to be two layers (group target walk + in-pool acquire lo
 |------------------|---------|
 | `401` / `403` (auth), `402` (billing) | bench 300s; try next candidate |
 | `429` (rate limit) | bench **until the upstream reset when derivable** — rate-limit reset headers when present, else the earliest `≥100%` window's `resets_at` from the snapshot, else 300s; capped at 7 days — then try next candidate. A weekly-limited account stays benched for its window, not 300s |
-| `520` / `522` / `524` (upstream's own edge failed/timed out before first byte) | bench 300s; try next candidate — these arrive as a response status before anything was piped, so in-request failover is safe |
+| `520` / `522` / `524` (upstream's own edge failed/timed out before first byte) | **three-strike**: strikes 1–2 are request-local only (exclude the candidate for this request, no bench, account stays usable for the next request); the **3rd edge-timeout within 10 minutes** benches **30s** and resets the counter. Strikes live on the account row (`edge_strikes` / `edge_strike_at`, [database.md](./database.md)), incremented atomically in one conditional UPDATE — a strike older than 10 minutes stales the count back to 1 instead of accumulating forever, and no write happens on success. These statuses arrive before anything was piped, so in-request failover is safe. (Until 2026-08-14 a *single* 524 benched 300s: an edge timeout is far weaker evidence of account trouble than an auth/limit status, and on a one-account pool one transient 524 turned into a five-minute outage) |
+| `529` (upstream overloaded) | **never bench** (fleet-wide overload says nothing about this account) — but before any bytes have been piped, retry the **same account once** after ~1s; if the retry also fails, pass through / in-stream error as before |
+| First-byte timeout (proxy-local — see [api.md](./api.md) § Streaming) | no bench (a local timeout is weak evidence); exclude the candidate **for this request only** and try the next |
 | Any other non-2xx | no bench; passthrough / in-stream error, as before |
+
+Bench writes are **monotonic and non-fatal**: a write only extends (`bench_until IS NULL OR < new` — a short concurrent penalty never truncates a longer one), records the cause in `bench_reason`, and a failed write must never abort the request — dispatch keeps its own per-request exclusion set and continues the walk, logging the persistence failure.
 
 Failover never crosses users. Custom providers participate identically (pooled under their slug; `provider_settings` rows keyed by the slug).
 
-**Manual unpause.** The operator can clear a bench immediately without waiting for its TTL — `POST /api/providers/:provider/accounts/:id/unpause` for a builtin account, `POST /api/custom-providers/:id/unpause` for a custom endpoint (clears every account row of that slug; one key today). Both are session-auth admin routes ([auth.md](./auth.md)); UI: [admin-ui.md](./admin-ui.md) § Providers page. The write is `clearBench` only — delete the KV key:
+**Manual unpause.** The operator can clear a bench immediately without waiting for its expiry — `POST /api/providers/:provider/accounts/:id/unpause` for a builtin account, `POST /api/custom-providers/:id/unpause` for a custom endpoint (clears every account row of that slug; one key today). Both are session-auth admin routes ([auth.md](./auth.md)); UI: [admin-ui.md](./admin-ui.md) § Providers page. The write is `clearBench` only — null `bench_until`/`bench_reason` on the row:
 
 - Idempotent: already-unpaused is still `200 {ok: true}`.
+- Clearing KV is no longer involved — bench state lives on the account row since `0011` ([database.md](./database.md)).
 - Does **not** rewrite `usage_snapshot_json`. A window still at `utilization ≥ 100` keeps the candidate unusable until that window's `resets_at` — that is a **limit**, not a pause (Providers shows Resume only for `status: "benched"`; Groups still shows "limit" for the window). Unpausing a 429-until-weekly-reset bench therefore restores the row's Paused badge but does not override a still-exhausted usage fact.
 - The next bench-status upstream response (401/402/403/429/520/522/524) re-benches as usual. Unpause is not a permanent override and does not change priority, tokens, or labels.
 - 404 when the id is not the caller's, or (builtins) the account's `provider` does not match the path.
 
-The same facts also power the admin **current-route indicator**: `GET /api/model-groups` computes per-target usability and the target the ordered walk would pick right now from stored state only (KV bench + usage snapshots — never a synchronous upstream call), so the Groups page shows exactly what the router itself would decide with the same information ([auth.md](./auth.md), [admin-ui.md](./admin-ui.md) § Groups page).
+The same facts also power the admin **current-route indicator**: `GET /api/model-groups` computes per-target usability and the target the ordered walk would pick right now from stored state only (D1 bench columns + usage snapshots — never a synchronous upstream call), so the Groups page shows exactly what the router itself would decide with the same information ([auth.md](./auth.md), [admin-ui.md](./admin-ui.md) § Groups page).
 
 ## Catalog
 

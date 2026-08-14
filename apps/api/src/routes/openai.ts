@@ -64,6 +64,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
         },
       },
       400,
+      { "x-should-retry": "false" },
     )
   }
   const effort = parseReasoningEffort(body.reasoning_effort)
@@ -107,6 +108,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
           },
         },
         400,
+        { "x-should-retry": "false" },
       )
     }
   }

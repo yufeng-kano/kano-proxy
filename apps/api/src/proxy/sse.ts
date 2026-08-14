@@ -31,6 +31,8 @@ export type StreamKeepaliveOpts = {
   idleTimeoutMs?: number
   /** Enqueued once, immediately before close, when `idleTimeoutMs` fires. */
   stallFrame?: Uint8Array
+  /** Terminal frame for errors before any real upstream bytes were emitted. */
+  errorFrame?: Uint8Array
 }
 
 /**
@@ -184,7 +186,7 @@ export type EagerStreamController = {
    */
   pipeUpstream: (
     upstream: ReadableStream<Uint8Array>,
-    pipeOpts?: Pick<StreamKeepaliveOpts, "tap" | "idleTimeoutMs" | "stallFrame">,
+    pipeOpts?: Pick<StreamKeepaliveOpts, "tap" | "idleTimeoutMs" | "stallFrame" | "errorFrame">,
   ) => Promise<void>
   /** Enqueue one terminal frame (error) and close cleanly. */
   fail: (frame: Uint8Array) => void
@@ -294,6 +296,7 @@ export function streamWithEagerProducer(
           const reader = upstream.getReader()
           upstreamReader = reader
           let idleTimedOut = false
+          let emittedUpstreamBytes = false
 
           const armIdle = () => {
             if (!pipeOpts?.idleTimeoutMs) return
@@ -334,6 +337,7 @@ export function streamWithEagerProducer(
               if (value) {
                 try {
                   controller.enqueue(value)
+                  emittedUpstreamBytes = true
                 } catch {
                   /* client gone */
                   break
@@ -362,15 +366,30 @@ export function streamWithEagerProducer(
             }
           } catch (e) {
             if (!idleTimedOut && !closed) {
-              closed = true
               clearKeepalive()
               clearIdle()
-              try {
-                controller.error(e)
-              } catch {
-                /* */
+              // Once a real byte has flowed, a stream may be mid-frame and raw
+              // abort is the only honest option. Before output, preserve the
+              // client protocol with the dispatch-provided terminal frame.
+              if (!emittedUpstreamBytes && pipeOpts?.errorFrame) {
+                try {
+                  controller.enqueue(pipeOpts.errorFrame)
+                  controller.close()
+                  closed = true
+                  fireClose("done")
+                } catch {
+                  closed = true
+                  fireClose("error")
+                }
+              } else {
+                closed = true
+                try {
+                  controller.error(e)
+                } catch {
+                  /* */
+                }
+                fireClose("error")
               }
-              fireClose("error")
             }
           } finally {
             clearKeepalive()
@@ -390,17 +409,21 @@ export function streamWithEagerProducer(
         if (!closed) {
           safeClose(cancelled ? "cancel" : "done")
         }
-      } catch (e) {
+      } catch {
         if (!closed) {
-          closed = true
           clearKeepalive()
           clearIdle()
+          // Eager dispatch has not handed us upstream bytes at this level:
+          // always preserve SSE protocol with a generic terminal frame.
           try {
-            controller.error(e)
+            controller.enqueue(opts?.errorFrame ?? new TextEncoder().encode('data: {"error":{"message":"upstream error","type":"api_error"}}\n\n'))
+            controller.close()
+            closed = true
+            fireClose("done")
           } catch {
-            /* */
+            closed = true
+            fireClose("error")
           }
-          fireClose("error")
         }
       }
     },

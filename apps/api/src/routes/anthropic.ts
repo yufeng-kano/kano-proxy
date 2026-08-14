@@ -63,6 +63,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
         },
       },
       400,
+      { "x-should-retry": "false" },
     )
   }
 
@@ -133,6 +134,7 @@ anthropicRoutes.post("/v1/messages", async (c) => {
         error: { type: "invalid_request_error", message: loopDetectedMessage(loop) },
       },
       400,
+      { "x-should-retry": "false" },
     )
   }
 

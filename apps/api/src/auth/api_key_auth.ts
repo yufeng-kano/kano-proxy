@@ -45,10 +45,11 @@ export const apiKeyAuth: MiddlewareHandler<HonoEnv> = async (c, next) => {
         }),
       )
       return isAnthropic
-        ? c.json({ type: "error", error: { type: "rate_limit_error", message } }, 429)
+        ? c.json({ type: "error", error: { type: "rate_limit_error", message } }, 429, { "x-should-retry": "false" })
         : c.json(
             { error: { message, type: "rate_limit_error", code: "spend_limit_exceeded" } },
             429,
+            { "x-should-retry": "false" },
           )
     }
   }

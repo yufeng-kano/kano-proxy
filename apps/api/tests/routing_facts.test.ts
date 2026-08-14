@@ -5,11 +5,9 @@
  */
 import { describe, expect, it, vi, afterEach } from "vitest"
 import type { Env } from "../src/env"
-import { benchKey, markBenched } from "../src/pool/bench"
 import { candidateFacts, usageWindowUnusableUntil } from "../src/routing/facts"
 import type { AccountRow } from "../src/db/accounts"
 import type { RoutingCandidate } from "../src/routing/types"
-import { fakeKV } from "./helpers/fake_d1"
 
 afterEach(() => {
   vi.useRealTimers()
@@ -96,9 +94,7 @@ describe("usageWindowUnusableUntil", () => {
   })
 })
 
-function envWith(bench: ReturnType<typeof fakeKV>): Env {
-  return { BENCH: bench } as unknown as Env
-}
+const env = {} as Env
 
 function candidateFor(account: AccountRow): RoutingCandidate {
   return {
@@ -114,23 +110,23 @@ function candidateFor(account: AccountRow): RoutingCandidate {
 
 describe("candidateFacts", () => {
   it("neither benched nor limited: usable, unusableUntil null", async () => {
-    const env = envWith(fakeKV())
     const facts = await candidateFacts(env, "user_1", candidateFor(accountRow()))
     expect(facts).toEqual({ usable: true, unusableUntil: null, benchUntil: null, usageWindowUntil: null })
   })
 
-  it("benched only: unusable until the bench expiry", async () => {
-    const env = envWith(fakeKV())
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"))
-    await markBenched(env, "user_1", "claude-code", "acc_1", 300_000)
-    const facts = await candidateFacts(env, "user_1", candidateFor(accountRow()))
+  it("benched only: unusable until the row's bench expiry", async () => {
+    const now = Date.parse("2026-01-01T00:00:00.000Z")
+    const facts = await candidateFacts(
+      env,
+      "user_1",
+      candidateFor(accountRow({ bench_until: new Date(now + 300_000).toISOString() })),
+      now,
+    )
     expect(facts.usable).toBe(false)
-    expect(facts.unusableUntil).toBe(Date.now() + 300_000)
+    expect(facts.unusableUntil).toBe(now + 300_000)
   })
 
   it("limited only: unusable until the window resets", async () => {
-    const env = envWith(fakeKV())
     const now = Date.parse("2026-06-01T00:00:00.000Z")
     const row = accountRow({
       usage_snapshot_json: snapshotJson([
@@ -147,11 +143,10 @@ describe("candidateFacts", () => {
   })
 
   it("both benched and limited: unusable until whichever is later", async () => {
-    const env = envWith(fakeKV())
     const now = Date.parse("2026-06-01T00:00:00.000Z")
     // Bench clears sooner (5 min) than the usage window (5h).
-    await env.BENCH.put(benchKey("user_1", "claude-code", "acc_1"), String(now + 300_000))
     const row = accountRow({
+      bench_until: new Date(now + 300_000).toISOString(),
       usage_snapshot_json: snapshotJson([
         { label: "5h", utilization: 100, resets_at: "2026-06-01T05:00:00.000Z" },
       ]),

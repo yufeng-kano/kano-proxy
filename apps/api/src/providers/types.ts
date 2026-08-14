@@ -84,6 +84,8 @@ export type ProviderAdapter = {
     extras?: {
       apiKeyId?: string | null
       waitUntil?: (promise: Promise<unknown>) => void
+      /** Dispatch-scoped deadline for waiting on upstream response headers. */
+      signal?: AbortSignal
     },
   ): Promise<Response>
   /**
@@ -96,7 +98,7 @@ export type ProviderAdapter = {
     account: AcquiredAccount,
     body: unknown,
     headers: Headers,
-    extras?: { waitUntil?: (promise: Promise<unknown>) => void },
+    extras?: { waitUntil?: (promise: Promise<unknown>) => void; signal?: AbortSignal },
   ): Promise<Response>
   /** Optional native Anthropic count_tokens (same providers as `messages`). Never streams. */
   countTokens?(
@@ -104,6 +106,7 @@ export type ProviderAdapter = {
     account: AcquiredAccount,
     body: unknown,
     headers: Headers,
+    extras?: { signal?: AbortSignal },
   ): Promise<Response>
   /** Live model list from upstream when the provider has one. Empty if none. */
   listModels?(

@@ -1,7 +1,7 @@
 import type { Env } from "../env"
 import type { AcquiredAccount } from "../pool/acquire"
-import { saveCredential } from "../pool/acquire"
 import { mapReasoning } from "../utils/reasoning"
+import { refreshOAuthCredential } from "./refresh"
 import type { ChatCompletionRequest, ProviderAdapter, UsageWindow } from "./types"
 import {
   deleteGrokReasoningReplay,
@@ -71,42 +71,37 @@ function clientId(env: Env): string {
 }
 
 async function refreshGrok(env: Env, account: AcquiredAccount): Promise<AcquiredAccount> {
-  const { credential } = account
-  if (!credential.refresh_token || !credential.token_endpoint) return account
-  const exp = credential.expires_at ? Date.parse(credential.expires_at) : 0
-  if (exp && exp - 3_600_000 > Date.now()) return account
-
-  try {
-    const res = await fetch(credential.token_endpoint, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: credential.refresh_token,
-        client_id: credential.client_id || clientId(env),
-      }),
-      signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
-    })
-    if (!res.ok) return account
-    const json = (await res.json()) as {
-      access_token: string
-      refresh_token?: string
-      expires_in?: number
-    }
-    const next = {
-      ...credential,
-      access_token: json.access_token,
-      refresh_token: json.refresh_token ?? credential.refresh_token,
-      expires_at: json.expires_in
-        ? new Date(Date.now() + json.expires_in * 1000).toISOString()
-        : credential.expires_at,
-    }
-    await saveCredential(env, account.row.id, next)
-    return { row: account.row, credential: next }
-  } catch {
-    // Timeout / network — keep existing credential; next request can retry.
-    return account
-  }
+  return refreshOAuthCredential(
+    env,
+    account,
+    (credential) => {
+      if (!credential.refresh_token || !credential.token_endpoint) return false
+      const exp = credential.expires_at ? Date.parse(credential.expires_at) : 0
+      return !exp || exp - 3_600_000 <= Date.now()
+    },
+    async (credential) => {
+      const res = await fetch(credential.token_endpoint!, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: credential.refresh_token!,
+          client_id: credential.client_id || clientId(env),
+        }),
+        signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
+      })
+      if (!res.ok) return null
+      const json = (await res.json()) as { access_token: string; refresh_token?: string; expires_in?: number }
+      return {
+        ...credential,
+        access_token: json.access_token,
+        refresh_token: json.refresh_token ?? credential.refresh_token,
+        expires_at: json.expires_in
+          ? new Date(Date.now() + json.expires_in * 1000).toISOString()
+          : credential.expires_at,
+      }
+    },
+  )
 }
 
 function affinityFromHeaders(headers: Headers): {
@@ -163,7 +158,7 @@ export const grokAdapter: ProviderAdapter = {
    * OpenAI surface: Chat Completions on api.x.ai (unchanged wire format).
    * Anthropic surface uses `messages()` → Responses instead.
    */
-  async chatCompletions(env, account, req) {
+  async chatCompletions(env, account, req, extras) {
     const acc = await refreshGrok(env, account)
     const mapped = mapReasoning("grok", req.reasoning_effort)
 
@@ -206,6 +201,7 @@ export const grokAdapter: ProviderAdapter = {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: extras?.signal,
     })
     return res
   },
@@ -294,6 +290,7 @@ export const grokAdapter: ProviderAdapter = {
         method: "POST",
         headers: grokResponsesHeaders(acc.credential.access_token, aff),
         body: JSON.stringify(body),
+        signal: extras?.signal,
       })
 
     // Opaque-state decode recovery (compaction / encrypted_content 400):

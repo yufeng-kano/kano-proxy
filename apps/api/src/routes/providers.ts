@@ -32,7 +32,7 @@ import {
 import { fetchAndPersistUsage } from "../providers/usage_refresh"
 import { encryptJson } from "../crypto/token_crypto"
 import { isProviderId, type ProviderId } from "../env"
-import { clearBench, isBenched } from "../pool/bench"
+import { benchUntilFromRow, clearBench } from "../pool/bench"
 import type { StoredCredential } from "../pool/acquire"
 import { getAdapter } from "../providers"
 import { newId, nowIso } from "../utils/id"
@@ -65,7 +65,7 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   const accounts = []
   let priority = 0
   for (const row of rows) {
-    const benched = await isBenched(c.env, user.id, provider, row.id)
+    const benched = benchUntilFromRow(row) !== null
     let status: "active" | "standby" | "benched" | "unusable" = benched
       ? "benched"
       : priority === 0

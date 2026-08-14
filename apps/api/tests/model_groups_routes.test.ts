@@ -220,7 +220,7 @@ describe("GET /api/model-groups", () => {
     db.rows("upstream_accounts")[0]!.usage_snapshot_json = JSON.stringify({
       windows: [{ utilization: 100, resets_at: new Date(reset).toISOString() }], error: null, stale: false, edgeBlocked: false,
     })
-    await env.BENCH.put(`bench:user_1:claude-code:acc`, String(reset + 60_000))
+    db.rows("upstream_accounts")[0]!.bench_until = new Date(reset + 60_000).toISOString()
     await createGroup(env, cookie, { targets: [{ model: "claude-code/model", account_id: "acc" }] })
 
     const json = await readJson(await modelGroupRoutes.request("/", req("GET", cookie), env))
