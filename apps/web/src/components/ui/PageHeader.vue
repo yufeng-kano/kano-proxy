@@ -8,8 +8,8 @@
  * rather than in the content that scrolls away.
  *
  * Chrome, not a surface (docs/admin-ui.md § Layout): one compact title row
- * with the subtitle inline beside it, and a background that is the page bg
- * blurred — a stuck header reads as the page fading out under the controls,
+ * with the subtitle inline beside it, and a heavy frosted wash of the page
+ * bg — a stuck header reads as the page frosting out under the controls,
  * never as a white slab sitting on it.
  */
 defineProps<{
@@ -50,9 +50,10 @@ defineSlots<{
  * is stuck; cancelling `--page-gutter` lets the wash and bottom rule run
  * from the sidebar edge to the region's far edge. The same gutter comes back
  * as padding so title, actions, and section nav stay on the card column —
- * a header whose words run wider than the cards reads as two page widths
- * stacked; a wash that stops at the cards reads as a strip that does not
- * cover the page.
+ * the gutter is the shell's `--space-4`, shared with the cards, not a
+ * tighter header-only inset. A header whose words run wider than the
+ * cards reads as two page widths stacked; a wash that stops at the cards
+ * reads as a strip that does not cover the page.
  *
  * Both values are AppShell's own, inherited rather than restated — two
  * copies would disagree at whichever breakpoint someone updated only one
@@ -61,7 +62,7 @@ defineSlots<{
  */
 .page-header {
   --top: var(--page-top, var(--space-6));
-  --gutter: var(--page-gutter, var(--space-8));
+  --gutter: var(--page-gutter, var(--space-4));
 
   position: sticky;
   top: 0;
@@ -69,7 +70,9 @@ defineSlots<{
   margin: calc(var(--top) * -1) calc(var(--gutter) * -1) var(--space-5);
   padding: var(--top) var(--gutter) 0;
   background: var(--topbar-bg);
-  backdrop-filter: blur(12px);
+  /* Heavy frost: smear scrolling cards into milk, not a 12px whisper. */
+  backdrop-filter: blur(var(--topbar-blur));
+  -webkit-backdrop-filter: blur(var(--topbar-blur));
   border-bottom: 1px solid var(--border);
 }
 

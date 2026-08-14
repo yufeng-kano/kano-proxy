@@ -33,9 +33,12 @@
   --accent-hover: #27272a;
   --hover: #f4f4f5;
   /* The sticky page header's wash — a translucent tint of --bg, not of
-     --surface, so a stuck header reads as the page fading out under the
-     controls rather than a white card slab (docs/admin-ui.md § Layout). */
-  --topbar-bg: rgb(244 244 245 / 88%);
+     --surface. Frost is heavy: opacity low enough that scrolling cards
+     smear through, blur high enough that the smear reads as milk, not a
+     ghost of the table. Raising opacity toward opaque --bg kills the frost;
+     painting --surface turns the header into a card (docs/admin-ui.md § Layout). */
+  --topbar-bg: rgb(244 244 245 / 72%);
+  --topbar-blur: 24px;
 
   /* --- Color: status --------------------------------------------------- */
   --danger: #b91c1c;
@@ -192,7 +195,7 @@
     --accent-fg: #18181b;
     --accent-hover: #e4e4e7;
     --hover: #27272a;
-    --topbar-bg: rgb(9 9 11 / 88%);
+    --topbar-bg: rgb(9 9 11 / 72%);
     --danger: #f87171;
     --danger-bg: #2a1416;
     --danger-border: #7f1d1d;

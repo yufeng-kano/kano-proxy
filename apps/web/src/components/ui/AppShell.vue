@@ -524,12 +524,13 @@ async function onSignOut() {
 /**
  * The page gutter is published as a custom property rather than only applied
  * as padding: PageHeader has to cancel it with a negative margin so its blur
- * reaches the region's edges, and a second hardcoded copy of these values
- * would silently disagree at one breakpoint. Inheritance makes this the single
- * source of truth for both.
+ * reaches the region's edges, and a second hardcoded copy would silently
+ * disagree if the shell's value ever changed. Inheritance makes this the
+ * single source of truth for both. The gutter is `--space-4` at every width —
+ * it is not a fourth breakpoint.
  */
 .content-inner {
-  --page-gutter: var(--space-8);
+  --page-gutter: var(--space-4);
   --page-top: var(--space-6);
   /* The safe-area inset lives *inside* this value rather than being applied
      separately, so every consumer stays correct without knowing about it: the
@@ -551,12 +552,6 @@ async function onSignOut() {
 }
 
 /* --- Responsive --------------------------------------------------------- */
-
-@media (max-width: 1200px) {
-  .content-inner {
-    --page-gutter: var(--space-6);
-  }
-}
 
 @media (max-width: 1080px) {
   .shell {
@@ -683,7 +678,6 @@ async function onSignOut() {
 
 @media (max-width: 640px) {
   .content-inner {
-    --page-gutter: var(--space-4);
     --page-top: var(--space-4);
     /* Keeps the safe-area inset — this is the breakpoint that actually has
        one, so dropping it here would undo the whole thing. */
