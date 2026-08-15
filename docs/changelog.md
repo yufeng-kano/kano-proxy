@@ -83,6 +83,6 @@ Strategy is **escape-then-allowlist**: escape everything, then re-emit only tags
 
 ## Web caching
 
-`localStorage` under `kano-proxy:changelog`, cache-first like every other page: paint cache, refresh in the background, keep cache and show a non-blocking error on failure. TTL is **1 hour** here rather than the 90s used for accounts/models/usage — release notes change on deploy, not continuously.
+`localStorage` under `kano-proxy:changelog`, cache-first like every other page: paint cache, refresh in the background, keep cache and show a non-blocking error on failure. TTL is **1 hour** here rather than the 2 min used for accounts/models/usage — release notes change on deploy, not continuously.
 
 Unlike the other cached domains this key carries **no user id** (the data is identical for everyone and contains nothing user-identifying), so the logout sweep clears it unconditionally.

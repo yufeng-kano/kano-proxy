@@ -96,7 +96,7 @@ export function useChangelog() {
     }
 
     // Within TTL: keep cache, skip network unless forced. An hour here, not
-    // the 90s the other domains use — release notes change on deploy.
+    // the 2 min the other domains use — release notes change on deploy.
     if (!force && isChangelogCacheFresh(CHANGELOG_CACHE_TTL_MS)) {
       state.loading = false
       state.refreshing = false

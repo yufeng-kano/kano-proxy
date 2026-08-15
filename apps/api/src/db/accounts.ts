@@ -215,7 +215,7 @@ export type UsageSnapshot = {
 }
 
 /** Server-side usage TTL: within this, a read never touches upstream. */
-export const USAGE_TTL_MS = 90_000
+export const USAGE_TTL_MS = 120_000
 
 /**
  * How long a lock may be held before another caller may break it. Bounds the

@@ -94,10 +94,10 @@ export async function fetchAndPersistUsage(
 /**
  * Background refresh (docs/providers.md § Routing module "Facts"): fired
  * via `waitUntil` on every dispatch so limit-aware skip facts stay warm
- * while traffic flows, reusing the exact 90s-TTL single-flight cache `GET
+ * while traffic flows, reusing the exact 2 min-TTL single-flight cache `GET
  * /api/providers/:provider/accounts` uses — zero added request latency.
  *
- * Fresh-within-90s short-circuits with no upstream call. A lock already
+ * Fresh-within-2-min short-circuits with no upstream call. A lock already
  * held by another caller (another concurrent request, or the accounts-page
  * poll) also short-circuits without queuing — the stored snapshot already
  * serves every reader; there is nothing here to report a failure to, so a

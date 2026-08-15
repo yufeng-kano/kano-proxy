@@ -9,21 +9,21 @@ Per `(user_id, provider)`:
 3. **Bench** on upstream auth/limit/edge-timeout failures — stored on the account row (`bench_until`/`bench_reason`, D1; see [database.md](./database.md)) — statuses and durations in § Routing module below
 4. **Unpause** — operator nulls that bench so the account is eligible again (admin REST; does not rewrite usage windows). See "Manual unpause" below.
 5. **Promote** / **Remove**  
-6. **Usage snapshot** — cached **90s server-side in D1** on the `upstream_accounts` row, behind a single-flight lock. See "Usage cache" below.
+6. **Usage snapshot** — cached **2 min server-side in D1** on the `upstream_accounts` row, behind a single-flight lock. See "Usage cache" below.
 
 Timeouts: do not permanently shrink the pool on transport timeout alone when avoidable; prefer per-request exclude + retry.
 
-## Usage cache (server-side, 90s, D1)
+## Usage cache (server-side, 2 min, D1)
 
-`GET /api/providers/{provider}/accounts` used to call `fetchUsage` live for every account on every request. The only protection was the admin UI's 90s localStorage TTL + 90s poll — which is **per device**, so N signed-in devices meant N× upstream calls, against endpoints that rate-limit and bot-wall. Two devices was enough to feel it.
+`GET /api/providers/{provider}/accounts` used to call `fetchUsage` live for every account on every request. The only protection was the admin UI's localStorage TTL + matching poll — which is **per device**, so N signed-in devices meant N× upstream calls, against endpoints that rate-limit and bot-wall. Two devices was enough to feel it.
 
 The snapshot now lives on the account row (`usage_snapshot_json`, `usage_fetched_at`, `usage_fetching_at` — see [database.md](./database.md)), shared by every device and tab:
 
-- **Fresh** (`usage_fetched_at` within **90s**): return the stored snapshot, no upstream call. This is the only case that skips the network.
-- **Stale / missing / `?refresh=true`**: fetch upstream **synchronously** and return the fresh result. Not stale-while-revalidate — the frontend polls every 90s, so a steady-state poll lands on the TTL boundary and still takes the stale path about as often as not; revalidate-in-background would render a cycle behind whenever it did, and a newly added account would show no usage at all until the second poll.
-- Net effect: upstream calls are capped at **1 per account per 90s** regardless of device count, and single-device freshness is unchanged from the live-fetch behavior it replaces.
+- **Fresh** (`usage_fetched_at` within **2 min**): return the stored snapshot, no upstream call. This is the only case that skips the network.
+- **Stale / missing / `?refresh=true`**: fetch upstream **synchronously** and return the fresh result. Not stale-while-revalidate — the frontend polls every 2 min, so a steady-state poll lands on the TTL boundary and still takes the stale path about as often as not; revalidate-in-background would render a cycle behind whenever it did, and a newly added account would show no usage at all until the second poll.
+- Net effect: upstream calls are capped at **1 per account per 2 min** regardless of device count, and single-device freshness is unchanged from the live-fetch behavior it replaces.
 
-**Why 90s and not 60s.** The TTL was 60s through v3.8.0. Anthropic rate-limits `GET /api/oauth/usage` on its own budget, separate from the Messages API: on a busy pool the background refresh (below) is what actually drives this cache, so a 60s TTL meant a steady 60 usage probes per account per hour whenever traffic flowed — and the reference deployment's primary Claude Code account was observed persistently storing `error: "usage 429"` from that probe (2026‑08‑15) while its Messages traffic kept succeeding. 90s cuts the probe rate by a third and aligns the server TTL with the frontend's existing 90s poll. It is a mitigation, not a proof of causation: the probe budget is not documented and no upstream header confirms which limit was hit.
+**Why 2 min.** The TTL was 60s through v3.8.0, then 90s in v3.8.1. Anthropic rate-limits `GET /api/oauth/usage` on its own budget, separate from the Messages API: on a busy pool the background refresh (below) is what actually drives this cache. 60s meant a steady 60 usage probes per account per hour whenever traffic flowed; 90s cut that by a third and still left the reference deployment's primary Claude Code account persistently storing `error: "usage 429"` from the probe (observed 2026‑08‑15 and again 2026‑08‑16) while its Messages traffic kept succeeding. 2 min halves the 90s probe rate and aligns the server TTL with the frontend's poll. It is a mitigation, not a proof of causation: the probe budget is not documented and no upstream header confirms which limit was hit. The admin UI also **does not render** a stored `usage 429` ([admin-ui.md](./admin-ui.md) § Providers page) — the last good windows stay on the bars.
 
 **Single-flight lock.** D1 has no cross-request transactions, so the lock is a conditional `UPDATE` used as a compare-and-swap — SQLite's single-statement atomicity plus `meta.changes`:
 
@@ -241,7 +241,7 @@ This flattens what used to be two layers (group target walk + in-pool acquire lo
 
 - **Bench state** from the account row's `bench_until` (D1, [database.md](./database.md)) — the row is already loaded to build candidates, so bench reads cost nothing extra. Expired values compare as not-benched at read time; nothing deletes them. (Bench lived in KV until `0011`; KV's eventual consistency made a fresh bench invisible to the next request — observed as an account "flapping" benched/usable — and its 1-write/sec-per-key limit made the key a hotspot exactly when a burst of failures all tried to bench the same account.)
 - **Usage windows** from the account row's stored `usage_snapshot_json`: any window (5h, Week, …) with `utilization ≥ 100` marks the candidate **unusable until that window's `resets_at`**. This is the proactive "limit hit → next account until the window resets" switch, and it is per-window: a 5h-limited account comes back when its 5h window resets, a week-limited one when the week resets. Precision is bounded by snapshot freshness; the skip self-expires at `resets_at` even if the snapshot has gone stale, so a stale snapshot can never bench an account past its real reset.
-- To keep snapshots warm while traffic flows, dispatch fires a **background** usage refresh (`waitUntil`) through the existing 90s-TTL single-flight cache — ≤1 upstream usage call per account per 90s, zero added client latency, and nothing fetched when there is no traffic (same demand-driven argument as the admin-page cache above).
+- To keep snapshots warm while traffic flows, dispatch fires a **background** usage refresh (`waitUntil`) through the existing 2 min-TTL single-flight cache — ≤1 upstream usage call per account per 2 min, zero added client latency, and nothing fetched when there is no traffic (same demand-driven argument as the admin-page cache above).
 
 **Strategies.** A strategy does exactly one thing: order the usable candidates. Configured per **group** (`model_groups.strategy`) and per **provider pool** (`provider_settings`, keyed `(user_id, provider)`, covering direct calls) — both default `ordered`, the only value accepted today; unknown values are rejected at write time ([database.md](./database.md)).
 

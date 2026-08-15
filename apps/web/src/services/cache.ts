@@ -33,8 +33,8 @@ import type {
   UsageSummary,
 } from "@/types"
 
-/** Frontend cache TTL — paired with the Accounts page's 90s poll interval. */
-export const CACHE_TTL_MS = 90_000
+/** Frontend cache TTL — paired with the Providers page's 2 min poll interval. */
+export const CACHE_TTL_MS = 120_000
 
 /**
  * Envelope version. Bump whenever a cached payload's shape changes: every
@@ -385,7 +385,7 @@ export function writeLogsCache(
 /**
  * Changelog cache. Takes no `userId` — see the CHANGELOG_KEY note above: the
  * payload is public release notes plus the running version, identical for
- * every operator. TTL defaults to an hour rather than the 90s the other
+ * every operator. TTL defaults to an hour rather than the 2 min the other
  * domains use (docs/changelog.md § Web caching).
  */
 export function readChangelogCache(): ChangelogResponse | null {

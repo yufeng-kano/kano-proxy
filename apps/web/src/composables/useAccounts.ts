@@ -44,7 +44,7 @@ export function useAccounts() {
   /**
    * Cache-first load.
    * - Always paint localStorage cache immediately when present.
-   * - Network fetch only if cache missing/stale (>90s) or opts.refresh.
+   * - Network fetch only if cache missing/stale (>2 min) or opts.refresh.
    * - Manual refresh passes refresh=true to API (forces network; the server
    *   fetches usage live — there is no backend usage KV cache).
    */

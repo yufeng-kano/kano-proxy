@@ -111,13 +111,18 @@ const plan = computed(() => {
 })
 
 /**
- * Codex's usage API sits behind chatgpt.com's bot wall. Chat still routes
- * fine, so surfacing it would be reporting a failure the user cannot act on
- * and that is not actually breaking their requests.
+ * Usage-probe failures the operator cannot act on (docs/admin-ui.md
+ * § Providers page). Codex's usage API sits behind chatgpt.com's bot wall
+ * (chat still routes); Anthropic's usage endpoint can return `usage 429`
+ * on its own budget while Messages traffic is fine. The last good windows
+ * stay on the bars — a banner restating the probe error is noise. Token /
+ * auth failures still surface.
  */
-const usageEdgeBlocked = computed(
-  () => !!props.account.error && /edge blocked|403 bot challenge/i.test(props.account.error),
-)
+const hideUsageError = computed(() => {
+  const error = props.account.error
+  if (!error) return false
+  return /edge blocked|403 bot challenge/i.test(error) || /^\s*usage 429\s*$/i.test(error)
+})
 
 const windows = computed(() => props.account.usage?.windows ?? [])
 </script>
@@ -188,11 +193,11 @@ const windows = computed(() => props.account.usage?.windows ?? [])
     <div v-if="windows.length" class="windows">
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
     </div>
-    <p v-else-if="!usageEdgeBlocked" class="no-usage">
+    <p v-else-if="!hideUsageError" class="no-usage">
       {{ t("providers.account.noUsage") }}
     </p>
 
-    <Banner v-if="account.error && !usageEdgeBlocked" tone="warn">
+    <Banner v-if="account.error && !hideUsageError" tone="warn">
       {{ account.error }}
     </Banner>
   </div>

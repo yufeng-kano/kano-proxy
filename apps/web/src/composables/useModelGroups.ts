@@ -41,7 +41,7 @@ export function useModelGroups() {
   /**
    * Cache-first load.
    * - Always paint the localStorage cache immediately when present.
-   * - Network fetch only if the cache is missing/stale (>90s) or opts.refresh.
+   * - Network fetch only if the cache is missing/stale (>2 min) or opts.refresh.
    *
    * Mutations pass `refresh: true` rather than patching the list locally: the
    * server owns `updated_at` and the name uniqueness check, so re-reading is

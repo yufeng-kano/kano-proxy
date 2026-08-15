@@ -689,10 +689,10 @@ describe("GET /api/providers/:provider/accounts usage cache", () => {
     await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
     expect(usage.calls()).toBe(1)
 
-    // Age the snapshot past 90s. A stale read fetches synchronously and returns
+    // Age the snapshot past 2 min. A stale read fetches synchronously and returns
     // the fresh value — not the previous one with a background refresh.
     db.rows("upstream_accounts")[0]!.usage_fetched_at = new Date(
-      Date.now() - 91_000,
+      Date.now() - 121_000,
     ).toISOString()
     const after = await readJson(
       await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
@@ -732,7 +732,7 @@ describe("GET /api/providers/:provider/accounts usage cache", () => {
     // Stale snapshot + a lock someone else is holding: the loser must return
     // the old value rather than queue up a second upstream call.
     const row = db.rows("upstream_accounts")[0]!
-    row.usage_fetched_at = new Date(Date.now() - 91_000).toISOString()
+    row.usage_fetched_at = new Date(Date.now() - 121_000).toISOString()
     row.usage_fetching_at = new Date().toISOString()
 
     const res = await readJson(
@@ -775,7 +775,7 @@ describe("GET /api/providers/:provider/accounts usage cache", () => {
     expect(stored).toBeTruthy()
 
     db.rows("upstream_accounts")[0]!.usage_fetched_at = new Date(
-      Date.now() - 91_000,
+      Date.now() - 121_000,
     ).toISOString()
     globalThis.fetch = (async () => {
       throw new Error("upstream down")

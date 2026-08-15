@@ -49,7 +49,7 @@ export function useUsage() {
   /**
    * Cache-first load for one `days` range.
    * - Always paint localStorage cache immediately when present.
-   * - Network fetch only if cache missing/stale (>90s) or opts.refresh.
+   * - Network fetch only if cache missing/stale (>2 min) or opts.refresh.
    * - No backend KV to bypass here (D1 read, no cache layer — see
    *   docs/admin-ui.md Dashboard page) so `refresh` only skips the
    *   frontend cache, unlike accounts/models/custom-providers.
