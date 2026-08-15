@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { encryptJson } from "../src/crypto/token_crypto"
-import type { AccountRow } from "../src/db/accounts"
+import { acquireUsageLock, type AccountRow } from "../src/db/accounts"
 import type { Env } from "../src/env"
-import { refreshAccountUsageInBackground } from "../src/providers/usage_refresh"
+import { fetchAndPersistUsage, refreshAccountUsageInBackground } from "../src/providers/usage_refresh"
 import type { ProviderAdapter } from "../src/providers/types"
 import { FakeD1 } from "./helpers/fake_d1"
 
@@ -52,5 +52,147 @@ describe("background usage refresh", () => {
 
     await refreshAccountUsageInBackground(env, capturedRow, adapter)
     expect(usageCredential).toBe("fresh-access")
+  })
+})
+
+describe("fetchAndPersistUsage — soft failure vs. thrown (docs/providers.md § Usage cache)", () => {
+  const PRIOR_SNAPSHOT = {
+    windows: [{ label: "5h", utilization: 10, resets_at: null }],
+    account: { email: "a@example.com" },
+    error: null,
+    stale: false,
+    edgeBlocked: false,
+  }
+
+  async function setup(priorSnapshot: typeof PRIOR_SNAPSHOT | null) {
+    const db = new FakeD1()
+    const payload = await encryptJson(TOKEN_KEY, { access_token: "tok" })
+    const seeded = row(payload)
+    if (priorSnapshot) {
+      seeded.usage_snapshot_json = JSON.stringify(priorSnapshot)
+      seeded.usage_fetched_at = new Date(Date.now() - 120_000).toISOString()
+    }
+    db.seed("upstream_accounts", [seeded])
+    const env = { DB: db as unknown as D1Database, TOKEN_ENCRYPTION_KEY: TOKEN_KEY } as Env
+    const lockToken = await acquireUsageLock(env.DB, "acc_1")
+    if (!lockToken) throw new Error("expected to acquire the lock")
+    return { db, env, seeded, lockToken }
+  }
+
+  it("preserves the prior snapshot on a soft failure (error, no windows), flagged stale", async () => {
+    const before = new Date().toISOString()
+    const { db, env, seeded, lockToken } = await setup(PRIOR_SNAPSHOT)
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      chatCompletions: async () => new Response(),
+      fetchUsage: async () => ({
+        windows: [],
+        account: {},
+        error: "usage 429",
+        stale: true,
+        edgeBlocked: false,
+      }),
+    }
+
+    const result = await fetchAndPersistUsage(env, seeded, adapter, lockToken)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error("unreachable")
+    expect(result.snapshot).toEqual({
+      windows: PRIOR_SNAPSHOT.windows,
+      account: PRIOR_SNAPSHOT.account,
+      error: "usage 429",
+      stale: true,
+      edgeBlocked: false,
+    })
+    const stored = db.rows("upstream_accounts")[0]!
+    expect(JSON.parse(stored.usage_snapshot_json as string)).toEqual(result.snapshot)
+    // The read genuinely happened: the lock is released via a write, not a bare release.
+    expect(stored.usage_fetching_at).toBeNull()
+    expect((stored.usage_fetched_at as string) >= before).toBe(true)
+  })
+
+  it("writes the empty/errored snapshot unchanged when there is no prior snapshot", async () => {
+    const before = new Date().toISOString()
+    const { db, env, seeded, lockToken } = await setup(null)
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      chatCompletions: async () => new Response(),
+      fetchUsage: async () => ({
+        windows: [],
+        account: {},
+        error: "usage 429",
+        stale: true,
+        edgeBlocked: false,
+      }),
+    }
+
+    const result = await fetchAndPersistUsage(env, seeded, adapter, lockToken)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error("unreachable")
+    expect(result.snapshot).toEqual({
+      windows: [],
+      account: {},
+      error: "usage 429",
+      stale: true,
+      edgeBlocked: false,
+    })
+    const stored = db.rows("upstream_accounts")[0]!
+    expect(JSON.parse(stored.usage_snapshot_json as string)).toEqual(result.snapshot)
+    expect(stored.usage_fetching_at).toBeNull()
+    expect((stored.usage_fetched_at as string) >= before).toBe(true)
+  })
+
+  it("lets windows win even when the incoming snapshot also carries an error", async () => {
+    const before = new Date().toISOString()
+    const { db, env, seeded, lockToken } = await setup(PRIOR_SNAPSHOT)
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      chatCompletions: async () => new Response(),
+      fetchUsage: async () => ({
+        windows: [{ label: "5h", utilization: 42, resets_at: null }],
+        account: { email: "new@example.com" },
+        error: "usage degraded",
+        stale: false,
+        edgeBlocked: false,
+      }),
+    }
+
+    const result = await fetchAndPersistUsage(env, seeded, adapter, lockToken)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error("unreachable")
+    expect(result.snapshot).toEqual({
+      windows: [{ label: "5h", utilization: 42, resets_at: null }],
+      account: { email: "new@example.com" },
+      error: "usage degraded",
+      stale: false,
+      edgeBlocked: false,
+    })
+    const stored = db.rows("upstream_accounts")[0]!
+    expect(JSON.parse(stored.usage_snapshot_json as string)).toEqual(result.snapshot)
+    expect(stored.usage_fetching_at).toBeNull()
+    expect((stored.usage_fetched_at as string) >= before).toBe(true)
+  })
+
+  it("still releases the lock without writing on a thrown failure, preserving the prior snapshot", async () => {
+    const { db, env, seeded, lockToken } = await setup(PRIOR_SNAPSHOT)
+    const priorFetchedAt = (db.rows("upstream_accounts")[0]!.usage_fetched_at as string)
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      chatCompletions: async () => new Response(),
+      fetchUsage: async () => {
+        throw new Error("network error")
+      },
+    }
+
+    const result = await fetchAndPersistUsage(env, seeded, adapter, lockToken)
+
+    expect(result).toEqual({ ok: false, error: "network error" })
+    const stored = db.rows("upstream_accounts")[0]!
+    expect(JSON.parse(stored.usage_snapshot_json as string)).toEqual(PRIOR_SNAPSHOT)
+    expect(stored.usage_fetched_at).toBe(priorFetchedAt)
+    expect(stored.usage_fetching_at).toBeNull()
   })
 })

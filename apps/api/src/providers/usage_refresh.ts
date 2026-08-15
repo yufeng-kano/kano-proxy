@@ -14,6 +14,7 @@ import {
   acquireUsageLock,
   getAccount,
   isUsageFresh,
+  readUsageSnapshot,
   releaseUsageLock,
   updateAccountIdentity,
   writeUsageSnapshot,
@@ -28,10 +29,11 @@ import type { ProviderAdapter } from "./types"
 export type UsagePersistResult = { ok: true; snapshot: UsageSnapshot } | { ok: false; error: string }
 
 /**
- * Fetch usage from upstream and persist it, or release the lock without
- * writing on failure (one hiccup must not blank a good snapshot — same rule
- * as the route). Caller must already hold `lockToken` from
- * `acquireUsageLock`.
+ * Fetch usage from upstream and persist it. A thrown error releases the lock
+ * without writing; a soft failure (adapter returns `error` with no windows)
+ * still writes, merged with the prior snapshot's windows/account and flagged
+ * `stale`, so the TTL restarts either way — one hiccup must not blank a good
+ * snapshot. Caller must already hold `lockToken` from `acquireUsageLock`.
  */
 export async function fetchAndPersistUsage(
   env: Env,
@@ -61,13 +63,26 @@ export async function fetchAndPersistUsage(
     } else {
       await updateAccountIdentity(env.DB, row.id, { accountMetaJson: JSON.stringify(accountMeta) })
     }
-    const persisted: UsageSnapshot = {
-      windows: snap.windows,
-      account: snap.account,
-      error: snap.error ?? null,
-      stale: !!snap.stale,
-      edgeBlocked: !!snap.edgeBlocked,
-    }
+    // A soft failure (error + no windows of its own) is a failed read wearing
+    // a 200 — same rule as a thrown error: never overwrite a good snapshot
+    // (docs/providers.md § Usage cache "'Failure' includes a soft failure").
+    // Windows always win when they do arrive, error or not.
+    const priorSnapshot = snap.windows.length === 0 && snap.error ? readUsageSnapshot(row) : null
+    const persisted: UsageSnapshot = priorSnapshot
+      ? {
+          windows: priorSnapshot.windows,
+          account: priorSnapshot.account,
+          error: snap.error ?? null,
+          stale: true,
+          edgeBlocked: !!snap.edgeBlocked,
+        }
+      : {
+          windows: snap.windows,
+          account: snap.account,
+          error: snap.error ?? null,
+          stale: !!snap.stale,
+          edgeBlocked: !!snap.edgeBlocked,
+        }
     await writeUsageSnapshot(env.DB, row.id, lockToken, persisted)
     return { ok: true, snapshot: persisted }
   } catch (e) {
@@ -79,10 +94,10 @@ export async function fetchAndPersistUsage(
 /**
  * Background refresh (docs/providers.md § Routing module "Facts"): fired
  * via `waitUntil` on every dispatch so limit-aware skip facts stay warm
- * while traffic flows, reusing the exact 60s-TTL single-flight cache `GET
+ * while traffic flows, reusing the exact 90s-TTL single-flight cache `GET
  * /api/providers/:provider/accounts` uses — zero added request latency.
  *
- * Fresh-within-60s short-circuits with no upstream call. A lock already
+ * Fresh-within-90s short-circuits with no upstream call. A lock already
  * held by another caller (another concurrent request, or the accounts-page
  * poll) also short-circuits without queuing — the stored snapshot already
  * serves every reader; there is nothing here to report a failure to, so a

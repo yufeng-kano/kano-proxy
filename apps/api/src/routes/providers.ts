@@ -57,7 +57,7 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   const provider = parseProvider(c.req.param("provider"))
   if (!provider) return c.json({ error: "invalid provider" }, 400)
 
-  // Usage is cached 60s server-side in D1 behind a single-flight lock, so N
+  // Usage is cached 90s server-side in D1 behind a single-flight lock, so N
   // devices cost one upstream call, not N (docs/providers.md § Usage cache).
   const force = c.req.query("refresh") === "true"
   const rows = await listAccounts(c.env.DB, user.id, provider)
@@ -83,9 +83,9 @@ providerRoutes.get("/:provider/accounts", async (c) => {
     if (adapter.fetchUsage) {
       // Fresh cache is the only path that skips upstream. Everything else —
       // stale, missing, or an explicit user Refresh — fetches synchronously and
-      // returns the fresh result: revalidating in the background would render
-      // one poll cycle behind forever, since the 90s frontend poll always
-      // arrives after the 60s TTL has expired.
+      // returns the fresh result: the 90s frontend poll lands right on the 90s
+      // TTL boundary and still takes this stale path about as often as not, so
+      // revalidating in the background would render a cycle behind whenever it did.
       const fresh = !force && isUsageFresh(row)
       // A malformed blob reads as a miss, never as trusted data, so an
       // unparseable snapshot inside the TTL falls through to a real fetch.

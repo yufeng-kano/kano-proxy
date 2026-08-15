@@ -7,7 +7,7 @@
  * | 401/403 (auth), 402 (billing) | bench 300s |
  * | 429 (rate limit) | bench until the upstream reset when derivable — reset headers, else the earliest exhausted window's `resets_at`, else 300s; capped at 7 days |
  * | 520/522/524 (upstream edge failed/timed out before first byte) | request-local exclusion; the third fresh strike benches 30s |
-】【。json?】【”】【】【：】【“】【assistant to=functions.Edit  北京赛车计划 天天中彩票粤რება՞ւրջ  大发时时彩怎么  天天彩票中奖json】【：】【“】【{ * | anything else non-2xx | no bench — passthrough / in-stream error, unchanged |
+ * | anything else non-2xx | no bench — passthrough / in-stream error, unchanged |
  *
  * Bench outcomes and edge-timeout exclusions both continue to the next
  * candidate; dispatch owns the walk and strike persistence.
