@@ -163,6 +163,178 @@ describe("createCustomOpenAIAdapter", () => {
     expect(text).toContain('"delta":"hi"')
   })
 
+  it("remaps a Tabby unsupported-effort 400 and retries once on the same account", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = []
+    const retryResponse = new Response(JSON.stringify({ ok: true }), { status: 200 })
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      calls.push({ url, init })
+      if (calls.length === 1) {
+        return new Response(
+          JSON.stringify({
+            detail:
+              "TemplateError: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+          }),
+          { status: 400, statusText: "Bad Request", headers: { "content-type": "application/json" } },
+        )
+      }
+      return retryResponse
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    const clientBody = {
+      model: "my-endpoint/qwen",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 0.7,
+      reasoning_effort: "high",
+      response_format: { type: "json_object" },
+    }
+    const res = await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/qwen",
+      rawModel: "my-endpoint/qwen",
+      upstreamModel: "qwen",
+      messages: clientBody.messages,
+      reasoning_effort: "high",
+      rawBody: clientBody,
+    })
+
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.url).toBe("https://upstream.example.com/v1/chat/completions")
+    expect(calls[1]!.url).toBe(calls[0]!.url)
+    const firstHeaders = calls[0]!.init?.headers as Record<string, string>
+    const secondHeaders = calls[1]!.init?.headers as Record<string, string>
+    expect(firstHeaders.authorization).toBe("Bearer sk-test-upstream-key")
+    expect(secondHeaders.authorization).toBe(firstHeaders.authorization)
+    const firstBody = JSON.parse(String(calls[0]!.init?.body))
+    const secondBody = JSON.parse(String(calls[1]!.init?.body))
+    expect(firstBody).toMatchObject({
+      model: "qwen",
+      messages: [{ role: "user", content: "hi" }],
+      temperature: 0.7,
+      reasoning_effort: "high",
+      response_format: { type: "json_object" },
+    })
+    expect(secondBody).toEqual({ ...firstBody, reasoning_effort: "xhigh" })
+    expect(res).toBe(retryResponse)
+  })
+
+  it("returns an unrecognized 400 unchanged after one fetch", async () => {
+    const original = '{"error":"context length exceeded"}'
+    globalThis.fetch = (async () =>
+      new Response(original, {
+        status: 400,
+        statusText: "Bad Request",
+        headers: { "content-type": "application/json", "x-upstream": "yes" },
+      })) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    const res = await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/gpt-4o",
+      rawModel: "my-endpoint/gpt-4o",
+      upstreamModel: "gpt-4o",
+      messages: [],
+      reasoning_effort: "high",
+      rawBody: { model: "my-endpoint/gpt-4o", messages: [], reasoning_effort: "high" },
+    })
+
+    expect(res.status).toBe(400)
+    expect(res.statusText).toBe("Bad Request")
+    expect(res.headers.get("content-type")).toBe("application/json")
+    expect(res.headers.get("x-upstream")).toBe("yes")
+    expect(await res.text()).toBe(original)
+  })
+
+  it("returns a retry non-2xx instead of the original 400", async () => {
+    let fetches = 0
+    const retryBody = '{"error":"still rejected"}'
+    globalThis.fetch = (async () => {
+      fetches += 1
+      if (fetches === 1) {
+        return new Response(
+          JSON.stringify({
+            detail:
+              "TemplateError: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+          }),
+          { status: 400 },
+        )
+      }
+      return new Response(retryBody, { status: 422, statusText: "Unprocessable Entity" })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    const res = await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/qwen",
+      rawModel: "my-endpoint/qwen",
+      upstreamModel: "qwen",
+      messages: [],
+      reasoning_effort: "high",
+      rawBody: { model: "my-endpoint/qwen", messages: [], reasoning_effort: "high" },
+    })
+
+    expect(fetches).toBe(2)
+    expect(res.status).toBe(422)
+    expect(res.statusText).toBe("Unprocessable Entity")
+    expect(await res.text()).toBe(retryBody)
+  })
+
+  it("does not retry when the parser does not recognize the 400", async () => {
+    let fetches = 0
+    globalThis.fetch = (async () => {
+      fetches += 1
+      return new Response('{"error":"nope"}', { status: 400 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    const res = await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/gpt-4o",
+      rawModel: "my-endpoint/gpt-4o",
+      upstreamModel: "gpt-4o",
+      messages: [],
+      reasoning_effort: "high",
+      rawBody: { model: "my-endpoint/gpt-4o", messages: [], reasoning_effort: "high" },
+    })
+
+    expect(fetches).toBe(1)
+    expect(res.status).toBe(400)
+    expect(await res.text()).toBe('{"error":"nope"}')
+  })
+
+  it("forwards extras.signal on both POSTs", async () => {
+    const signal = new AbortController().signal
+    const signals: Array<AbortSignal | null | undefined> = []
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      signals.push(init?.signal)
+      if (signals.length === 1) {
+        return new Response(
+          JSON.stringify({
+            detail:
+              "TemplateError: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+          }),
+          { status: 400 },
+        )
+      }
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    await adapter.chatCompletions(
+      {} as Env,
+      account,
+      {
+        model: "my-endpoint/qwen",
+        rawModel: "my-endpoint/qwen",
+        upstreamModel: "qwen",
+        messages: [],
+        reasoning_effort: "high",
+        rawBody: { model: "my-endpoint/qwen", messages: [], reasoning_effort: "high" },
+      },
+      { signal },
+    )
+
+    expect(signals).toHaveLength(2)
+    expect(signals[0]).toBe(signal)
+    expect(signals[1]).toBe(signal)
+  })
+
   it("listModels GETs {base}/models with a Bearer header", async () => {
     let capturedUrl: string | undefined
     let capturedInit: RequestInit | undefined

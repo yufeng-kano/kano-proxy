@@ -1,4 +1,5 @@
 import type { CustomProviderRow } from "../db/custom_providers"
+import { remapUnsupportedEffortBody } from "./custom_openai_reasoning"
 import type { ProviderAdapter } from "./types"
 
 /**
@@ -6,11 +7,13 @@ import type { ProviderAdapter } from "./types"
  * client's own OpenAI Chat Completions body (or its Anthropic→OpenAI
  * conversion) with only `model` rewritten to the bare upstream id —
  * `temperature`, `reasoning_effort`, `response_format`, etc. all ride along
- * unmodified. This deliberately diverges from the built-in adapters, which
- * strip `temperature` and clamp `reasoning_effort` to a provider ceiling;
- * custom endpoints have neither. No `messages()` — the `/anthropic` surface
- * reaches this adapter through the existing Anthropic→OpenAI conversion path
- * (`dispatchAnthropicViaOpenAI`), same as grok/codex.
+ * unmodified on the first send. A recognized unsupported-effort HTTP 400 may
+ * rewrite only `reasoning_effort` and POST once more on the same account.
+ * This deliberately diverges from the built-in adapters, which strip
+ * `temperature` and clamp `reasoning_effort` to a provider ceiling. No
+ * `messages()` — the `/anthropic` surface reaches this adapter through the
+ * existing Anthropic→OpenAI conversion path (`dispatchAnthropicViaOpenAI`),
+ * same as grok/codex.
  */
 export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapter {
   const base = row.base_url
@@ -19,16 +22,30 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
     id: row.slug,
 
     async chatCompletions(_env, account, req, extras) {
-      const upstreamBody = { ...req.rawBody, model: req.upstreamModel }
-      return fetch(`${base}/chat/completions`, {
+      const url = `${base}/chat/completions`
+      const headers = {
+        authorization: `Bearer ${account.credential.access_token}`,
+        "content-type": "application/json",
+      }
+      const init = {
         method: "POST",
-        headers: {
-          authorization: `Bearer ${account.credential.access_token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(upstreamBody),
+        headers,
         signal: extras?.signal,
-      })
+      }
+      const upstreamBody = { ...req.rawBody, model: req.upstreamModel }
+      const res = await fetch(url, { ...init, body: JSON.stringify(upstreamBody) })
+      if (res.ok || res.status !== 400 || isEventStream(res)) return res
+
+      const text = await res.text()
+      const remapped = remapUnsupportedEffortBody(upstreamBody, text)
+      if (!remapped) {
+        return new Response(text, {
+          status: res.status,
+          statusText: res.statusText,
+          headers: res.headers,
+        })
+      }
+      return fetch(url, { ...init, body: JSON.stringify(remapped) })
     },
 
     async listModels(_env, account) {
@@ -47,4 +64,9 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
       }
     },
   }
+}
+
+function isEventStream(res: Response): boolean {
+  const ct = res.headers.get("content-type") || ""
+  return ct.includes("text/event-stream")
 }

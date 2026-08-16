@@ -6,7 +6,7 @@ Real upstream traffic is real money. **Never** debug, reproduce, bisect, or benc
 
 ## Layers
 
-1. **Unit** — pure adapters (OpenAI↔Anthropic mapping, reasoning_effort map, model parse, key hash).
+1. **Unit** — pure adapters (OpenAI↔Anthropic mapping, reasoning_effort map + custom-openai effort-rejection parsers / `nearestReasoningEffort`, model parse, key hash).
 2. **Pool** — acquire/bench/promote with mocked KV/D1.
 3. **Route** — Workers + `cloudflare:test` or miniflare-style where available; mock upstream fetch.
 4. **Relay** — `apps/relay` Deno tests: header allowlist (CF-* never forwarded), streaming no-buffer proof, path/method fault contract. Stubbed fetch only.

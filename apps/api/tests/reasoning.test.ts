@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { mapReasoning, parseReasoningEffort } from "../src/utils/reasoning"
+import {
+  mapReasoning,
+  nearestReasoningEffort,
+  parseReasoningEffort,
+} from "../src/utils/reasoning"
 
 describe("parseReasoningEffort", () => {
   it("accepts ladder", () => {
@@ -100,5 +104,31 @@ describe("mapReasoning", () => {
     expect(mapReasoning("claude-code", "max")).toEqual({
       output_config: { effort: "max" },
     })
+  })
+})
+
+describe("nearestReasoningEffort", () => {
+  it("prefers the higher token on equal distance", () => {
+    expect(nearestReasoningEffort("high", ["low", "medium", "xhigh"])).toBe("xhigh")
+  })
+
+  it("maps high to the only allowed medium", () => {
+    expect(nearestReasoningEffort("high", ["medium"])).toBe("medium")
+  })
+
+  it("maps max down to xhigh", () => {
+    expect(nearestReasoningEffort("max", ["xhigh"])).toBe("xhigh")
+  })
+
+  it("maps none up to the nearest low", () => {
+    expect(nearestReasoningEffort("none", ["low", "medium"])).toBe("low")
+  })
+
+  it("returns identity when rejected is already allowed", () => {
+    expect(nearestReasoningEffort("medium", ["medium", "high"])).toBe("medium")
+  })
+
+  it("returns undefined for an empty allowed set", () => {
+    expect(nearestReasoningEffort("high", [])).toBeUndefined()
   })
 })

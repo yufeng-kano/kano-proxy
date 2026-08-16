@@ -8,13 +8,48 @@ export type ReasoningEffort =
   | "xhigh"
   | "max"
 
-const ALL: ReasoningEffort[] = ["none", "low", "medium", "high", "xhigh", "max"]
+export const REASONING_EFFORTS: readonly ReasoningEffort[] = [
+  "none",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]
 
 export function parseReasoningEffort(v: unknown): ReasoningEffort | undefined | "invalid" {
   if (v === undefined || v === null || v === "") return undefined
   if (typeof v !== "string") return "invalid"
   const s = v.toLowerCase() as ReasoningEffort
-  return ALL.includes(s) ? s : "invalid"
+  return REASONING_EFFORTS.includes(s) ? s : "invalid"
+}
+
+/**
+ * Closest allowed ladder token to `rejected`. Equal distance prefers the
+ * higher token. Empty `allowed` → undefined. Identity when `rejected` is
+ * already in `allowed`.
+ */
+export function nearestReasoningEffort(
+  rejected: ReasoningEffort,
+  allowed: readonly ReasoningEffort[],
+): ReasoningEffort | undefined {
+  if (allowed.length === 0) return undefined
+  if (allowed.includes(rejected)) return rejected
+
+  const rejectedIdx = REASONING_EFFORTS.indexOf(rejected)
+  let best: ReasoningEffort | undefined
+  let bestDist = Infinity
+  for (const token of allowed) {
+    const idx = REASONING_EFFORTS.indexOf(token)
+    const dist = Math.abs(idx - rejectedIdx)
+    if (best === undefined || dist < bestDist) {
+      best = token
+      bestDist = dist
+    } else if (dist === bestDist && idx > REASONING_EFFORTS.indexOf(best)) {
+      best = token
+    }
+  }
+  return best
 }
 
 /**
@@ -32,7 +67,7 @@ const CEILING: Record<ProviderId, ReasoningEffort> = {
 
 function clampToCeiling(provider: ProviderId, effort: ReasoningEffort): ReasoningEffort {
   const cap = CEILING[provider]
-  return ALL.indexOf(effort) > ALL.indexOf(cap) ? cap : effort
+  return REASONING_EFFORTS.indexOf(effort) > REASONING_EFFORTS.indexOf(cap) ? cap : effort
 }
 
 /** Map client reasoning_effort to provider-specific payload fragments. */
