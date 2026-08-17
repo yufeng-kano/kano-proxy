@@ -52,9 +52,11 @@ export const CACHE_TTL_MS = 120_000
  * hold rows with no account and the group rows no current-route indicator.
  * v8: the usage summary's per-model rows went back to one row per (provider,
  * model) — a v7 entry holds the account/alias split, which would double-count
- * every model the By-model table now shows once.
+ * every model the By-model table now shows once. v9: log rows dropped the
+ * internal `api_keys` row id and grew `api_key_removed` — a v8 entry still
+ * carries that id, which the row detail must never render.
  */
-const CACHE_SCHEMA_VERSION = 8
+const CACHE_SCHEMA_VERSION = 9
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

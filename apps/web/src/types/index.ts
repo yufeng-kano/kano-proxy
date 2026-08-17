@@ -370,10 +370,12 @@ export type LogUsageType = "oauth" | "api"
  * One `request_logs` row, as the log explorer reads it.
  *
  * Nullable fields are *unreported*, not zero (docs/database.md): a token count
- * or a cost of `null` renders as an em dash, never as 0. `account_label` and
- * `api_key_name` are resolved at read time and never stored, so an id set with
- * a **null** name is a record deleted since the request ran — a state the UI
- * has to show, not drop.
+ * or a cost of `null` renders as an em dash, never as 0. `account_label` is
+ * resolved at read time and never stored, so an id set with a **null** label
+ * is an account deleted since the request ran — a state the UI has to show,
+ * not drop. The API key follows a different convention: the `api_keys` id is
+ * resolved server-side and never returned, so `api_key_name` pairs with the
+ * explicit `api_key_removed` boolean instead (docs/admin-ui.md § Logs page).
  */
 export type RequestLogRow = {
   id: string
@@ -385,8 +387,9 @@ export type RequestLogRow = {
   group_name: string | null
   account_id: string | null
   account_label: string | null
-  api_key_id: string | null
   api_key_name: string | null
+  /** True when the row points at an `api_keys` id that no longer resolves — the key was deleted since the request ran. */
+  api_key_removed: boolean
   usage_type: LogUsageType
   status_code: number
   /** Last upstream status seen; `null` when no upstream answered (docs/logging.md). */

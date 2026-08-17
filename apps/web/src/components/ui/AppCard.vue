@@ -7,12 +7,24 @@
  * cell, which is what lets a card's body scroll internally instead of growing
  * the page — the anti-scroll rule in docs/admin-ui.md.
  */
+import { ref } from "vue"
+
 defineProps<{
   title?: string
   subtitle?: string
   flush?: boolean
   fill?: boolean
 }>()
+
+/**
+ * The body element — in a `fill` card, the box the content actually scrolls
+ * in. Exposed because a page that watches its own scrolling (Logs roots an
+ * IntersectionObserver here to fetch the next page on approach) otherwise has
+ * to reach in through this component's class names, which makes a private
+ * layout detail into an external contract.
+ */
+const body = ref<HTMLElement | null>(null)
+defineExpose({ body })
 
 defineSlots<{
   default: () => unknown
@@ -39,7 +51,7 @@ defineSlots<{
       <slot name="toolbar" />
     </div>
 
-    <div class="card-body" :class="{ flush }">
+    <div ref="body" class="card-body" :class="{ flush }">
       <slot />
     </div>
   </section>

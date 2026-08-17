@@ -32,10 +32,9 @@ const account = computed<Reference>(() => ({
   id: props.row.account_id,
 }))
 
-const apiKey = computed<Reference>(() => ({
+const apiKey = computed(() => ({
   name: props.row.api_key_name,
-  missing: props.row.api_key_id !== null && props.row.api_key_name === null,
-  id: props.row.api_key_id,
+  missing: props.row.api_key_removed,
 }))
 
 const typeLabel = computed(() =>
@@ -94,13 +93,15 @@ const fields = computed<{ key: string; label: string; value: string; mono?: bool
         </dd>
       </div>
 
+      <!-- The api_keys id never leaves the Worker (docs/admin-ui.md § Logs
+           page), so unlike the account field above, there is no id line
+           here — just the name, the removed badge, or nothing to name. -->
       <div class="field">
         <dt>{{ t("logs.detail.apiKey") }}</dt>
         <dd>
           <Badge v-if="apiKey.missing" tone="warn">{{ t("logs.detail.keyRemoved") }}</Badge>
           <span v-else-if="apiKey.name">{{ apiKey.name }}</span>
           <span v-else class="none">{{ EM_DASH }}</span>
-          <span v-if="apiKey.id" class="mono id">{{ apiKey.id }}</span>
         </dd>
       </div>
 

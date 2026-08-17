@@ -61,7 +61,7 @@ The callback redirects to the SPA root (`APP_URL/`), not to a specific page: lan
 | DELETE | `/api/keys/:id` | Revoke |
 | GET | `/api/models` | Catalog with `available`; `?available=1` filters |
 | GET | `/api/usage/summary` | Aggregated `request_logs` for the dashboard; `?days=` 1, 7, or 30 (default 7). `models[]` is per **(provider, model)** — no account/alias dimension (see [admin-ui.md](./admin-ui.md) § Series shape) |
-| GET | `/api/logs` | Newest-first `request_logs` rows for the caller; `?limit=` (default 50, max 100), `?cursor=` opaque keyset over `(created_at, id)`, `?provider=` exact slug, `?errors=1` (`error_code` set or `status_code >= 400`). Returns `{rows, next_cursor}`; rows carry read-time `account_label` / `api_key_name`, derived `usage_type` (`oauth` = builtin provider, `api` = anything else), and read-time cost fill for `NULL` `cost` |
+| GET | `/api/logs` | Newest-first `request_logs` rows for the caller; `?limit=` (default 50, max 100), `?cursor=` opaque keyset over `(created_at, id)`, `?provider=` exact slug, `?errors=1` (`error_code` set or `status_code >= 400`). Returns `{rows, next_cursor}`; rows carry read-time `account_label` / `api_key_name` + `api_key_removed` (the `api_keys` id is resolved server-side and never returned — see [admin-ui.md](./admin-ui.md) § Logs page), derived `usage_type` (`oauth` = builtin provider, `api` = anything else), and read-time cost fill for `NULL` `cost` |
 
 ## Upstream OAuth (account binding)
 

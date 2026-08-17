@@ -212,21 +212,34 @@ describe("GET /api/logs", () => {
     const res = await logsRoutes.request("/?limit=10", req(cookie), env)
     expect(res.status).toBe(200)
     const json = (await res.json()) as { rows: Array<Record<string, unknown>>; next_cursor: string | null }
+    // The api_keys id is resolved server-side to a name/removed flag and must
+    // never leave the Worker (docs/admin-ui.md § Logs page) — assert its
+    // absence on every row, not just the ones under test below.
+    for (const row of json.rows) {
+      expect(row).not.toHaveProperty("api_key_id")
+    }
+
     const oauth = json.rows.find((row) => row.id === "oauth")!
     expect(oauth).toMatchObject({
       account_label: "Primary",
       api_key_name: "Production",
+      api_key_removed: false,
       usage_type: "oauth",
     })
     expect(oauth.cost).toBeCloseTo(100 * 0.00001 + 10 * 0.00005, 12)
+    // "custom" points at api_key_id "deleted_key", which never appears in
+    // api_keys for this user — that is exactly what api_key_removed means.
     const custom = json.rows.find((row) => row.id === "custom")!
     expect(custom).toMatchObject({
       account_label: "Fallback name",
       api_key_name: null,
+      api_key_removed: true,
       usage_type: "api",
       cost: null,
     })
+    // "deleted-account" has a NULL api_key_id (never had a key attributed) —
+    // that is not "removed", it is "not reported", so the flag stays false.
     const deleted = json.rows.find((row) => row.id === "deleted-account")!
-    expect(deleted).toMatchObject({ account_label: null, api_key_name: null })
+    expect(deleted).toMatchObject({ account_label: null, api_key_name: null, api_key_removed: false })
   })
 })

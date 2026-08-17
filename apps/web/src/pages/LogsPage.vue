@@ -10,11 +10,18 @@
  * what happened, and hiding it would hurt the diagnosis this page exists for.
  *
  * One bounded card filling the content region, rows scrolling inside it with a
- * sticky header and a Load more control at the end — the Keys/Models shape.
- * Both filters are applied server-side, so changing either reloads from the
- * first page rather than narrowing what is already painted.
+ * sticky header — the Keys/Models shape. The next page loads on approach, with
+ * the Load more control at the end kept as the keyboard, no-observer, and
+ * after-a-failure path to the same request. Both filters are applied
+ * server-side, so changing either reloads from the first page rather than
+ * narrowing what is already painted.
+ *
+ * The card scrolls vertically only. Eleven columns do not fit a laptop's width
+ * by their content, so the table is fixed-layout: each column is a share of the
+ * card and each cell is clamped to the row's two lines, with the full text on a
+ * `title` for the pointer and the row detail for everything else.
  */
-import { computed, onMounted, ref } from "vue"
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import LogDetailModal from "@/components/LogDetailModal.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
@@ -98,22 +105,45 @@ const showOptions = computed(() => [
   { value: "errors", label: t("logs.filter.showErrors") },
 ])
 
+/*
+ * Every track is a percentage and the eleven of them sum to 100: under
+ * `DataTable`'s fixed layout a width is the column, not a suggestion, and a
+ * pixel width would stop being a share of the card the moment the sidebar
+ * collapses or the window changes.
+ *
+ * 13 Time + 13 Model + 12 Account + 7 Type + 9 Status + 7 Input + 7 Cache read
+ * + 7 Cache write + 7 Output + 9 Cost + 9 Latency = 100.
+ *
+ * The shares are sized to their *headers* first — an uppercase 11px LATENCY
+ * needs more room than the "1.2 s" under it, and a header that does not fit is
+ * a column nobody can name — then to the values that cannot be shortened
+ * ("$0.0042" is four significant digits by design, docs/pricing.md). Time,
+ * Model and Account get the remainder because they are the only columns whose
+ * text is open-ended, and they are the ones the two-line clamp is for.
+ *
+ * Which is also why only their cells carry a `title`: a figure column is sized
+ * to its own widest value, so nothing there is ever cut, and a tooltip
+ * repeating the "12.3K" already on screen would fire under the pointer on
+ * every row of the table for no reading the row does not already give.
+ */
 const columns = computed<Column<RequestLogRow>[]>(() => [
-  { key: "time", header: t("logs.column.time"), width: "150px" },
-  { key: "model", header: t("logs.column.model") },
-  { key: "account", header: t("logs.column.account"), width: "16%" },
-  { key: "type", header: t("logs.column.type"), width: "72px", hideOnMobile: true },
-  { key: "status", header: t("logs.column.status"), width: "112px" },
+  { key: "time", header: t("logs.column.time"), width: "13%" },
+  { key: "model", header: t("logs.column.model"), width: "13%" },
+  { key: "account", header: t("logs.column.account"), width: "12%" },
+  { key: "type", header: t("logs.column.type"), width: "7%", hideOnMobile: true },
+  { key: "status", header: t("logs.column.status"), width: "9%" },
   {
     key: "input",
     header: t("logs.column.input"),
     numeric: true,
+    width: "7%",
     value: (row) => format.compact(row.prompt_tokens),
   },
   {
     key: "cacheRead",
     header: t("logs.column.cacheRead"),
     numeric: true,
+    width: "7%",
     hideOnMobile: true,
     value: (row) => format.compact(row.cache_read_input_tokens),
   },
@@ -121,6 +151,7 @@ const columns = computed<Column<RequestLogRow>[]>(() => [
     key: "cacheWrite",
     header: t("logs.column.cacheWrite"),
     numeric: true,
+    width: "7%",
     hideOnMobile: true,
     value: (row) => format.compact(row.cache_creation_input_tokens),
   },
@@ -128,21 +159,88 @@ const columns = computed<Column<RequestLogRow>[]>(() => [
     key: "output",
     header: t("logs.column.output"),
     numeric: true,
+    width: "7%",
     value: (row) => format.compact(row.completion_tokens),
   },
   {
     key: "cost",
     header: t("logs.column.cost"),
     numeric: true,
+    width: "9%",
     value: (row) => format.currency(row.cost),
   },
   {
     key: "latency",
     header: t("logs.column.latency"),
     numeric: true,
+    width: "9%",
     value: (row) => format.duration(row.latency_ms),
   },
 ])
+
+/* --- Auto load more ------------------------------------------------------ */
+
+/** The scrolling card, and the marker sitting after the last row inside it. */
+const card = ref<InstanceType<typeof AppCard> | null>(null)
+const sentinel = ref<HTMLElement | null>(null)
+let observer: IntersectionObserver | null = null
+
+/**
+ * How early the next page starts loading: one card-height of look-ahead, so
+ * the rows are already there by the time the scroll reaches them and the list
+ * never stops at a button. A percentage rather than a pixel count because the
+ * card's height is whatever the viewport left it.
+ */
+const APPROACH_MARGIN = "0px 0px 100% 0px"
+
+/**
+ * The observer's whole lifecycle hangs off the sentinel's existence, which is
+ * the state we actually care about: it renders only while `nextCursor` is set,
+ * so the last page unmounts it and the observer stops for good, and a filter
+ * change (which nulls the cursor, then loads a fresh first page) unmounts and
+ * remounts it — re-arming with an observer rooted on the card as it is now.
+ * Watching the ref beats wiring `onMounted`/`onBeforeUnmount` plus a watcher on
+ * the cursor, which would be three places to keep agreeing with each other.
+ *
+ * `flush: "post"` so the card's own ref is populated before we read it: both
+ * are set by the same DOM patch, and a pre-flush callback can run first.
+ */
+watch(
+  sentinel,
+  (el) => {
+    observer?.disconnect()
+    observer = null
+    // No IntersectionObserver (or nothing to watch): the Load more button is
+    // the whole feature, exactly as it was.
+    if (!el || typeof IntersectionObserver === "undefined") return
+    observer = new IntersectionObserver(onApproach, {
+      // The page does not scroll — the card's body does (AppCard `fill`), so
+      // the viewport is the wrong box to measure approach against.
+      root: card.value?.body ?? null,
+      rootMargin: APPROACH_MARGIN,
+    })
+    observer.observe(el)
+  },
+  { flush: "post" },
+)
+
+onBeforeUnmount(() => {
+  observer?.disconnect()
+  observer = null
+})
+
+/**
+ * `loadMore` already refuses a second call while one is in flight, so the guard
+ * here is `moreError`: a failed auto-fetch leaves the sentinel on screen, and
+ * without it the next scroll nudge would retry the same failing request for as
+ * long as the user kept moving. After a failure the page waits for the Load
+ * more button, which clears the error and re-opens this path.
+ */
+function onApproach(entries: IntersectionObserverEntry[]) {
+  if (!entries.some((entry) => entry.isIntersecting)) return
+  if (!logs.nextCursor || logs.loadingMore || logs.moreError) return
+  void loadMore()
+}
 
 onMounted(() => void load())
 
@@ -197,6 +295,11 @@ function isRemovedAccount(row: RequestLogRow): boolean {
   return row.account_id !== null && row.account_label === null
 }
 
+/** The row's visible timestamp — also its tooltip and part of its button's name. */
+function timeLabel(row: RequestLogRow): string {
+  return format.timestamp(row.created_at)
+}
+
 function typeLabel(row: RequestLogRow): string {
   return row.usage_type === "oauth" ? t("logs.type.oauth") : t("logs.type.api")
 }
@@ -247,7 +350,7 @@ function typeLabel(row: RequestLogRow): string {
       </template>
     </Banner>
 
-    <AppCard fill flush class="list">
+    <AppCard ref="card" fill flush class="list">
       <!-- Skeletons are decoration; the status beside them is what a screen
            reader gets. -->
       <div v-if="showSkeleton" class="skeletons">
@@ -276,6 +379,7 @@ function typeLabel(row: RequestLogRow): string {
              so keyboard and screen-reader users reach it the same way. -->
         <DataTable
           row-clickable
+          fixed
           :columns="columns"
           :rows="rows"
           :row-key="(row) => row.id"
@@ -287,29 +391,31 @@ function typeLabel(row: RequestLogRow): string {
               size="sm"
               variant="ghost"
               class="time"
-              :label="t('logs.openDetail', { time: format.timestamp(row.created_at) })"
+              :label="t('logs.openDetail', { time: timeLabel(row) })"
               @click.stop="detail = row"
             >
-              <span class="tabular">{{ format.timestamp(row.created_at) }}</span>
+              <span class="tabular" :title="timeLabel(row)">{{ timeLabel(row) }}</span>
             </AppButton>
           </template>
 
           <!-- The alias travels with the model id: it is what the client
-               actually sent, and the id is what ran. -->
+               actually sent, and the id is what ran. Both are plain inline
+               content so they flow through the cell's two lines together —
+               a flex box between them would be one unclampable item. -->
           <template #cell-model="{ row }">
-            <span class="model-cell">
-              <code class="mono model-id" :title="row.model">{{ row.model }}</code>
-              <Badge v-if="row.group_name" tone="neutral">
-                {{ t("logs.via", { alias: row.group_name }) }}
-              </Badge>
-            </span>
+            <code class="mono model-id" :title="row.model">{{ row.model }}</code>
+            <Badge v-if="row.group_name" tone="neutral" class="alias">
+              {{ t("logs.via", { alias: row.group_name }) }}
+            </Badge>
           </template>
 
           <template #cell-account="{ row }">
             <Badge v-if="isRemovedAccount(row)" tone="warn">
               {{ t("logs.accountRemoved") }}
             </Badge>
-            <span v-else-if="row.account_label" class="account">{{ row.account_label }}</span>
+            <span v-else-if="row.account_label" class="account" :title="row.account_label">
+              {{ row.account_label }}
+            </span>
             <span v-else class="none">—</span>
           </template>
 
@@ -320,23 +426,32 @@ function typeLabel(row: RequestLogRow): string {
           <!-- Never color-only: a failure is named by its code, a success is
                its status number and nothing louder. -->
           <template #cell-status="{ row }">
-            <Badge v-if="isFailure(row)" tone="danger" mono>{{ failureLabel(row) }}</Badge>
+            <Badge v-if="isFailure(row)" tone="danger" mono :title="failureLabel(row)">
+              {{ failureLabel(row) }}
+            </Badge>
             <span v-else class="status tabular">{{ row.status_code }}</span>
           </template>
         </DataTable>
 
-        <!-- The list's end: one more page, appended in place. -->
-        <div v-if="logs.nextCursor" class="more">
-          <p v-if="logs.moreError" class="more-error">{{ t("logs.error.loadMore") }}</p>
-          <AppButton
-            size="sm"
-            variant="secondary"
-            :loading="logs.loadingMore"
-            @click="loadMore()"
-          >
-            {{ t("logs.loadMore") }}
-          </AppButton>
-        </div>
+        <!-- The list's end: one more page, appended in place.
+             The sentinel makes that automatic and the button keeps it
+             reachable — by keyboard, without an IntersectionObserver, and
+             after a fetch that failed. Both live under the one condition, so
+             they exist exactly while there is a next page to ask for. -->
+        <template v-if="logs.nextCursor">
+          <div ref="sentinel" class="sentinel" aria-hidden="true" />
+          <div class="more">
+            <p v-if="logs.moreError" class="more-error">{{ t("logs.error.loadMore") }}</p>
+            <AppButton
+              size="sm"
+              variant="secondary"
+              :loading="logs.loadingMore"
+              @click="loadMore()"
+            >
+              {{ t("logs.loadMore") }}
+            </AppButton>
+          </div>
+        </template>
       </template>
     </AppCard>
 
@@ -413,38 +528,43 @@ function typeLabel(row: RequestLogRow): string {
 
 /* --- Rows --------------------------------------------------------------- */
 
-/* The timestamp is the row's control, so it reads as the row's first field
-   rather than as a button parked in the column: no padding of its own, and the
-   full text strength the rest of the row's identity has. */
+/*
+ * The timestamp is the row's control, so it reads as the row's first field
+ * rather than as a button parked in the column: no padding of its own, and the
+ * full text strength the rest of the row's identity has.
+ *
+ * It also has to behave like text inside the clamped cell. A button is 28px
+ * tall and `nowrap` by default, which in a fixed track means one line sitting
+ * 6px off every other column's first line, with the tail of the timestamp cut
+ * flat at the track's edge. Here it inherits the cell's line box instead and
+ * wraps into the second line the row already has.
+ */
 .list :deep(.time) {
+  height: auto;
   padding: 0;
+  justify-content: flex-start;
   color: var(--text);
   font-size: var(--text-sm);
-}
-
-/* The id and its alias tag wrap together rather than the tag stranding on a
-   line of its own in a narrow column. */
-.model-cell {
-  display: inline-flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-2);
-  min-width: 0;
+  line-height: inherit;
+  text-align: left;
+  white-space: normal;
+  /* Its top edge, not its baseline, is what should line up with the cell's
+     first line — a two-line timestamp aligned on the baseline of its *first*
+     line hangs the second one below the cell and loses it to the clip. */
+  vertical-align: top;
 }
 
 .model-id {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text);
 }
 
+/* Inline spacing, not a flex gap: the tag flows with the id through the cell's
+   two lines rather than being an item beside it. */
+.alias {
+  margin-left: var(--space-2);
+}
+
 .account {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   color: var(--text-secondary);
 }
 
@@ -459,6 +579,13 @@ function typeLabel(row: RequestLogRow): string {
 }
 
 /* --- Load more ----------------------------------------------------------- */
+
+/* What the observer watches for. It has to occupy a box to be intersected, and
+   it must not cost the layout one: the negative margin gives its pixel back. */
+.sentinel {
+  height: 1px;
+  margin-bottom: -1px;
+}
 
 .more {
   display: flex;
