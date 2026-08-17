@@ -225,7 +225,7 @@ async function copyAlias(alias: string) {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('groups.title')" :subtitle="t('groups.subtitle')">
+    <PageHeader :title="t('groups.title')">
       <template #actions>
         <AppButton variant="primary" @click="openCreate">
           <template #icon><ActionIcon name="plus" /></template>
@@ -254,17 +254,14 @@ async function copyAlias(alias: string) {
         </div>
       </div>
 
+      <!-- No action slot: Create group is in the sticky header, present at every
+           scroll depth and in every state of the page (docs/admin-ui.md
+           § Component primitives). -->
       <EmptyState
         v-else-if="!rows.length"
         :title="t('groups.empty.title')"
         :body="t('groups.empty.body')"
-      >
-        <template #action>
-          <AppButton variant="primary" @click="openCreate">
-            {{ t("groups.create") }}
-          </AppButton>
-        </template>
-      </EmptyState>
+      />
 
       <DataTable
         v-else

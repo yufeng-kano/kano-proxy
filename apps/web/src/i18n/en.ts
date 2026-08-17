@@ -46,16 +46,17 @@ export const en = {
   "action.copy": "Copy",
   "action.copied": "Copied",
   "action.dismiss": "Dismiss",
-  // Visible text for the row actions. Their accessible names name the row's
-  // subject too (`providers.account.*`, `custom.*Endpoint`) — the same three
-  // words (Resume, Rename, Remove) repeat down a list, so the label alone
-  // does not say which account. Those names must contain these words
-  // verbatim (WCAG 2.5.3).
-  "action.resume": "Resume",
-  "action.rename": "Rename",
+  // The row actions that keep a visible word: the one that destroys something
+  // (Remove) and the one no glyph names on sight (Test). Every other row action
+  // is a glyph whose words live in its accessible name — those names carry the
+  // row's subject too (`providers.account.*`, `custom.*Endpoint`), since the
+  // same action repeats down a list, and where a visible word exists the name
+  // must contain it verbatim (WCAG 2.5.3).
   "action.remove": "Remove",
-  "action.edit": "Edit",
   "action.test": "Test",
+  // Names the trailing edit column of a table, rendered visually hidden: a
+  // blank `<th>` is an unnamed column to a screen reader.
+  "action.edit": "Edit",
   "action.search": "Search",
   "action.done": "Done",
 
@@ -71,7 +72,6 @@ export const en = {
 
   // --- Overview (dashboard) ----------------------------------------------
   "overview.title": "Overview",
-  "overview.subtitle": "Your traffic across every connected provider",
   "overview.range.24h": "24 hours",
   "overview.range.7d": "7 days",
   "overview.range.30d": "30 days",
@@ -127,7 +127,6 @@ export const en = {
 
   // --- Logs ---------------------------------------------------------------
   "logs.title": "Logs",
-  "logs.subtitle": "Every request, newest first",
   // Filters. "Errors" is the whole second option, so the group's name has to
   // say what is being narrowed rather than repeating one of its options.
   "logs.filter.provider": "Provider",
@@ -176,18 +175,20 @@ export const en = {
 
   // --- Providers ----------------------------------------------------------
   "providers.title": "Providers",
-  "providers.subtitle": "Connect the accounts your requests route through",
   "providers.all": "All",
   "providers.group.custom": "Custom",
   "providers.addAccount": "Add account",
   // One gate per section, so its name is the section's — not a row's.
   "providers.section.edit": "Edit {section}",
   "providers.section.doneEditing": "Done editing {section}",
-  // Accessible names; the buttons' visible text is `providers.account.primary`,
-  // `action.resume`, and `action.rename` / `action.remove`, which these
-  // repeat verbatim.
+  // Accessible names for the row's actions. Resume, promote and rename are
+  // glyphs, so these are the only words they have — name and tooltip both.
+  // Remove is the one with visible text (`action.remove`), which its name
+  // repeats verbatim.
   "providers.account.resume": "Resume {name}",
   "providers.account.promote": "Make {name} primary",
+  // The badge on the account requests route through first — the same word the
+  // promote name ends on, so the control and the badge state one fact.
   "providers.account.primary": "Primary",
   "providers.account.rename": "Rename {name}",
   "providers.account.remove": "Remove {name}",
@@ -230,7 +231,6 @@ export const en = {
   "provider.grok.name": "Grok",
   "provider.grok.blurb": "Your xAI subscription",
   "provider.custom.name": "Custom endpoints",
-  "provider.custom.blurb": "Any OpenAI- or Anthropic-compatible API",
 
   // --- Add account dialog -------------------------------------------------
   "addAccount.title": "Add {provider} account",
@@ -260,6 +260,9 @@ export const en = {
 
   // --- Custom endpoints ---------------------------------------------------
   "custom.add": "Add endpoint",
+  // Accessible names for the row's actions. Resume and Edit are glyphs, so
+  // these are their only words; Test and Remove keep visible text, which their
+  // names repeat verbatim.
   "custom.resumeEndpoint": "Resume {name}",
   "custom.testEndpoint": "Test {name}",
   "custom.editEndpoint": "Edit {name}",
@@ -338,7 +341,6 @@ export const en = {
 
   // --- Models -------------------------------------------------------------
   "models.title": "Models",
-  "models.subtitle": "Everything you can call right now",
   "models.searchPlaceholder": "Search models",
   "models.all": "All models",
   "models.count_one": "{count} model",
@@ -363,7 +365,6 @@ export const en = {
 
   // --- Groups -------------------------------------------------------------
   "groups.title": "Groups",
-  "groups.subtitle": "Your own model names, pointed at real models",
   "groups.create": "Create group",
   "groups.column.name": "Name",
   "groups.column.aliases": "Aliases",
@@ -459,7 +460,6 @@ export const en = {
 
   // --- API keys -----------------------------------------------------------
   "keys.title": "API keys",
-  "keys.subtitle": "Keys your clients use to reach your models",
   "keys.tab.keys": "Keys",
   "keys.tab.connect": "Connect",
   "keys.create": "Create key",
@@ -495,7 +495,6 @@ export const en = {
   "keys.created.title": "Key created",
   "keys.created.body": "Copy it now — it won't be shown again.",
   "keys.connect.title": "Connect a client",
-  "keys.connect.body": "Point any OpenAI- or Anthropic-compatible client at these URLs.",
   "keys.connect.openai": "OpenAI-compatible",
   "keys.connect.anthropic": "Anthropic-compatible",
   "keys.connect.auth": "Authorization",
@@ -507,7 +506,6 @@ export const en = {
 
   // --- Changelog ----------------------------------------------------------
   "changelog.title": "What's new",
-  "changelog.subtitle": "Every release, newest first",
   "changelog.currentShort": "Current",
   /* Long form of the badge above, rendered sr-only: a screen reader listing
      tags out of context gets "Current" with nothing to be current *of*. */

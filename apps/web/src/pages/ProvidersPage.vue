@@ -67,12 +67,6 @@ const NAME_KEY: Record<ProviderId, MessageKey> = {
   grok: "provider.grok.name",
 }
 
-const BLURB_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.blurb",
-  codex: "provider.codex.blurb",
-  grok: "provider.grok.blurb",
-}
-
 /**
  * Each strategy's own name and the line that says what it does to a pool. A
  * map rather than a template literal for the same reason as above — and it is
@@ -468,7 +462,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 
 <template>
   <div>
-    <PageHeader :title="t('providers.title')" :subtitle="t('providers.subtitle')">
+    <PageHeader :title="t('providers.title')">
       <template #actions>
         <!-- Icon-only: the label is a tooltip and the accessible name. -->
         <AppButton
@@ -509,12 +503,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       role="tabpanel"
       :aria-label="activeLabel"
     >
-      <AppCard
-        v-for="pid in visibleProviders"
-        :key="pid"
-        :title="t(NAME_KEY[pid])"
-        :subtitle="t(BLURB_KEY[pid])"
-      >
+      <AppCard v-for="pid in visibleProviders" :key="pid" :title="t(NAME_KEY[pid])">
         <template #actions>
           <!-- Section-level config, so it appears with the section's other
                config affordances when the gate opens — never on a row. It
@@ -613,11 +602,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
         </div>
       </AppCard>
 
-      <AppCard
-        v-if="showCustomSection"
-        :title="t('provider.custom.name')"
-        :subtitle="t('provider.custom.blurb')"
-      >
+      <AppCard v-if="showCustomSection" :title="t('provider.custom.name')">
         <template #actions>
           <AppButton
             v-if="!isEditing(CUSTOM)"

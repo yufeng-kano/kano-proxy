@@ -115,7 +115,7 @@ function spendCell(key: ApiKey): string {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('keys.title')" :subtitle="t('keys.subtitle')">
+    <PageHeader :title="t('keys.title')">
       <template #actions>
         <AppButton v-if="tab === 'keys'" variant="primary" @click="openCreate">
           <template #icon><ActionIcon name="plus" /></template>
@@ -158,17 +158,14 @@ function spendCell(key: ApiKey): string {
           </div>
         </div>
 
+        <!-- No action slot: Create key is in the sticky header, present at every
+             scroll depth and in every state of the page (docs/admin-ui.md
+             § Component primitives). -->
         <EmptyState
           v-else-if="!keys.length"
           :title="t('keys.empty.title')"
           :body="t('keys.empty.body')"
-        >
-          <template #action>
-            <AppButton variant="primary" @click="openCreate">
-              {{ t("keys.create") }}
-            </AppButton>
-          </template>
-        </EmptyState>
+        />
 
         <DataTable
           v-else
@@ -218,12 +215,7 @@ function spendCell(key: ApiKey): string {
       <!-- `fill` like the key list: Connect is short and would otherwise hug
            its content, resizing the card on every tab switch. A tab changes
            what is on the surface, not how big the surface is. -->
-      <AppCard
-        fill
-        class="list"
-        :title="t('keys.connect.title')"
-        :subtitle="t('keys.connect.body')"
-      >
+      <AppCard fill class="list" :title="t('keys.connect.title')">
         <div class="connect">
           <CopyField
             :label="t('keys.connect.openai')"

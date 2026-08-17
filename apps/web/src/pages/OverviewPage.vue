@@ -289,7 +289,7 @@ function coverageNote(row: ModelUsageRow): string | null {
 
 <template>
   <div>
-    <PageHeader :title="t('overview.title')" :subtitle="t('overview.subtitle')">
+    <PageHeader :title="t('overview.title')">
       <template #actions>
         <Segmented
           :model-value="days"
@@ -358,7 +358,7 @@ function coverageNote(row: ModelUsageRow): string | null {
             :label="t('overview.activity.label')"
             @select="onSelectActivityTab"
           />
-          <!-- The two former tiles, as quiet header stats. -->
+          <!-- The two former tiles, as header stats beside the sub-tabs. -->
           <div class="activity-stats">
             <span class="stat">
               <span class="stat-label">{{ t("overview.stat.errors") }}</span>
@@ -485,20 +485,23 @@ function coverageNote(row: ModelUsageRow): string | null {
   gap: var(--space-4);
 }
 
+/* The two figures that survived the tile removal, so they are set to be read:
+   body size, the value at full text tone and weight (docs/admin-ui.md
+   § Design restraint — a value that matters is not shrunk and greyed). */
 .stat {
   display: inline-flex;
   align-items: baseline;
   gap: var(--space-2);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 
 .stat-label {
-  color: var(--faint);
+  color: var(--muted);
 }
 
 .stat-value {
-  color: var(--text-secondary);
-  font-weight: var(--weight-medium);
+  color: var(--text);
+  font-weight: var(--weight-semibold);
 }
 
 .activity-body {

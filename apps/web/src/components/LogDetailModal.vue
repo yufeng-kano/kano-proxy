@@ -148,13 +148,15 @@ dd {
   overflow-wrap: anywhere;
 }
 
-/* The id under a resolved name: present for tracing, quiet enough that the
-   name is still what the row reads as. */
+/* The id under a resolved name. It is the only handle left on an account that
+   has since been removed, so it is set to read: body size, one tone down from
+   the name rather than shrunk out of the way (docs/admin-ui.md
+   § Design restraint). */
 .id {
   display: block;
   margin-top: var(--space-1);
-  color: var(--faint);
-  font-size: var(--text-2xs);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
 }
 
 .none {

@@ -9,9 +9,13 @@
  */
 import { ref } from "vue"
 
+/**
+ * No subtitle prop: a card whose contents are self-evident carries no line
+ * explaining itself, and a section title the page's own nav already names
+ * carries even less (docs/admin-ui.md § Design restraint).
+ */
 defineProps<{
   title?: string
-  subtitle?: string
   flush?: boolean
   fill?: boolean
 }>()
@@ -38,9 +42,10 @@ defineSlots<{
 <template>
   <section class="card" :class="{ fill }">
     <header v-if="title || $slots.actions" class="card-head">
+      <!-- Kept as the head's left slot even when the card has no title: it is
+           what `space-between` places the actions against. -->
       <div class="card-heading">
         <h2 v-if="title" class="card-title">{{ title }}</h2>
-        <p v-if="subtitle" class="card-subtitle">{{ subtitle }}</p>
       </div>
       <div v-if="$slots.actions" class="card-actions">
         <slot name="actions" />
@@ -102,12 +107,6 @@ defineSlots<{
   font-size: var(--text-sm);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
-}
-
-.card-subtitle {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: var(--text-xs);
 }
 
 .card-actions {

@@ -344,7 +344,7 @@ async function copyId(id: string) {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('models.title')" :subtitle="t('models.subtitle')">
+    <PageHeader :title="t('models.title')">
       <template #actions>
         <!-- The wrapping label is the field's accessible name; the placeholder
              carries the same words visually. -->

@@ -20,6 +20,8 @@ defineProps<{
     | "edit"
     | "expand"
     | "plus"
+    | "play"
+    | "star"
     | "arrow-up"
     | "arrow-down"
     | "grip"
@@ -69,6 +71,18 @@ defineProps<{
     <!-- Plus: create. -->
     <template v-else-if="name === 'plus'">
       <path d="M8 3v10M3 8h10" />
+    </template>
+
+    <!-- Play: resume a paused account or endpoint. The status it undoes reads
+         "Paused", and play/pause is the one pairing no user has to hover. -->
+    <template v-else-if="name === 'play'">
+      <path d="M5.25 3.5L11.75 8 5.25 12.5z" />
+    </template>
+
+    <!-- Star: make this the primary account — the one requests route through
+         first. The mark for "the one of these that gets used". -->
+    <template v-else-if="name === 'star'">
+      <path d="M8 2L9.85 5.76 14 6.36 11 9.28 11.71 13.41 8 11.46 4.29 13.41 5 9.28 2 6.36 6.15 5.76z" />
     </template>
 
     <!-- Arrow up / down: move a row one position within its list. -->

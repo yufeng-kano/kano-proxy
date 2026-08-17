@@ -156,9 +156,12 @@ async function runTest() {
       </div>
 
       <!-- The blank space at the row's right edge, filled only while the
-           section's gate is open. Labelled like the account rows above; `label`
-           carries the endpoint name for the accessible name, since several rows
-           show the same three words. -->
+           section's gate is open. Iconography like the account rows above, and
+           `label` carries the endpoint name for the accessible name since
+           several rows offer the same actions. Two keep their word: Remove,
+           because deleting the endpoint deletes its stored key, and Test,
+           because no glyph says "send a probe request" without a hover (a play
+           triangle already means Resume on this very row). -->
       <div v-if="editing" class="actions">
         <template v-if="reorderable">
           <AppButton
@@ -184,12 +187,14 @@ async function runTest() {
         </template>
         <AppButton
           v-if="provider.status === 'benched'"
+          icon-only
           size="sm"
+          variant="ghost"
           :label="t('custom.resumeEndpoint', { name: provider.name })"
           :disabled="busy || testing"
           @click="emit('resume')"
         >
-          {{ t("action.resume") }}
+          <template #icon><ActionIcon name="play" /></template>
         </AppButton>
         <AppButton
           size="sm"
@@ -201,12 +206,14 @@ async function runTest() {
           {{ t("action.test") }}
         </AppButton>
         <AppButton
+          icon-only
           size="sm"
+          variant="ghost"
           :label="t('custom.editEndpoint', { name: provider.name })"
           :disabled="busy || testing"
           @click="emit('edit')"
         >
-          {{ t("action.edit") }}
+          <template #icon><ActionIcon name="edit" /></template>
         </AppButton>
         <AppButton
           size="sm"

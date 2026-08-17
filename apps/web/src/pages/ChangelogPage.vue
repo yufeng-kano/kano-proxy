@@ -76,7 +76,7 @@ function onRefresh() {
 
 <template>
   <div>
-    <PageHeader :title="t('changelog.title')" :subtitle="t('changelog.subtitle')">
+    <PageHeader :title="t('changelog.title')">
       <template #actions>
         <!-- Icon-only: the label is a tooltip and the accessible name, so the
              control keeps its meaning without spending header width on a word

@@ -318,7 +318,7 @@ function typeLabel(row: RequestLogRow): string {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('logs.title')" :subtitle="t('logs.subtitle')">
+    <PageHeader :title="t('logs.title')">
       <template #actions>
         <!-- The wrapping label is the select's accessible name; the "All
              providers" option carries the same words visually. -->

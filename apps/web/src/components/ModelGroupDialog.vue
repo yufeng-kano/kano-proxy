@@ -254,6 +254,10 @@ const trimmedQuery = computed(() => query.value.trim())
  * The active tab's models. Keyed on each row's own `provider`, which is the
  * catalog's section — so the fixed `group` section never appears under a
  * provider tab, and a group can never target another group.
+ *
+ * `display_name` is a **search key only** — the list renders the id alone
+ * (docs/admin-ui.md § Groups page), but "Opus 4.8" still has to find
+ * `claude-opus-4-8`, so the friendly name stays in the match.
  */
 const tabModels = computed<CatalogModel[]>(() => {
   const q = trimmedQuery.value.toLowerCase()
@@ -819,11 +823,14 @@ async function remove() {
                       :disabled="saving || deleting"
                       @click="addTarget(model.id)"
                     >
-                      <code class="mono model-id">{{ model.id }}</code>
+                      <!-- The id and nothing else. What the column cannot fit
+                           truncates and stays readable on the `title`; the
+                           button's own name carries it in full for a screen
+                           reader. -->
+                      <code class="mono model-id" :title="model.id">{{ model.id }}</code>
                       <Badge v-if="isAdded(model.id)" tone="ok">
                         {{ t("groups.dialog.added") }}
                       </Badge>
-                      <span v-else class="model-name">{{ model.display_name }}</span>
                     </AppButton>
                   </li>
                 </ul>
@@ -1158,19 +1165,58 @@ async function remove() {
   min-height: 0;
 }
 
+/* Flush like everything else in this column: a full-bleed row with a hairline
+   under it, not a rounded field inset in a flush region — a box drawn inside a
+   box, the same objection that rejected the bordered rail card (docs/admin-ui.md
+   § Groups page). The row's only inset is what lines the placeholder up with
+   the ids below it: `--space-1` here plus the button's own `--space-2`. */
 .models-search {
-  display: block;
+  display: flex;
   flex-shrink: 0;
-  padding: var(--space-2);
+  padding: 0 var(--space-1);
   border-bottom: 1px solid var(--border);
 }
 
-/* The one region that grows with its data, so it is the one that scrolls.
+/* The field gives up its border, radius and fill; without them it is the row,
+   and the row is what the picker already is. */
+.models-search :deep(.control) {
+  padding: 0 var(--space-2);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+/* Focus moves to the row, since the field no longer has a box to ring. Inset,
+   because the row runs edge to edge: an outward ring would sit on the rail
+   divider and on the tab strip above it. 2px in `--ring-border` is the app's
+   one focus convention (styles.css `:focus-visible`), not a local invention. */
+.models-search :deep(.control:focus) {
+  box-shadow: none;
+}
+
+.models-search:focus-within {
+  box-shadow: inset 0 0 0 2px var(--ring-border);
+}
+
+/* The one region that grows with its data, so it is the one that scrolls —
+   vertically, and only vertically.
    `align-content: start` is load-bearing: a stretched grid distributes two
    rows across the whole tall track and reads as items floating in space —
-   a list packs from the top whatever its count (rejected 2026-08-14). */
+   a list packs from the top whatever its count (rejected 2026-08-14).
+
+   `grid-template-columns: minmax(0, 1fr)` is what stops the sideways scroll,
+   and it has to be declared: an *implicit* `auto` track cannot go below its
+   items' min-content, and a row's min-content here is the whole un-wrappable
+   id (AppButton sets `white-space: nowrap`) — `min-width: 0` on `.model-id`
+   lets it shrink *within* a line but does not lower what the row contributes
+   to the track. The track then out-grew the region, and because `overflow-y:
+   auto` computes the other axis from `visible` to `auto`, the horizontal bar
+   appeared unasked and slid the ids out from under the tabs and rail that name
+   them. A 0-min track plus `min-width: 0` on the item caps it at the source,
+   which is what leaves `.model-id`'s ellipsis something to do. */
 .models-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: 2px;
   flex: 1;
@@ -1182,6 +1228,12 @@ async function remove() {
   list-style: none;
 }
 
+/* A grid item's automatic minimum is content-based, so it would overflow the
+   0-min track above without this. */
+.models-list > li {
+  min-width: 0;
+}
+
 /* A full-width row rather than a pill: the id is what the user reads down the
    list, so the button is shaped to it. Selected through the list so these
    outrank AppButton's own single-class rules rather than depending on style
@@ -1191,8 +1243,8 @@ async function remove() {
   justify-content: flex-start;
 }
 
-/* The default slot lands in one flex item, so the id/name split is set up
-   inside it. */
+/* The default slot lands in one flex item, so the id and its Added tag are laid
+   out inside it: the id takes the line and the tag sits at the trailing edge. */
 .models-list :deep(.model .btn-label) {
   display: flex;
   align-items: baseline;
@@ -1208,12 +1260,6 @@ async function remove() {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.model-name {
-  flex-shrink: 0;
-  color: var(--muted);
-  font-size: var(--text-2xs);
 }
 
 .note {

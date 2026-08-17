@@ -11,6 +11,7 @@
  * click away. The status dot always ships its text label (§ Accessibility floor).
  */
 import { computed } from "vue"
+import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -147,36 +148,44 @@ const windows = computed(() => props.account.usage?.windows ?? [])
       </div>
 
       <!-- The blank space at the row's right edge, filled only while the
-           section's gate is open. Labelled, not icons: these are rare and
-           consequential, and a glyph makes the user hover to find out which one
-           removes the account. `label` carries the account name for the
-           accessible name, since several rows show the same three words. -->
+           section's gate is open. Icons but for Remove (docs/admin-ui.md
+           § Providers page): each glyph's words live in `label`, which is both
+           the accessible name and the tooltip, and each name carries the
+           account — several rows offer the same three actions. Remove keeps its
+           word in the danger tone: re-binding an account means walking the
+           whole OAuth flow again, so it is never a glyph to hover over. -->
       <div v-if="editing" class="actions">
         <AppButton
           v-if="account.status === 'benched'"
+          icon-only
           size="sm"
+          variant="ghost"
           :label="t('providers.account.resume', { name: displayName })"
           :disabled="busy"
           @click="emit('resume')"
         >
-          {{ t("action.resume") }}
+          <template #icon><ActionIcon name="play" /></template>
         </AppButton>
         <AppButton
           v-if="account.status !== 'active'"
+          icon-only
           size="sm"
+          variant="ghost"
           :label="t('providers.account.promote', { name: displayName })"
           :disabled="busy"
           @click="emit('promote')"
         >
-          {{ t("providers.account.primary") }}
+          <template #icon><ActionIcon name="star" /></template>
         </AppButton>
         <AppButton
+          icon-only
           size="sm"
+          variant="ghost"
           :label="t('providers.account.rename', { name: displayName })"
           :disabled="busy"
           @click="emit('rename', identity)"
         >
-          {{ t("action.rename") }}
+          <template #icon><ActionIcon name="edit" /></template>
         </AppButton>
         <AppButton
           size="sm"

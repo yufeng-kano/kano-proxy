@@ -1,24 +1,29 @@
 <script setup lang="ts">
 /**
- * The sticky top of every page: title, primary actions, and — where a page has
- * sections — the section nav.
+ * The sticky top of every page: the title, the primary actions, and — where a
+ * page has sections — the section nav.
  *
  * Sticky is the point. The controls a page is operated by (range picker,
  * search, Create) must be reachable at any scroll depth, so they live here
  * rather than in the content that scrolls away.
  *
- * Chrome, not a surface (docs/admin-ui.md § Layout): one compact title row
- * with the subtitle inline beside it, and a heavy frosted wash of the page
- * bg — a stuck header reads as the page frosting out under the controls,
+ * The visible `h1` is the one thing here that repeats the sidebar's active
+ * item, and the named exception to it (docs/admin-ui.md § Design restraint): it
+ * anchors the content column and gives the header something to be the top of.
+ * What went is the line *beneath* it explaining the page — there is no
+ * `subtitle` prop.
+ *
+ * Chrome, not a surface: one compact title row over a heavy frosted wash of the
+ * page bg, so a stuck header reads as the page frosting out under the controls,
  * never as a white slab sitting on it.
  */
 defineProps<{
+  /** The page's name — the visible `h1`, and the only one on the page. */
   title: string
-  subtitle?: string
 }>()
 
 defineSlots<{
-  /** Primary + secondary actions, right-aligned. */
+  /** Primary + secondary actions, right-aligned on the title row. */
   actions?: () => unknown
   /** Section nav or tabs, on their own row below the title. */
   nav?: () => unknown
@@ -28,10 +33,7 @@ defineSlots<{
 <template>
   <header class="page-header">
     <div class="row">
-      <div class="heading">
-        <h1 class="title">{{ title }}</h1>
-        <p v-if="subtitle" class="subtitle">{{ subtitle }}</p>
-      </div>
+      <h1 class="title">{{ title }}</h1>
       <div v-if="$slots.actions" class="actions">
         <slot name="actions" />
       </div>
@@ -49,11 +51,11 @@ defineSlots<{
  * the region's top padding lets the blur reach the top edge once the header
  * is stuck; cancelling `--page-gutter` lets the wash and bottom rule run
  * from the sidebar edge to the region's far edge. The same gutter comes back
- * as padding so title, actions, and section nav stay on the card column —
+ * as padding so title, actions, and the section nav stay on the card column —
  * the gutter is the shell's `--space-2`, shared with the cards, not a
- * tighter header-only inset. A header whose words run wider than the
- * cards reads as two page widths stacked; a wash that stops at the cards
- * reads as a strip that does not cover the page.
+ * tighter header-only inset. A header whose controls run wider than the cards
+ * reads as two page widths stacked; a wash that stops at the cards reads as a
+ * strip that does not cover the page.
  *
  * Both values are AppShell's own, inherited rather than restated — two
  * copies would disagree at whichever breakpoint someone updated only one
@@ -76,40 +78,32 @@ defineSlots<{
   border-bottom: 1px solid var(--border);
 }
 
-/* Title and subtitle share one baseline row: the header is a strip of
-   chrome, and two stacked text rows are what made it read as a block. */
+/*
+ * Title and actions on one row: the header is a strip of chrome, and a second
+ * stacked text row is what made it read as a block.
+ *
+ * The 34px floor is the height of the control that normally sits beside the
+ * title — taller than the title itself, so without it the header would lose
+ * that much height wherever a page has no action of its own (Keys' Connect
+ * tab), which reads as the layout jumping rather than as the page changing.
+ */
 .row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-4);
   flex-wrap: wrap;
+  min-height: 34px;
   padding-bottom: var(--space-3);
-}
-
-.heading {
-  display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-  min-width: 0;
-  flex-wrap: wrap;
 }
 
 .title {
   margin: 0;
+  min-width: 0;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
   line-height: 1.3;
-}
-
-.subtitle {
-  margin: 0;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /*
@@ -139,12 +133,6 @@ defineSlots<{
 @media (max-width: 640px) {
   .page-header {
     margin-bottom: var(--space-4);
-  }
-
-  /* The subtitle is context, not instruction — on a phone the vertical space
-     is worth more than the restatement. */
-  .subtitle {
-    display: none;
   }
 }
 </style>
