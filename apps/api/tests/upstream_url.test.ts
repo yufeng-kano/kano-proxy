@@ -146,4 +146,24 @@ describe("validateUpstreamBaseUrl", () => {
     const res = validateUpstreamBaseUrl("https://openrouter.example.com/api/v1")
     expect(res).toEqual({ ok: true, url: "https://openrouter.example.com/api/v1" })
   })
+
+  it("uses fieldName in error messages when given, defaulting to base_url", () => {
+    const res = validateUpstreamBaseUrl("http://api.example.com/v1", { fieldName: "count_tokens_url" })
+    expect(res).toEqual({ ok: false, error: "count_tokens_url must use https" })
+  })
+
+  it("preserves a path on the stored value — count_tokens_url is a complete URL", () => {
+    const res = validateUpstreamBaseUrl("https://count.example.com/anthropic/count_tokens", {
+      fieldName: "count_tokens_url",
+    })
+    expect(res).toEqual({ ok: true, url: "https://count.example.com/anthropic/count_tokens" })
+  })
+
+  it("still applies the SSRF host guard with a custom fieldName", () => {
+    const res = validateUpstreamBaseUrl("https://127.0.0.1/count_tokens", { fieldName: "count_tokens_url" })
+    expect(res).toEqual({
+      ok: false,
+      error: "count_tokens_url must not point at a private or loopback address",
+    })
+  })
 })

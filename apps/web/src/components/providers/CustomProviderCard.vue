@@ -5,8 +5,8 @@
  * Mirrors AccountCard's row shape so the two sections read as one page — the
  * section-owned `editing` gate included (docs/admin-ui.md § Providers page) —
  * but carries a static key instead of a usage window: the details are the
- * model prefix, the base URL, and the key mask (never the key itself — see
- * docs/admin-ui.md § Data freshness).
+ * model prefix, the base URL, the token-count URL when one is configured, and
+ * the key mask (never the key itself — see docs/admin-ui.md § Data freshness).
  */
 import { computed, ref } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
@@ -58,6 +58,15 @@ const formatLabel = computed(() =>
 )
 
 const modelPrefix = computed(() => `${props.provider.slug}/*`)
+
+/**
+ * The complete token-count URL, shown only when an OpenAI-format endpoint has
+ * one — anthropic rows derive that path from their base and never carry the
+ * field (docs/providers.md § Custom endpoints).
+ */
+const countTokensUrl = computed(() =>
+  props.provider.format === "openai" ? props.provider.count_tokens_url || null : null,
+)
 
 /**
  * Headline of a finished test: the count when the endpoint reported one.
@@ -220,6 +229,15 @@ async function runTest() {
         <dt>{{ t("custom.field.endpoint") }}</dt>
         <dd>
           <code class="mono truncate" :title="provider.base_url">{{ provider.base_url }}</code>
+        </dd>
+      </div>
+      <!-- Only when the operator configured one: an unset field is the common
+           case and must not leave a permanent empty row behind
+           (docs/admin-ui.md § Providers page). -->
+      <div v-if="countTokensUrl" class="detail">
+        <dt>{{ t("custom.field.countTokens") }}</dt>
+        <dd>
+          <code class="mono truncate" :title="countTokensUrl">{{ countTokensUrl }}</code>
         </dd>
       </div>
       <div class="detail">

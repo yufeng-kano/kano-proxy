@@ -84,6 +84,7 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 | name | TEXT | display name |
 | format | TEXT | `openai` \| `anthropic`; immutable after creation |
 | base_url | TEXT | validated (https, no credentials/query/fragment, not localhost/private/loopback/own-host) and trailing-slash-stripped on save |
+| count_tokens_url | TEXT | nullable; **openai format only** (`0012_custom_provider_count_tokens_url.sql`). A **complete** URL for an Anthropic-shaped `/v1/messages/count_tokens` endpoint — nothing is appended to it. Same validator as `base_url`. `NULL` = the surface stays unsupported and `POST /anthropic/v1/messages/count_tokens` keeps returning its `400` ([providers.md](./providers.md) § Custom endpoints) |
 | models_mode | TEXT | `auto` \| `manual`; `NOT NULL DEFAULT 'auto'` |
 | manual_models_json | TEXT | nullable; JSON array of upstream model id strings |
 | sort_order | INTEGER | display order within the user's list, ascending; `NOT NULL DEFAULT 0` (`0007_custom_provider_sort_order.sql`) |

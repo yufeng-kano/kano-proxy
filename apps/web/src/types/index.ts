@@ -155,6 +155,14 @@ export type CustomProvider = {
   name: string
   format: CustomProviderFormat
   base_url: string
+  /**
+   * Complete URL of an Anthropic-shaped `/v1/messages/count_tokens` to post to
+   * verbatim — nothing is appended, unlike `base_url` (docs/providers.md
+   * § Custom endpoints). Only ever set on `openai`-format rows; `null` means
+   * `count_tokens` keeps failing for them, which is the default. Not a secret,
+   * so it is returned on read and pre-filled on edit.
+   */
+  count_tokens_url: string | null
   models_mode: CustomProviderModelsMode
   manual_models: string[]
   /** Non-secret display mask, e.g. "sk-abc…f3a2". Never the plaintext key. */

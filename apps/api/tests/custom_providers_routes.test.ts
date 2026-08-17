@@ -65,7 +65,14 @@ const validCreateBody = {
 async function createProvider(
   env: Env,
   cookie: string,
-  overrides: Partial<typeof validCreateBody & { models_mode: string; manual_models: string[] }> = {},
+  overrides: Partial<
+    Omit<typeof validCreateBody, "format"> & {
+      format: "openai" | "anthropic"
+      count_tokens_url: string
+      models_mode: string
+      manual_models: string[]
+    }
+  > = {},
 ) {
   return customProviderRoutes.request("/", req("POST", cookie, { ...validCreateBody, ...overrides }), env)
 }
@@ -656,6 +663,193 @@ describe("PUT /api/custom-providers/:id (update)", () => {
     const res = await customProviderRoutes.request(
       "/" + id,
       req("PUT", cookie, { base_url: "https://127.0.0.1/v1" }),
+      env,
+    )
+    expect(res.status).toBe(400)
+  })
+})
+
+describe("count_tokens_url", () => {
+  it("create: omitted stores null and the field is echoed back", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createProvider(env, cookie)
+    const json = await readJson(res)
+    expect(json.count_tokens_url).toBeNull()
+  })
+
+  it("create: a valid value on an openai-format provider is validated, stored, and echoed back", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createProvider(env, cookie, {
+      count_tokens_url: "https://count.example.com/anthropic/count_tokens",
+    })
+    expect(res.status).toBe(201)
+    const json = await readJson(res)
+    expect(json.count_tokens_url).toBe("https://count.example.com/anthropic/count_tokens")
+  })
+
+  it("create: rejects a non-https count_tokens_url", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createProvider(env, cookie, {
+      count_tokens_url: "http://count.example.com/count_tokens",
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("create: rejects a count_tokens_url pointing at a private host", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createProvider(env, cookie, {
+      count_tokens_url: "https://127.0.0.1/count_tokens",
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("create: rejects a count_tokens_url over 300 characters", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createProvider(env, cookie, {
+      count_tokens_url: "https://count.example.com/" + "a".repeat(290),
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("create: rejects a non-empty count_tokens_url on an anthropic-format provider", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const res = await createProvider(env, cookie, {
+      format: "anthropic",
+      base_url: "https://upstream.example.com",
+      count_tokens_url: "https://count.example.com/count_tokens",
+    })
+    expect(res.status).toBe(400)
+  })
+
+  it("update: omitted keeps the stored value", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(
+      await createProvider(env, cookie, {
+        count_tokens_url: "https://count.example.com/count_tokens",
+      }),
+    )
+
+    const res = await customProviderRoutes.request(
+      "/" + created.id,
+      req("PUT", cookie, { name: "Renamed" }),
+      env,
+    )
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json.count_tokens_url).toBe("https://count.example.com/count_tokens")
+  })
+
+  it("update: empty string clears the stored value to null", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(
+      await createProvider(env, cookie, {
+        count_tokens_url: "https://count.example.com/count_tokens",
+      }),
+    )
+
+    const res = await customProviderRoutes.request(
+      "/" + created.id,
+      req("PUT", cookie, { count_tokens_url: "" }),
+      env,
+    )
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json.count_tokens_url).toBeNull()
+  })
+
+  it("update: null clears the stored value to null", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(
+      await createProvider(env, cookie, {
+        count_tokens_url: "https://count.example.com/count_tokens",
+      }),
+    )
+
+    const res = await customProviderRoutes.request(
+      "/" + created.id,
+      req("PUT", cookie, { count_tokens_url: null }),
+      env,
+    )
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json.count_tokens_url).toBeNull()
+  })
+
+  it("update: a new non-empty value is validated and replaces the stored one", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createProvider(env, cookie))
+
+    const res = await customProviderRoutes.request(
+      "/" + created.id,
+      req("PUT", cookie, { count_tokens_url: "https://count.example.com/count_tokens" }),
+      env,
+    )
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    expect(json.count_tokens_url).toBe("https://count.example.com/count_tokens")
+  })
+
+  it("update: rejects an invalid non-empty count_tokens_url", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(await createProvider(env, cookie))
+
+    const res = await customProviderRoutes.request(
+      "/" + created.id,
+      req("PUT", cookie, { count_tokens_url: "https://127.0.0.1/count_tokens" }),
+      env,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it("update: rejects a non-empty count_tokens_url against a stored anthropic-format provider", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    const created = await readJson(
+      await createProvider(env, cookie, {
+        slug: "my-claude-endpoint",
+        format: "anthropic",
+        base_url: "https://upstream.example.com",
+      }),
+    )
+
+    const res = await customProviderRoutes.request(
+      "/" + created.id,
+      req("PUT", cookie, { count_tokens_url: "https://count.example.com/count_tokens" }),
       env,
     )
     expect(res.status).toBe(400)

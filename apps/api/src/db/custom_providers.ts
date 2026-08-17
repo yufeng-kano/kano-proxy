@@ -7,6 +7,8 @@ export type CustomProviderRow = {
   name: string
   format: "openai" | "anthropic"
   base_url: string
+  /** Complete Anthropic-shaped `/v1/messages/count_tokens` URL, openai format only. Nullable. */
+  count_tokens_url: string | null
   models_mode: "auto" | "manual"
   manual_models_json: string | null
   sort_order: number
@@ -72,6 +74,7 @@ export async function insertCustomProvider(
     name: string
     format: "openai" | "anthropic"
     baseUrl: string
+    countTokensUrl: string | null
     modelsMode: "auto" | "manual"
     manualModelsJson: string | null
   },
@@ -90,8 +93,8 @@ export async function insertCustomProvider(
   await db
     .prepare(
       `INSERT INTO custom_providers
-       (id, user_id, slug, name, format, base_url, models_mode, manual_models_json, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, slug, name, format, base_url, count_tokens_url, models_mode, manual_models_json, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .bind(
       id,
@@ -100,6 +103,7 @@ export async function insertCustomProvider(
       input.name,
       input.format,
       input.baseUrl,
+      input.countTokensUrl,
       input.modelsMode,
       input.manualModelsJson,
       sortOrder,
@@ -114,6 +118,7 @@ export async function insertCustomProvider(
     name: input.name,
     format: input.format,
     base_url: input.baseUrl,
+    count_tokens_url: input.countTokensUrl,
     models_mode: input.modelsMode,
     manual_models_json: input.manualModelsJson,
     sort_order: sortOrder,
@@ -144,6 +149,13 @@ export async function reorderCustomProviders(
  * Partial update — an omitted field (`undefined`, bound as SQL NULL) keeps
  * its stored value via COALESCE, same convention as `updateAccountIdentity`.
  * To clear manual_models_json, pass `"[]"` (a real value), not `undefined`.
+ *
+ * `countTokensUrl` is nullable *and* clearable, which the COALESCE convention
+ * above can't express on its own (a bound `null` would just mean "omitted,
+ * keep the stored value" — indistinguishable from an actual clear-to-NULL).
+ * So it gets its own statement, run only when the caller actually sent the
+ * field (`!== undefined`): a direct `= ?` assignment, where `null` really
+ * does write NULL and a string really does write that string.
  */
 export async function updateCustomProviderFields(
   db: D1Database,
@@ -151,6 +163,7 @@ export async function updateCustomProviderFields(
   patch: {
     name?: string
     baseUrl?: string
+    countTokensUrl?: string | null
     modelsMode?: "auto" | "manual"
     manualModelsJson?: string | null
   },
@@ -175,6 +188,13 @@ export async function updateCustomProviderFields(
       id,
     )
     .run()
+
+  if (patch.countTokensUrl !== undefined) {
+    await db
+      .prepare(`UPDATE custom_providers SET count_tokens_url = ?, updated_at = ? WHERE id = ?`)
+      .bind(patch.countTokensUrl, ts, id)
+      .run()
+  }
 }
 
 export async function deleteCustomProvider(

@@ -277,6 +277,7 @@ export const en = {
   "custom.field.modelId": "Model prefix",
   "custom.field.endpoint": "Endpoint",
   "custom.field.key": "Key",
+  "custom.field.countTokens": "Token count",
   "custom.removeConfirm": "Remove \"{name}\"? Its stored key is deleted too.",
   "custom.test.ok": "Connected",
   "custom.test.okModels_one": "Connected · {count} model",
@@ -307,6 +308,16 @@ export const en = {
   "custom.dialog.modelsManualHint": "List the model ids yourself",
   "custom.dialog.manualModels": "Model ids",
   "custom.dialog.manualModelsHint": "One per line",
+  "custom.dialog.countTokensUrl": "Token-count URL",
+  "custom.dialog.countTokensUrlOptional": "Optional",
+  // A URL, not copy — `example.com` is the reserved documentation domain and
+  // the path is the Anthropic wire path, so neither is translated.
+  "custom.dialog.countTokensUrlPlaceholder":
+    "https://your-gateway.example.com/v1/messages/count_tokens",
+  // Says what it buys, and that this one is the whole address: every other URL
+  // field here is a base the proxy appends a path to.
+  "custom.dialog.countTokensUrlHint":
+    "Claude Code asks for a token count, and an OpenAI endpoint has none — point this at an Anthropic-compatible /v1/messages/count_tokens if your gateway has one. It's used exactly as typed, with nothing added to the end. Leave it empty and that request keeps failing as it does today.",
   "custom.dialog.testConnection": "Test connection",
   "custom.dialog.submitAdd": "Add endpoint",
   "custom.dialog.submitEdit": "Save changes",
@@ -317,6 +328,8 @@ export const en = {
   "custom.error.baseUrl": "Enter a base URL",
   "custom.error.baseUrlInvalid": "Enter a valid URL",
   "custom.error.baseUrlHttps": "The URL must start with https://",
+  "custom.error.countTokensUrlInvalid": "Enter a valid token-count URL",
+  "custom.error.countTokensUrlHttps": "The token-count URL must start with https://",
   "custom.error.apiKey": "Enter an API key",
   "custom.error.save": "Couldn't save the endpoint",
   "custom.error.resume": "Couldn't resume the endpoint",

@@ -66,8 +66,8 @@ export function validateApiKey(key: string): string | null {
   return null
 }
 
-export function validateBaseUrlLength(url: string): string | null {
-  if (url.length > 300) return "base_url must be at most 300 characters"
+export function validateBaseUrlLength(url: string, fieldName = "base_url"): string | null {
+  if (url.length > 300) return `${fieldName} must be at most 300 characters`
   return null
 }
 

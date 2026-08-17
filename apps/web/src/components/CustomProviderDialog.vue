@@ -10,7 +10,8 @@
  * The base-URL hint is a live preview of the endpoint the request will
  * actually reach, matching providers.md's literal-concatenation rule, so a
  * missing or doubled `/v1` is visible before saving rather than after a failed
- * call.
+ * call. The token-count URL deliberately has no such preview: it is a complete
+ * URL posted to verbatim, not a base (docs/providers.md § Custom endpoints).
  */
 import { computed, reactive, ref } from "vue"
 import { useI18n } from "@/i18n"
@@ -48,6 +49,9 @@ const form = reactive({
   format: (props.provider?.format ?? "openai") as CustomProviderFormat,
   base_url: props.provider?.base_url ?? "",
   api_key: "",
+  // Not a secret, so unlike the key it is pre-filled on edit and emptying it
+  // is how the user turns the feature back off (docs/auth.md).
+  count_tokens_url: props.provider?.count_tokens_url ?? "",
   models_mode: (props.provider?.models_mode ?? "auto") as CustomProviderModelsMode,
 })
 const manualModelsText = ref(props.provider?.manual_models?.join("\n") ?? "")
@@ -121,6 +125,14 @@ const slugPreview = computed(
   () => `${form.slug || t("custom.dialog.slugPlaceholder")}/*`,
 )
 
+/**
+ * Only the OpenAI format has a token-count gap to fill — an anthropic-format
+ * endpoint derives that path from its own base, and the server rejects the
+ * field there. `format` is immutable once saved, so on edit this is simply the
+ * saved format.
+ */
+const showCountTokensUrl = computed(() => form.format === "openai")
+
 const manualModelsList = computed(() =>
   manualModelsText.value
     .split(/\r?\n/)
@@ -163,6 +175,19 @@ function validate(): string | null {
     return t("custom.error.baseUrlInvalid")
   }
   if (!isEdit.value && !form.api_key.trim()) return t("custom.error.apiKey")
+  // Optional, and only ever sent for the OpenAI format — but when it is filled
+  // in it gets the same shape check as the base URL. The server is still the
+  // authority (host and scheme rules live there).
+  const countTokensUrl = form.count_tokens_url.trim()
+  if (showCountTokensUrl.value && countTokensUrl) {
+    try {
+      if (new URL(countTokensUrl).protocol !== "https:") {
+        return t("custom.error.countTokensUrlHttps")
+      }
+    } catch {
+      return t("custom.error.countTokensUrlInvalid")
+    }
+  }
   return null
 }
 
@@ -209,6 +234,9 @@ async function submit() {
       }
       // Blank means keep: only a typed key is ever sent.
       if (form.api_key.trim()) body.api_key = form.api_key
+      // The opposite convention, on purpose: this one is readable data, so the
+      // field is always sent and an empty string is what clears a stored value.
+      if (showCountTokensUrl.value) body.count_tokens_url = form.count_tokens_url.trim()
       await updateCustomProvider(props.provider.id, body)
     } else {
       await createCustomProvider({
@@ -217,6 +245,11 @@ async function submit() {
         format: form.format,
         base_url: form.base_url.trim(),
         api_key: form.api_key,
+        // Nothing to clear on create, and a value typed before the format was
+        // switched to anthropic must not travel with it.
+        count_tokens_url: showCountTokensUrl.value
+          ? form.count_tokens_url.trim() || undefined
+          : undefined,
         models_mode: form.models_mode,
         manual_models: form.models_mode === "manual" ? manualModelsList.value : undefined,
       })
@@ -352,6 +385,26 @@ async function submit() {
           multiline
           mono
           :rows="4"
+          :described-by="field.describedBy"
+        />
+      </FormField>
+
+      <!-- OpenAI format only: an anthropic-format endpoint already derives this
+           path from its base URL, and the server rejects the field there. -->
+      <FormField
+        v-if="showCountTokensUrl"
+        v-slot="field"
+        :label="t('custom.dialog.countTokensUrl')"
+        :optional-text="t('custom.dialog.countTokensUrlOptional')"
+        :hint="t('custom.dialog.countTokensUrlHint')"
+      >
+        <TextInput
+          :id="field.id"
+          v-model="form.count_tokens_url"
+          type="url"
+          mono
+          inputmode="url"
+          :placeholder="t('custom.dialog.countTokensUrlPlaceholder')"
           :described-by="field.describedBy"
         />
       </FormField>

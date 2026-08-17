@@ -11,6 +11,7 @@ const row: CustomProviderRow = {
   name: "My Endpoint",
   format: "openai",
   base_url: "https://upstream.example.com/v1",
+  count_tokens_url: null,
   models_mode: "auto",
   manual_models_json: null,
   sort_order: 0,
@@ -375,5 +376,99 @@ describe("createCustomOpenAIAdapter", () => {
     const result = await adapter.listModels!({} as Env, account)
     expect(result.models).toEqual([])
     expect(result.error).toBe("network down")
+  })
+})
+
+describe("createCustomOpenAIAdapter — countTokens", () => {
+  const rowWithCountTokens: CustomProviderRow = {
+    ...row,
+    count_tokens_url: "https://count.example.com/anthropic/count_tokens",
+  }
+
+  it("has no countTokens() when count_tokens_url is unset", () => {
+    const adapter = createCustomOpenAIAdapter(row)
+    expect(adapter.countTokens).toBeUndefined()
+  })
+
+  it("has countTokens() when count_tokens_url is set", () => {
+    const adapter = createCustomOpenAIAdapter(rowWithCountTokens)
+    expect(adapter.countTokens).toBeInstanceOf(Function)
+  })
+
+  it("posts to the exact stored URL, verbatim, with both auth headers and the default anthropic-version", async () => {
+    let capturedUrl: string | undefined
+    let capturedInit: RequestInit | undefined
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      capturedUrl = url
+      capturedInit = init
+      return new Response(JSON.stringify({ input_tokens: 12 }), { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(rowWithCountTokens)
+    const body = { model: "gpt-4o", messages: [{ role: "user", content: "hi" }] }
+    const res = await adapter.countTokens!({} as Env, account, body, new Headers())
+
+    expect(capturedUrl).toBe("https://count.example.com/anthropic/count_tokens")
+    expect(capturedInit?.method).toBe("POST")
+    const headers = capturedInit?.headers as Record<string, string>
+    expect(headers.authorization).toBe("Bearer sk-test-upstream-key")
+    expect(headers["x-api-key"]).toBe("sk-test-upstream-key")
+    expect(headers["content-type"]).toBe("application/json")
+    expect(headers["anthropic-version"]).toBe("2023-06-01")
+    expect(headers["anthropic-beta"]).toBeUndefined()
+    expect(JSON.parse(String(capturedInit?.body))).toEqual(body)
+    expect(res.status).toBe(200)
+  })
+
+  it("forwards a client anthropic-version instead of the default", async () => {
+    let capturedInit: RequestInit | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      capturedInit = init
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(rowWithCountTokens)
+    const headers = new Headers({ "anthropic-version": "2024-10-01" })
+    await adapter.countTokens!({} as Env, account, {}, headers)
+
+    expect((capturedInit?.headers as Record<string, string>)["anthropic-version"]).toBe("2024-10-01")
+  })
+
+  it("forwards anthropic-beta verbatim when the client sent one", async () => {
+    let capturedInit: RequestInit | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      capturedInit = init
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(rowWithCountTokens)
+    const headers = new Headers({ "anthropic-beta": "some-beta-2025-01-01" })
+    await adapter.countTokens!({} as Env, account, {}, headers)
+
+    expect((capturedInit?.headers as Record<string, string>)["anthropic-beta"]).toBe(
+      "some-beta-2025-01-01",
+    )
+  })
+
+  it("returns the upstream response untouched", async () => {
+    const upstream = new Response(JSON.stringify({ input_tokens: 42 }), { status: 200 })
+    globalThis.fetch = (async () => upstream) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(rowWithCountTokens)
+    const res = await adapter.countTokens!({} as Env, account, {}, new Headers())
+    expect(res).toBe(upstream)
+  })
+
+  it("forwards extras.signal", async () => {
+    const signal = new AbortController().signal
+    let capturedInit: RequestInit | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      capturedInit = init
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(rowWithCountTokens)
+    await adapter.countTokens!({} as Env, account, {}, new Headers(), { signal })
+    expect(capturedInit?.signal).toBe(signal)
   })
 })

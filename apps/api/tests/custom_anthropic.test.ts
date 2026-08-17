@@ -11,6 +11,7 @@ const row: CustomProviderRow = {
   name: "My Claude-compatible",
   format: "anthropic",
   base_url: "https://upstream.example.com",
+  count_tokens_url: null,
   models_mode: "auto",
   manual_models_json: null,
   sort_order: 0,

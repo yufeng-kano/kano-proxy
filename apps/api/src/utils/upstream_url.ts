@@ -11,6 +11,8 @@ export type UpstreamUrlCheckOpts = {
   requestHost?: string | null
   /** Bare lowercase hostname parsed from env.APP_URL, when set. */
   appUrlHost?: string | null
+  /** Field name used in error messages — defaults to "base_url". */
+  fieldName?: string
 }
 
 export type UpstreamUrlResult = { ok: true; url: string } | { ok: false; error: string }
@@ -19,30 +21,31 @@ export function validateUpstreamBaseUrl(
   input: string,
   opts: UpstreamUrlCheckOpts = {},
 ): UpstreamUrlResult {
+  const field = opts.fieldName ?? "base_url"
   const trimmed = input.trim()
-  if (!trimmed) return { ok: false, error: "base_url is required" }
+  if (!trimmed) return { ok: false, error: `${field} is required` }
 
   let url: URL
   try {
     url = new URL(trimmed)
   } catch {
-    return { ok: false, error: "base_url must be a valid URL" }
+    return { ok: false, error: `${field} must be a valid URL` }
   }
 
   if (url.protocol !== "https:") {
-    return { ok: false, error: "base_url must use https" }
+    return { ok: false, error: `${field} must use https` }
   }
   if (url.username || url.password) {
-    return { ok: false, error: "base_url must not contain credentials" }
+    return { ok: false, error: `${field} must not contain credentials` }
   }
   if (url.search) {
-    return { ok: false, error: "base_url must not contain a query string" }
+    return { ok: false, error: `${field} must not contain a query string` }
   }
   if (url.hash) {
-    return { ok: false, error: "base_url must not contain a fragment" }
+    return { ok: false, error: `${field} must not contain a fragment` }
   }
 
-  const hostError = checkHostname(url.hostname.toLowerCase(), opts)
+  const hostError = checkHostname(url.hostname.toLowerCase(), opts, field)
   if (hostError) return { ok: false, error: hostError }
 
   // Strip trailing slash(es): endpoints are built by literal concatenation
@@ -51,25 +54,25 @@ export function validateUpstreamBaseUrl(
   return { ok: true, url: normalized }
 }
 
-function checkHostname(hostname: string, opts: UpstreamUrlCheckOpts): string | null {
+function checkHostname(hostname: string, opts: UpstreamUrlCheckOpts, field: string): string | null {
   if (hostname === "localhost" || hostname.endsWith(".localhost") || hostname.endsWith(".local")) {
-    return "base_url must not point at localhost"
+    return `${field} must not point at localhost`
   }
 
   const ipv4 = parseIPv4(hostname)
   if (ipv4 && isPrivateOrLoopbackIPv4(ipv4)) {
-    return "base_url must not point at a private or loopback address"
+    return `${field} must not point at a private or loopback address`
   }
   if (!ipv4 && hostname.startsWith("[") && hostname.endsWith("]")) {
     if (isBlockedIPv6(hostname.slice(1, -1))) {
-      return "base_url must not point at a private or loopback address"
+      return `${field} must not point at a private or loopback address`
     }
   }
 
   const requestHost = opts.requestHost?.toLowerCase()
   const appUrlHost = opts.appUrlHost?.toLowerCase()
   if ((requestHost && hostname === requestHost) || (appUrlHost && hostname === appUrlHost)) {
-    return "base_url must not point at this deploy's own host"
+    return `${field} must not point at this deploy's own host`
   }
 
   return null

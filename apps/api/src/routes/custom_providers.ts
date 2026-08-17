@@ -92,6 +92,7 @@ async function toListItem(
     name: row.name,
     format: row.format,
     base_url: row.base_url,
+    count_tokens_url: row.count_tokens_url,
     models_mode: row.models_mode,
     manual_models: parseManualModels(row.manual_models_json),
     sort_order: row.sort_order,
@@ -134,6 +135,7 @@ customProviderRoutes.post("/", async (c) => {
   const slug = typeof body.slug === "string" ? body.slug.trim().toLowerCase() : ""
   const format = body.format
   const baseUrlRaw = typeof body.base_url === "string" ? body.base_url.trim() : ""
+  const countTokensUrlRaw = typeof body.count_tokens_url === "string" ? body.count_tokens_url.trim() : ""
   const apiKey = typeof body.api_key === "string" ? body.api_key : ""
   const modelsMode = body.models_mode ?? "auto"
 
@@ -158,6 +160,24 @@ customProviderRoutes.post("/", async (c) => {
   const urlRes = validateUpstreamBaseUrl(baseUrlRaw, { requestHost, appUrlHost })
   if (!urlRes.ok) return c.json({ error: urlRes.error }, 400)
 
+  // An anthropic-format provider already derives count_tokens from base_url —
+  // setting the field there is rejected rather than silently stored.
+  let countTokensUrl: string | null = null
+  if (countTokensUrlRaw) {
+    if (format !== "openai") {
+      return c.json({ error: 'count_tokens_url is only supported when format is "openai"' }, 400)
+    }
+    const ctLenErr = validateBaseUrlLength(countTokensUrlRaw, "count_tokens_url")
+    if (ctLenErr) return c.json({ error: ctLenErr }, 400)
+    const ctUrlRes = validateUpstreamBaseUrl(countTokensUrlRaw, {
+      requestHost,
+      appUrlHost,
+      fieldName: "count_tokens_url",
+    })
+    if (!ctUrlRes.ok) return c.json({ error: ctUrlRes.error }, 400)
+    countTokensUrl = ctUrlRes.url
+  }
+
   const count = await countCustomProviders(c.env.DB, user.id)
   if (count >= MAX_CUSTOM_PROVIDERS_PER_USER) {
     return c.json(
@@ -175,6 +195,7 @@ customProviderRoutes.post("/", async (c) => {
     name,
     format,
     baseUrl: urlRes.url,
+    countTokensUrl,
     modelsMode,
     manualModelsJson: manualRes.models.length ? JSON.stringify(manualRes.models) : null,
   })
@@ -268,6 +289,27 @@ customProviderRoutes.put("/:id", async (c) => {
     baseUrl = urlRes.url
   }
 
+  // Omitted keeps the stored value; "" or null clears it (the only way back
+  // to "unsupported"); a non-empty value validates and replaces it. Checked
+  // against the stored (immutable) format, not any format in this body.
+  let countTokensUrl: string | null | undefined
+  if (body.count_tokens_url !== undefined) {
+    const raw = typeof body.count_tokens_url === "string" ? body.count_tokens_url.trim() : ""
+    if (!raw) {
+      countTokensUrl = null
+    } else {
+      if (existing.format !== "openai") {
+        return c.json({ error: 'count_tokens_url is only supported when format is "openai"' }, 400)
+      }
+      const ctLenErr = validateBaseUrlLength(raw, "count_tokens_url")
+      if (ctLenErr) return c.json({ error: ctLenErr }, 400)
+      const { requestHost, appUrlHost } = hostsFromRequest(c)
+      const ctUrlRes = validateUpstreamBaseUrl(raw, { requestHost, appUrlHost, fieldName: "count_tokens_url" })
+      if (!ctUrlRes.ok) return c.json({ error: ctUrlRes.error }, 400)
+      countTokensUrl = ctUrlRes.url
+    }
+  }
+
   let modelsMode: "auto" | "manual" | undefined
   if (body.models_mode !== undefined) {
     if (!isModelsMode(body.models_mode)) {
@@ -292,7 +334,13 @@ customProviderRoutes.put("/:id", async (c) => {
     apiKey = body.api_key
   }
 
-  await updateCustomProviderFields(c.env.DB, id, { name, baseUrl, modelsMode, manualModelsJson })
+  await updateCustomProviderFields(c.env.DB, id, {
+    name,
+    baseUrl,
+    countTokensUrl,
+    modelsMode,
+    manualModelsJson,
+  })
 
   if (apiKey) {
     if (!c.env.TOKEN_ENCRYPTION_KEY) {

@@ -2,6 +2,8 @@ import type { CustomProviderRow } from "../db/custom_providers"
 import { remapUnsupportedEffortBody } from "./custom_openai_reasoning"
 import type { ProviderAdapter } from "./types"
 
+const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
+
 /**
  * BYO OpenAI-compatible endpoint. Near-passthrough: the outgoing body is the
  * client's own OpenAI Chat Completions body (or its Anthropic→OpenAI
@@ -13,12 +15,15 @@ import type { ProviderAdapter } from "./types"
  * `temperature` and clamp `reasoning_effort` to a provider ceiling. No
  * `messages()` — the `/anthropic` surface reaches this adapter through the
  * existing Anthropic→OpenAI conversion path (`dispatchAnthropicViaOpenAI`),
- * same as grok/codex.
+ * same as grok/codex. `countTokens()` is added below, only when the row has
+ * a `count_tokens_url` — with the field unset the method stays absent, which
+ * is exactly what keeps `/anthropic/v1/messages/count_tokens` returning its
+ * existing `400` for this format.
  */
 export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapter {
   const base = row.base_url
 
-  return {
+  const adapter: ProviderAdapter = {
     id: row.slug,
 
     async chatCompletions(_env, account, req, extras) {
@@ -64,6 +69,34 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
       }
     },
   }
+
+  // The operator's pointer to a real Anthropic-shaped count_tokens endpoint —
+  // posted to verbatim, nothing appended. Same key as chatCompletions, sent
+  // both ways (Bearer + x-api-key) since the target speaks Anthropic while
+  // the key was entered as an OpenAI key. No effort-remap retry here — that
+  // recovery is chatCompletions()-only.
+  if (row.count_tokens_url) {
+    const countTokensUrl = row.count_tokens_url
+    adapter.countTokens = async (_env, account, body, headers, extras) => {
+      const raw = typeof body === "object" && body ? { ...(body as Record<string, unknown>) } : {}
+      const h: Record<string, string> = {
+        authorization: `Bearer ${account.credential.access_token}`,
+        "x-api-key": account.credential.access_token,
+        "content-type": "application/json",
+        "anthropic-version": headers.get("anthropic-version") || DEFAULT_ANTHROPIC_VERSION,
+      }
+      const beta = headers.get("anthropic-beta")
+      if (beta) h["anthropic-beta"] = beta
+      return fetch(countTokensUrl, {
+        method: "POST",
+        headers: h,
+        body: JSON.stringify(raw),
+        signal: extras?.signal,
+      })
+    }
+  }
+
+  return adapter
 }
 
 function isEventStream(res: Response): boolean {

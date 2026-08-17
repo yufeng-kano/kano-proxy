@@ -47,7 +47,7 @@ async function seedApiKey(db: FakeD1, userId: string): Promise<void> {
 
 async function seedCustomProvider(
   db: FakeD1,
-  opts: { slug: string; format: "openai" | "anthropic"; userId: string },
+  opts: { slug: string; format: "openai" | "anthropic"; userId: string; countTokensUrl?: string | null },
 ): Promise<void> {
   db.seed("custom_providers", [
     {
@@ -57,6 +57,7 @@ async function seedCustomProvider(
       name: opts.slug,
       format: opts.format,
       base_url: opts.format === "openai" ? "https://upstream.example.com/v1" : "https://upstream.example.com",
+      count_tokens_url: opts.countTokensUrl ?? null,
       models_mode: "auto",
       manual_models_json: null,
       created_at: "2026-01-01T00:00:00.000Z",
@@ -249,5 +250,42 @@ describe("custom provider routing — /anthropic/v1/messages/count_tokens", () =
         message: "count_tokens is only supported for claude-code models",
       },
     })
+  })
+
+  it("forwards a custom openai-format slug with count_tokens_url configured to that exact URL", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedCustomProvider(db, {
+      slug: "my-oa4",
+      format: "openai",
+      userId: "user_1",
+      countTokensUrl: "https://count.example.com/anthropic/count_tokens",
+    })
+    let capturedUrl: string | undefined
+    let capturedHeaders: Record<string, string> | undefined
+    let capturedBody: Record<string, unknown> | undefined
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      capturedUrl = url
+      capturedHeaders = init?.headers as Record<string, string>
+      capturedBody = JSON.parse(String(init?.body))
+      return new Response(JSON.stringify({ input_tokens: 9 }), { status: 200 })
+    }) as typeof fetch
+
+    const res = await app.request(
+      "/anthropic/v1/messages/count_tokens",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "my-oa4/gpt-4o", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+
+    expect(res.status).toBe(200)
+    expect(capturedUrl).toBe("https://count.example.com/anthropic/count_tokens")
+    expect(capturedHeaders?.authorization).toBe("Bearer sk-upstream-test-key")
+    expect(capturedHeaders?.["x-api-key"]).toBe("sk-upstream-test-key")
+    expect(capturedBody?.model).toBe("gpt-4o")
   })
 })

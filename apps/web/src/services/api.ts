@@ -273,6 +273,8 @@ export async function createCustomProvider(body: {
   format: CustomProviderFormat
   base_url: string
   api_key: string
+  /** `openai` format only; a complete URL, not a base. See docs/providers.md. */
+  count_tokens_url?: string
   models_mode?: CustomProviderModelsMode
   manual_models?: string[]
 }): Promise<CustomProvider> {
@@ -282,13 +284,20 @@ export async function createCustomProvider(body: {
   })
 }
 
-/** Omitted/empty `api_key` keeps the stored key. `slug`/`format` are immutable. */
+/**
+ * Omitted/empty `api_key` keeps the stored key. `slug`/`format` are immutable.
+ *
+ * `count_tokens_url` does **not** follow the key's blank-means-keep rule: it
+ * holds no secret, so omitting it keeps the stored value while sending `""`
+ * clears it (docs/auth.md § Custom endpoint keys).
+ */
 export async function updateCustomProvider(
   id: string,
   body: {
     name?: string
     base_url?: string
     api_key?: string
+    count_tokens_url?: string
     models_mode?: CustomProviderModelsMode
     manual_models?: string[]
   },
