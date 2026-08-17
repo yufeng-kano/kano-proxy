@@ -131,7 +131,71 @@ describe("createCustomOpenAIAdapter", () => {
       top_p: 0.9,
       seed: 42,
       model: "gpt-4o",
+      stream_options: { include_usage: true },
     })
+  })
+
+  it("always sets stream_options.include_usage on non-stream", async () => {
+    let body: Record<string, unknown> | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body))
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/gpt-4o",
+      rawModel: "my-endpoint/gpt-4o",
+      upstreamModel: "gpt-4o",
+      messages: [],
+      rawBody: { model: "my-endpoint/gpt-4o", messages: [] },
+    })
+
+    expect(body?.stream_options).toEqual({ include_usage: true })
+  })
+
+  it("always sets stream_options.include_usage on stream", async () => {
+    let body: Record<string, unknown> | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body))
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/gpt-4o",
+      rawModel: "my-endpoint/gpt-4o",
+      upstreamModel: "gpt-4o",
+      messages: [],
+      stream: true,
+      rawBody: { model: "my-endpoint/gpt-4o", messages: [], stream: true },
+    })
+
+    expect(body?.stream).toBe(true)
+    expect(body?.stream_options).toEqual({ include_usage: true })
+  })
+
+  it("merges client stream_options and forces include_usage true", async () => {
+    let body: Record<string, unknown> | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body))
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/gpt-4o",
+      rawModel: "my-endpoint/gpt-4o",
+      upstreamModel: "gpt-4o",
+      messages: [],
+      rawBody: {
+        model: "my-endpoint/gpt-4o",
+        messages: [],
+        stream_options: { include_usage: false, some_other_flag: true },
+      },
+    })
+
+    expect(body?.stream_options).toEqual({ include_usage: true, some_other_flag: true })
   })
 
   it("pipes an SSE response through untouched (no buffering)", async () => {
@@ -213,9 +277,49 @@ describe("createCustomOpenAIAdapter", () => {
       temperature: 0.7,
       reasoning_effort: "high",
       response_format: { type: "json_object" },
+      stream_options: { include_usage: true },
     })
     expect(secondBody).toEqual({ ...firstBody, reasoning_effort: "xhigh" })
+    expect(secondBody.stream_options).toEqual({ include_usage: true })
     expect(res).toBe(retryResponse)
+  })
+
+  it("keeps merged stream_options on the remapped retry POST", async () => {
+    const bodies: Record<string, unknown>[] = []
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)))
+      if (bodies.length === 1) {
+        return new Response(
+          JSON.stringify({
+            detail:
+              "TemplateError: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.",
+          }),
+          { status: 400, statusText: "Bad Request", headers: { "content-type": "application/json" } },
+        )
+      }
+      return new Response("{}", { status: 200 })
+    }) as typeof fetch
+
+    const adapter = createCustomOpenAIAdapter(row)
+    await adapter.chatCompletions({} as Env, account, {
+      model: "my-endpoint/qwen",
+      rawModel: "my-endpoint/qwen",
+      upstreamModel: "qwen",
+      messages: [],
+      reasoning_effort: "high",
+      rawBody: {
+        model: "my-endpoint/qwen",
+        messages: [],
+        reasoning_effort: "high",
+        stream_options: { include_usage: false, some_other_flag: true },
+      },
+    })
+
+    expect(bodies).toHaveLength(2)
+    const merged = { include_usage: true, some_other_flag: true }
+    expect(bodies[0]!.stream_options).toEqual(merged)
+    expect(bodies[1]!.stream_options).toEqual(merged)
+    expect(bodies[1]!.reasoning_effort).toBe("xhigh")
   })
 
   it("returns an unrecognized 400 unchanged after one fetch", async () => {

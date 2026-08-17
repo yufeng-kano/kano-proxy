@@ -9,14 +9,17 @@ const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
  * client's own OpenAI Chat Completions body (or its Anthropic→OpenAI
  * conversion) with only `model` rewritten to the bare upstream id —
  * `temperature`, `reasoning_effort`, `response_format`, etc. all ride along
- * unmodified on the first send. A recognized unsupported-effort HTTP 400 may
- * rewrite only `reasoning_effort` and POST once more on the same account.
- * This deliberately diverges from the built-in adapters, which strip
- * `temperature` and clamp `reasoning_effort` to a provider ceiling. No
- * `messages()` — the `/anthropic` surface reaches this adapter through the
- * existing Anthropic→OpenAI conversion path (`dispatchAnthropicViaOpenAI`),
- * same as grok/codex. `countTokens()` is added below, only when the row has
- * a `count_tokens_url` — with the field unset the method stays absent, which
+ * unmodified on the first send. Always also sets
+ * `stream_options.include_usage: true` (stream and non-stream; TabbyAPI-class
+ * upstreams omit `usage` without it). Client-supplied `stream_options` other
+ * keys are kept. A recognized unsupported-effort HTTP 400 may rewrite only
+ * `reasoning_effort` and POST once more on the same account. This
+ * deliberately diverges from the built-in adapters, which strip `temperature`
+ * and clamp `reasoning_effort` to a provider ceiling. No `messages()` — the
+ * `/anthropic` surface reaches this adapter through the existing
+ * Anthropic→OpenAI conversion path (`dispatchAnthropicViaOpenAI`), same as
+ * grok/codex. `countTokens()` is added below, only when the row has a
+ * `count_tokens_url` — with the field unset the method stays absent, which
  * is exactly what keeps `/anthropic/v1/messages/count_tokens` returning its
  * existing `400` for this format.
  */
@@ -37,7 +40,22 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
         headers,
         signal: extras?.signal,
       }
-      const upstreamBody = { ...req.rawBody, model: req.upstreamModel }
+      // TabbyAPI reports usage only when this flag is set, for stream and
+      // non-stream alike. Merge so a client stream_options object is not
+      // wholesale overwritten; force include_usage even if they sent false.
+      const clientStreamOptions =
+        req.rawBody &&
+        typeof req.rawBody === "object" &&
+        req.rawBody.stream_options &&
+        typeof req.rawBody.stream_options === "object" &&
+        !Array.isArray(req.rawBody.stream_options)
+          ? (req.rawBody.stream_options as Record<string, unknown>)
+          : {}
+      const upstreamBody = {
+        ...req.rawBody,
+        model: req.upstreamModel,
+        stream_options: { ...clientStreamOptions, include_usage: true },
+      }
       const res = await fetch(url, { ...init, body: JSON.stringify(upstreamBody) })
       if (res.ok || res.status !== 400 || isEventStream(res)) return res
 

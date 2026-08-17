@@ -73,7 +73,7 @@ The sweep is idempotent and safe to run any time (locally: `wrangler dev --test-
 |------|-----------|--------|
 | `/anthropic` native passthrough (`claude-code`, custom `format=anthropic`) | response JSON `usage` | passthrough parse of `message_start` / `message_delta` usage while piping |
 | `/openai/v1` → `claude-code` / custom `format=anthropic`; codex on either surface | converted response `usage` (includes cached details — see [api.md](./api.md)) | converter-attached final-chunk `usage` |
-| `grok` / custom `format=openai` | response JSON `usage` (`prompt_tokens_details.cached_tokens` and `cache_write_tokens` when upstream reports them) | **best-effort:** captured only when the upstream stream carries a `usage` chunk (e.g. client sent `stream_options.include_usage`); otherwise token fields stay `NULL` |
+| `grok` / custom `format=openai` | response JSON `usage` (`prompt_tokens_details.cached_tokens` and `cache_write_tokens` when upstream reports them) | **best-effort:** captured when the upstream stream carries a `usage` chunk. custom-openai always sets `stream_options.include_usage: true` (stream and non-stream); grok sets it on stream. If the upstream still omits the chunk, token fields stay `NULL` |
 
 Rules:
 
