@@ -7,9 +7,12 @@
  * narrows across ids and display names. Neither costs a request — a keystroke
  * must never hit the network.
  *
- * The catalog lives in one bounded card that scrolls inside itself, so the
- * header (search, Refresh, tabs) stays reachable at any depth instead of
- * scrolling away above a thousand-row list.
+ * One card per provider group, stacked — the Providers page's layout, for the
+ * same reason: each group is a separate dataset with its own identity and its
+ * own upstream error. The card head is the group's label, so the table below
+ * it drops its column-header row (`hideHeader`), and each card bounds its own
+ * rows at `--group-max` so one auto-mode endpoint cannot set the page's length
+ * (docs/admin-ui.md § Models page, § Anti-scroll rules).
  *
  * Groups are built from whatever the response lists, not from a fixed set: the
  * three builtins in their declared order, then one group per custom endpoint,
@@ -55,7 +58,13 @@ type EmptyKind = "codex" | "custom" | "generic"
 type ModelGroup = {
   key: string
   name: string
-  /** Subtitle under the group name — a builtin's blurb, or `slug/*` for a custom endpoint. */
+  /**
+   * The `slug/*` prefix hint of a custom endpoint — the one piece of identity
+   * the group's name does not already carry, since it is what a client puts in
+   * front of every model id here. A builtin has none: its name *is* its prefix,
+   * and a line restating what the provider is would be the subtitle the card
+   * head refuses to grow (docs/admin-ui.md § Design restraint).
+   */
   blurb: string | null
   formatBadge: string | null
   models: CatalogModel[]
@@ -78,12 +87,6 @@ const NAME_KEY: Record<ProviderId, MessageKey> = {
   "claude-code": "provider.claude-code.name",
   codex: "provider.codex.name",
   grok: "provider.grok.name",
-}
-
-const BLURB_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.blurb",
-  codex: "provider.codex.blurb",
-  grok: "provider.grok.blurb",
 }
 
 /** Why a group is empty decides what it tells the user to do about it. */
@@ -147,7 +150,7 @@ const groups = computed<ModelGroup[]>(() => {
     out.push({
       key: p.id,
       name: t(NAME_KEY[p.id]),
-      blurb: t(BLURB_KEY[p.id]),
+      blurb: null,
       formatBadge: null,
       models: byPrefix.get(p.id) ?? [],
       error: metaFor(p.id)?.error ?? null,
@@ -343,7 +346,7 @@ async function copyId(id: string) {
 </script>
 
 <template>
-  <div class="page">
+  <div>
     <PageHeader :title="t('models.title')">
       <template #actions>
         <!-- The wrapping label is the field's accessible name; the placeholder
@@ -389,54 +392,64 @@ async function copyId(id: string) {
     </Banner>
 
     <!-- The panel the tabs point at: SectionNav's `aria-controls` is
-         `panel-<id>`, and only the selected one is ever in the DOM. -->
-    <AppCard
-      fill
-      flush
-      class="catalog"
+         `panel-<id>`, and only the selected tab's cards are ever in the DOM. -->
+    <div
       :id="`panel-${activeTab}`"
+      class="sections"
       role="tabpanel"
       :aria-label="activeLabel"
     >
-      <!-- Skeletons are decoration; the status beside them is what a screen
-           reader gets. -->
-      <div v-if="showSkeleton" class="skeletons">
-        <span class="sr-only" role="status">{{ t("app.loading") }}</span>
-        <div v-for="i in 6" :key="i" class="skeleton-row" aria-hidden="true">
-          <span class="skeleton skeleton-id" />
-          <span class="skeleton skeleton-name" />
+      <!-- The page's own states — nothing loaded, nothing anywhere, nothing
+           matched — are facts about the page, so they get one card rather than
+           being attributed to a provider. -->
+      <AppCard v-if="showSkeleton">
+        <!-- Skeletons are decoration; the status beside them is what a screen
+             reader gets. -->
+        <div class="skeletons">
+          <span class="sr-only" role="status">{{ t("app.loading") }}</span>
+          <div v-for="i in 6" :key="i" class="skeleton-row" aria-hidden="true">
+            <span class="skeleton skeleton-id" />
+            <span class="skeleton skeleton-name" />
+          </div>
         </div>
-      </div>
+      </AppCard>
 
-      <EmptyState
-        v-else-if="noResults"
-        :title="t('models.noResults.title')"
-        :body="t('models.noResults.body', { query: trimmedQuery })"
-      />
+      <AppCard v-else-if="noResults">
+        <EmptyState
+          :title="t('models.noResults.title')"
+          :body="t('models.noResults.body', { query: trimmedQuery })"
+        />
+      </AppCard>
 
-      <EmptyState
-        v-else-if="noModels"
-        :title="t('models.empty.title')"
-        :body="t('models.empty.body')"
-      >
-        <template #action>
-          <AppButton variant="primary" to="/providers">
-            {{ t("models.empty.action") }}
-          </AppButton>
-        </template>
-      </EmptyState>
+      <AppCard v-else-if="noModels">
+        <EmptyState :title="t('models.empty.title')" :body="t('models.empty.body')">
+          <template #action>
+            <AppButton variant="primary" to="/providers">
+              {{ t("models.empty.action") }}
+            </AppButton>
+          </template>
+        </EmptyState>
+      </AppCard>
 
+      <!-- `v-else` on the wrapper, not on the card: `v-for` outranks `v-if` on
+           one element, so the branch would be evaluated once per group. -->
       <template v-else>
-        <section v-for="group in visibleGroups" :key="group.key" class="group">
-          <div class="group-head">
-            <h2 class="group-name">{{ group.name }}</h2>
+        <AppCard v-for="group in visibleGroups" :key="group.key" flush :title="group.name">
+          <!-- Identity, not explanation: the format the endpoint speaks and the
+               prefix its ids carry. A builtin adds neither. -->
+          <template v-if="group.formatBadge || group.blurb" #heading>
             <Badge v-if="group.formatBadge">{{ group.formatBadge }}</Badge>
-            <span v-if="group.blurb" class="group-blurb mono">{{ group.blurb }}</span>
+            <span v-if="group.blurb" class="group-prefix mono">{{ group.blurb }}</span>
+          </template>
+
+          <template #actions>
             <span class="group-count tabular">
               {{ t("models.count", { count: group.models.length }) }}
             </span>
-          </div>
+          </template>
 
+          <!-- Outside the scroll region below: an upstream failure is a fact
+               about the group, not about the rows it happens to sit above. -->
           <div v-if="group.error" class="group-alert">
             <Banner tone="warn">{{ group.error }}</Banner>
           </div>
@@ -445,32 +458,34 @@ async function copyId(id: string) {
                a 28px square is a small target for the only action a row has.
                The button stays a real control, so keyboard and screen-reader
                users are unaffected — this only widens the pointer target. -->
-          <DataTable
-            v-if="group.models.length"
-            row-clickable
-            :columns="columns"
-            :rows="group.models"
-            :row-key="(m) => m.id"
-            :caption="group.name"
-            @row-click="copyId($event.id)"
-          >
-            <template #cell-id="{ row }">
-              <code class="mono model-id" :title="row.id">{{ row.id }}</code>
-            </template>
-            <template #cell-copy="{ row }">
-              <AppButton
-                size="sm"
-                variant="ghost"
-                icon-only
-                :label="copiedId === row.id ? t('action.copied') : t('models.copyId')"
-                @click.stop="copyId(row.id)"
-              >
-                <template #icon>
-                  <ActionIcon :name="copiedId === row.id ? 'check' : 'copy'" />
-                </template>
-              </AppButton>
-            </template>
-          </DataTable>
+          <div v-if="group.models.length" class="group-rows">
+            <DataTable
+              hide-header
+              row-clickable
+              :columns="columns"
+              :rows="group.models"
+              :row-key="(m) => m.id"
+              :caption="group.name"
+              @row-click="copyId($event.id)"
+            >
+              <template #cell-id="{ row }">
+                <code class="mono model-id" :title="row.id">{{ row.id }}</code>
+              </template>
+              <template #cell-copy="{ row }">
+                <AppButton
+                  size="sm"
+                  variant="ghost"
+                  icon-only
+                  :label="copiedId === row.id ? t('action.copied') : t('models.copyId')"
+                  @click.stop="copyId(row.id)"
+                >
+                  <template #icon>
+                    <ActionIcon :name="copiedId === row.id ? 'check' : 'copy'" />
+                  </template>
+                </AppButton>
+              </template>
+            </DataTable>
+          </div>
 
           <EmptyState
             v-else
@@ -478,43 +493,20 @@ async function copyId(id: string) {
             :title="t('models.empty.title')"
             :body="t(GROUP_EMPTY_KEY[group.emptyKind])"
           />
-        </section>
+        </AppCard>
       </template>
+    </div>
 
-      <span class="sr-only" role="status" aria-live="polite">
-        {{ copiedId ? t("action.copied") : "" }}
-      </span>
-    </AppCard>
+    <span class="sr-only" role="status" aria-live="polite">
+      {{ copiedId ? t("action.copied") : "" }}
+    </span>
   </div>
 </template>
 
 <style scoped>
-/*
- * The page is exactly the content region minus its padding, which is what
- * gives `AppCard fill` a bounded box to scroll the catalog inside of instead
- * of growing the page (docs/admin-ui.md § Anti-scroll rules).
- *
- * Every value here is AppShell's own, inherited rather than restated: it owns
- * the padding and knows how much chrome sits above this region, and a second
- * copy would drift the first time only one of them changed breakpoint.
- */
-.page {
-  display: flex;
-  flex-direction: column;
-  height: calc(
-    100dvh - var(--page-chrome, 0px) - var(--page-top, var(--space-6)) -
-      var(--page-bottom, var(--space-12))
-  );
-}
-
+/* PageHeader carries its own bottom margin, so the stack needs no gap above it. */
 .page-alert {
-  flex-shrink: 0;
   margin-bottom: var(--space-4);
-}
-
-.catalog {
-  flex: 1;
-  min-height: 0;
 }
 
 /*
@@ -553,51 +545,46 @@ async function copyId(id: string) {
 /* --- Groups ------------------------------------------------------------- */
 
 /*
- * On the "All" tab the groups stack inside one scroll region, so each group's
- * head sticks: scrolled deep into a long catalog, "which provider is this id
- * from" stays answerable without scrolling back up. Each head is bounded by its
- * own section, so the next group's head pushes the previous one out.
+ * One card per provider, the Providers page's stack. `--group-max` is the
+ * height past which a group's rows scroll inside their own card, so the page
+ * length is set by the number of providers rather than by the largest of them
+ * (docs/admin-ui.md § Anti-scroll rules).
  *
- * A declared height rather than a content-driven one, because the table header
- * below has to park under it exactly — a measured offset is the only way two
- * sticky bars stack without overlapping.
+ * Layout arithmetic, so a raw px rather than a spacing token: a row is 53px (a
+ * 28px ghost control between two --space-3 gutters, plus its rule), so this is
+ * nine rows. Every builtin catalog is smaller than that and hugs its content
+ * with no scrollbar at all; a custom endpoint in auto mode listing hundreds
+ * stops at roughly half a laptop viewport, which still leaves the next
+ * provider's card head on screen.
  */
-.group {
-  --group-head-height: 40px;
+.sections {
+  --group-max: 480px;
+  display: grid;
+  gap: var(--space-5);
 }
 
-.group + .group {
-  border-top: 1px solid var(--border);
+/* The body is flush, so the banner brings the gutter the rows do not need. */
+.group-alert {
+  padding: var(--space-3) var(--space-4);
 }
 
-.group-head {
-  position: sticky;
-  top: 0;
-  /* Above DataTable's own sticky header (z-index 1), which parks beneath it. */
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  height: var(--group-head-height);
-  padding: 0 var(--space-4);
-  /* Opaque, not translucent: rows scrolling under a semi-transparent bar smear
-     into the label. */
-  background: var(--surface);
+.group-rows {
+  max-height: var(--group-max);
+  overflow: auto;
 }
 
-.group :deep(.table th) {
-  top: var(--group-head-height);
+/* Below the table breakpoint a row is a stacked card (~109px), not a 53px line,
+   so the same pixel cap would bound five providers at four models each. Raised
+   to hold the same handful of rows the desktop cap does. */
+@media (max-width: 768px) {
+  .sections {
+    --group-max: 640px;
+  }
 }
 
-.group-name {
-  margin: 0;
-  flex-shrink: 0;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-semibold);
-  letter-spacing: var(--tracking-tight);
-}
-
-.group-blurb {
+/* The prefix a client puts in front of every id in this card — long enough on a
+   narrow endpoint name to need the ellipsis rather than the head's second row. */
+.group-prefix {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -606,16 +593,11 @@ async function copyId(id: string) {
   font-size: var(--text-xs);
 }
 
+/* A fact about the card's dataset, read alongside the title — so one tone down
+   from it, not shrunk into 11px chrome (§ Design restraint). */
 .group-count {
-  margin-left: auto;
-  flex-shrink: 0;
-  padding-left: var(--space-2);
-  color: var(--faint);
-  font-size: var(--text-2xs);
-}
-
-.group-alert {
-  padding: var(--space-2) var(--space-4) var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
 }
 
 /* --- Rows --------------------------------------------------------------- */
@@ -632,11 +614,11 @@ async function copyId(id: string) {
    down a catalog is a wall of chrome competing with the ids the page is
    actually for. Always *present* though — never revealed on hover, which would
    read as the control having disappeared. */
-.group :deep(tbody tr .btn) {
+.group-rows :deep(tbody tr .btn) {
   color: var(--faint);
 }
 
-.group :deep(tbody tr:hover .btn) {
+.group-rows :deep(tbody tr:hover .btn) {
   color: var(--text);
 }
 
@@ -647,7 +629,6 @@ async function copyId(id: string) {
 .skeletons {
   display: grid;
   gap: var(--space-4);
-  padding: var(--space-5) var(--space-4);
 }
 
 .skeleton-row {

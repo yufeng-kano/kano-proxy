@@ -32,6 +32,14 @@ defineExpose({ body })
 
 defineSlots<{
   default: () => unknown
+  /**
+   * Beside the title, inside the head's left box: identity metadata about the
+   * dataset this card holds — Models' format badge and `slug/*` prefix hint.
+   * Still not a subtitle: it names *which* collection this is, it does not
+   * explain the card. Metadata rather than a control, which is why it sits
+   * here and not in `actions`.
+   */
+  heading?: () => unknown
   /** Right side of the header — filters, view switchers, a primary action. */
   actions?: () => unknown
   /** Below the header, outside the padded body: a search field, a legend. */
@@ -41,11 +49,12 @@ defineSlots<{
 
 <template>
   <section class="card" :class="{ fill }">
-    <header v-if="title || $slots.actions" class="card-head">
+    <header v-if="title || $slots.heading || $slots.actions" class="card-head">
       <!-- Kept as the head's left slot even when the card has no title: it is
            what `space-between` places the actions against. -->
       <div class="card-heading">
         <h2 v-if="title" class="card-title">{{ title }}</h2>
+        <slot name="heading" />
       </div>
       <div v-if="$slots.actions" class="card-actions">
         <slot name="actions" />
@@ -98,7 +107,13 @@ defineSlots<{
   border-bottom: 1px solid var(--border);
 }
 
+/* A row, so the `heading` slot's metadata sits on the title's baseline instead
+   of stacking under it as the subtitle this deliberately is not. Harmless on a
+   title-only card: one block child in a flex row lays out identically. */
 .card-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   min-width: 0;
 }
 

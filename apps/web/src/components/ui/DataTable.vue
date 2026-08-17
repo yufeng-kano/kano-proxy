@@ -95,6 +95,24 @@ defineProps<{
    * in the row detail.
    */
   fixed?: boolean
+  /**
+   * Drops the visible column-header row, for a table whose columns are
+   * self-evident *and* whose card head already names the collection (Models'
+   * provider cards). Repeated once per card down a stack, MODEL ID / NAME /
+   * COPY is three words restated above a monospaced id and a plain name
+   * (docs/admin-ui.md § Design restraint).
+   *
+   * The `<th>`s stay in the markup with their labels visually hidden, so the
+   * table is still a named structure to a screen reader and each `<td>` keeps
+   * the `data-label` the mobile card fallback prints. They collapse to zero
+   * height rather than being pulled out of flow: an absolutely positioned
+   * `<th>` leaves the table's column set, taking its `width` with it, and the
+   * tracks a page declared (52% / 72px) would silently stop applying.
+   *
+   * Opt-in — a table that is a page's whole content has no card head naming
+   * its columns, so it keeps its headers.
+   */
+  hideHeader?: boolean
 }>()
 
 defineEmits<{ rowClick: [Row] }>()
@@ -104,7 +122,7 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 
 <template>
   <div class="table-wrap">
-    <table class="table" :class="{ fixed }">
+    <table class="table" :class="{ fixed, headerless: hideHeader }">
       <caption class="sr-only">{{ caption }}</caption>
       <thead>
         <tr>
@@ -115,9 +133,10 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
             :class="{ numeric: column.numeric, end: column.align === 'end' }"
             :style="column.width ? { width: column.width } : undefined"
           >
-            <span v-if="!column.header && column.srHeader" class="sr-only">
-              {{ column.srHeader }}
-            </span>
+            <span
+              v-if="hideHeader || (!column.header && column.srHeader)"
+              class="sr-only"
+            >{{ column.header || column.srHeader }}</span>
             <template v-else>{{ column.header }}</template>
           </th>
         </tr>
@@ -236,6 +255,25 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 .table th.end,
 .table td.end {
   text-align: right;
+}
+
+/*
+ * --- No visible header (the `hideHeader` prop) -----------------------------
+ *
+ * The cells keep their place in the table — they are still what sizes the
+ * columns — and lose everything that draws them. `line-height: 0` because the
+ * only child left is the `.sr-only` label, which is out of flow: without it a
+ * stray line box would give the row a few pixels of height anyway. Nothing is
+ * sticky, so the rule and the opaque fill that let the header survive scrolling
+ * rows both go with it.
+ */
+.table.headerless th {
+  position: static;
+  height: 0;
+  padding: 0;
+  line-height: 0;
+  background: none;
+  box-shadow: none;
 }
 
 /*

@@ -1008,7 +1008,7 @@ async function remove() {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.3fr) minmax(0, 1.05fr);
   margin: calc(var(--space-5) * -1);
-  /* The shared height of the two scrolling regions (picker body, target list).
+  /* Shared height of the two scrolling regions (picker body, target list).
      Viewport-driven, not fixed: the wide panel now grows with the screen
      (Modal lifts its 760px cap for `wide`), and a fixed 400px left half the
      dialog empty on a tall display — the "not enough height" complaint,
@@ -1026,6 +1026,13 @@ async function remove() {
   gap: var(--space-4);
   min-width: 0;
   padding: var(--space-5);
+}
+
+/* Targets is last: drop its bottom pad so a full list meets the footer the
+   picker now meets (bottom-bleed). Heads stay on one row — top pad is
+   unchanged. */
+.col:last-child {
+  padding-bottom: 0;
 }
 
 /* The dividers — one per adjacent pair, and nothing else draws a line between
@@ -1051,17 +1058,19 @@ async function remove() {
    than as a widget dropped onto it. It owns its column, so it takes the height
    that column has.
 
-   Full bleed: the picker cancels its column's horizontal padding so the tabs,
-   rail, and model list run divider to divider — the padded gutters either side
-   of it read as empty vertical bands splitting the surface (rejected
-   2026-08-14). The column head above keeps the padding, which is what holds
-   the three heads on one aligned row. */
+   Full bleed: the picker cancels its column's horizontal *and* bottom padding
+   so the tabs, rail, and model list run divider to divider and the rail meets
+   the panel footer's top rule. Side gutters read as empty vertical bands
+   (rejected 2026-08-14); leftover column padding under a height-capped body
+   is the same unfinished L (reported 2026-08-17). The column head above
+   keeps the padding, which is what holds the three heads on one aligned row.
+
+   No `gap`: a gutter between the tab strip and the body is a break in the L. */
 .picker {
   display: flex;
   flex-direction: column;
   flex: 1;
-  gap: var(--space-2);
-  margin: 0 calc(var(--space-5) * -1);
+  margin: 0 calc(var(--space-5) * -1) calc(var(--space-5) * -1);
   min-width: 0;
   min-height: 0;
 }
@@ -1074,7 +1083,10 @@ async function remove() {
 /* The inverted L: rail down the left, models filling the rest. A declared
    height, not a content-driven one — the two regions scroll inside it, so the
    dialog's own height never depends on how many models a provider lists. The
-   height itself is the board's viewport-driven `--pane-h`.
+   height itself is the board's viewport-driven `--pane-h`. `flex: 1` lets the
+   body grow a few pixels when a sibling column is taller, so the rail still
+   meets the footer instead of leaving an empty band under a capped list
+   (reported 2026-08-17).
 
    The rail is a proportion between two bounds rather than a fixed 128px: on a
    small desktop the panel is narrower than 3/4 of a wide one, and a fixed rail
@@ -1082,8 +1094,9 @@ async function remove() {
 .picker-body {
   display: grid;
   grid-template-columns: clamp(96px, 28%, 128px) minmax(0, 1fr);
+  flex: 1 1 auto;
   height: var(--pane-h);
-  min-height: 0;
+  min-height: var(--pane-h);
 }
 
 .rail {
@@ -1317,12 +1330,15 @@ async function remove() {
 .targets {
   display: grid;
   align-content: start;
-  margin: 0;
+  /* Flush to the column divider and the panel edge — the same cancel the
+     picker uses — so a row hairline is one line, not a stub that stops a
+     gutter short of the structure (reported 2026-08-17). */
+  margin: 0 calc(var(--space-5) * -1);
   padding: 0;
-  /* Matched to the picker beside it (its height plus the hint line the picker
-     column spends on tabs), so a full list and a full model list end at the
-     same line instead of one column dragging the panel taller. */
-  max-height: calc(var(--pane-h) + 24px);
+  /* Tab strip is SectionNav's 38px row; the picker no longer spends a gap
+     under the tabs, so a full list and a full model list still end on the
+     same line. */
+  max-height: calc(var(--pane-h) + 38px);
   overflow-y: auto;
   overscroll-behavior: contain;
   list-style: none;
@@ -1418,7 +1434,10 @@ async function remove() {
   grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-1) var(--space-2);
-  padding: var(--space-2) 0;
+  /* Horizontal inset restates the column gutter the list cancelled, so
+     numbers / ids / buttons stay aligned with the column head while the
+     hairline runs edge to edge. */
+  padding: var(--space-2) var(--space-5);
 }
 
 .target + .target {
@@ -1530,11 +1549,13 @@ async function remove() {
   }
 
   .picker-body {
+    flex: none;
     height: 300px;
+    min-height: 0;
   }
 
   .targets {
-    max-height: 320px;
+    max-height: 338px;
   }
 }
 
@@ -1545,7 +1566,9 @@ async function remove() {
   .picker-body {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
+    flex: none;
     height: 300px;
+    min-height: 0;
   }
 
   .rail {
