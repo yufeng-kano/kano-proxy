@@ -111,7 +111,7 @@ const showOptions = computed(() => [
  * pixel width would stop being a share of the card the moment the sidebar
  * collapses or the window changes.
  *
- * 13 Time + 13 Model + 12 Account + 7 Type + 9 Status + 7 Input + 7 Cache read
+ * 12 Time + 11 Model + 11 Account + 7 Type + 13 Status + 7 Input + 7 Cache read
  * + 7 Cache write + 7 Output + 9 Cost + 9 Latency = 100.
  *
  * The shares are sized to their *headers* first — an uppercase 11px LATENCY
@@ -121,17 +121,28 @@ const showOptions = computed(() => [
  * Model and Account get the remainder because they are the only columns whose
  * text is open-ended, and they are the ones the two-line clamp is for.
  *
+ * **Status is sized to the longest error code**, because that cell is the one
+ * value on the row that has to be read in full to be worth anything — a code
+ * cut down to `upstream_unavailabl` names nothing. The full set is in
+ * docs/logging.md; the longest are `upstream_unavailable` and
+ * `spend_limit_exceeded` at 20 characters. The narrowest the desktop table ever
+ * gets is a ~770px viewport (below 768px it is cards instead), which leaves the
+ * card body ~752px: 13% of that is ~98px, ~82px inside the cell's padding, or 11
+ * characters a line of `.mono` at 0.6em advance — 22 across the row's two lines,
+ * against the 20 it has to hold. The three percent that bought it came from
+ * Time, Model and Account, whose text was already being clamped at every width.
+ *
  * Which is also why only their cells carry a `title`: a figure column is sized
  * to its own widest value, so nothing there is ever cut, and a tooltip
  * repeating the "12.3K" already on screen would fire under the pointer on
  * every row of the table for no reading the row does not already give.
  */
 const columns = computed<Column<RequestLogRow>[]>(() => [
-  { key: "time", header: t("logs.column.time"), width: "13%" },
-  { key: "model", header: t("logs.column.model"), width: "13%" },
-  { key: "account", header: t("logs.column.account"), width: "12%" },
+  { key: "time", header: t("logs.column.time"), width: "12%" },
+  { key: "model", header: t("logs.column.model"), width: "11%" },
+  { key: "account", header: t("logs.column.account"), width: "11%" },
   { key: "type", header: t("logs.column.type"), width: "7%", hideOnMobile: true },
-  { key: "status", header: t("logs.column.status"), width: "9%" },
+  { key: "status", header: t("logs.column.status"), width: "13%" },
   {
     key: "input",
     header: t("logs.column.input"),
@@ -426,9 +437,9 @@ function typeLabel(row: RequestLogRow): string {
           <!-- Never color-only: a failure is named by its code, a success is
                its status number and nothing louder. -->
           <template #cell-status="{ row }">
-            <Badge v-if="isFailure(row)" tone="danger" mono :title="failureLabel(row)">
+            <span v-if="isFailure(row)" class="error-code mono" :title="failureLabel(row)">
               {{ failureLabel(row) }}
-            </Badge>
+            </span>
             <span v-else class="status tabular">{{ row.status_code }}</span>
           </template>
         </DataTable>
@@ -566,6 +577,19 @@ function typeLabel(row: RequestLogRow): string {
 
 .account {
   color: var(--text-secondary);
+}
+
+/*
+ * A failure names itself, as text rather than in a pill. The code word *is* the
+ * identification, so the pill added a rounded border and its side padding to a
+ * track sized for the code — and being one nowrap item, it could not use the
+ * row's second line either, so every failing row read `upstream_unav…` with the
+ * border sliced through it. Set as text it breaks inside the token instead
+ * (`overflow-wrap: anywhere`, inherited from DataTable's clamped cell) and uses
+ * both lines. The colour stays decoration: the word carries the meaning.
+ */
+.error-code {
+  color: var(--danger);
 }
 
 /* A successful status is context, not a finding — the failures beside it are
