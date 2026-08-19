@@ -265,7 +265,7 @@ When the client requests `stream: true` (OpenAI body field, or Anthropic Message
 
 ### Keepalive and idle timeout
 
-- **Keepalive comments** (`: keepalive\n\n`, an SSE comment line clients ignore) fire every 30s of silence — Cloudflare's own idle-connection mitigation. Keepalives re-arm after **every** real upstream chunk, so any silence gap anywhere in the stream gets them (including the pre-upstream TTFB window under eager commit).
+- **Keepalive comments** (`: keepalive\n\n`, an SSE comment line clients ignore) fire every 10s of silence — Cloudflare's own idle-connection mitigation. Keepalives re-arm after **every** real upstream chunk, so any silence gap anywhere in the stream gets them (including the pre-upstream TTFB window under eager commit). The interval was 30s until 2026-08-19: clients with shorter idle timeouts (e.g. Claude Code) read a 30s silence gap as a dropped connection and retry, even though the upstream is still working.
 - **120s upstream idle timeout.** Applies only **while an upstream body is being piped** — not during the acquire/refresh/TTFB wait before the first upstream byte. If no real upstream chunk (keepalive comments do not count) arrives for 120s after piping starts, the proxy emits one final stall frame, then ends the stream cleanly. Frame shape is surface-specific:
   - Anthropic surface: `event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"upstream stalled: no data received for 120s"}}\n\n`
   - OpenAI surface: `data: {"error":{"message":"upstream stalled: no data received for 120s","type":"api_error","code":"upstream_stall"}}\n\n`

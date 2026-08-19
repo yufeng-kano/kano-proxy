@@ -46,7 +46,7 @@ export type StreamKeepaliveOpts = {
  */
 export function streamWithKeepalive(
   upstream: ReadableStream<Uint8Array>,
-  intervalMs = 30_000,
+  intervalMs = 10_000,
   opts?: StreamKeepaliveOpts,
 ): ReadableStream<Uint8Array> {
   const reader = upstream.getReader()
@@ -201,7 +201,7 @@ export type EagerStreamController = {
  */
 export function streamWithEagerProducer(
   run: (ctl: EagerStreamController) => Promise<void>,
-  intervalMs = 30_000,
+  intervalMs = 10_000,
   opts?: StreamKeepaliveOpts,
 ): ReadableStream<Uint8Array> {
   let closed = false
