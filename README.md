@@ -2,7 +2,18 @@
 
 **Turn your own AI subscriptions into OpenAI- and Anthropic-compatible APIs.**
 
-Kano Proxy is a multi-tenant account-pool proxy: sign in, bind Claude Code / Codex / Grok accounts, issue API keys, and point coding agents or SDKs at a single base URL. Your upstream OAuth tokens stay server-side; clients only ever use project-issued keys.
+Kano Proxy is a multi-tenant account-pool proxy:
+sign in, bind Claude Code / Codex / Grok accounts, issue API keys,
+and point coding agents or SDKs at a single base URL.
+
+Your upstream OAuth tokens stay server-side;
+clients only ever use project-issued keys.
+
+Just want to use it?
+
+Skip the self-hosting — a hosted instance is already running at [https://kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com).
+
+Want to run your own? Keep reading.
 
 ---
 
