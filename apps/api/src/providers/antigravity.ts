@@ -582,12 +582,11 @@ export const antigravityAdapter: ProviderAdapter = {
     } = await import("../proxy/gemini_anthropic")
 
     const reqBody = body as Record<string, unknown>
-    const rawModel = String(reqBody.model ?? "")
-    // The route already rewrote `model` to the bare upstream id; the client-
-    // visible id it sent rides along in a header so responses echo it back.
-    const upstreamModel = rawModel.includes("/")
-      ? rawModel.slice(rawModel.indexOf("/") + 1)
-      : rawModel
+    // The route already rewrote `model` to the bare upstream id — used as-is,
+    // never re-split: a namespaced upstream id ("org/model") would lose its
+    // first segment. The client-visible id it sent rides along in a header so
+    // responses echo it back.
+    const upstreamModel = String(reqBody.model ?? "")
     const displayModel = headers.get("x-kano-raw-model")?.trim() || `antigravity/${upstreamModel}`
 
     let converted

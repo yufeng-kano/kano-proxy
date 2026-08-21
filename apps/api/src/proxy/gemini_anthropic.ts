@@ -434,39 +434,53 @@ export function geminiSseToAnthropicStream(
   const emitThinking = (opts?.thinkingMode ?? "default") !== "disabled"
   const msgId = `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`
   const reader = body.getReader()
+  const lines = sseDataLines(reader)
   let clientCancelled = false
+  let finished = false
+  let emitted = 0
 
+  let nextIndex = 0
+  let open: { kind: "text" | "thinking" | "tool"; index: number } | null = null
+  let pendingSignature = ""
+  let sawToolCall = false
+  let finishReason: string | undefined
+  /** A candidate reported a `finishReason` — Gemini's terminal frame. A
+   *  clean EOF without one is a truncated stream, not a completion. */
+  let sawTerminal = false
+  let blockReason = ""
+  let usage: Record<string, number> = { input_tokens: 0, output_tokens: 0 }
+
+  // Pull-driven pump, same shape as the OpenAI converter: each pull()
+  // consumes upstream frames only until it has enqueued something, so a slow
+  // or paused client applies backpressure to the paid upstream generation
+  // instead of the whole remainder buffering in Worker memory.
   return new ReadableStream({
-    async start(controller) {
-      let nextIndex = 0
-      let open: { kind: "text" | "thinking" | "tool"; index: number } | null = null
-      let pendingSignature = ""
-      let sawToolCall = false
-      let finishReason: string | undefined
-      /** A candidate reported a `finishReason` — Gemini's terminal frame. A
-       *  clean EOF without one is a truncated stream, not a completion. */
-      let sawTerminal = false
-      let blockReason = ""
-      let usage: Record<string, number> = { input_tokens: 0, output_tokens: 0 }
-
+    start(controller) {
+      controller.enqueue(
+        encoder.encode(
+          `event: message_start\ndata: ${JSON.stringify({
+            type: "message_start",
+            message: {
+              id: msgId,
+              type: "message",
+              role: "assistant",
+              model,
+              content: [],
+              stop_reason: null,
+              stop_sequence: null,
+              usage: { input_tokens: 0, output_tokens: 0 },
+            },
+          })}\n\n`,
+        ),
+      )
+    },
+    async pull(controller) {
+      if (finished || clientCancelled) return
       const emit = (event: string, data: unknown) => {
         if (clientCancelled) return
         controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+        emitted++
       }
-      emit("message_start", {
-        type: "message_start",
-        message: {
-          id: msgId,
-          type: "message",
-          role: "assistant",
-          model,
-          content: [],
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        },
-      })
-
       const closeBlock = () => {
         if (!open) return
         if (open.kind === "thinking" && pendingSignature) {
@@ -491,12 +505,57 @@ export function geminiSseToAnthropicStream(
         })
       }
 
+      const before = emitted
       try {
-        for await (const data of sseDataLines(reader)) {
-          if (data === "[DONE]") break
+        for (;;) {
+          const next = await lines.next()
+          if (clientCancelled) {
+            finished = true
+            return
+          }
+          if (next.done || next.value === "[DONE]") {
+            finished = true
+            if (!next.done) await lines.return(undefined)
+
+            closeBlock()
+            // A clean EOF is not a completion: without a terminal Gemini
+            // frame the stream was truncated (no error is thrown for a quiet
+            // network close), so end the turn with the documented error
+            // event, never a fabricated `end_turn`. A blocked prompt is the
+            // one no-terminal shape that *is* a real answer — Gemini reports
+            // it via promptFeedback, no candidate.
+            if (!sawTerminal && !blockReason) {
+              emit("error", {
+                type: "error",
+                error: { type: "api_error", message: "upstream stream ended before completion" },
+              })
+              controller.close()
+              return
+            }
+            emit("message_delta", {
+              type: "message_delta",
+              delta: {
+                stop_reason:
+                  !sawTerminal && blockReason
+                    ? "refusal"
+                    : anthropicStopReason(finishReason, sawToolCall),
+                stop_sequence: null,
+              },
+              // The whole usage object, not just `output_tokens`: Gemini
+              // reports input counts on the same frames, and `message_start`
+              // went out before any of them arrived, so this is the client's
+              // only chance to learn them (the repo's Anthropic usage sniffer
+              // merges field-wise).
+              usage,
+            })
+            emit("message_stop", { type: "message_stop" })
+            controller.close()
+            return
+          }
+
           let json: unknown
           try {
-            json = JSON.parse(data)
+            json = JSON.parse(next.value)
           } catch {
             continue
           }
@@ -574,41 +633,12 @@ export function geminiSseToAnthropicStream(
             finishReason = resp.candidates[0].finishReason
           }
           if (resp?.usageMetadata) usage = usageToAnthropic(resp)
-        }
-        if (clientCancelled) return
 
-        closeBlock()
-        // A clean EOF is not a completion: without a terminal Gemini frame the
-        // stream was truncated (no error is thrown for a quiet network close),
-        // so end the turn with the documented error event, never a fabricated
-        // `end_turn`. A blocked prompt is the one no-terminal shape that *is*
-        // a real answer — Gemini reports it via promptFeedback, no candidate.
-        if (!sawTerminal && !blockReason) {
-          emit("error", {
-            type: "error",
-            error: { type: "api_error", message: "upstream stream ended before completion" },
-          })
-          controller.close()
-          return
+          // Something went out — yield to the client until it pulls again.
+          if (emitted > before) return
         }
-        emit("message_delta", {
-          type: "message_delta",
-          delta: {
-            stop_reason:
-              !sawTerminal && blockReason
-                ? "refusal"
-                : anthropicStopReason(finishReason, sawToolCall),
-            stop_sequence: null,
-          },
-          // The whole usage object, not just `output_tokens`: Gemini reports
-          // input counts on the same frames, and `message_start` went out
-          // before any of them arrived, so this is the client's only chance to
-          // learn them (the repo's Anthropic usage sniffer merges field-wise).
-          usage,
-        })
-        emit("message_stop", { type: "message_stop" })
-        controller.close()
       } catch (e) {
+        finished = true
         if (clientCancelled) return
         // Mid-stream failure ends the turn as an Anthropic `error` event, not
         // a fabricated message_stop (docs/api.md § Errors).
@@ -631,6 +661,7 @@ export function geminiSseToAnthropicStream(
       // without this hook the conversion loop would keep consuming the
       // abandoned paid upstream generation until it ended on its own.
       clientCancelled = true
+      finished = true
       reader.cancel(reason).catch(() => {})
     },
   })

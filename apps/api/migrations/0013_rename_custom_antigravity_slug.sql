@@ -36,6 +36,17 @@ WHERE user_id IN (
     AND user_id NOT IN (SELECT user_id FROM custom_providers WHERE slug = 'antigravity-custom')
 );
 
+-- Deleting a custom provider leaves its provider_settings row behind as
+-- inert data (docs/database.md). For a user being renamed onto this target
+-- such a row is necessarily orphaned — the pass already skips users who own
+-- the slug — and it would collide with the (user_id, provider) primary key.
+DELETE FROM provider_settings
+WHERE provider = 'antigravity-custom'
+  AND user_id IN (
+    SELECT user_id FROM custom_providers WHERE slug = 'antigravity'
+      AND user_id NOT IN (SELECT user_id FROM custom_providers WHERE slug = 'antigravity-custom')
+  );
+
 UPDATE provider_settings
 SET provider = 'antigravity-custom'
 WHERE provider = 'antigravity'
@@ -66,6 +77,17 @@ WHERE user_id IN (
     AND user_id NOT IN (SELECT user_id FROM custom_providers WHERE slug = 'antigravity-custom-2')
 );
 
+-- Deleting a custom provider leaves its provider_settings row behind as
+-- inert data (docs/database.md). For a user being renamed onto this target
+-- such a row is necessarily orphaned — the pass already skips users who own
+-- the slug — and it would collide with the (user_id, provider) primary key.
+DELETE FROM provider_settings
+WHERE provider = 'antigravity-custom-2'
+  AND user_id IN (
+    SELECT user_id FROM custom_providers WHERE slug = 'antigravity'
+      AND user_id NOT IN (SELECT user_id FROM custom_providers WHERE slug = 'antigravity-custom-2')
+  );
+
 UPDATE provider_settings
 SET provider = 'antigravity-custom-2'
 WHERE provider = 'antigravity'
@@ -95,6 +117,17 @@ WHERE user_id IN (
   SELECT user_id FROM custom_providers WHERE slug = 'antigravity'
     AND user_id NOT IN (SELECT user_id FROM custom_providers WHERE slug = 'antigravity-custom-3')
 );
+
+-- Deleting a custom provider leaves its provider_settings row behind as
+-- inert data (docs/database.md). For a user being renamed onto this target
+-- such a row is necessarily orphaned — the pass already skips users who own
+-- the slug — and it would collide with the (user_id, provider) primary key.
+DELETE FROM provider_settings
+WHERE provider = 'antigravity-custom-3'
+  AND user_id IN (
+    SELECT user_id FROM custom_providers WHERE slug = 'antigravity'
+      AND user_id NOT IN (SELECT user_id FROM custom_providers WHERE slug = 'antigravity-custom-3')
+  );
 
 UPDATE provider_settings
 SET provider = 'antigravity-custom-3'

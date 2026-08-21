@@ -484,6 +484,32 @@ describe("geminiSseToAnthropicStream", () => {
     expect(upstreamCancelled).toBe(true)
   })
 
+  it("does not drain upstream ahead of client demand", async () => {
+    const encoder = new TextEncoder()
+    let served = 0
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (served >= 20) {
+          controller.close()
+          return
+        }
+        const frame = {
+          response: { candidates: [{ content: { parts: [{ text: `chunk-${served}` }] } }] },
+        }
+        served++
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`))
+      },
+    })
+    const reader = geminiSseToAnthropicStream(upstream, "m").getReader()
+    await reader.read() // message_start
+    await reader.read() // first converted event
+    // Let any stray eager pumping run — the pull-driven pump must be waiting
+    // on downstream demand, not buffering the remaining generation.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(served).toBeLessThan(6)
+    await reader.cancel()
+  })
+
   it("ends an unterminated stream with an error event, never a fabricated message_stop", async () => {
     // A clean EOF before any candidate reported a finishReason is a truncated
     // response — the catch block never sees it, so the converter must track

@@ -127,6 +127,25 @@ describe("openaiToGeminiRequest", () => {
     })
   })
 
+  it("replays a signature-only assistant message as a signed empty thought part", () => {
+    // The response side emits reasoning_signature without reasoning_content
+    // for Gemini's signature-only thought parts; the echo must survive the
+    // round trip or multi-turn thinking loses its required thoughtSignature.
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "answer", reasoning_signature: "sig-2" } as never,
+        ],
+      }),
+    )
+    expect(out.contents[1]!.parts![0]).toEqual({
+      text: "",
+      thought: true,
+      thoughtSignature: "sig-2",
+    })
+  })
+
   it("merges consecutive same-role turns — Gemini rejects two user turns in a row", () => {
     const out = openaiToGeminiRequest(
       req({
@@ -506,5 +525,30 @@ describe("geminiSseToOpenAIStream", () => {
     const converted = geminiSseToOpenAIStream(upstream, "m")
     await converted.cancel("client went away")
     expect(upstreamCancelled).toBe(true)
+  })
+
+  it("does not drain upstream ahead of client demand", async () => {
+    const encoder = new TextEncoder()
+    let served = 0
+    const upstream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (served >= 20) {
+          controller.close()
+          return
+        }
+        const frame = {
+          response: { candidates: [{ content: { parts: [{ text: `chunk-${served}` }] } }] },
+        }
+        served++
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`))
+      },
+    })
+    const reader = geminiSseToOpenAIStream(upstream, "m").getReader()
+    await reader.read()
+    // Let any stray eager pumping run — the pull-driven pump must be waiting
+    // on downstream demand, not buffering the remaining generation.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(served).toBeLessThan(6)
+    await reader.cancel()
   })
 })

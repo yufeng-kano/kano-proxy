@@ -144,15 +144,20 @@ function messagesToGemini(messages: unknown[]): {
 
     if (role === "assistant") {
       const parts: GeminiPart[] = []
-      if (typeof message.reasoning_content === "string" && message.reasoning_content) {
+      // The signature is Gemini's own `thoughtSignature` coming back;
+      // echoing it is what keeps multi-turn thinking valid upstream. Gemini
+      // itself emits signature-only thought parts (no text), and the response
+      // side exposes exactly that shape — a replayed message whose
+      // `reasoning_content` is empty but whose signature is set still counts.
+      const reasoningText =
+        typeof message.reasoning_content === "string" ? message.reasoning_content : ""
+      const reasoningSignature =
+        typeof message.reasoning_signature === "string" ? message.reasoning_signature : ""
+      if (reasoningText || reasoningSignature) {
         parts.push({
-          text: message.reasoning_content,
+          text: reasoningText,
           thought: true,
-          // The signature is Gemini's own `thoughtSignature` coming back;
-          // echoing it is what keeps multi-turn thinking valid upstream.
-          ...(typeof message.reasoning_signature === "string" && message.reasoning_signature
-            ? { thoughtSignature: message.reasoning_signature }
-            : {}),
+          ...(reasoningSignature ? { thoughtSignature: reasoningSignature } : {}),
         })
       }
       parts.push(...contentToParts(message.content))
@@ -391,24 +396,33 @@ export function geminiSseToOpenAIStream(
   const id = `chatcmpl_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`
   const created = Math.floor(Date.now() / 1000)
   const reader = body.getReader()
+  const lines = sseDataLines(reader)
   let clientCancelled = false
+  let finished = false
+  let emitted = 0
 
+  let toolIndex = 0
+  let imageIndex = 0
+  let sawToolCall = false
+  let finishReason: string | null = null
+  /** A candidate reported a `finishReason` — Gemini's terminal frame. A
+   *  clean EOF without one is a truncated stream, not a completion. */
+  let sawTerminal = false
+  let blockReason = ""
+  let usage: Record<string, unknown> | null = null
+  let roleSent = false
+
+  // Pull-driven pump: each pull() consumes upstream frames only until it has
+  // enqueued something, so a slow or paused client applies backpressure to
+  // the paid upstream generation instead of the whole remainder buffering in
+  // Worker memory (CLAUDE.md: never buffer a whole upstream stream).
   return new ReadableStream({
-    async start(controller) {
-      let toolIndex = 0
-      let imageIndex = 0
-      let sawToolCall = false
-      let finishReason: string | null = null
-      /** A candidate reported a `finishReason` — Gemini's terminal frame. A
-       *  clean EOF without one is a truncated stream, not a completion. */
-      let sawTerminal = false
-      let blockReason = ""
-      let usage: Record<string, unknown> | null = null
-      let roleSent = false
-
+    async pull(controller) {
+      if (finished || clientCancelled) return
       const emit = (payload: Record<string, unknown>) => {
         if (clientCancelled) return
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
+        emitted++
       }
       const chunk = (delta: Record<string, unknown>) => {
         if (!roleSent) {
@@ -424,12 +438,52 @@ export function geminiSseToOpenAIStream(
         })
       }
 
+      const before = emitted
       try {
-        for await (const data of sseDataLines(reader)) {
-          if (data === "[DONE]") break
+        for (;;) {
+          const next = await lines.next()
+          if (clientCancelled) {
+            finished = true
+            return
+          }
+          if (next.done || next.value === "[DONE]") {
+            finished = true
+            if (!next.done) await lines.return(undefined)
+
+            // A clean EOF is not a completion: without a terminal Gemini
+            // frame the stream was truncated (no error is thrown for a quiet
+            // network close), so end the turn with the documented stream
+            // error, never a fabricated `stop`. A blocked prompt is the one
+            // no-terminal shape that *is* a real answer — Gemini reports it
+            // via promptFeedback with no candidate.
+            if (!sawTerminal && !blockReason) {
+              emit({
+                error: { message: "upstream stream ended before completion", type: "upstream_error" },
+              })
+              controller.close()
+              return
+            }
+            const terminalFinish = sawToolCall
+              ? "tool_calls"
+              : !sawTerminal && blockReason
+                ? "content_filter"
+                : (finishReason ?? "stop")
+            emit({
+              id,
+              object: "chat.completion.chunk",
+              created,
+              model,
+              choices: [{ index: 0, delta: {}, finish_reason: terminalFinish }],
+              ...(usage ? { usage } : {}),
+            })
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"))
+            controller.close()
+            return
+          }
+
           let json: unknown
           try {
-            json = JSON.parse(data)
+            json = JSON.parse(next.value)
           } catch {
             continue
           }
@@ -477,38 +531,12 @@ export function geminiSseToOpenAIStream(
           }
           const chunkUsage = usageToOpenAI(resp)
           if (chunkUsage) usage = chunkUsage
-        }
-        if (clientCancelled) return
 
-        // A clean EOF is not a completion: without a terminal Gemini frame the
-        // stream was truncated (no error is thrown for a quiet network close),
-        // so end the turn with the documented stream error, never a fabricated
-        // `stop`. A blocked prompt is the one no-terminal shape that *is* a
-        // real answer — Gemini reports it via promptFeedback with no candidate.
-        if (!sawTerminal && !blockReason) {
-          emit({
-            error: { message: "upstream stream ended before completion", type: "upstream_error" },
-          })
-          controller.close()
-          return
+          // Something went out — yield to the client until it pulls again.
+          if (emitted > before) return
         }
-
-        const terminalFinish = sawToolCall
-          ? "tool_calls"
-          : !sawTerminal && blockReason
-            ? "content_filter"
-            : (finishReason ?? "stop")
-        emit({
-          id,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          choices: [{ index: 0, delta: {}, finish_reason: terminalFinish }],
-          ...(usage ? { usage } : {}),
-        })
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"))
-        controller.close()
       } catch (e) {
+        finished = true
         if (clientCancelled) return
         // Mid-stream upstream failure: an OpenAI-shaped error line ends the
         // turn, never a fabricated successful finish (same rule as codex).
@@ -530,6 +558,7 @@ export function geminiSseToOpenAIStream(
       // without this hook the conversion loop would keep consuming the
       // abandoned paid upstream generation until it ended on its own.
       clientCancelled = true
+      finished = true
       reader.cancel(reason).catch(() => {})
     },
   })

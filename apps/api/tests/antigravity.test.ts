@@ -437,6 +437,20 @@ describe("antigravityAdapter.messages", () => {
     expect(res.status).toBe(400)
     expect(calls).toHaveLength(0)
   })
+
+  it("sends a namespaced upstream id unchanged instead of re-splitting it", async () => {
+    const calls = stubFetch(() => okGenerate())
+    // The route already stripped the `antigravity/` provider prefix — a
+    // second split would eat the first segment of a namespaced upstream id.
+    await antigravityAdapter.messages!(
+      buildEnv(),
+      account(),
+      { model: "org/model-x", messages: [{ role: "user", content: "hi" }], max_tokens: 8 },
+      new Headers(),
+    )
+    const body = JSON.parse(calls[0]!.init.body as string) as Record<string, unknown>
+    expect(body.model).toBe("org/model-x")
+  })
 })
 
 describe("antigravityAdapter.countTokens", () => {
