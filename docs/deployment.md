@@ -101,9 +101,19 @@ Optional overrides:
 CLAUDE_CODE_OAUTH_CLIENT_ID
 CODEX_OAUTH_CLIENT_ID
 GROK_OAUTH_CLIENT_ID
+ANTIGRAVITY_CLIENT_VERSION       # Antigravity Hub version in the upstream User-Agent; default is pinned
 REQUEST_LOG_RETENTION_DAYS   # retention sweep window in days; default 90
 GITHUB_TOKEN                 # optional; raises the /changelog GitHub rate limit (secret)
 ```
+
+**Antigravity is opt-in and has no default credential.** Unlike the other three providers it needs an OAuth client *secret*, which is never committed here, so it stays off until an operator supplies both halves — sign-in answers `400` naming them until then:
+
+```text
+ANTIGRAVITY_OAUTH_CLIENT_ID      # wrangler secret put — both halves or neither
+ANTIGRAVITY_OAUTH_CLIENT_SECRET  # wrangler secret put, never [vars]
+```
+
+Put **both** through `wrangler secret put`, not `[vars]`; a half-configured pair is treated as unconfigured rather than failing later inside Google's token endpoint. Where the pair comes from, the redirect-URI constraint it inherits, and the terms-of-service risk that comes with it: [auth.md](./auth.md) § Antigravity.
 
 `GITHUB_REPO` (`owner/repo`, source of the `/changelog` release notes) is **public**, so it lives in `wrangler.toml` `[vars]` and is carried into production by the CI config writer — not in the secret store. `GITHUB_TOKEN` is optional: the KV cache keeps a deploy inside the unauthenticated 60/hr budget on its own. See [changelog.md](./changelog.md).
 

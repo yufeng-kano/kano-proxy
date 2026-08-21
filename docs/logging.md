@@ -16,7 +16,7 @@
 | `upstream_unavailable` | Accounts exist but none usable — every bound account benched at request start, or the failover loop exhausted its attempts (503, `Retry-After` = seconds until earliest bench expiry when known) |
 | `upstream_error` | Upstream returned a non-2xx after retries/failover, or every account got benched and there was a prior upstream response to fall back to |
 | `invalid_model` | Authenticated request; `model` did not resolve to a builtin provider or one of the caller's own custom provider slugs (400, pre-dispatch) |
-| `loop_detected` | Degenerate tool-call loop guard tripped on a grok/codex/custom-openai conversion request (400, pre-dispatch) — see [api.md](./api.md) |
+| `loop_detected` | Degenerate tool-call loop guard tripped on a grok/codex/antigravity/custom-openai conversion request (400, pre-dispatch) — see [api.md](./api.md) |
 | `upstream_stall` | Streaming response: no upstream chunk for 120s — idle-timeout close, logged unconditionally regardless of whether a completion signal was already seen |
 | `client_abort` | Streaming response: the client cancelled before the upstream reported a completion signal |
 | `incomplete_stream` | Streaming response: the upstream connection ended — cleanly or with a transport error — before a completion signal ever arrived |
@@ -73,6 +73,7 @@ The sweep is idempotent and safe to run any time (locally: `wrangler dev --test-
 |------|-----------|--------|
 | `/anthropic` native passthrough (`claude-code`, custom `format=anthropic`) | response JSON `usage` | passthrough parse of `message_start` / `message_delta` usage while piping |
 | `/openai/v1` → `claude-code` / custom `format=anthropic`; codex on either surface | converted response `usage` (includes cached details — see [api.md](./api.md)) | converter-attached final-chunk `usage` |
+| `antigravity` (both surfaces) | converted `usage` built from Gemini `usageMetadata` — `thoughtsTokenCount` is added into the output count and also reported as `reasoning_tokens` / kept out of Anthropic `input_tokens`; `cachedContentTokenCount` becomes `cached_tokens` / `cache_read_input_tokens` | converter-attached final chunk (`/openai/v1`) or `message_delta.usage` (`/anthropic`), carrying the **whole** usage object rather than output tokens alone — Gemini reports its input counts on the same frames, after `message_start` already went out |
 | `grok` / custom `format=openai` | response JSON `usage` (`prompt_tokens_details.cached_tokens` and `cache_write_tokens` when upstream reports them) | **best-effort:** captured when the upstream stream carries a `usage` chunk. custom-openai always sets `stream_options.include_usage: true` (stream and non-stream); grok sets it on stream. If the upstream still omits the chunk, token fields stay `NULL` |
 
 Rules:

@@ -3,7 +3,7 @@
 **Turn your own AI subscriptions into OpenAI- and Anthropic-compatible APIs.**
 
 Kano Proxy is a multi-tenant account-pool proxy:
-sign in, bind Claude Code / Codex / Grok accounts, issue API keys,
+sign in, bind Claude Code / Codex / Grok / Antigravity accounts, issue API keys,
 and point coding agents or SDKs at a single base URL.
 
 Your upstream OAuth tokens stay server-side;
@@ -34,7 +34,7 @@ Want to run your own? Keep reading.
 ```text
   Coding agent / SDK          Kano Proxy                 Your subscriptions
   ─────────────────      ─────────────────────      ─────────────────────────
-  base URL + API key  →  auth + pool routing    →  Claude Code / Codex / Grok
+  base URL + API key  →  auth + pool routing    →  Claude Code / Codex / Grok / …
   model: provider/…   →  stream end-to-end      →  OAuth tokens never leave
                          usage & keys in UI         the Worker
 ```
@@ -71,6 +71,7 @@ Anthropic-style clients may also use `x-api-key: sk-kano-proxy-...`.
 claude-code/claude-opus-5
 codex/gpt-5.4
 grok/grok-4.5
+antigravity/gemini-3-flash
 ```
 
 `GET …/models` lists only models available for the key owner’s currently usable accounts.
@@ -98,6 +99,7 @@ Point tools that accept a custom OpenAI base (CC Switch, Codex-style clients, Op
 | **Claude Code** | Anthropic Messages (subscription OAuth) | Multi-account |
 | **Codex** | ChatGPT Codex backend | Multi-account |
 | **Grok** | xAI Chat Completions (SuperGrok OAuth) | Multi-account |
+| **Antigravity** | Gemini via Google's CloudCode API (Google AI Pro / Ultra) | Multi-account |
 
 Pool behavior is the same once accounts are bound: priority, acquire, bench on 401/403/429, promote, remove.
 

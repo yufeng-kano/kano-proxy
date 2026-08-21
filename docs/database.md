@@ -48,7 +48,7 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | |
-| provider | TEXT | builtin `claude-code` \| `codex` \| `grok`, **or** a custom provider's `slug` (see `custom_providers` below) |
+| provider | TEXT | builtin `claude-code` \| `codex` \| `grok` \| `antigravity`, **or** a custom provider's `slug` (see `custom_providers` below) |
 | external_account_id | TEXT | nullable; upstream account id when known (e.g. codex's ChatGPT account id) |
 | label | TEXT | email or display, **synced from upstream** on every accounts read — not user-editable |
 | custom_label | TEXT | nullable; the operator's own name for this account. Wins over `label` for display and is **never** overwritten by the upstream sync (`0005_account_custom_label.sql`) |

@@ -2,7 +2,7 @@
 
 Estimated USD cost per request, computed from logged token counts and a public per-model price table. Powers the Overview spend cards and per-API-key spend limits ([admin-ui.md](./admin-ui.md), [auth.md](./auth.md)).
 
-**Estimates, not invoices.** Costs are derived from `request_logs` token fields and list prices; they exist so an operator can bound and compare usage, not to reconcile a bill. Subscription (OAuth) traffic through `claude-code` / `codex` / `grok` is priced at the same list rates — that is the "what would this have cost via API" number, which is also what makes the per-key include-OAuth toggle meaningful.
+**Estimates, not invoices.** Costs are derived from `request_logs` token fields and list prices; they exist so an operator can bound and compare usage, not to reconcile a bill. Subscription (OAuth) traffic through `claude-code` / `codex` / `grok` / `antigravity` is priced at the same list rates — that is the "what would this have cost via API" number, which is also what makes the per-key include-OAuth toggle meaningful.
 
 ## Price table
 

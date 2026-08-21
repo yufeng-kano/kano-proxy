@@ -37,6 +37,7 @@
 | `claude-code` | Anthropic Messages via Claude Code OAuth | Browser OAuth + paste `code#state` | Multi-account |
 | `codex` | ChatGPT Codex backend | Browser OAuth (public redirect or paste) | Multi-account |
 | `grok` | xAI Chat Completions via SuperGrok OAuth | Device code (and future ingest methods) | Multi-account |
+| `antigravity` | Gemini via the Google Antigravity CloudCode API (Google AI Pro / Ultra) | Browser OAuth + paste the localhost callback | Multi-account |
 
 Token **acquisition methods may differ**; once stored, pool semantics are the same: priority, acquire, bench on 401/402/403/429, promote, remove.
 
@@ -57,6 +58,7 @@ Examples:
 - `claude-code/claude-opus-5`
 - `codex/gpt-5.4`
 - `grok/grok-4.5`
+- `antigravity/gemini-3-flash`
 - `<your-slug>/<upstream_model_id>` — a user-defined custom endpoint. Only the *first* `/` splits the id, so an upstream id that itself contains `/` (e.g. an OpenRouter-style `org/model`) still routes: `openrouter/anthropic/claude-3.7-sonnet` is slug `openrouter`, upstream id `anthropic/claude-3.7-sonnet`.
 
 **One exception to the prefix rule:** a bare id (no `/`) that matches one of the caller's **model group aliases** (a group carries 1–10 of them) expands to that group's first usable `provider/model` target before dispatch ([providers.md](./providers.md) § Model groups). Any other bare id is rejected. The missing slash is what keeps the two namespaces from ever colliding.

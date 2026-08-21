@@ -16,7 +16,7 @@ kano-proxy/
           custom_providers.ts    # admin REST for user-defined BYO endpoints
         auth/            # session, google, api keys
         proxy/           # stream helpers, openai↔provider
-        providers/       # claude-code, codex, grok (builtin registry) +
+        providers/       # claude-code, codex, grok, antigravity (builtin registry) +
                           #   custom_openai.ts / custom_anthropic.ts (per-request
                           #   adapters for user-defined endpoints, not in the
                           #   registry)
