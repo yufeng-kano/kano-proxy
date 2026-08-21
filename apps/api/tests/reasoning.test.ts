@@ -96,6 +96,30 @@ describe("mapReasoning", () => {
     expect(mapReasoning("grok", "max")).toEqual({ reasoning_effort: "xhigh" })
   })
 
+  it("maps antigravity effort to a Gemini thinking level", () => {
+    expect(mapReasoning("antigravity", "low")).toEqual({
+      thinkingConfig: { thinkingLevel: "low" },
+    })
+    expect(mapReasoning("antigravity", "high")).toEqual({
+      thinkingConfig: { thinkingLevel: "high" },
+    })
+  })
+
+  it("maps antigravity none to a zero budget — thinkingLevel has no off token", () => {
+    expect(mapReasoning("antigravity", "none")).toEqual({
+      thinkingConfig: { thinkingBudget: 0 },
+    })
+  })
+
+  it("clamps antigravity above-ceiling efforts to high", () => {
+    expect(mapReasoning("antigravity", "xhigh")).toEqual({
+      thinkingConfig: { thinkingLevel: "high" },
+    })
+    expect(mapReasoning("antigravity", "max")).toEqual({
+      thinkingConfig: { thinkingLevel: "high" },
+    })
+  })
+
   it("leaves efforts at or below the ceiling unclamped", () => {
     expect(mapReasoning("grok", "high")).toEqual({ reasoning_effort: "high" })
     expect(mapReasoning("codex", "xhigh")).toEqual({

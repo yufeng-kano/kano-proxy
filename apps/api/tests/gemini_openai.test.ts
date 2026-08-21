@@ -1,0 +1,360 @@
+import { describe, expect, it } from "vitest"
+import {
+  geminiResponseToOpenAI,
+  geminiSseToOpenAIStream,
+  openaiToGeminiRequest,
+} from "../src/proxy/gemini_openai"
+import type { ChatCompletionRequest } from "../src/providers/types"
+
+function req(patch: Partial<ChatCompletionRequest>): ChatCompletionRequest {
+  return {
+    model: "antigravity/gemini-3-flash",
+    rawModel: "antigravity/gemini-3-flash",
+    upstreamModel: "gemini-3-flash",
+    messages: [],
+    rawBody: {},
+    ...patch,
+  }
+}
+
+function sse(...frames: unknown[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder()
+  const text = frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join("")
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(text))
+      controller.close()
+    },
+  })
+}
+
+async function readSse(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const decoder = new TextDecoder()
+  const reader = stream.getReader()
+  let out = ""
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    out += decoder.decode(value, { stream: true })
+  }
+  return out
+}
+
+function chunks(raw: string): Array<Record<string, unknown>> {
+  return raw
+    .split("\n\n")
+    .map((block) => block.replace(/^data:\s*/, "").trim())
+    .filter((data) => data && data !== "[DONE]")
+    .map((data) => JSON.parse(data) as Record<string, unknown>)
+}
+
+describe("openaiToGeminiRequest", () => {
+  it("lifts system messages into systemInstruction and keeps the rest as contents", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          { role: "system", content: "be terse" },
+          { role: "user", content: "hi" },
+          { role: "assistant", content: "hello" },
+          { role: "user", content: "again" },
+        ],
+      }),
+    )
+    expect(out.systemInstruction).toEqual({ role: "user", parts: [{ text: "be terse" }] })
+    expect(out.contents).toEqual([
+      { role: "user", parts: [{ text: "hi" }] },
+      { role: "model", parts: [{ text: "hello" }] },
+      { role: "user", parts: [{ text: "again" }] },
+    ])
+  })
+
+  it("round-trips a tool call and its result", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          { role: "user", content: "weather?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "get_weather", arguments: '{"city":"Taipei"}' },
+              },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_1", content: '{"temp":30}' },
+        ],
+      }),
+    )
+    expect(out.contents[1]).toEqual({
+      role: "model",
+      parts: [{ functionCall: { id: "call_1", name: "get_weather", args: { city: "Taipei" } } }],
+    })
+    expect(out.contents[2]).toEqual({
+      role: "user",
+      parts: [
+        {
+          functionResponse: {
+            id: "call_1",
+            name: "get_weather",
+            response: { result: { temp: 30 } },
+          },
+        },
+      ],
+    })
+  })
+
+  it("merges consecutive same-role turns — Gemini rejects two user turns in a row", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          { role: "user", content: "a" },
+          { role: "user", content: "b" },
+        ],
+      }),
+    )
+    expect(out.contents).toEqual([{ role: "user", parts: [{ text: "a" }, { text: "b" }] }])
+  })
+
+  it("turns a base64 image_url into an inline part and drops a remote URL", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "what is this" },
+              { type: "image_url", image_url: { url: "data:image/png;base64,AAAB" } },
+              { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+            ],
+          },
+        ],
+      }),
+    )
+    expect(out.contents[0].parts).toEqual([
+      { text: "what is this" },
+      { inlineData: { mimeType: "image/png", data: "AAAB" } },
+    ])
+  })
+
+  it("maps response_format json_schema to responseMimeType + responseSchema", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: { name: { type: "string", title: "Name" } },
+            },
+          },
+        },
+      }),
+    )
+    expect(out.generationConfig?.responseMimeType).toBe("application/json")
+    // additionalProperties / title have no Gemini Schema field and are stripped.
+    expect(out.generationConfig?.responseSchema).toEqual({
+      type: "object",
+      properties: { name: { type: "string" } },
+    })
+  })
+
+  it("maps reasoning_effort to thinkingConfig and asks for the thoughts back", () => {
+    expect(openaiToGeminiRequest(req({ reasoning_effort: "medium" })).generationConfig)
+      .toMatchObject({ thinkingConfig: { thinkingLevel: "medium", includeThoughts: true } })
+  })
+
+  it("clamps an above-ceiling effort down to high", () => {
+    expect(openaiToGeminiRequest(req({ reasoning_effort: "max" })).generationConfig)
+      .toMatchObject({ thinkingConfig: { thinkingLevel: "high" } })
+  })
+
+  it("turns effort none into a zero budget with thoughts off", () => {
+    expect(openaiToGeminiRequest(req({ reasoning_effort: "none" })).generationConfig)
+      .toMatchObject({ thinkingConfig: { thinkingBudget: 0, includeThoughts: false } })
+  })
+
+  it("carries sampling, stop sequences and max_tokens through", () => {
+    const out = openaiToGeminiRequest(
+      req({ temperature: 0.4, top_p: 0.9, max_tokens: 128, stop: ["END"] }),
+    )
+    expect(out.generationConfig).toMatchObject({
+      temperature: 0.4,
+      topP: 0.9,
+      maxOutputTokens: 128,
+      stopSequences: ["END"],
+    })
+  })
+
+  it("maps tools and a forced tool_choice", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "search",
+              description: "look up",
+              parameters: { type: "object", properties: { q: { type: "string" } } },
+            },
+          },
+        ],
+        tool_choice: { type: "function", function: { name: "search" } },
+      }),
+    )
+    expect(out.tools).toEqual([
+      {
+        functionDeclarations: [
+          {
+            name: "search",
+            description: "look up",
+            parameters: { type: "object", properties: { q: { type: "string" } } },
+          },
+        ],
+      },
+    ])
+    expect(out.toolConfig).toEqual({
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["search"] },
+    })
+  })
+
+  it("omits toolConfig entirely when there are no tools", () => {
+    expect(openaiToGeminiRequest(req({ tool_choice: "auto" })).toolConfig).toBeUndefined()
+  })
+})
+
+describe("geminiResponseToOpenAI", () => {
+  it("splits thought parts into reasoning_content and maps usage", () => {
+    const out = geminiResponseToOpenAI(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                role: "model",
+                parts: [
+                  { text: "thinking about it", thought: true },
+                  { text: "the answer" },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+          usageMetadata: {
+            promptTokenCount: 10,
+            candidatesTokenCount: 4,
+            thoughtsTokenCount: 6,
+            cachedContentTokenCount: 3,
+            totalTokenCount: 20,
+          },
+        },
+      },
+      "antigravity/gemini-3-flash",
+    )
+    const choice = (out.choices as Array<Record<string, unknown>>)[0]
+    const message = choice.message as Record<string, unknown>
+    expect(message.content).toBe("the answer")
+    expect(message.reasoning_content).toBe("thinking about it")
+    expect(choice.finish_reason).toBe("stop")
+    expect(out.usage).toEqual({
+      prompt_tokens: 10,
+      // thoughts are billed output too, so both halves make up completion_tokens
+      completion_tokens: 10,
+      total_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 3 },
+      completion_tokens_details: { reasoning_tokens: 6 },
+    })
+  })
+
+  it("emits tool_calls and overrides finish_reason", () => {
+    const out = geminiResponseToOpenAI(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                parts: [{ functionCall: { id: "fc1", name: "search", args: { q: "x" } } }],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "antigravity/gemini-3-flash",
+    )
+    const choice = (out.choices as Array<Record<string, unknown>>)[0]
+    expect(choice.finish_reason).toBe("tool_calls")
+    expect((choice.message as Record<string, unknown>).tool_calls).toEqual([
+      { id: "fc1", index: 0, type: "function", function: { name: "search", arguments: '{"q":"x"}' } },
+    ])
+  })
+
+  it("maps MAX_TOKENS to the OpenAI length token", () => {
+    const out = geminiResponseToOpenAI(
+      { response: { candidates: [{ content: { parts: [{ text: "…" }] }, finishReason: "MAX_TOKENS" }] } },
+      "m",
+    )
+    expect((out.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe("length")
+  })
+})
+
+describe("geminiSseToOpenAIStream", () => {
+  it("assembles text, reasoning and a terminal usage chunk", async () => {
+    const raw = await readSse(
+      geminiSseToOpenAIStream(
+        sse(
+          { response: { candidates: [{ content: { parts: [{ text: "think", thought: true }] } }] } },
+          { response: { candidates: [{ content: { parts: [{ text: "Hel" }] } }] } },
+          { response: { candidates: [{ content: { parts: [{ text: "lo" }] } }] } },
+          {
+            response: {
+              candidates: [{ finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 2, totalTokenCount: 7 },
+            },
+          },
+        ),
+        "antigravity/gemini-3-flash",
+      ),
+    )
+    const parsed = chunks(raw)
+    expect(raw.endsWith("data: [DONE]\n\n")).toBe(true)
+    const deltas = parsed.map((c) => (c.choices as Array<Record<string, unknown>>)[0].delta)
+    expect(deltas[0]).toMatchObject({ role: "assistant", reasoning_content: "think" })
+    expect(deltas[1]).toMatchObject({ content: "Hel" })
+    expect(deltas[2]).toMatchObject({ content: "lo" })
+    const final = parsed.at(-1)!
+    expect((final.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe("stop")
+    expect(final.usage).toMatchObject({ prompt_tokens: 5, completion_tokens: 2 })
+  })
+
+  it("finishes as tool_calls once a functionCall streamed", async () => {
+    const raw = await readSse(
+      geminiSseToOpenAIStream(
+        sse(
+          {
+            response: {
+              candidates: [
+                { content: { parts: [{ functionCall: { name: "search", args: { q: "x" } } }] } },
+              ],
+            },
+          },
+          { response: { candidates: [{ finishReason: "STOP" }] } },
+        ),
+        "m",
+      ),
+    )
+    const parsed = chunks(raw)
+    const toolDelta = (parsed[0].choices as Array<Record<string, unknown>>)[0]
+      .delta as Record<string, unknown>
+    expect((toolDelta.tool_calls as Array<Record<string, unknown>>)[0]).toMatchObject({
+      index: 0,
+      function: { name: "search", arguments: '{"q":"x"}' },
+    })
+    expect((parsed.at(-1)!.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe(
+      "tool_calls",
+    )
+  })
+})
