@@ -240,6 +240,27 @@ describe("buildAntigravityEnvelope", () => {
   })
 })
 
+describe("antigravityAdapter.refreshIfNeeded", () => {
+  it("rejects on a failed project bootstrap so dispatch skips the candidate", async () => {
+    stubFetch(() => new Response("boom", { status: 500 }))
+    const acc = account()
+    delete acc.credential.extra
+    // A rejection here makes the candidate walk skip this account and keep
+    // going — instead of the bootstrap throwing mid-request and turning into
+    // a request-terminal 502 that blocks the rest of the pool.
+    await expect(antigravityAdapter.refreshIfNeeded!(buildEnv(), acc)).rejects.toThrow(
+      /loadCodeAssist 500/,
+    )
+  })
+
+  it("is a no-op beyond refresh when the project is already stored", async () => {
+    const calls = stubFetch(() => okGenerate())
+    const out = await antigravityAdapter.refreshIfNeeded!(buildEnv(), account())
+    expect(out.credential.extra?.project_id).toBe("proj-42")
+    expect(calls).toHaveLength(0)
+  })
+})
+
 describe("antigravityAdapter.chatCompletions", () => {
   it("posts the envelope to the daily base URL with the Antigravity identity", async () => {
     const calls = stubFetch(() => okGenerate())

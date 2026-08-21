@@ -125,6 +125,15 @@ describe("classifyAntigravity429", () => {
     expect(classifyAntigravity429(body).kind).toBe("quota_exhausted")
   })
 
+  it("survives null and non-object entries in a heterogeneous details array", () => {
+    // Must classify, never throw — a classifier crash would turn a benchable
+    // 429 into a generic 502 before dispatch can fail over.
+    const verdict = classifyAntigravity429(
+      resourceExhausted("mixed", [null, 42, "junk", errorInfo("QUOTA_EXHAUSTED")]),
+    )
+    expect(verdict.kind).toBe("quota_exhausted")
+  })
+
   it("does not classify a non-RESOURCE_EXHAUSTED 429", () => {
     const body = { error: { status: "UNAVAILABLE", message: "backend busy" } }
     expect(classifyAntigravity429(body).kind).toBe("unknown")

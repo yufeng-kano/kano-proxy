@@ -47,7 +47,12 @@ function errorDetails(body: unknown): ErrorDetail[] {
   const error = (body as { error?: unknown }).error
   if (!error || typeof error !== "object") return []
   const details = (error as { details?: unknown }).details
-  return Array.isArray(details) ? (details as ErrorDetail[]) : []
+  // A heterogeneous details array (null / non-object entries) must classify
+  // as `unknown`, not crash the adapter into a generic 502 before dispatch
+  // can bench and fail over.
+  return Array.isArray(details)
+    ? details.filter((d): d is ErrorDetail => !!d && typeof d === "object")
+    : []
 }
 
 /**

@@ -487,7 +487,13 @@ export const antigravityAdapter: ProviderAdapter = {
   id: "antigravity",
 
   async refreshIfNeeded(env, account) {
-    return refreshAntigravity(env, account)
+    // Project bootstrap is part of making this credential usable, so it runs
+    // here: a bootstrap failure (loadCodeAssist / onboardUser rejecting)
+    // stays account-scoped — dispatch skips the candidate and continues the
+    // walk, same as an unreadable credential — instead of throwing inside the
+    // request method and turning into a request-terminal 502 that blocks
+    // every account after this one in the pool.
+    return ensureProject(env, await refreshAntigravity(env, account))
   },
 
   /**
