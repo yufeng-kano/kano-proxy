@@ -25,6 +25,8 @@ const props = defineProps<{
   busy?: boolean
   /** The section's gate — the row's actions render only while this is on. */
   editing?: boolean
+  /** Only read to explain a permanently empty usage area; identity is provider-agnostic. */
+  provider?: string
 }>()
 
 const emit = defineEmits<{
@@ -43,7 +45,7 @@ const { t } = useI18n()
  * upstream returns them as a placeholder for "no profile", where the account
  * id at least distinguishes two accounts from each other.
  */
-const GENERIC_LABELS = new Set(["claude", "codex", "grok"])
+const GENERIC_LABELS = new Set(["claude", "codex", "grok", "antigravity"])
 
 /**
  * The real account behind the row — the email/username upstream reports.
@@ -91,12 +93,13 @@ function formatPlan(raw: string): string {
     "chatgpt",
     "codex",
     "grok",
+    "antigravity",
     "subscription",
     "tier",
   ])
   while (tokens.length > 1 && providerPrefixes.has(tokens[0]!)) tokens.shift()
   if (!tokens.length) return raw
-  const special: Record<string, string> = { supergrok: "SuperGrok" }
+  const special: Record<string, string> = { supergrok: "SuperGrok", ai: "AI" }
   return tokens
     .map((s) => (/^\d+x$/.test(s) ? s : (special[s] ?? s.charAt(0).toUpperCase() + s.slice(1))))
     .join(" ")
@@ -126,6 +129,18 @@ const hideUsageError = computed(() => {
 })
 
 const windows = computed(() => props.account.usage?.windows ?? [])
+
+/**
+ * "Usage will appear once this account is used" is a promise, and for
+ * Antigravity it is one the backend cannot keep: Google reports a tier and a
+ * credit balance, never a percentage window with a reset, so the bars would
+ * never arrive (docs/providers.md § Antigravity). Say that instead of waiting.
+ */
+const noUsageKey = computed(() =>
+  props.provider === "antigravity"
+    ? ("providers.account.noUsageWindows" as const)
+    : ("providers.account.noUsage" as const),
+)
 </script>
 
 <template>
@@ -203,7 +218,7 @@ const windows = computed(() => props.account.usage?.windows ?? [])
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
     </div>
     <p v-else-if="!hideUsageError" class="no-usage">
-      {{ t("providers.account.noUsage") }}
+      {{ t(noUsageKey) }}
     </p>
 
     <Banner v-if="account.error && !hideUsageError" tone="warn">

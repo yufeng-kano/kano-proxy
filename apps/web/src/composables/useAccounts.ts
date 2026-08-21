@@ -30,9 +30,10 @@ const byProvider = reactive<Record<ProviderId, ProviderState>>({
   "claude-code": emptyState(),
   codex: emptyState(),
   grok: emptyState(),
+  antigravity: emptyState(),
 })
 
-const PROVIDER_IDS: ProviderId[] = ["claude-code", "codex", "grok"]
+const PROVIDER_IDS: ProviderId[] = ["claude-code", "codex", "grok", "antigravity"]
 
 export function useAccounts() {
   const userId = ref<string | null>(null)
