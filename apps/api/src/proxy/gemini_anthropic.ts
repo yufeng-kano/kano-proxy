@@ -364,6 +364,11 @@ export function geminiResponseToAnthropic(
 
   for (const part of geminiParts(resp)) {
     if (part.functionCall) {
+      // Gemini can sign the functionCall part itself. Anthropic tool_use has
+      // no signature field, so it rides on the adjacent thinking block (a
+      // signature-only one when nothing was accumulated) — the replay path
+      // already restores signed thinking blocks as signed thought parts.
+      if (emitThinking && part.thoughtSignature) thinkingSignature = part.thoughtSignature
       flushThinking()
       flushText()
       const block = toolUseBlock(part, content.length)
@@ -564,6 +569,13 @@ export function geminiSseToAnthropicStream(
 
           for (const part of geminiParts(resp)) {
             if (part.functionCall) {
+              // A signature on the functionCall part itself rides on the
+              // adjacent thinking block, whose closing signature_delta goes
+              // out right before the tool_use block opens.
+              if (emitThinking && part.thoughtSignature) {
+                openBlock("thinking", { type: "thinking", thinking: "" })
+                pendingSignature = part.thoughtSignature
+              }
               closeBlock()
               const block = toolUseBlock(part, nextIndex)
               if (!block) continue

@@ -518,7 +518,10 @@ export const antigravityAdapter: ProviderAdapter = {
         })
         if (!res.ok) continue
         const json = (await res.json()) as { models?: Record<string, { displayName?: unknown }> }
-        if (!json.models || typeof json.models !== "object") continue
+        // An array here means the undocumented endpoint changed shape —
+        // treating it as a map would publish the array indexes ("0", "1", …)
+        // as callable model ids and cache that invented catalog for an hour.
+        if (!json.models || typeof json.models !== "object" || Array.isArray(json.models)) continue
         const models = Object.entries(json.models)
           .filter(([id]) => id.trim())
           .map(([id, info]) => ({

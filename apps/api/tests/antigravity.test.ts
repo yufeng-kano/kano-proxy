@@ -539,6 +539,20 @@ describe("antigravityAdapter.listModels", () => {
     })
   })
 
+  it("treats an array-shaped models payload as malformed, never as a catalog of indexes", async () => {
+    const calls = stubFetch(
+      () =>
+        new Response(JSON.stringify({ models: [{ id: "gemini-3-flash" }] }), { status: 200 }),
+    )
+    // Publishing Object.entries of an array would invent "0", "1", … as
+    // callable model ids and cache them for an hour.
+    expect(await antigravityAdapter.listModels!(buildEnv(), account())).toEqual({
+      models: [],
+      error: "models fetch failed",
+    })
+    expect(calls).toHaveLength(2)
+  })
+
   it("treats a well-formed empty models map as a real answer, not a failure", async () => {
     const calls = stubFetch(() => new Response(JSON.stringify({ models: {} }), { status: 200 }))
     // An account with no currently available models must not probe the

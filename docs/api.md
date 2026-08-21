@@ -255,7 +255,7 @@ Effort inputs, in priority order where applicable: (1) `reasoning_effort` (OpenA
 
 ## Streaming
 
-Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive / eager-commit wrapper (`proxy/sse.ts`):
+Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive / eager-commit wrapper (`proxy/sse.ts`). Both wrappers are **demand-driven**: while the client is not consuming, the pump stops reading upstream (backpressure propagates instead of the remainder buffering in Worker memory), and the keepalive/idle timers pause with it — a client-side stall is not an upstream silence gap, so it neither draws keepalives into an unread queue nor counts toward the 120s upstream idle timeout.
 
 ### Eager streaming commit
 

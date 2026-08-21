@@ -50,10 +50,13 @@ describe("streamWithKeepalive — keepalive re-arming", () => {
   it("re-arms the keepalive interval after a real chunk instead of stopping for the rest of the stream", async () => {
     const { stream, push, close } = controllableStream()
     const out = streamWithKeepalive(stream, 10) // 10ms keepalive interval
+    // Consume live: the pump is demand-driven, so keepalives only flow while
+    // a client is actually reading — an unread queue gets none (by design).
+    const collected = collect(out)
     push("hello") // first real chunk
     await sleep(70) // several 10ms intervals elapse in the silence AFTER it
     close()
-    const text = await collect(out)
+    const text = await collected
     expect(text).toContain("hello")
     const keepalives = (text.match(/: keepalive/g) ?? []).length
     // Old behavior stopped keepalives forever after the first byte (0 here).
@@ -264,5 +267,50 @@ describe("streamWithEagerProducer", () => {
     expect(text).toContain("first")
     expect(text).toContain("STALL")
     expect(reasons).toEqual(["idle_timeout"])
+  })
+})
+
+describe("backpressure — demand-driven pumps", () => {
+  /** Upstream that serves a counted frame per pull, up to `total`. */
+  function countingUpstream(total: number): {
+    stream: ReadableStream<Uint8Array>
+    served: () => number
+  } {
+    let served = 0
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (served >= total) {
+          controller.close()
+          return
+        }
+        served++
+        controller.enqueue(encoder.encode(`chunk-${served}\n`))
+      },
+    })
+    return { stream, served: () => served }
+  }
+
+  it("streamWithKeepalive does not drain upstream ahead of client demand", async () => {
+    const { stream, served } = countingUpstream(20)
+    const reader = streamWithKeepalive(stream, 10_000).getReader()
+    await reader.read()
+    // Let any stray eager pumping run — the pump must be parked on demand,
+    // not buffering the remaining upstream into the wrapper queue.
+    await sleep(10)
+    expect(served()).toBeLessThan(6)
+    await reader.cancel()
+  })
+
+  it("pipeUpstream does not drain upstream ahead of client demand", async () => {
+    const { stream, served } = countingUpstream(20)
+    const out = streamWithEagerProducer(async (ctl) => {
+      await ctl.pipeUpstream(stream)
+    }, 10_000)
+    const reader = out.getReader()
+    await reader.read()
+    await sleep(10)
+    expect(served()).toBeLessThan(6)
+    await reader.cancel()
   })
 })

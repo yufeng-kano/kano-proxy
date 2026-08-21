@@ -331,6 +331,36 @@ describe("geminiResponseToAnthropic", () => {
     ])
   })
 
+  it("carries a functionCall-attached signature on the adjacent thinking block", () => {
+    const out = geminiResponseToAnthropic(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: { id: "t1", name: "search", args: {} },
+                    thoughtSignature: "sig-fc",
+                  },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+    )
+    // Anthropic tool_use has no signature field, so the signature rides on a
+    // signature-only thinking block right before it — the replay path turns
+    // that back into a signed thought part.
+    expect(out.content).toEqual([
+      { type: "thinking", thinking: "", signature: "sig-fc" },
+      { type: "tool_use", id: "t1", name: "search", input: {} },
+    ])
+  })
+
   it("maps a SAFETY finish to a refusal, not a successful end_turn", () => {
     const out = geminiResponseToAnthropic(
       { response: { candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }] } },

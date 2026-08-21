@@ -41,6 +41,9 @@ type OpenAIMessage = {
     id?: string
     type?: string
     function?: { name?: string; arguments?: string }
+    /** Proxy extension: `thoughtSignature` Gemini attached to this
+     *  functionCall part, echoed back verbatim on replay. */
+    thought_signature?: unknown
   }>
   tool_call_id?: string
   name?: string
@@ -178,7 +181,14 @@ function messagesToGemini(messages: unknown[]): {
             args = {}
           }
         }
-        parts.push({ functionCall: { ...(id ? { id } : {}), name, args } })
+        parts.push({
+          functionCall: { ...(id ? { id } : {}), name, args },
+          // Gemini can sign the functionCall part itself; the echoed
+          // extension restores the signature exactly where it came from.
+          ...(typeof call.thought_signature === "string" && call.thought_signature
+            ? { thoughtSignature: call.thought_signature }
+            : {}),
+        })
       }
       pushContent(contents, "model", parts)
     }
@@ -280,6 +290,10 @@ export type OpenAIToolCall = {
   index: number
   type: "function"
   function: { name: string; arguments: string }
+  /** Proxy extension: `thoughtSignature` Gemini attached to this functionCall
+   *  part — the client echoes it back on the assistant history message
+   *  (docs/providers.md § Antigravity "Thinking"). */
+  thought_signature?: string
 }
 
 function toolCallFromPart(part: GeminiPart, index: number): OpenAIToolCall | null {
@@ -292,6 +306,7 @@ function toolCallFromPart(part: GeminiPart, index: number): OpenAIToolCall | nul
     index,
     type: "function",
     function: { name: call.name, arguments: JSON.stringify(call.args ?? {}) },
+    ...(part.thoughtSignature ? { thought_signature: part.thoughtSignature } : {}),
   }
 }
 

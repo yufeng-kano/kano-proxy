@@ -227,6 +227,17 @@ export function sanitizeJsonSchema(schema: unknown): unknown {
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
     if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue
+    // `properties` maps arbitrary *property names* to schemas — the names are
+    // not schema keywords, so a property that happens to be called "title" or
+    // "default" must survive while its schema value is still sanitized.
+    if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+      const properties: Record<string, unknown> = {}
+      for (const [name, sub] of Object.entries(value as Record<string, unknown>)) {
+        properties[name] = sanitizeJsonSchema(sub)
+      }
+      out[key] = properties
+      continue
+    }
     out[key] = sanitizeJsonSchema(value)
   }
   return out

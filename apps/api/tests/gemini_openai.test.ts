@@ -202,6 +202,67 @@ describe("openaiToGeminiRequest", () => {
     })
   })
 
+  it("keeps a tool property that shares its name with a stripped schema keyword", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "annotate",
+              parameters: {
+                type: "object",
+                properties: {
+                  // Property *names* are not schema keywords — a field the
+                  // user happened to call "title" or "default" must survive.
+                  title: { type: "string", title: "Label" },
+                  default: { type: "boolean" },
+                },
+                required: ["title"],
+              },
+            },
+          },
+        ],
+      }),
+    )
+    const declaration = (out.tools![0]!.functionDeclarations as Array<Record<string, unknown>>)[0]!
+    expect(declaration.parameters).toEqual({
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        default: { type: "boolean" },
+      },
+      required: ["title"],
+    })
+  })
+
+  it("carries a tool call's thought_signature back as the part's thoughtSignature", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          { role: "user", content: "go" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "search", arguments: "{}" },
+                thought_signature: "sig-fc",
+              },
+            ],
+          } as never,
+          { role: "tool", tool_call_id: "call_1", content: "{}" },
+        ],
+      }),
+    )
+    expect(out.contents[1]!.parts![0]).toEqual({
+      functionCall: { id: "call_1", name: "search", args: {} },
+      thoughtSignature: "sig-fc",
+    })
+  })
+
   it("maps reasoning_effort to thinkingConfig and asks for the thoughts back", () => {
     expect(openaiToGeminiRequest(req({ reasoning_effort: "medium" })).generationConfig)
       .toMatchObject({ thinkingConfig: { thinkingLevel: "medium", includeThoughts: true } })
@@ -369,6 +430,33 @@ describe("geminiResponseToOpenAI", () => {
     const choice = (out.choices as Array<Record<string, unknown>>)[0]
     expect(choice.finish_reason).toBe("content_filter")
     expect((choice.message as Record<string, unknown>).content).toBeNull()
+  })
+
+  it("exposes a signature attached to the functionCall part on the tool call", () => {
+    const out = geminiResponseToOpenAI(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    functionCall: { id: "fc1", name: "search", args: {} },
+                    thoughtSignature: "sig-fc",
+                  },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+    )
+    const call = ((out.choices as Array<Record<string, unknown>>)[0].message as {
+      tool_calls: Array<Record<string, unknown>>
+    }).tool_calls[0]!
+    expect(call.thought_signature).toBe("sig-fc")
   })
 
   it("maps a SAFETY finish to content_filter, not a successful stop", () => {

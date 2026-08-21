@@ -54,7 +54,14 @@ export function streamWithKeepalive(
   let closeFired = false
   let keepaliveTimer: ReturnType<typeof setInterval> | undefined
   let idleTimer: ReturnType<typeof setTimeout> | undefined
+  /** Resolved by `pull()` — the pump parks on this while the client is not consuming. */
+  let demandWaiter: (() => void) | null = null
 
+  const signalDemand = () => {
+    const waiter = demandWaiter
+    demandWaiter = null
+    waiter?.()
+  }
   const clearKeepalive = () => {
     if (keepaliveTimer) {
       clearInterval(keepaliveTimer)
@@ -77,93 +84,120 @@ export function streamWithKeepalive(
     }
   }
 
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      let idleTimedOut = false
-      const armKeepalive = () => {
-        keepaliveTimer = setInterval(() => {
-          try {
-            controller.enqueue(sseKeepaliveComment())
-          } catch {
-            /* closed */
-          }
-        }, intervalMs)
-      }
-      const armIdle = () => {
-        if (!opts?.idleTimeoutMs) return
-        idleTimer = setTimeout(() => {
-          if (closeFired) return
-          idleTimedOut = true
-          clearKeepalive()
-          try {
-            if (opts?.stallFrame) controller.enqueue(opts.stallFrame)
-          } catch {
-            /* closed */
-          }
-          try {
-            controller.close()
-          } catch {
-            /* already closed */
-          }
-          closed = true
-          reader.cancel().catch(() => {})
-          fireClose("idle_timeout")
-        }, opts.idleTimeoutMs)
-      }
+  // The pump runs detached from start() — pull() is never invoked while
+  // start()'s promise is pending, so a pump awaited inside start() could
+  // never observe downstream demand and would buffer the whole upstream.
+  const pump = async (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    let idleTimedOut = false
+    const armKeepalive = () => {
+      keepaliveTimer = setInterval(() => {
+        try {
+          controller.enqueue(sseKeepaliveComment())
+        } catch {
+          /* closed */
+        }
+      }, intervalMs)
+    }
+    const armIdle = () => {
+      if (!opts?.idleTimeoutMs) return
+      idleTimer = setTimeout(() => {
+        if (closeFired) return
+        idleTimedOut = true
+        clearKeepalive()
+        try {
+          if (opts?.stallFrame) controller.enqueue(opts.stallFrame)
+        } catch {
+          /* closed */
+        }
+        try {
+          controller.close()
+        } catch {
+          /* already closed */
+        }
+        closed = true
+        reader.cancel().catch(() => {})
+        signalDemand()
+        fireClose("idle_timeout")
+      }, opts.idleTimeoutMs)
+    }
 
-      armKeepalive()
-      armIdle()
-      try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (idleTimedOut) break
-          // The wait is over — the silence gap ends here whether this was a
-          // real chunk or natural EOF, so both timers reset.
+    armKeepalive()
+    armIdle()
+    try {
+      for (;;) {
+        // Demand gate: while the client is not consuming, stop reading
+        // upstream so backpressure propagates instead of the remaining
+        // generation buffering here. Timers pause with the pump — a client
+        // stall is not an upstream silence gap.
+        if (!closed && controller.desiredSize !== null && controller.desiredSize <= 0) {
           clearKeepalive()
           clearIdle()
-          if (done) break
-          if (value) {
-            controller.enqueue(value)
-            if (opts?.tap) {
-              try {
-                opts.tap(value)
-              } catch {
-                /* capture must never break the stream */
-              }
-            }
-          }
-          // Re-arm for the next gap — keepalive and idle timeout both cover
-          // the whole stream lifetime, not just the time before first byte.
+          await new Promise<void>((resolve) => {
+            demandWaiter = resolve
+          })
+          if (closed || idleTimedOut) break
           armKeepalive()
           armIdle()
         }
-        if (!idleTimedOut) {
-          controller.close()
-          fireClose("done")
-        }
-      } catch (e) {
-        if (!idleTimedOut) {
-          controller.error(e)
-          fireClose("error")
-        }
-      } finally {
+        if (closed) break
+        const { done, value } = await reader.read()
+        if (idleTimedOut || closed) break
+        // The wait is over — the silence gap ends here whether this was a
+        // real chunk or natural EOF, so both timers reset.
         clearKeepalive()
         clearIdle()
-        if (!closed) {
-          closed = true
-          try {
-            reader.releaseLock()
-          } catch {
-            /* */
+        if (done) break
+        if (value) {
+          controller.enqueue(value)
+          if (opts?.tap) {
+            try {
+              opts.tap(value)
+            } catch {
+              /* capture must never break the stream */
+            }
           }
         }
+        // Re-arm for the next gap — keepalive and idle timeout both cover
+        // the whole stream lifetime, not just the time before first byte.
+        armKeepalive()
+        armIdle()
       }
+      if (!idleTimedOut && !closed) {
+        controller.close()
+        fireClose("done")
+      }
+    } catch (e) {
+      if (!idleTimedOut && !closed) {
+        controller.error(e)
+        fireClose("error")
+      }
+    } finally {
+      clearKeepalive()
+      clearIdle()
+      if (!closed) {
+        closed = true
+        try {
+          reader.releaseLock()
+        } catch {
+          /* */
+        }
+      }
+    }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      void pump(controller)
+    },
+    pull() {
+      signalDemand()
     },
     cancel() {
       closed = true
       clearKeepalive()
       clearIdle()
       reader.cancel().catch(() => {})
+      signalDemand()
       fireClose("cancel")
     },
   })
@@ -210,7 +244,14 @@ export function streamWithEagerProducer(
   let keepaliveTimer: ReturnType<typeof setInterval> | undefined
   let idleTimer: ReturnType<typeof setTimeout> | undefined
   let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
+  /** Resolved by `pull()` — `pipeUpstream` parks on this while the client is not consuming. */
+  let demandWaiter: (() => void) | null = null
 
+  const signalDemand = () => {
+    const waiter = demandWaiter
+    demandWaiter = null
+    waiter?.()
+  }
   const clearKeepalive = () => {
     if (keepaliveTimer) {
       clearInterval(keepaliveTimer)
@@ -233,8 +274,10 @@ export function streamWithEagerProducer(
     }
   }
 
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
+  // The producer runs detached from start() — pull() is never invoked while
+  // start()'s promise is pending, so awaiting `run` inside start() would make
+  // `pipeUpstream` blind to downstream demand and buffer the whole upstream.
+  const produce = async (controller: ReadableStreamDefaultController<Uint8Array>) => {
       const armKeepalive = () => {
         clearKeepalive()
         keepaliveTimer = setInterval(() => {
@@ -318,6 +361,7 @@ export function streamWithEagerProducer(
               }
               closed = true
               reader.cancel().catch(() => {})
+              signalDemand()
               fireClose("idle_timeout")
             }, pipeOpts.idleTimeoutMs)
           }
@@ -329,6 +373,20 @@ export function streamWithEagerProducer(
           try {
             for (;;) {
               if (cancelled || closed) break
+              // Demand gate: while the client is not consuming, stop reading
+              // upstream so backpressure propagates instead of the remaining
+              // generation buffering here. Timers pause with the pump — a
+              // client stall is not an upstream silence gap.
+              if (controller.desiredSize !== null && controller.desiredSize <= 0) {
+                clearKeepalive()
+                clearIdle()
+                await new Promise<void>((resolve) => {
+                  demandWaiter = resolve
+                })
+                if (cancelled || closed || idleTimedOut) break
+                armKeepalive()
+                armIdle()
+              }
               const { done, value } = await reader.read()
               if (idleTimedOut || closed) break
               clearKeepalive()
@@ -426,6 +484,14 @@ export function streamWithEagerProducer(
           }
         }
       }
+  }
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      void produce(controller)
+    },
+    pull() {
+      signalDemand()
     },
     cancel() {
       cancelled = true
@@ -435,6 +501,7 @@ export function streamWithEagerProducer(
         upstreamReader.cancel().catch(() => {})
       }
       closed = true
+      signalDemand()
       fireClose("cancel")
     },
   })
