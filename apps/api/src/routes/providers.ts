@@ -2,11 +2,17 @@ import { Hono } from "hono"
 import type { HonoEnv } from "../auth/session"
 import { loadSessionUser } from "../auth/session"
 import {
+  ANTIGRAVITY_OAUTH,
+  antigravityOAuthClient,
+  beginAntigravityAuthorization,
   beginClaudeAuthorization,
   CODEX_DEVICE_AUTH,
+  exchangeAntigravityCode,
   exchangeClaudeCode,
   extractChatgptAccountId,
   extractJwtExpiryIso,
+  parseAntigravityCallback,
+  type PendingAntigravityOAuth,
   type PendingOAuth,
 } from "../auth/provider_oauth"
 import { parseCodeHashState } from "../auth/pkce"
@@ -23,7 +29,9 @@ import {
 } from "../db/accounts"
 import { getProviderStrategy, setProviderStrategy } from "../db/provider_settings"
 import { DEFAULT_STRATEGY } from "../routing/strategy"
+import { bootstrapAntigravityProject } from "../providers/antigravity"
 import {
+  fetchAntigravityIdentity,
   fetchClaudeIdentity,
   fetchCodexIdentity,
   fetchGrokIdentity,
@@ -413,6 +421,40 @@ providerRoutes.post("/:provider/login", async (c) => {
     })
   }
 
+  if (provider === "antigravity") {
+    // Unlike the other three, this provider ships with no built-in client:
+    // it needs an OAuth client *secret*, which is never committed here
+    // (docs/auth.md § Antigravity). Refuse plainly instead of starting a flow
+    // that cannot finish.
+    const configured = antigravityOAuthClient(c.env)
+    if (!configured) {
+      return c.json(
+        {
+          error:
+            "Antigravity is not configured on this deploy: set ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET.",
+        },
+        400,
+      )
+    }
+    // Google only accepts this client's own registered localhost redirect, so
+    // the proxy cannot host a callback: the user approves, lands on a page that
+    // does not load, and pastes the URL (or the bare code) back. Same paste UX
+    // as claude-code — see docs/auth.md § Antigravity.
+    const { authorizationUrl, pending } = beginAntigravityAuthorization(configured.clientId)
+    await c.env.DB.prepare(
+      `INSERT INTO oauth_login_states (id, kind, user_id, provider, payload_json, expires_at, created_at)
+       VALUES (?, 'provider', ?, ?, ?, ?, ?)`,
+    )
+      .bind(loginId, user.id, provider, JSON.stringify(pending), expires, nowIso())
+      .run()
+    return c.json({
+      login_id: loginId,
+      authorization_url: authorizationUrl,
+      instructions:
+        "Open authorization_url, approve, then paste the localhost callback URL (or just its code) from the browser.",
+    })
+  }
+
   if (provider === "grok") {
     const clientId = c.env.GROK_OAUTH_CLIENT_ID || "b1a00492-073a-47ea-816f-4c329264a828"
     const deviceRes = await fetch("https://auth.x.ai/oauth2/device/code", {
@@ -672,6 +714,77 @@ providerRoutes.post("/:provider/login/:id/complete", async (c) => {
           email: identity.email,
           plan_type: identity.plan,
           account_id: accountId,
+        }),
+      })
+      await c.env.DB.prepare(`DELETE FROM oauth_login_states WHERE id = ?`)
+        .bind(stateRow.id)
+        .run()
+      return c.json({ ok: true, token_id: row.id, label })
+    } catch (e) {
+      return c.json({ error: e instanceof Error ? e.message : "complete failed" }, 400)
+    }
+  }
+
+  if (provider === "antigravity") {
+    try {
+      const { code, state } = parseAntigravityCallback(raw)
+      const stateRow = await loadPendingLogin(c.env, {
+        userId: user.id,
+        provider,
+        loginId,
+        oauthState: state ?? undefined,
+      })
+      if (!stateRow) return c.json({ error: "login expired; start again" }, 400)
+      const configured = antigravityOAuthClient(c.env)
+      if (!configured) {
+        return c.json({ error: "Antigravity is not configured on this deploy." }, 400)
+      }
+      const pending = JSON.parse(stateRow.payload_json) as PendingAntigravityOAuth
+      const tok = await exchangeAntigravityCode({
+        code,
+        returnedState: state,
+        pending,
+        clientSecret: configured.clientSecret,
+      })
+      const identity = await fetchAntigravityIdentity(tok.access_token)
+      const label = pickAccountLabel({
+        email: identity.email,
+        displayName: identity.displayName,
+        fallback: "antigravity",
+      })
+      // Resolve the CloudCode project once, here, so the dispatch path never
+      // pays for loadCodeAssist/onboardUser (docs/providers.md § Antigravity).
+      // A failure must not lose the tokens the user just approved — the
+      // adapter retries the bootstrap on first use.
+      let project: { projectId: string; tierId: string | null } | null = null
+      try {
+        project = await bootstrapAntigravityProject(c.env, tok.access_token)
+      } catch {
+        project = null
+      }
+      const credential: StoredCredential = {
+        access_token: tok.access_token,
+        refresh_token: tok.refresh_token ?? null,
+        expires_at: tok.expires_in
+          ? new Date(Date.now() + tok.expires_in * 1000).toISOString()
+          : null,
+        client_id: pending.client_id,
+        token_endpoint: ANTIGRAVITY_OAUTH.tokenUrl,
+        email: identity.email,
+        ...(project
+          ? { extra: { project_id: project.projectId, tier_id: project.tierId } }
+          : {}),
+      }
+      const encrypted = await encryptJson(c.env.TOKEN_ENCRYPTION_KEY, credential)
+      const row = await insertAccount(c.env.DB, {
+        userId: user.id,
+        provider,
+        encryptedPayload: encrypted,
+        label,
+        accountMetaJson: JSON.stringify({
+          email: identity.email,
+          display_name: identity.displayName,
+          plan_type: project?.tierId ?? null,
         }),
       })
       await c.env.DB.prepare(`DELETE FROM oauth_login_states WHERE id = ?`)

@@ -65,7 +65,26 @@ function earliestExhaustedWindowResetMs(account: AccountRow, now: number): numbe
   return earliest
 }
 
+/**
+ * Proxy-internal reset hint (epoch ms), for adapters whose upstream states the
+ * reset in the **body** rather than a header — antigravity's 429 carries a
+ * `RetryInfo` detail, and only its adapter can classify quota exhaustion apart
+ * from a transient throttle (docs/providers.md § Antigravity). Set by an
+ * adapter on the Response it hands back; no upstream ever sends it, so this
+ * cannot change what the other providers already do.
+ */
+export const RATELIMIT_RESET_HINT_HEADER = "x-kano-ratelimit-reset"
+
+function resetHintHeaderMs(headers: Headers): number | null {
+  const raw = headers.get(RATELIMIT_RESET_HINT_HEADER)
+  if (!raw) return null
+  const at = Number(raw)
+  return Number.isFinite(at) ? at : null
+}
+
 function rateLimitCooldownMs(headers: Headers, account: AccountRow, now: number): number {
+  const hintMs = resetHintHeaderMs(headers)
+  if (hintMs !== null) return clampCooldown(hintMs - now)
   const headerMs = rateLimitResetHeaderMs(headers)
   if (headerMs !== null) return clampCooldown(headerMs - now)
   const snapshotMs = earliestExhaustedWindowResetMs(account, now)

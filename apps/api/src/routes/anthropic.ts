@@ -9,6 +9,23 @@ import { dispatchAnthropicMessages, dispatchAnthropicViaOpenAI } from "../proxy/
 import { detectAnthropicToolLoop, loopDetectedMessage } from "../utils/loop_guard"
 import { loggingProviderFromRawModel } from "../utils/model"
 
+/**
+ * Builtins that expose `adapter.messages` but **convert** to a non-Anthropic
+ * upstream format rather than passing the body through: grok → xAI Responses,
+ * antigravity → Gemini `GenerateContent`. Everything else with a `messages()`
+ * (claude-code, custom anthropic-format) is a true native passthrough, which
+ * is what decides `cache_control` handling and whether the tool-loop guard
+ * runs (docs/api.md "Degenerate tool-call loop guard").
+ */
+const CONVERTING_MESSAGES_PROVIDERS: ReadonlySet<string> = new Set(["grok", "antigravity"])
+
+export function isNativeAnthropicPassthrough(
+  provider: string,
+  hasMessages: boolean,
+): boolean {
+  return hasMessages && !CONVERTING_MESSAGES_PROVIDERS.has(provider)
+}
+
 export const anthropicRoutes = new Hono<HonoEnv>()
 
 anthropicRoutes.use("*", apiKeyAuth)
@@ -75,16 +92,18 @@ anthropicRoutes.post("/v1/messages", async (c) => {
   }
 
   // claude-code / custom anthropic-format: native Messages passthrough.
-  // grok also exposes adapter.messages, but that path converts to Responses —
-  // not Claude-native passthrough — so the loop guard still applies below.
+  // grok and antigravity also expose adapter.messages, but those paths convert
+  // to another wire format, so the loop guard still applies below.
   // Decided from the highest-priority resolved target only — a structural,
   // not usability-based, property (routing/candidates.ts `primary`); a
   // later, differently-shaped target within the same group simply can't be
   // reached by this call shape (docs/providers.md § Routing module).
-  const isNativeAnthropicPassthrough =
-    !!resolved.primary.adapter.messages && resolved.primary.provider !== "grok"
+  const nativePassthrough = isNativeAnthropicPassthrough(
+    resolved.primary.provider,
+    !!resolved.primary.adapter.messages,
+  )
 
-  if (isNativeAnthropicPassthrough) {
+  if (nativePassthrough) {
     // Only normalize model to the bare upstream id — strict cache_control
     // passthrough, do not touch other body fields.
     const upstreamBody = { ...body, model: resolved.primary.upstreamModel }
@@ -138,8 +157,13 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     )
   }
 
-  // grok: Anthropic ↔ Responses (encrypted reasoning). Not Chat Completions.
-  if (resolved.primary.provider === "grok" && resolved.primary.adapter.messages) {
+  // grok (Anthropic ↔ xAI Responses, encrypted reasoning) and antigravity
+  // (Anthropic ↔ Gemini) both convert inside their own `messages()`, so they
+  // dispatch through the Messages path rather than the Chat Completions one.
+  if (
+    CONVERTING_MESSAGES_PROVIDERS.has(resolved.primary.provider) &&
+    resolved.primary.adapter.messages
+  ) {
     const upstreamBody = { ...body, model: resolved.primary.upstreamModel }
     const headers = new Headers()
     // Strip any client-supplied isolation headers; only the route may set them.
@@ -270,15 +294,18 @@ const COUNT_TOKENS_UNSUPPORTED = {
   type: "error",
   error: {
     type: "invalid_request_error",
-    message: "count_tokens is only supported for claude-code models",
+    message: "count_tokens is only supported for claude-code and antigravity models",
   },
 } as const
 
 /**
- * count_tokens has no grok/codex Chat Completions equivalent to convert to —
- * claude-code only. Exported as a pure function for unit testing.
+ * count_tokens needs a real upstream token count to forward to; grok and codex
+ * have no such endpoint on their Chat Completions/Responses surfaces, so they
+ * are rejected rather than answered with a local estimate. claude-code
+ * forwards natively; antigravity converts the body to Gemini and calls
+ * `v1internal:countTokens`. Exported as a pure function for unit testing.
  */
 export function countTokensProviderError(provider: ProviderId): Record<string, unknown> | null {
-  if (provider === "claude-code") return null
+  if (provider === "claude-code" || provider === "antigravity") return null
   return COUNT_TOKENS_UNSUPPORTED
 }

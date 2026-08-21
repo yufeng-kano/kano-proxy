@@ -1,4 +1,5 @@
 import type { ProviderId } from "../env"
+import { antigravityAdapter } from "./antigravity"
 import { claudeCodeAdapter } from "./claude-code"
 import { codexAdapter } from "./codex"
 import { grokAdapter } from "./grok"
@@ -8,6 +9,7 @@ const adapters: Record<ProviderId, ProviderAdapter> = {
   "claude-code": claudeCodeAdapter,
   codex: codexAdapter,
   grok: grokAdapter,
+  antigravity: antigravityAdapter,
 }
 
 export function getAdapter(provider: ProviderId): ProviderAdapter {

@@ -63,6 +63,9 @@ const CEILING: Record<ProviderId, ReasoningEffort> = {
   grok: "xhigh",
   codex: "xhigh",
   "claude-code": "max",
+  // Gemini `thinkingLevel` tops out at `high` (CLIProxyAPI's antigravity
+  // model registry lists minimal/low/medium/high and nothing above it).
+  antigravity: "high",
 }
 
 function clampToCeiling(provider: ProviderId, effort: ReasoningEffort): ReasoningEffort {
@@ -82,6 +85,8 @@ export function mapReasoning(
   // Claude Messages
   output_config?: { effort: string }
   thinking?: { type: "disabled" }
+  // Antigravity / Gemini generationConfig
+  thinkingConfig?: { thinkingLevel: string } | { thinkingBudget: number }
 } {
   if (effort === undefined) return {}
   const capped = clampToCeiling(provider, effort)
@@ -93,6 +98,13 @@ export function mapReasoning(
   if (provider === "codex") {
     if (capped === "none") return {}
     return { reasoning: { effort: capped, summary: "auto" } }
+  }
+
+  if (provider === "antigravity") {
+    // Gemini's own off switch is a zero budget, not a level — `thinkingLevel`
+    // has no "none" token (CLIProxyAPI thinking/provider/antigravity/apply.go).
+    if (capped === "none") return { thinkingConfig: { thinkingBudget: 0 } }
+    return { thinkingConfig: { thinkingLevel: capped } }
   }
 
   // claude-code: effort-only public API; map none → disabled thinking + low effort

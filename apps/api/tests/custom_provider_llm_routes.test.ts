@@ -247,7 +247,7 @@ describe("custom provider routing — /anthropic/v1/messages/count_tokens", () =
       type: "error",
       error: {
         type: "invalid_request_error",
-        message: "count_tokens is only supported for claude-code models",
+        message: "count_tokens is only supported for claude-code and antigravity models",
       },
     })
   })

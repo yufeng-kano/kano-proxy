@@ -12,6 +12,7 @@ export const RESERVED_SLUGS = new Set([
   "claude-code",
   "codex",
   "grok",
+  "antigravity",
   "openai",
   "anthropic",
   "claude",

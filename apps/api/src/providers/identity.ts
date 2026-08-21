@@ -78,6 +78,26 @@ export async function fetchGrokIdentity(accessToken: string): Promise<{
   }
 }
 
+/** Google userinfo — the only identity Antigravity's scopes expose. */
+export async function fetchAntigravityIdentity(accessToken: string): Promise<{
+  email: string | null
+  displayName: string | null
+}> {
+  try {
+    const res = await fetch("https://www.googleapis.com/oauth2/v2/userinfo?alt=json", {
+      headers: { authorization: `Bearer ${accessToken}`, accept: "application/json" },
+    })
+    if (!res.ok) return { email: null, displayName: null }
+    const json = (await res.json()) as { email?: string; name?: string }
+    return {
+      email: json.email ?? null,
+      displayName: json.name ?? null,
+    }
+  } catch {
+    return { email: null, displayName: null }
+  }
+}
+
 function emailFromJwt(accessToken: string): string | null {
   try {
     const mid = accessToken.split(".")[1]
