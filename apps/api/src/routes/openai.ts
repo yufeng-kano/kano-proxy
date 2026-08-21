@@ -3,6 +3,7 @@ import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
 import { logRequest } from "../logging/request_log"
+import { isNativeAnthropicPassthrough } from "./anthropic"
 import { resolveCandidates } from "../routing/candidates"
 import { dispatchChatCompletions } from "../proxy/dispatch"
 import { detectOpenAIToolLoop, loopDetectedMessage } from "../utils/loop_guard"
@@ -75,15 +76,17 @@ openaiRoutes.post("/chat/completions", async (c) => {
     )
   }
 
-  // Loop guard applies on conversion ingress (grok / codex / custom-openai);
-  // never on native Anthropic passthrough adapters (claude-code /
-  // custom-anthropic). grok exposes `messages()` for the /anthropic →
-  // Responses path, but /openai/v1 still uses chatCompletions — keep it
-  // guarded (docs/api.md "Degenerate tool-call loop guard"). Decided from
-  // the highest-priority resolved target only — a structural, not
-  // usability-based, property (routing/candidates.ts `primary`).
-  const nativeAnthropicPassthrough =
-    !!resolved.primary.adapter.messages && resolved.primary.provider !== "grok"
+  // Loop guard applies on conversion ingress (grok / codex / antigravity /
+  // custom-openai); never on native Anthropic passthrough adapters
+  // (claude-code / custom-anthropic). grok and antigravity expose `messages()`
+  // for their /anthropic conversion paths, but /openai/v1 still uses
+  // chatCompletions — keep them guarded (docs/api.md "Degenerate tool-call
+  // loop guard"). Decided from the highest-priority resolved target only — a
+  // structural, not usability-based, property (routing/candidates.ts `primary`).
+  const nativeAnthropicPassthrough = isNativeAnthropicPassthrough(
+    resolved.primary.provider,
+    !!resolved.primary.adapter.messages,
+  )
   if (!nativeAnthropicPassthrough) {
     const loop = detectOpenAIToolLoop((body.messages as unknown[]) ?? [])
     if (loop.tripped) {

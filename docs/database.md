@@ -48,7 +48,7 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | |
-| provider | TEXT | builtin `claude-code` \| `codex` \| `grok`, **or** a custom provider's `slug` (see `custom_providers` below) |
+| provider | TEXT | builtin `claude-code` \| `codex` \| `grok` \| `antigravity`, **or** a custom provider's `slug` (see `custom_providers` below) |
 | external_account_id | TEXT | nullable; upstream account id when known (e.g. codex's ChatGPT account id) |
 | label | TEXT | email or display, **synced from upstream** on every accounts read — not user-editable |
 | custom_label | TEXT | nullable; the operator's own name for this account. Wins over `label` for display and is **never** overwritten by the upstream sync (`0005_account_custom_label.sql`) |
@@ -94,6 +94,8 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 `sort_order` is **display only** — it never affects routing, pooling, or failover (a custom provider is selected by slug, not by list position; within-provider key priority stays in `upstream_accounts.priority`). Backfilled by `created_at ASC` so existing lists keep their current visual order. Reads sort `ORDER BY sort_order ASC, created_at ASC`, so ties and a all-zero legacy table degrade to the old behavior. Writes renumber the user's full list to a dense `0..n-1` sequence in one transaction rather than patching single rows; a create appends at the end.
 
 `UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-KV-bench convention as `upstream_accounts`, over that provider's account row(s).
+
+**Slug reservation vs. existing rows.** When a slug later becomes a builtin provider id, reserving it only blocks *new* creates — an already-stored custom provider under that slug would be shadowed by the builtin lookup and become unreachable. `0013_rename_custom_antigravity_slug.sql` is the pattern: a data migration renames the stored slug (`antigravity` → `antigravity-custom`) and rewrites everything keyed by it in the same step (`upstream_accounts.provider`, `provider_settings.provider`, `model_groups.targets_json` prefixes). A user who already owns the target slug falls through to `antigravity-custom-2`, then `-3` — static passes because the targets_json rewrite is a string replace that must know the exact replacement. Each pass first deletes an *orphaned* `provider_settings` row under its target name (deleting a custom provider leaves that row behind as inert data, and it would collide with the `(user_id, provider)` primary key on rename). `request_logs.provider` is left as history.
 
 ### `model_groups`
 

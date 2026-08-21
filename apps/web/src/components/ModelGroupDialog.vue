@@ -91,6 +91,7 @@ const NAME_KEY: Record<ProviderId, MessageKey> = {
   "claude-code": "provider.claude-code.name",
   codex: "provider.codex.name",
   grok: "provider.grok.name",
+  antigravity: "provider.antigravity.name",
 }
 
 /**

@@ -2,17 +2,20 @@
 /**
  * Connect one upstream subscription account.
  *
- * Two OAuth shapes behind one dialog: Claude Code opens a sign-in page and the
- * user pastes the code Anthropic hands them, while Codex and Grok are device
- * flows the app polls until the user approves elsewhere. The manual-token step
- * is the escape hatch for credentials the user already holds.
+ * Two OAuth shapes behind one dialog. Claude Code and Antigravity open a
+ * sign-in page and the user pastes back what the provider hands them — a code
+ * for Claude, the dead localhost callback address for Antigravity, whose
+ * client will not accept a redirect this proxy could host (docs/auth.md).
+ * Codex and Grok are device flows the app polls until the user approves
+ * elsewhere. The manual-token step is the escape hatch for credentials the
+ * user already holds.
  *
  * Focus trap, Escape, and the mobile bottom sheet all come from Modal — this
  * component owns only the flow.
  */
 import { computed, onUnmounted, ref } from "vue"
 import { useI18n } from "@/i18n"
-import { completeLogin, importAccount, startLogin } from "@/services/api"
+import { ApiError, completeLogin, importAccount, startLogin } from "@/services/api"
 import type { ProviderId } from "@/types"
 import AppButton from "./ui/AppButton.vue"
 import Banner from "./ui/Banner.vue"
@@ -25,7 +28,10 @@ const emit = defineEmits<{ close: []; added: [] }>()
 
 const { t } = useI18n()
 
-type Step = "idle" | "claude" | "device" | "import"
+/** `paste` covers both authorize-then-paste providers; the copy differs, the flow does not. */
+type Step = "idle" | "paste" | "device" | "import"
+
+const PASTE_PROVIDERS: ReadonlySet<string> = new Set(["claude-code", "antigravity"])
 
 const step = ref<Step>("idle")
 const busy = ref(false)
@@ -47,8 +53,21 @@ const title = computed(() =>
     : t("addAccount.title", { provider: props.providerName }),
 )
 
-/** Claude Code is the only paste flow left: approve, then paste the code. */
-const claudeSteps = computed(() => [t("addAccount.claude.step1"), t("addAccount.claude.step2")])
+const pasteSteps = computed(() =>
+  props.provider === "antigravity"
+    ? [
+        t("addAccount.antigravity.step1"),
+        t("addAccount.antigravity.step2"),
+        t("addAccount.antigravity.step3"),
+      ]
+    : [t("addAccount.claude.step1"), t("addAccount.claude.step2")],
+)
+
+const pasteLabel = computed(() =>
+  props.provider === "antigravity"
+    ? t("addAccount.antigravity.label")
+    : t("addAccount.claude.label"),
+)
 
 function clearPoll() {
   if (pollTimer) {
@@ -67,8 +86,8 @@ async function beginOAuth() {
     const res = await startLogin(props.provider)
     loginId.value = res.login_id
 
-    if (props.provider === "claude-code") {
-      step.value = "claude"
+    if (PASTE_PROVIDERS.has(props.provider)) {
+      step.value = "paste"
       authUrl.value = res.authorization_url ?? null
       if (authUrl.value) window.open(authUrl.value, "_blank", "noopener")
     } else {
@@ -85,8 +104,16 @@ async function beginOAuth() {
         void pollDevice()
       }, intervalMs)
     }
-  } catch {
-    error.value = t("addAccount.error.start")
+  } catch (e) {
+    // A 400 here is the server refusing on a precondition it can name — today,
+    // Antigravity with no OAuth client configured. That sentence tells the
+    // operator what to set; "Couldn't start sign-in" tells them nothing and
+    // will keep telling them nothing on every retry. Anything else (network,
+    // 5xx) stays generic, same as before.
+    error.value =
+      e instanceof ApiError && e.status === 400 && e.message
+        ? e.message
+        : t("addAccount.error.start")
   } finally {
     busy.value = false
   }
@@ -100,6 +127,7 @@ async function submitPasteComplete() {
     const raw = pasteCode.value.trim()
     await completeLogin(props.provider, loginId.value, {
       // Claude: code#state from the Anthropic callback page.
+      // Antigravity: the whole localhost callback URL, or just its code.
       code: raw,
       value: raw,
     })
@@ -174,16 +202,16 @@ function backToStart() {
         <p class="lede">{{ t("addAccount.intro", { provider: providerName }) }}</p>
       </template>
 
-      <template v-else-if="step === 'claude'">
+      <template v-else-if="step === 'paste'">
         <ol class="steps">
-          <li v-for="(instruction, i) in claudeSteps" :key="i">{{ instruction }}</li>
+          <li v-for="(instruction, i) in pasteSteps" :key="i">{{ instruction }}</li>
         </ol>
 
         <AppButton v-if="authUrl" :href="authUrl">
           {{ t("addAccount.openAuth") }}
         </AppButton>
 
-        <FormField v-slot="field" :label="t('addAccount.claude.label')">
+        <FormField v-slot="field" :label="pasteLabel">
           <TextInput
             :id="field.id"
             v-model="pasteCode"
@@ -257,7 +285,7 @@ function backToStart() {
         </AppButton>
       </template>
 
-      <template v-else-if="step === 'claude'">
+      <template v-else-if="step === 'paste'">
         <AppButton variant="ghost" @click="emit('close')">{{ t("action.cancel") }}</AppButton>
         <AppButton
           variant="primary"

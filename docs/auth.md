@@ -94,6 +94,31 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 - Device-code flow in admin UI (poll until complete).
 - Multi-account store (extend beyond single-token local tools).
 
+### Antigravity
+
+Plain Google OAuth 2.0 authorization code flow with a **confidential** client. No PKCE — the client secret is required on the code exchange *and* on every refresh.
+
+- Authorize `https://accounts.google.com/o/oauth2/v2/auth` with `response_type=code`, `access_type=offline`, `prompt=consent`, `state`.
+- Token `https://oauth2.googleapis.com/token`, form-encoded, `client_id` + `client_secret` on both `authorization_code` and `refresh_token` grants. Google does **not** rotate the refresh token on this grant and omits it from the refresh response — keep the stored one rather than nulling it.
+- Scopes: `cloud-platform`, `userinfo.email`, `userinfo.profile`, `cclog`, `experimentsandconfigs`.
+- Identity: `GET https://www.googleapis.com/oauth2/v2/userinfo?alt=json` for the account label.
+- Refresh goes through the same per-account CAS single-flight every other provider uses ([providers.md](./providers.md) § OAuth refresh single-flight); the token endpoint is never called straight from a request path.
+
+**The redirect URI cannot be this proxy — verified, not assumed.** The client's only registered redirect is `http://localhost:51121/oauth-callback`. Probed 2026-08-22 with the same client id and an arbitrary `https://…` redirect, Google's authorize endpoint 302s to its error page with `invalid_request` and the text *"You can't sign in to this app because it doesn't comply with Google's OAuth 2.0 policy for keeping apps secure"*, naming the rejected `redirect_uri`. Registering our own is not possible either — the client belongs to Google, not to this project.
+
+So the flow is authorize-then-paste, like Claude Code: the user approves, the browser lands on a localhost address nothing is serving and shows a connection error, and they paste that whole URL (or just its `code` value) back into the dialog. `state` is carried in the URL and checked against the stored `oauth_login_states` row; a **bare code carries no state**, so that paste form has no CSRF binding of its own and is accepted only because the login row it completes is already session-scoped and single-use. The admin dialog tells the user the error page is expected — otherwise it reads as a failed sign-in.
+
+After the exchange, login resolves the account's CloudCode project once (`v1internal:loadCodeAssist`, falling back to `v1internal:onboardUser`) and stores the project and tier ids **inside the encrypted credential payload** — no new column, and nothing on the dispatch path pays for that lookup. A bootstrap failure does not lose the tokens the user just approved: the account is bound anyway and the adapter retries the bootstrap on first use.
+
+**The credential pair is not in this repo, and the provider is off until an operator supplies one.** `ANTIGRAVITY_OAUTH_CLIENT_ID` and `ANTIGRAVITY_OAUTH_CLIENT_SECRET` have **no built-in default** — with either unset, `POST /api/providers/antigravity/login` answers `400` naming the two variables instead of starting a flow that cannot finish, and the refresh path declines rather than burning a refresh token on a call that must fail. This differs from the other three providers, whose well-known CLI client ids are plain public identifiers with no secret attached.
+
+Two reasons, and the second is the load-bearing one:
+
+1. **Committing an OAuth client secret is forbidden here** regardless of how public it already is (see the project rules). GitHub's own push protection blocks it too.
+2. **The obvious pair is Google's, not ours.** The credential the Antigravity desktop app ships with (mirrored in CLIProxyAPI `internal/auth/antigravity/constants.go`) is extractable from a distributed binary, so it is not confidential in any meaningful sense — but it is still Google's credential, and using it to reach the CloudCode API from something that is not Antigravity is very likely outside Google's terms for that client and for the AI Pro / Ultra subscription. Making the operator paste it in is what puts that decision, and its consequences, with the person who owns the deployment.
+
+The endpoints themselves are undocumented and may change or be closed without notice. An operator with their own registered Google OAuth client can use it instead — but note the redirect constraint above applies to whatever client is configured: a client of your own can register a redirect you control, in which case the paste step is still what this proxy implements, and a hosted-callback flow would be a separate change.
+
 ### Management routes (session required)
 
 | Method | Path |
@@ -110,7 +135,7 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 | POST | `/api/providers/:provider/accounts/import` |
 | GET | `/api/providers/:provider/usage?refresh=` |
 
-`:provider` ∈ `claude-code` | `codex` | `grok`. `accounts/import` is a manual credential-ingest route (bootstrapping / tests) — same shape as a completed OAuth login, but the caller supplies `access_token` (and optional `refresh_token` / `expires_at` / `account_id` / `email` / `label`) directly instead of running the OAuth dance.
+`:provider` ∈ `claude-code` | `codex` | `grok` | `antigravity`. `accounts/import` is a manual credential-ingest route (bootstrapping / tests) — same shape as a completed OAuth login, but the caller supplies `access_token` (and optional `refresh_token` / `expires_at` / `account_id` / `email` / `label`) directly instead of running the OAuth dance.
 
 `PATCH /api/providers/:provider/accounts/:id` renames an account: body `{custom_label: string | null}`, trimmed, max 64 chars, `null`/`""` clears it and falls back to the upstream identity. It touches **only** `custom_label` — never tokens, priority, or the upstream-synced `label` (see [database.md](./database.md)) — and returns `{ok: true, custom_label}`. 404 when the id is not the caller's.
 

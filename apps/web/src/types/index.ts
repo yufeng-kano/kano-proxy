@@ -1,4 +1,4 @@
-export type ProviderId = "claude-code" | "codex" | "grok"
+export type ProviderId = "claude-code" | "codex" | "grok" | "antigravity"
 
 export type AccountStatus = "active" | "standby" | "benched" | "unusable"
 
@@ -112,6 +112,7 @@ export const PROVIDERS: { id: ProviderId }[] = [
   { id: "claude-code" },
   { id: "codex" },
   { id: "grok" },
+  { id: "antigravity" },
 ]
 
 export const PROVIDER_IDS: ProviderId[] = PROVIDERS.map((p) => p.id)

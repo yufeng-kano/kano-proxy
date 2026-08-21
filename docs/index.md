@@ -1,6 +1,6 @@
 # kano-proxy documentation
 
-Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropic Messages APIs on Cloudflare, with per-user OAuth pools for Claude Code / Codex / Grok.
+Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropic Messages APIs on Cloudflare, with per-user OAuth pools for Claude Code / Codex / Grok / Antigravity.
 
 ## Docs map
 
@@ -31,9 +31,9 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 
 ## Product one-liner
 
-Users sign in with Google, bind their own subscription accounts (Claude Code / Codex / Grok) or bring their own OpenAI-/Anthropic-compatible endpoint (custom base URL + API key), issue API keys, and call **any bound provider** through either format:
+Users sign in with Google, bind their own subscription accounts (Claude Code / Codex / Grok / Antigravity) or bring their own OpenAI-/Anthropic-compatible endpoint (custom base URL + API key), issue API keys, and call **any bound provider** through either format:
 
 - `https://<your-domain>/openai/v1` — Chat Completions + Models  
 - `https://<your-domain>/anthropic` — Messages API (`/v1/messages`)
 
-Model ids use OpenRouter style on **both** bases: `provider/model` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, or `<your-slug>/<upstream-model>` for a custom endpoint) — or a bare **model-group alias** (each user-defined group carries a display name plus one or more callable aliases) that expands to an ordered list of `provider/model` targets ([providers.md](./providers.md)). Set `<your-domain>` via DNS + Worker/Pages custom domain (see [deployment.md](./deployment.md)).
+Model ids use OpenRouter style on **both** bases: `provider/model` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, `antigravity/gemini-3-flash`, or `<your-slug>/<upstream-model>` for a custom endpoint) — or a bare **model-group alias** (each user-defined group carries a display name plus one or more callable aliases) that expands to an ordered list of `provider/model` targets ([providers.md](./providers.md)). Set `<your-domain>` via DNS + Worker/Pages custom domain (see [deployment.md](./deployment.md)).

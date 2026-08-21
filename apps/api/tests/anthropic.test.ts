@@ -11,7 +11,7 @@ describe("countTokensProviderError", () => {
       type: "error",
       error: {
         type: "invalid_request_error",
-        message: "count_tokens is only supported for claude-code models",
+        message: "count_tokens is only supported for claude-code and antigravity models",
       },
     })
   })
@@ -21,7 +21,7 @@ describe("countTokensProviderError", () => {
       type: "error",
       error: {
         type: "invalid_request_error",
-        message: "count_tokens is only supported for claude-code models",
+        message: "count_tokens is only supported for claude-code and antigravity models",
       },
     })
   })

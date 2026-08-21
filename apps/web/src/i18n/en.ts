@@ -197,6 +197,8 @@ export const en = {
   "providers.account.removeConfirm":
     "Remove this account? Requests will stop routing through it.",
   "providers.account.noUsage": "Usage will appear once this account is used",
+  // Antigravity has no percentage quota to report — see docs/providers.md.
+  "providers.account.noUsageWindows": "This provider doesn't report usage limits",
   "providers.account.plan": "{plan} plan",
   "providers.rename.title": "Rename account",
   "providers.rename.label": "Name",
@@ -232,6 +234,8 @@ export const en = {
   "provider.codex.blurb": "Your ChatGPT subscription",
   "provider.grok.name": "Grok",
   "provider.grok.blurb": "Your xAI subscription",
+  "provider.antigravity.name": "Antigravity",
+  "provider.antigravity.blurb": "Your Google AI subscription",
   "provider.custom.name": "Custom endpoints",
 
   // --- Add account dialog -------------------------------------------------
@@ -243,6 +247,14 @@ export const en = {
   "addAccount.claude.step1": "Approve access on the page that opened.",
   "addAccount.claude.step2": "Copy the code you're given and paste it below.",
   "addAccount.claude.label": "Authorization code",
+  // Antigravity's sign-in ends on a localhost address nothing is serving, so
+  // the browser shows an error page. That is expected, and the copy has to say
+  // so before the user reads it as a failure and starts over.
+  "addAccount.antigravity.step1": "Approve access on the page that opened.",
+  "addAccount.antigravity.step2":
+    "Google sends you to a localhost address that won't load. That's expected.",
+  "addAccount.antigravity.step3": "Copy that address from the browser and paste it below.",
+  "addAccount.antigravity.label": "Callback address",
   // Shared by every device-code provider (Codex, Grok) — the copy describes
   // the flow, not the brand, so it must stay provider-neutral.
   "addAccount.device.intro": "Enter this code on the page that opened.",

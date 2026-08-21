@@ -11,6 +11,11 @@ export type Env = {
   CLAUDE_CODE_OAUTH_CLIENT_ID?: string
   CODEX_OAUTH_CLIENT_ID?: string
   GROK_OAUTH_CLIENT_ID?: string
+  /** Antigravity is a confidential Google OAuth client: both id and secret are needed (docs/auth.md § Antigravity). */
+  ANTIGRAVITY_OAUTH_CLIENT_ID?: string
+  ANTIGRAVITY_OAUTH_CLIENT_SECRET?: string
+  /** Antigravity Hub version inside the upstream `User-Agent`; unset uses the pinned fallback. */
+  ANTIGRAVITY_CLIENT_VERSION?: string
   /** Codex egress relay (docs/codex-relay.md) — both required to enable; either missing means direct to chatgpt.com. */
   CODEX_RELAY_URL?: string
   CODEX_RELAY_SA_KEY?: string
@@ -21,9 +26,9 @@ export type Env = {
   GITHUB_TOKEN?: string
 }
 
-export type ProviderId = "claude-code" | "codex" | "grok"
+export type ProviderId = "claude-code" | "codex" | "grok" | "antigravity"
 
-export const PROVIDERS: ProviderId[] = ["claude-code", "codex", "grok"]
+export const PROVIDERS: ProviderId[] = ["claude-code", "codex", "grok", "antigravity"]
 
 export function isProviderId(v: string): v is ProviderId {
   return (PROVIDERS as string[]).includes(v)

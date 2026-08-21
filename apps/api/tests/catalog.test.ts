@@ -3,7 +3,7 @@ import { PROVIDERS } from "../src/env"
 
 describe("model listing policy", () => {
   it("providers are only the live subscription pools", () => {
-    expect([...PROVIDERS].sort()).toEqual(["claude-code", "codex", "grok"])
+    expect([...PROVIDERS].sort()).toEqual(["antigravity", "claude-code", "codex", "grok"])
   })
 
   it("client model ids use provider/upstream shape", () => {

@@ -94,6 +94,29 @@ describe("429 — reset-aware cooldown", () => {
     expect(penalty).toEqual({ cooldownMs: 300_000 })
   })
 
+  it("adapter reset hint wins over everything — it read the reason out of the body", () => {
+    // antigravity states its reset inside the 429 body, so only its adapter can
+    // tell quota exhaustion from a throttle (docs/providers.md § Antigravity).
+    const headers = new Headers({
+      "x-kano-ratelimit-reset": String(NOW + 3_600_000),
+      "anthropic-ratelimit-requests-reset": "2026-06-01T00:01:00.000Z",
+    })
+    const row = accountRow({
+      usage_snapshot_json: JSON.stringify({
+        windows: [{ label: "5h", utilization: 100, resets_at: "2026-06-01T00:02:00.000Z" }],
+        error: null,
+        stale: false,
+        edgeBlocked: false,
+      }),
+    })
+    expect(penaltyForOutcome(429, headers, row, NOW)).toEqual({ cooldownMs: 3_600_000 })
+  })
+
+  it("ignores an unparseable reset hint rather than benching for NaN", () => {
+    const headers = new Headers({ "x-kano-ratelimit-reset": "soon" })
+    expect(penaltyForOutcome(429, headers, accountRow(), NOW)).toEqual({ cooldownMs: 300_000 })
+  })
+
   it("a header wins over the snapshot even when both are present", () => {
     const headers = new Headers({ "anthropic-ratelimit-requests-reset": "2026-06-01T00:01:00.000Z" })
     const row = accountRow({
