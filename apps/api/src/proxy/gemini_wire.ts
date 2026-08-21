@@ -114,12 +114,29 @@ export function normalizeGeminiUsage(
 }
 
 /**
+ * Candidate-level terminal reasons that mean the *output* was blocked. These
+ * must not read as a successful `stop` / `end_turn` — an often-empty answer a
+ * client cannot tell apart from a real blank completion.
+ */
+const BLOCKED_FINISH_REASONS = new Set([
+  "SAFETY",
+  "RECITATION",
+  "BLOCKLIST",
+  "PROHIBITED_CONTENT",
+  "SPII",
+  "IMAGE_SAFETY",
+])
+
+/**
  * Gemini `finishReason` → the OpenAI token, before the tool-call override the
  * callers apply (a turn that produced a `functionCall` is `tool_calls`
  * whatever the upstream reason said).
  */
 export function openaiFinishReason(finishReason: string | undefined): string {
-  return (finishReason || "").toUpperCase() === "MAX_TOKENS" ? "length" : "stop"
+  const reason = (finishReason || "").toUpperCase()
+  if (reason === "MAX_TOKENS") return "length"
+  if (BLOCKED_FINISH_REASONS.has(reason)) return "content_filter"
+  return "stop"
 }
 
 /** Gemini `finishReason` → the Anthropic `stop_reason` token. */
@@ -128,7 +145,10 @@ export function anthropicStopReason(
   sawToolCall: boolean,
 ): string {
   if (sawToolCall) return "tool_use"
-  return (finishReason || "").toUpperCase() === "MAX_TOKENS" ? "max_tokens" : "end_turn"
+  const reason = (finishReason || "").toUpperCase()
+  if (reason === "MAX_TOKENS") return "max_tokens"
+  if (BLOCKED_FINISH_REASONS.has(reason)) return "refusal"
+  return "end_turn"
 }
 
 /**

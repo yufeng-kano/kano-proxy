@@ -357,13 +357,20 @@ export async function buildAntigravityEnvelope(opts: {
     !!(request.generationConfig as Record<string, unknown> | undefined)?.responseSchema
   if (isClaude) {
     if (hasTools) {
-      request.toolConfig = {
-        ...(request.toolConfig as Record<string, unknown> | undefined),
-        functionCallingConfig: {
-          ...((request.toolConfig as { functionCallingConfig?: Record<string, unknown> })
-            ?.functionCallingConfig ?? {}),
-          mode: "VALIDATED",
-        },
+      const existing = (
+        request.toolConfig as { functionCallingConfig?: Record<string, unknown> } | undefined
+      )?.functionCallingConfig
+      const mode = typeof existing?.mode === "string" ? existing.mode : ""
+      // VALIDATED replaces only the default AUTO. An explicit client choice —
+      // NONE (never call) or ANY (forced call, possibly with
+      // allowedFunctionNames) — is a semantic the proxy must not overwrite:
+      // doing so could produce a tool call the client prohibited, or text
+      // where a call was required.
+      if (!mode || mode === "AUTO") {
+        request.toolConfig = {
+          ...(request.toolConfig as Record<string, unknown> | undefined),
+          functionCallingConfig: { ...(existing ?? {}), mode: "VALIDATED" },
+        }
       }
     }
   } else if (hasSchema && request.generationConfig) {
@@ -647,10 +654,28 @@ export const antigravityAdapter: ProviderAdapter = {
   async countTokens(env, account, body, headers, extras) {
     void headers
     const acc = await ensureProject(env, await refreshAntigravity(env, account))
-    const { anthropicToGeminiRequest } = await import("../proxy/gemini_anthropic")
+    const { anthropicToGeminiRequest, InvalidGeminiReasoningEffortError } = await import(
+      "../proxy/gemini_anthropic"
+    )
 
     const reqBody = body as Record<string, unknown>
-    const converted = anthropicToGeminiRequest(reqBody)
+    let converted
+    try {
+      converted = anthropicToGeminiRequest(reqBody)
+    } catch (e) {
+      // Same 400 as `messages`: a malformed client field is the client's
+      // error, never a 502 "upstream error" for a call that was never made.
+      if (e instanceof InvalidGeminiReasoningEffortError) {
+        return Response.json(
+          {
+            type: "error",
+            error: { type: "invalid_request_error", message: "invalid reasoning_effort" },
+          },
+          { status: 400 },
+        )
+      }
+      throw e
+    }
     const envelope = await buildAntigravityEnvelope({
       model: String(reqBody.model ?? ""),
       projectId: storedProject(acc.credential),

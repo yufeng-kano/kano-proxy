@@ -90,19 +90,22 @@ function blocksToParts(content: unknown): GeminiPart[] {
       case "text":
         if (typeof block.text === "string" && block.text) parts.push({ text: block.text })
         break
-      case "thinking":
-        if (typeof block.thinking === "string" && block.thinking) {
+      case "thinking": {
+        const thinkingText = typeof block.thinking === "string" ? block.thinking : ""
+        // The signature is Gemini's own opaque `thoughtSignature` coming
+        // back; echoing it is what keeps multi-turn thinking valid. Gemini
+        // itself emits signature-only thought parts (no text), so a replayed
+        // block whose text is empty but whose signature is set still counts.
+        const signature = typeof block.signature === "string" ? block.signature : ""
+        if (thinkingText || signature) {
           parts.push({
-            text: block.thinking,
+            text: thinkingText,
             thought: true,
-            // The signature is Gemini's own opaque `thoughtSignature` coming
-            // back; echoing it is what keeps multi-turn thinking valid.
-            ...(typeof block.signature === "string" && block.signature
-              ? { thoughtSignature: block.signature }
-              : {}),
+            ...(signature ? { thoughtSignature: signature } : {}),
           })
         }
         break
+      }
       case "image": {
         const source = block.source
         if (source?.type === "base64" && source.data) {
@@ -132,6 +135,23 @@ function blocksToParts(content: unknown): GeminiPart[] {
               : { result: toolResultValue(block.content) },
           },
         })
+        // A tool result can carry base64 images (screenshots, renders).
+        // Gemini's functionResponse has no image field, but the same user
+        // turn can carry inlineData parts alongside it — append them rather
+        // than silently sending the model only the textual fragment.
+        if (Array.isArray(block.content)) {
+          for (const inner of block.content) {
+            if (!inner || typeof inner !== "object") continue
+            const innerBlock = inner as AnthropicBlock
+            if (innerBlock.type !== "image") continue
+            const source = innerBlock.source
+            if (source?.type === "base64" && source.data) {
+              parts.push({
+                inlineData: { mimeType: source.media_type || "image/png", data: source.data },
+              })
+            }
+          }
+        }
         break
       }
       default:
@@ -325,7 +345,9 @@ export function geminiResponseToAnthropic(
   let thinkingSignature = ""
 
   const flushThinking = () => {
-    if (!thinking) return
+    // A signature with no accumulated text still makes a block — dropping it
+    // would strip `thinking.signature` and break the client's next replay.
+    if (!thinking && !thinkingSignature) return
     content.push({
       type: "thinking",
       thinking,
@@ -361,16 +383,20 @@ export function geminiResponseToAnthropic(
       })
       continue
     }
-    if (typeof part.text !== "string" || !part.text) continue
     if (part.thought) {
       if (!emitThinking) continue
+      // The signature can ride on a thought part with no visible text — it
+      // must be captured before the text guard or it never reaches the block.
+      const hasText = typeof part.text === "string" && !!part.text
+      if (!hasText && !part.thoughtSignature) continue
       flushText()
-      thinking += part.text
+      if (hasText) thinking += part.text
       if (part.thoughtSignature) thinkingSignature = part.thoughtSignature
-    } else {
-      flushThinking()
-      text += part.text
+      continue
     }
+    if (typeof part.text !== "string" || !part.text) continue
+    flushThinking()
+    text += part.text
   }
   flushThinking()
   flushText()
@@ -517,24 +543,30 @@ export function geminiSseToAnthropicStream(
               emit("content_block_stop", { type: "content_block_stop", index })
               continue
             }
-            if (typeof part.text !== "string" || !part.text) continue
             if (part.thought) {
               if (!emitThinking) continue
+              // A signature-only thought part (no text) is a valid shape —
+              // the block still opens so closeBlock emits its signature_delta.
+              const hasText = typeof part.text === "string" && !!part.text
+              if (!hasText && !part.thoughtSignature) continue
               openBlock("thinking", { type: "thinking", thinking: "" })
-              emit("content_block_delta", {
-                type: "content_block_delta",
-                index: open!.index,
-                delta: { type: "thinking_delta", thinking: part.text },
-              })
+              if (hasText) {
+                emit("content_block_delta", {
+                  type: "content_block_delta",
+                  index: open!.index,
+                  delta: { type: "thinking_delta", thinking: part.text },
+                })
+              }
               if (part.thoughtSignature) pendingSignature = part.thoughtSignature
-            } else {
-              openBlock("text", { type: "text", text: "" })
-              emit("content_block_delta", {
-                type: "content_block_delta",
-                index: open!.index,
-                delta: { type: "text_delta", text: part.text },
-              })
+              continue
             }
+            if (typeof part.text !== "string" || !part.text) continue
+            openBlock("text", { type: "text", text: "" })
+            emit("content_block_delta", {
+              type: "content_block_delta",
+              index: open!.index,
+              delta: { type: "text_delta", text: part.text },
+            })
           }
 
           if (resp?.candidates?.[0]?.finishReason) {

@@ -352,6 +352,14 @@ describe("geminiResponseToOpenAI", () => {
     expect((choice.message as Record<string, unknown>).content).toBeNull()
   })
 
+  it("maps a SAFETY finish to content_filter, not a successful stop", () => {
+    const out = geminiResponseToOpenAI(
+      { response: { candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }] } },
+      "m",
+    )
+    expect((out.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe("content_filter")
+  })
+
   it("maps MAX_TOKENS to the OpenAI length token", () => {
     const out = geminiResponseToOpenAI(
       { response: { candidates: [{ content: { parts: [{ text: "…" }] }, finishReason: "MAX_TOKENS" }] } },
@@ -436,6 +444,31 @@ describe("geminiSseToOpenAIStream", () => {
     )
     const deltas = chunks(raw).map((c) => (c.choices as Array<Record<string, unknown>>)[0]?.delta)
     expect(deltas[0]).toMatchObject({ reasoning_content: "think", reasoning_signature: "sig-1" })
+  })
+
+  it("gives each streamed image its own monotonic index", async () => {
+    const imageFrame = (data: string) => ({
+      response: {
+        candidates: [
+          { content: { parts: [{ inlineData: { mimeType: "image/png", data } }] } },
+        ],
+      },
+    })
+    const raw = await readSse(
+      geminiSseToOpenAIStream(
+        sse(imageFrame("AAA1"), imageFrame("AAA2"), {
+          response: { candidates: [{ finishReason: "STOP" }] },
+        }),
+        "m",
+      ),
+    )
+    const indexes = chunks(raw)
+      .map((c) => (c.choices as Array<Record<string, unknown>>)[0]?.delta as Record<string, unknown>)
+      .filter((d) => Array.isArray(d?.images))
+      .map((d) => (d.images as Array<Record<string, unknown>>)[0].index)
+    // Clients assembling streamed images by index must not see them all
+    // collapse onto slot 0.
+    expect(indexes).toEqual([0, 1])
   })
 
   it("ends an unterminated stream with an error line, never a fabricated stop", async () => {

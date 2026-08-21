@@ -126,6 +126,50 @@ describe("anthropicToGeminiRequest", () => {
     ])
   })
 
+  it("keeps base64 images nested in a tool_result as inline parts beside the functionResponse", () => {
+    const out = anthropicToGeminiRequest({
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "t1",
+              content: [
+                { type: "text", text: "screenshot taken" },
+                { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAB" } },
+              ],
+            },
+          ],
+        },
+      ],
+    })
+    // Gemini's functionResponse has no image field; the image rides along in
+    // the same user turn instead of being silently discarded.
+    expect(out.request.contents[0]!.parts).toEqual([
+      {
+        functionResponse: {
+          id: "t1",
+          name: "tool",
+          response: { result: "screenshot taken" },
+        },
+      },
+      { inlineData: { mimeType: "image/png", data: "AAAB" } },
+    ])
+  })
+
+  it("replays a signature-only thinking block instead of dropping the signature", () => {
+    const out = anthropicToGeminiRequest({
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "sig-1" }] },
+      ],
+    })
+    expect(out.request.contents[1]!.parts).toEqual([
+      { text: "", thought: true, thoughtSignature: "sig-1" },
+    ])
+  })
+
   it("marks an errored tool_result as an error, not a result", () => {
     const { request } = anthropicToGeminiRequest({
       messages: [
@@ -259,6 +303,42 @@ describe("geminiResponseToAnthropic", () => {
     expect(out.content).toEqual([{ type: "text", text: "shown" }])
   })
 
+  it("keeps a signature that arrives on a text-less thought part", () => {
+    const out = geminiResponseToAnthropic(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "reasoning", thought: true },
+                  // Gemini emits the signature on its own trailing thought
+                  // part with no visible text.
+                  { text: "", thought: true, thoughtSignature: "sig-7" },
+                  { text: "answer" },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+    )
+    expect(out.content).toEqual([
+      { type: "thinking", thinking: "reasoning", signature: "sig-7" },
+      { type: "text", text: "answer" },
+    ])
+  })
+
+  it("maps a SAFETY finish to a refusal, not a successful end_turn", () => {
+    const out = geminiResponseToAnthropic(
+      { response: { candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }] } },
+      "m",
+    )
+    expect(out.stop_reason).toBe("refusal")
+  })
+
   it("maps a candidate-less safety block to a refusal, not an empty end_turn", () => {
     const out = geminiResponseToAnthropic(
       { response: { promptFeedback: { blockReason: "SAFETY" } } },
@@ -349,6 +429,36 @@ describe("geminiSseToAnthropicStream", () => {
     const delta = seq.find((e) => e.event === "content_block_delta")!
     expect(delta.data.delta).toEqual({ type: "input_json_delta", partial_json: '{"q":"x"}' })
     expect((seq.at(-2)!.data.delta as Record<string, unknown>).stop_reason).toBe("tool_use")
+  })
+
+  it("emits the signature_delta when the signature streams in a text-less thought part", async () => {
+    const raw = await readSse(
+      geminiSseToAnthropicStream(
+        sse(
+          {
+            response: {
+              candidates: [{ content: { parts: [{ text: "think", thought: true }] } }],
+            },
+          },
+          {
+            response: {
+              candidates: [
+                { content: { parts: [{ text: "", thought: true, thoughtSignature: "sig-3" }] } },
+              ],
+            },
+          },
+          { response: { candidates: [{ finishReason: "STOP" }] } },
+        ),
+        "m",
+      ),
+    )
+    const seq = events(raw)
+    const signature = seq.find(
+      (e) =>
+        e.event === "content_block_delta" &&
+        (e.data.delta as Record<string, unknown>).type === "signature_delta",
+    )!
+    expect((signature.data.delta as Record<string, unknown>).signature).toBe("sig-3")
   })
 
   it("finishes a candidate-less safety block as a refusal", async () => {

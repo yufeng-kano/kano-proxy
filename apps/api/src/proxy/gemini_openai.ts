@@ -396,6 +396,7 @@ export function geminiSseToOpenAIStream(
   return new ReadableStream({
     async start(controller) {
       let toolIndex = 0
+      let imageIndex = 0
       let sawToolCall = false
       let finishReason: string | null = null
       /** A candidate reported a `finishReason` — Gemini's terminal frame. A
@@ -448,7 +449,10 @@ export function geminiSseToOpenAIStream(
                 images: [
                   {
                     type: "image_url",
-                    index: 0,
+                    // Monotonic like the non-stream converter — clients that
+                    // assemble streamed images by index must not see them all
+                    // collapse onto slot 0.
+                    index: imageIndex++,
                     image_url: { url: `data:${inline.mimeType};base64,${inline.data}` },
                   },
                 ],

@@ -174,6 +174,51 @@ describe("buildAntigravityEnvelope", () => {
     })
   })
 
+  it("preserves an explicit NONE / ANY tool choice for a Claude model instead of forcing VALIDATED", async () => {
+    // Overwriting an explicit mode could produce a tool call the client
+    // prohibited (NONE) or text where a call was required (ANY).
+    const none = await buildAntigravityEnvelope({
+      model: "claude-sonnet-4-6",
+      projectId: "p",
+      request: {
+        contents: [],
+        tools: [{ functionDeclarations: [] }],
+        toolConfig: { functionCallingConfig: { mode: "NONE" } },
+      },
+    })
+    expect((none.request as Record<string, unknown>).toolConfig).toEqual({
+      functionCallingConfig: { mode: "NONE" },
+    })
+
+    const forced = await buildAntigravityEnvelope({
+      model: "claude-sonnet-4-6",
+      projectId: "p",
+      request: {
+        contents: [],
+        tools: [{ functionDeclarations: [] }],
+        toolConfig: { functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["search"] } },
+      },
+    })
+    expect((forced.request as Record<string, unknown>).toolConfig).toEqual({
+      functionCallingConfig: { mode: "ANY", allowedFunctionNames: ["search"] },
+    })
+  })
+
+  it("upgrades the default AUTO tool choice to VALIDATED for a Claude model", async () => {
+    const envelope = await buildAntigravityEnvelope({
+      model: "claude-sonnet-4-6",
+      projectId: "p",
+      request: {
+        contents: [],
+        tools: [{ functionDeclarations: [] }],
+        toolConfig: { functionCallingConfig: { mode: "AUTO" } },
+      },
+    })
+    expect((envelope.request as Record<string, unknown>).toolConfig).toEqual({
+      functionCallingConfig: { mode: "VALIDATED" },
+    })
+  })
+
   it("does not force VALIDATED for a tool-less Claude request with only a response schema", async () => {
     // Structured output without tools must not carry an unattached
     // function-calling config — the backend rejects that shape.
@@ -412,6 +457,20 @@ describe("antigravityAdapter.countTokens", () => {
     expect(body).not.toHaveProperty("project")
     expect(body.request).toBeDefined()
     expect(await res.json()).toEqual({ input_tokens: 1234 })
+  })
+
+  it("rejects an invalid reasoning_effort with a 400 before calling upstream", async () => {
+    const calls = stubFetch(() => new Response(JSON.stringify({ totalTokens: 1 }), { status: 200 }))
+    const res = await antigravityAdapter.countTokens!(
+      buildEnv(),
+      account(),
+      { model: "gemini-3-flash", messages: [], reasoning_effort: "turbo" },
+      new Headers(),
+    )
+    // Same contract as `messages`: a malformed client field is the client's
+    // 400, never a 502 for an upstream call that was never made.
+    expect(res.status).toBe(400)
+    expect(calls).toHaveLength(0)
   })
 
   it("rejects a 200 without a usable totalTokens instead of fabricating zero", async () => {
