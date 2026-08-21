@@ -137,6 +137,7 @@ export const en = {
   "logs.column.time": "Time",
   "logs.column.model": "Model",
   "logs.column.account": "Account",
+  "logs.column.apiKey": "API key",
   "logs.column.type": "Type",
   "logs.column.status": "Status",
   "logs.column.input": "Input",
@@ -146,11 +147,12 @@ export const en = {
   "logs.column.cost": "Cost",
   "logs.column.latency": "Latency",
   // "via" names the alias the client actually sent, so a group's traffic reads
-  // apart from a direct call to the same model; "Account removed" is an
-  // account that has since been disconnected — the request still ran, so the
-  // row stays and says which part of it is gone.
+  // apart from a direct call to the same model; "Account removed" and
+  // "Key removed" are records deleted since the request ran — which happened
+  // all the same, so the row stays and says which part of it is gone.
   "logs.via": "via {alias}",
   "logs.accountRemoved": "Account removed",
+  "logs.keyRemoved": "Key removed",
   "logs.type.oauth": "OAuth",
   "logs.type.api": "API",
   // The row's own control: the visible text is the timestamp, so the name it

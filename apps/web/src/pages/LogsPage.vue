@@ -16,7 +16,7 @@
  * server-side, so changing either reloads from the first page rather than
  * narrowing what is already painted.
  *
- * The card scrolls vertically only. Eleven columns do not fit a laptop's width
+ * The card scrolls vertically only. Twelve columns do not fit a laptop's width
  * by their content, so the table is fixed-layout: each column is a share of the
  * card and each cell is clamped to the row's two lines, with the full text on a
  * `title` for the pointer and the row detail for everything else.
@@ -106,20 +106,25 @@ const showOptions = computed(() => [
 ])
 
 /*
- * Every track is a percentage and the eleven of them sum to 100: under
+ * Every track is a percentage and the twelve of them sum to 100: under
  * `DataTable`'s fixed layout a width is the column, not a suggestion, and a
  * pixel width would stop being a share of the card the moment the sidebar
  * collapses or the window changes.
  *
- * 12 Time + 11 Model + 11 Account + 7 Type + 13 Status + 7 Input + 7 Cache read
- * + 7 Cache write + 7 Output + 9 Cost + 9 Latency = 100.
+ * 8 Time + 8 Model + 9 Account + 9 API key + 7 Type + 13 Status + 7 Input +
+ * 7 Cache read + 7 Cache write + 7 Output + 9 Cost + 9 Latency = 100.
  *
  * The shares are sized to their *headers* first — an uppercase 11px LATENCY
  * needs more room than the "1.2 s" under it, and a header that does not fit is
  * a column nobody can name — then to the values that cannot be shortened
  * ("$0.0042" is four significant digits by design, docs/pricing.md). Time,
- * Model and Account get the remainder because they are the only columns whose
- * text is open-ended, and they are the ones the two-line clamp is for.
+ * Model, Account and API key get the remainder because they are the only
+ * columns whose text is open-ended, and they are the ones the two-line clamp
+ * is for. Account and API key hold the 9% their headers need — ACCOUNT the
+ * same seven letters LATENCY already holds at 9%, API KEY six letters plus a
+ * space — and Time and Model take the rest at 8% each, where their shorter
+ * headers (four and five letters, the class TYPE and INPUT already hold at
+ * 7%) still fit on one line.
  *
  * **Status is sized to the longest error code**, because that cell is the one
  * value on the row that has to be read in full to be worth anything — a code
@@ -138,9 +143,10 @@ const showOptions = computed(() => [
  * every row of the table for no reading the row does not already give.
  */
 const columns = computed<Column<RequestLogRow>[]>(() => [
-  { key: "time", header: t("logs.column.time"), width: "12%" },
-  { key: "model", header: t("logs.column.model"), width: "11%" },
-  { key: "account", header: t("logs.column.account"), width: "11%" },
+  { key: "time", header: t("logs.column.time"), width: "8%" },
+  { key: "model", header: t("logs.column.model"), width: "8%" },
+  { key: "account", header: t("logs.column.account"), width: "9%" },
+  { key: "apiKey", header: t("logs.column.apiKey"), width: "9%" },
   { key: "type", header: t("logs.column.type"), width: "7%", hideOnMobile: true },
   { key: "status", header: t("logs.column.status"), width: "13%" },
   {
@@ -430,6 +436,16 @@ function typeLabel(row: RequestLogRow): string {
             <span v-else class="none">—</span>
           </template>
 
+          <template #cell-apiKey="{ row }">
+            <Badge v-if="row.api_key_removed" tone="warn">
+              {{ t("logs.keyRemoved") }}
+            </Badge>
+            <span v-else-if="row.api_key_name" class="api-key" :title="row.api_key_name">
+              {{ row.api_key_name }}
+            </span>
+            <span v-else class="none">—</span>
+          </template>
+
           <template #cell-type="{ row }">
             <Badge tone="neutral">{{ typeLabel(row) }}</Badge>
           </template>
@@ -576,6 +592,10 @@ function typeLabel(row: RequestLogRow): string {
 }
 
 .account {
+  color: var(--text-secondary);
+}
+
+.api-key {
   color: var(--text-secondary);
 }
 

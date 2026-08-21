@@ -74,7 +74,7 @@ defineProps<{
   rowClickable?: boolean
   /**
    * Fixed tracks and two-line cells, for a table with more columns than the
-   * card has width (Logs, eleven of them).
+   * card has width (Logs, twelve of them).
    *
    * Auto layout sizes a column by its longest cell, so one long model id widens
    * the table past its card and the card grows a horizontal scrollbar that
