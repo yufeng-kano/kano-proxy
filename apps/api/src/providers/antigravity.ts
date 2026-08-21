@@ -343,16 +343,20 @@ export async function buildAntigravityEnvelope(opts: {
     request.sessionId = opts.sessionId || (await stableSessionId(request))
   }
 
-  // Claude models served through Antigravity need VALIDATED function calling,
-  // and reject `maxOutputTokens` alongside a schema; the Gemini models are the
-  // other way round. Both rules are CLIProxyAPI `buildRequest`'s, kept because
-  // the backend 400s without them and neither can be probed for free.
+  // Claude models served through Antigravity need VALIDATED function calling
+  // when tools are present, and Gemini models reject `maxOutputTokens`
+  // alongside tools or a response schema. Both rules are CLIProxyAPI
+  // `buildRequest`'s, kept because the backend 400s without them and neither
+  // can be probed for free. VALIDATED must not be attached to a tool-less
+  // request (e.g. structured output only) — an unattached function-calling
+  // config is itself rejected.
   const isClaude = opts.model.toLowerCase().includes("claude")
+  const hasTools = Array.isArray(request.tools) && request.tools.length > 0
   const hasSchema =
-    Array.isArray(request.tools) ||
+    hasTools ||
     !!(request.generationConfig as Record<string, unknown> | undefined)?.responseSchema
-  if (hasSchema) {
-    if (isClaude) {
+  if (isClaude) {
+    if (hasTools) {
       request.toolConfig = {
         ...(request.toolConfig as Record<string, unknown> | undefined),
         functionCallingConfig: {
@@ -361,13 +365,13 @@ export async function buildAntigravityEnvelope(opts: {
           mode: "VALIDATED",
         },
       }
-    } else if (request.generationConfig) {
-      const { maxOutputTokens: _dropped, ...rest } = request.generationConfig as Record<
-        string,
-        unknown
-      >
-      request.generationConfig = rest
     }
+  } else if (hasSchema && request.generationConfig) {
+    const { maxOutputTokens: _dropped, ...rest } = request.generationConfig as Record<
+      string,
+      unknown
+    >
+    request.generationConfig = rest
   }
 
   return {
@@ -410,9 +414,11 @@ async function postWithFallback(
         signal: opts.signal,
       })
     } catch (e) {
+      // A transport failure never wins over an earlier real HTTP answer: the
+      // saved response still carries the body dispatch needs for feedback
+      // (bench + candidate failover), which a thrown error would erase.
       lastError = e
-      if (i + 1 < BASE_URLS.length) continue
-      throw e
+      continue
     }
 
     if (res.ok) return { response: res, body: null }
@@ -453,8 +459,17 @@ function errorResponse(result: UpstreamResult): Response {
     } catch {
       /* keep the default bench */
     }
-    const until = antigravityBenchUntil(parsed)
-    if (until !== null) headers.set(RATELIMIT_RESET_HINT_HEADER, String(until))
+    if (isAntigravityNoCapacity(response.status, parsed)) {
+      // "No capacity" is a fleet-side condition, not this credential's fault
+      // (docs/providers.md § Antigravity): a 429 that survived both base URLs
+      // must not bench the account for the routing module's 300s default.
+      // An already-expired reset hint keeps the ordinary failover walk (try
+      // the next candidate now) while making the recorded bench a no-op.
+      headers.set(RATELIMIT_RESET_HINT_HEADER, String(Date.now()))
+    } else {
+      const until = antigravityBenchUntil(parsed)
+      if (until !== null) headers.set(RATELIMIT_RESET_HINT_HEADER, String(until))
+    }
   }
   return new Response(body ?? "", { status: response.status, headers })
 }
@@ -474,7 +489,17 @@ export const antigravityAdapter: ProviderAdapter = {
    * failure returns empty plus the error, never an invented catalog.
    */
   async listModels(env, account) {
-    const acc = await refreshAntigravity(env, account)
+    let acc = await refreshAntigravity(env, account)
+    // The catalog is normally how a user discovers a callable model, so an
+    // account whose login-time project bootstrap failed retries it here —
+    // otherwise it would stay stuck on "models fetch failed" until some
+    // known-id chat request happened to run the bootstrap first. A bootstrap
+    // failure is still tolerated: the fetch below may work without a project.
+    try {
+      acc = await ensureProject(env, acc)
+    } catch {
+      /* keep going without a project id */
+    }
     const projectId = storedProject(acc.credential)
     for (const base of BASE_URLS) {
       try {
@@ -494,7 +519,10 @@ export const antigravityAdapter: ProviderAdapter = {
             display_name:
               typeof info?.displayName === "string" && info.displayName ? info.displayName : null,
           }))
-        if (models.length) return { models, error: null }
+        // A well-formed `{models: {}}` is a real answer — an account with no
+        // currently available models — not an upstream failure to retry or
+        // cache as an error for an hour.
+        return { models, error: null }
       } catch {
         continue
       }
@@ -640,7 +668,19 @@ export const antigravityAdapter: ProviderAdapter = {
     )
     if (!result.response.ok) return errorResponse(result)
     const json = (await result.response.json()) as { totalTokens?: unknown }
-    const total = typeof json.totalTokens === "number" ? json.totalTokens : 0
+    const total = json.totalTokens
+    // Clients budget context on this number. A 200 whose `totalTokens` is
+    // missing or malformed must surface as an upstream error, never as a
+    // plausible-but-fabricated `input_tokens: 0`.
+    if (typeof total !== "number" || !Number.isFinite(total) || total < 0) {
+      return Response.json(
+        {
+          type: "error",
+          error: { type: "api_error", message: "antigravity countTokens returned no totalTokens" },
+        },
+        { status: 502 },
+      )
+    }
     return Response.json({ input_tokens: total })
   },
 

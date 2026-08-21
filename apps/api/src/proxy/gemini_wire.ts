@@ -137,9 +137,11 @@ export function anthropicStopReason(
  * usage sniffers use. `[DONE]` is yielded as-is so callers can end cleanly.
  */
 export async function* sseDataLines(
-  body: ReadableStream<Uint8Array>,
+  source: ReadableStream<Uint8Array> | ReadableStreamDefaultReader<Uint8Array>,
 ): AsyncGenerator<string> {
-  const reader = body.getReader()
+  // Callers that need to cancel the upstream fetch from a wrapper stream's
+  // `cancel()` hook acquire the reader themselves and pass it in.
+  const reader = "getReader" in source ? source.getReader() : source
   const decoder = new TextDecoder()
   let carry = ""
   try {

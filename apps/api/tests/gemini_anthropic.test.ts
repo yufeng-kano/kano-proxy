@@ -259,6 +259,15 @@ describe("geminiResponseToAnthropic", () => {
     expect(out.content).toEqual([{ type: "text", text: "shown" }])
   })
 
+  it("maps a candidate-less safety block to a refusal, not an empty end_turn", () => {
+    const out = geminiResponseToAnthropic(
+      { response: { promptFeedback: { blockReason: "SAFETY" } } },
+      "m",
+    )
+    expect(out.stop_reason).toBe("refusal")
+    expect(out.content).toEqual([])
+  })
+
   it("maps MAX_TOKENS to the Anthropic stop reason", () => {
     const out = geminiResponseToAnthropic(
       { response: { candidates: [{ content: { parts: [{ text: "…" }] }, finishReason: "MAX_TOKENS" }] } },
@@ -342,9 +351,36 @@ describe("geminiSseToAnthropicStream", () => {
     expect((seq.at(-2)!.data.delta as Record<string, unknown>).stop_reason).toBe("tool_use")
   })
 
-  it("closes an unterminated stream with message_stop rather than hanging", async () => {
+  it("finishes a candidate-less safety block as a refusal", async () => {
+    const raw = await readSse(
+      geminiSseToAnthropicStream(sse({ response: { promptFeedback: { blockReason: "SAFETY" } } }), "m"),
+    )
+    const seq = events(raw)
+    expect(seq.at(-1)!.event).toBe("message_stop")
+    const delta = seq.find((e) => e.event === "message_delta")!
+    expect((delta.data.delta as Record<string, unknown>).stop_reason).toBe("refusal")
+  })
+
+  it("cancels the upstream body when the client cancels the converted stream", async () => {
+    let upstreamCancelled = false
+    const upstream = new ReadableStream<Uint8Array>({
+      // Never closes on its own — only cancellation can end it.
+      cancel() {
+        upstreamCancelled = true
+      },
+    })
+    const converted = geminiSseToAnthropicStream(upstream, "m")
+    await converted.cancel("client went away")
+    expect(upstreamCancelled).toBe(true)
+  })
+
+  it("ends an unterminated stream with an error event, never a fabricated message_stop", async () => {
+    // A clean EOF before any candidate reported a finishReason is a truncated
+    // response — the catch block never sees it, so the converter must track
+    // the terminal frame itself.
     const raw = await readSse(geminiSseToAnthropicStream(sse(), "m"))
     const seq = events(raw)
-    expect(seq.map((e) => e.event)).toEqual(["message_start", "message_delta", "message_stop"])
+    expect(seq.map((e) => e.event)).toEqual(["message_start", "error"])
+    expect(seq.at(-1)!.data.error).toMatchObject({ type: "api_error" })
   })
 })

@@ -33,6 +33,10 @@ type OpenAIMessage = {
   role?: string
   content?: unknown
   reasoning_content?: unknown
+  /** Proxy extension: Gemini's opaque `thoughtSignature`, echoed back verbatim
+   *  alongside `reasoning_content` to keep multi-turn thinking valid
+   *  (docs/providers.md § Antigravity "Thinking"). */
+  reasoning_signature?: unknown
   tool_calls?: Array<{
     id?: string
     type?: string
@@ -141,7 +145,15 @@ function messagesToGemini(messages: unknown[]): {
     if (role === "assistant") {
       const parts: GeminiPart[] = []
       if (typeof message.reasoning_content === "string" && message.reasoning_content) {
-        parts.push({ text: message.reasoning_content, thought: true })
+        parts.push({
+          text: message.reasoning_content,
+          thought: true,
+          // The signature is Gemini's own `thoughtSignature` coming back;
+          // echoing it is what keeps multi-turn thinking valid upstream.
+          ...(typeof message.reasoning_signature === "string" && message.reasoning_signature
+            ? { thoughtSignature: message.reasoning_signature }
+            : {}),
+        })
       }
       parts.push(...contentToParts(message.content))
       for (const call of message.tool_calls ?? []) {
@@ -305,6 +317,7 @@ export function geminiResponseToOpenAI(json: unknown, model: string): Record<str
   const parts = geminiParts(resp)
   let content = ""
   let reasoning = ""
+  let reasoningSignature = ""
   const toolCalls: OpenAIToolCall[] = []
   const images: Array<{ type: "image_url"; index: number; image_url: { url: string } }> = []
 
@@ -323,14 +336,22 @@ export function geminiResponseToOpenAI(json: unknown, model: string): Record<str
       })
       continue
     }
+    // A signature can ride on a thought part with no visible text.
+    if (part.thought && part.thoughtSignature) reasoningSignature = part.thoughtSignature
     if (typeof part.text !== "string" || !part.text) continue
     if (part.thought) reasoning += part.text
     else content += part.text
   }
 
+  // A safety-blocked prompt is a valid response with no candidates and a
+  // `promptFeedback.blockReason` — surface it as a content filter, never as a
+  // successful blank answer the client cannot tell apart from real output.
+  const blocked = !resp?.candidates?.length && !!resp?.promptFeedback?.blockReason
   const finishReason = toolCalls.length
     ? "tool_calls"
-    : openaiFinishReason(resp?.candidates?.[0]?.finishReason)
+    : blocked
+      ? "content_filter"
+      : openaiFinishReason(resp?.candidates?.[0]?.finishReason)
   const usage = usageToOpenAI(resp)
 
   return {
@@ -345,6 +366,7 @@ export function geminiResponseToOpenAI(json: unknown, model: string): Record<str
           role: "assistant",
           content: content || null,
           ...(reasoning ? { reasoning_content: reasoning } : {}),
+          ...(reasoningSignature ? { reasoning_signature: reasoningSignature } : {}),
           ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
           ...(images.length ? { images } : {}),
         },
@@ -368,16 +390,23 @@ export function geminiSseToOpenAIStream(
   const encoder = new TextEncoder()
   const id = `chatcmpl_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`
   const created = Math.floor(Date.now() / 1000)
+  const reader = body.getReader()
+  let clientCancelled = false
 
   return new ReadableStream({
     async start(controller) {
       let toolIndex = 0
       let sawToolCall = false
       let finishReason: string | null = null
+      /** A candidate reported a `finishReason` — Gemini's terminal frame. A
+       *  clean EOF without one is a truncated stream, not a completion. */
+      let sawTerminal = false
+      let blockReason = ""
       let usage: Record<string, unknown> | null = null
       let roleSent = false
 
       const emit = (payload: Record<string, unknown>) => {
+        if (clientCancelled) return
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`))
       }
       const chunk = (delta: Record<string, unknown>) => {
@@ -395,7 +424,7 @@ export function geminiSseToOpenAIStream(
       }
 
       try {
-        for await (const data of sseDataLines(body)) {
+        for await (const data of sseDataLines(reader)) {
           if (data === "[DONE]") break
           let json: unknown
           try {
@@ -404,6 +433,7 @@ export function geminiSseToOpenAIStream(
             continue
           }
           const resp = unwrapAntigravityResponse(json)
+          if (resp?.promptFeedback?.blockReason) blockReason = resp.promptFeedback.blockReason
           for (const part of geminiParts(resp)) {
             if (part.functionCall) {
               const call = toolCallFromPart(part, toolIndex++)
@@ -425,29 +455,57 @@ export function geminiSseToOpenAIStream(
               })
               continue
             }
+            if (part.thought) {
+              const delta: Record<string, unknown> = {}
+              if (typeof part.text === "string" && part.text) delta.reasoning_content = part.text
+              // The signature can ride on a thought part with no visible text.
+              if (part.thoughtSignature) delta.reasoning_signature = part.thoughtSignature
+              if (Object.keys(delta).length) chunk(delta)
+              continue
+            }
             if (typeof part.text !== "string" || !part.text) continue
-            if (part.thought) chunk({ reasoning_content: part.text })
-            else chunk({ content: part.text })
+            chunk({ content: part.text })
           }
           const upstreamFinish = resp?.candidates?.[0]?.finishReason
-          if (upstreamFinish) finishReason = openaiFinishReason(upstreamFinish)
+          if (upstreamFinish) {
+            sawTerminal = true
+            finishReason = openaiFinishReason(upstreamFinish)
+          }
           const chunkUsage = usageToOpenAI(resp)
           if (chunkUsage) usage = chunkUsage
         }
+        if (clientCancelled) return
 
+        // A clean EOF is not a completion: without a terminal Gemini frame the
+        // stream was truncated (no error is thrown for a quiet network close),
+        // so end the turn with the documented stream error, never a fabricated
+        // `stop`. A blocked prompt is the one no-terminal shape that *is* a
+        // real answer — Gemini reports it via promptFeedback with no candidate.
+        if (!sawTerminal && !blockReason) {
+          emit({
+            error: { message: "upstream stream ended before completion", type: "upstream_error" },
+          })
+          controller.close()
+          return
+        }
+
+        const terminalFinish = sawToolCall
+          ? "tool_calls"
+          : !sawTerminal && blockReason
+            ? "content_filter"
+            : (finishReason ?? "stop")
         emit({
           id,
           object: "chat.completion.chunk",
           created,
           model,
-          choices: [
-            { index: 0, delta: {}, finish_reason: sawToolCall ? "tool_calls" : (finishReason ?? "stop") },
-          ],
+          choices: [{ index: 0, delta: {}, finish_reason: terminalFinish }],
           ...(usage ? { usage } : {}),
         })
         controller.enqueue(encoder.encode("data: [DONE]\n\n"))
         controller.close()
       } catch (e) {
+        if (clientCancelled) return
         // Mid-stream upstream failure: an OpenAI-shaped error line ends the
         // turn, never a fabricated successful finish (same rule as codex).
         try {
@@ -462,6 +520,13 @@ export function geminiSseToOpenAIStream(
           controller.error(e)
         }
       }
+    },
+    cancel(reason) {
+      // Dispatch cancels the wrapper on client disconnect / idle timeout;
+      // without this hook the conversion loop would keep consuming the
+      // abandoned paid upstream generation until it ended on its own.
+      clientCancelled = true
+      reader.cancel(reason).catch(() => {})
     },
   })
 }

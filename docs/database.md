@@ -95,6 +95,8 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 `UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-KV-bench convention as `upstream_accounts`, over that provider's account row(s).
 
+**Slug reservation vs. existing rows.** When a slug later becomes a builtin provider id, reserving it only blocks *new* creates — an already-stored custom provider under that slug would be shadowed by the builtin lookup and become unreachable. `0013_rename_custom_antigravity_slug.sql` is the pattern: a data migration renames the stored slug (`antigravity` → `antigravity-custom`) and rewrites everything keyed by it in the same step (`upstream_accounts.provider`, `provider_settings.provider`, `model_groups.targets_json` prefixes), skipping only a user who already owns the target slug. `request_logs.provider` is left as history.
+
 ### `model_groups`
 
 User-defined bare-name model aliases → ordered `provider/model` target lists (full contract in [providers.md](./providers.md) § Model groups). Added in `0008_model_groups.sql`.

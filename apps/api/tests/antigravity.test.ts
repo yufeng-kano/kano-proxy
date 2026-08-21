@@ -174,6 +174,17 @@ describe("buildAntigravityEnvelope", () => {
     })
   })
 
+  it("does not force VALIDATED for a tool-less Claude request with only a response schema", async () => {
+    // Structured output without tools must not carry an unattached
+    // function-calling config — the backend rejects that shape.
+    const envelope = await buildAntigravityEnvelope({
+      model: "claude-sonnet-4-6",
+      projectId: "p",
+      request: { contents: [], generationConfig: { responseSchema: { type: "object" } } },
+    })
+    expect(envelope.request as Record<string, unknown>).not.toHaveProperty("toolConfig")
+  })
+
   it("uses the image request type for an image model", async () => {
     const envelope = await buildAntigravityEnvelope({
       model: "gemini-3.1-flash-image",
@@ -292,6 +303,50 @@ describe("antigravityAdapter.chatCompletions", () => {
     expect(hint).toBeLessThan(before + 60_000)
   })
 
+  it("returns the earlier 429 when the fallback base URL then fails at the transport layer", async () => {
+    const calls = stubFetch((call) => {
+      if (call.url.startsWith(DAILY)) {
+        return new Response(
+          JSON.stringify({
+            error: {
+              status: "RESOURCE_EXHAUSTED",
+              details: [
+                { "@type": "type.googleapis.com/google.rpc.ErrorInfo", reason: "QUOTA_EXHAUSTED" },
+              ],
+            },
+          }),
+          { status: 429 },
+        )
+      }
+      throw new TypeError("network down")
+    })
+    const before = Date.now()
+    // The saved HTTP answer must survive the later transport failure — a
+    // thrown error would collapse into a generic 502 and skip the bench
+    // classification plus candidate failover entirely.
+    const res = await antigravityAdapter.chatCompletions(buildEnv(), account(), chatRequest())
+    expect(calls).toHaveLength(2)
+    expect(res.status).toBe(429)
+    const hint = Number(res.headers.get(RATELIMIT_RESET_HINT_HEADER))
+    expect(hint).toBeGreaterThanOrEqual(before + ANTIGRAVITY_QUOTA_BENCH_MS)
+  })
+
+  it("does not bench the account for a terminal no-capacity 429 — the hint is already expired", async () => {
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({ error: { status: "RESOURCE_EXHAUSTED", message: "no capacity" } }),
+          { status: 429 },
+        ),
+    )
+    const res = await antigravityAdapter.chatCompletions(buildEnv(), account(), chatRequest())
+    expect(res.status).toBe(429)
+    // Fleet-side condition, not this credential's: the hint must not put the
+    // account on the 300s default bench, only let the failover walk continue.
+    const hint = Number(res.headers.get(RATELIMIT_RESET_HINT_HEADER))
+    expect(hint).toBeLessThanOrEqual(Date.now())
+  })
+
   it("does not fall back or hint on a non-429 failure — the body passes through", async () => {
     const calls = stubFetch(
       () => new Response(JSON.stringify({ error: { message: "bad model" } }), { status: 404 }),
@@ -358,6 +413,20 @@ describe("antigravityAdapter.countTokens", () => {
     expect(body.request).toBeDefined()
     expect(await res.json()).toEqual({ input_tokens: 1234 })
   })
+
+  it("rejects a 200 without a usable totalTokens instead of fabricating zero", async () => {
+    stubFetch(() => new Response(JSON.stringify({ totalTokens: "many" }), { status: 200 }))
+    const res = await antigravityAdapter.countTokens!(
+      buildEnv(),
+      account(),
+      { model: "gemini-3-flash", messages: [{ role: "user", content: "hi" }] },
+      new Headers(),
+    )
+    // Clients budget context on this number — a malformed upstream payload
+    // must be a detectable error, never a plausible `input_tokens: 0`.
+    expect(res.status).toBe(502)
+    expect(await res.json()).toMatchObject({ type: "error" })
+  })
 })
 
 describe("antigravityAdapter.listModels", () => {
@@ -395,6 +464,41 @@ describe("antigravityAdapter.listModels", () => {
       models: [],
       error: "models fetch failed",
     })
+  })
+
+  it("treats a well-formed empty models map as a real answer, not a failure", async () => {
+    const calls = stubFetch(() => new Response(JSON.stringify({ models: {} }), { status: 200 }))
+    // An account with no currently available models must not probe the
+    // fallback host or cache "models fetch failed" for an hour.
+    expect(await antigravityAdapter.listModels!(buildEnv(), account())).toEqual({
+      models: [],
+      error: null,
+    })
+    expect(calls).toHaveLength(1)
+  })
+
+  it("retries the project bootstrap for an account that has none stored", async () => {
+    const calls = stubFetch((call) => {
+      if (call.url.includes("loadCodeAssist")) {
+        return new Response(
+          JSON.stringify({ cloudaicompanionProject: "proj-new", currentTier: { id: "free-tier" } }),
+          { status: 200 },
+        )
+      }
+      return new Response(
+        JSON.stringify({ models: { "gemini-3-flash": {} } }),
+        { status: 200 },
+      )
+    })
+    const acc = account()
+    delete acc.credential.extra
+    const result = await antigravityAdapter.listModels!(buildEnv(), acc)
+    // The catalog is how a user discovers a callable model, so a login-time
+    // bootstrap failure must not leave it permanently on "models fetch failed".
+    expect(calls[0]!.url).toContain("loadCodeAssist")
+    const modelsCall = calls.find((c) => c.url.includes("fetchAvailableModels"))!
+    expect(JSON.parse(modelsCall.init.body as string)).toEqual({ project: "proj-new" })
+    expect(result).toEqual({ models: [{ id: "gemini-3-flash", display_name: null }], error: null })
   })
 })
 

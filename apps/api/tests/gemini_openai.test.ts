@@ -106,6 +106,27 @@ describe("openaiToGeminiRequest", () => {
     })
   })
 
+  it("replays reasoning_content with its reasoning_signature as a signed thought part", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          { role: "user", content: "hi" },
+          {
+            role: "assistant",
+            content: "answer",
+            reasoning_content: "thought about it",
+            reasoning_signature: "sig-1",
+          } as never,
+        ],
+      }),
+    )
+    expect(out.contents[1]!.parts![0]).toEqual({
+      text: "thought about it",
+      thought: true,
+      thoughtSignature: "sig-1",
+    })
+  })
+
   it("merges consecutive same-role turns — Gemini rejects two user turns in a row", () => {
     const out = openaiToGeminiRequest(
       req({
@@ -292,6 +313,45 @@ describe("geminiResponseToOpenAI", () => {
     ])
   })
 
+  it("surfaces the thought signature as reasoning_signature on the message", () => {
+    const out = geminiResponseToOpenAI(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "hmm", thought: true, thoughtSignature: "sig-9" },
+                  { text: "done" },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+    )
+    const message = (out.choices as Array<Record<string, unknown>>)[0].message as Record<
+      string,
+      unknown
+    >
+    expect(message.reasoning_content).toBe("hmm")
+    // The opaque signature must be exposed so the client can echo it back —
+    // docs/providers.md says it round-trips on both surfaces.
+    expect(message.reasoning_signature).toBe("sig-9")
+  })
+
+  it("maps a candidate-less safety block to content_filter, not an empty success", () => {
+    const out = geminiResponseToOpenAI(
+      { response: { promptFeedback: { blockReason: "SAFETY" } } },
+      "m",
+    )
+    const choice = (out.choices as Array<Record<string, unknown>>)[0]
+    expect(choice.finish_reason).toBe("content_filter")
+    expect((choice.message as Record<string, unknown>).content).toBeNull()
+  })
+
   it("maps MAX_TOKENS to the OpenAI length token", () => {
     const out = geminiResponseToOpenAI(
       { response: { candidates: [{ content: { parts: [{ text: "…" }] }, finishReason: "MAX_TOKENS" }] } },
@@ -356,5 +416,62 @@ describe("geminiSseToOpenAIStream", () => {
     expect((parsed.at(-1)!.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe(
       "tool_calls",
     )
+  })
+
+  it("streams the thought signature as a reasoning_signature delta", async () => {
+    const raw = await readSse(
+      geminiSseToOpenAIStream(
+        sse(
+          {
+            response: {
+              candidates: [
+                { content: { parts: [{ text: "think", thought: true, thoughtSignature: "sig-1" }] } },
+              ],
+            },
+          },
+          { response: { candidates: [{ content: { parts: [{ text: "hi" }] }, finishReason: "STOP" }] } },
+        ),
+        "m",
+      ),
+    )
+    const deltas = chunks(raw).map((c) => (c.choices as Array<Record<string, unknown>>)[0]?.delta)
+    expect(deltas[0]).toMatchObject({ reasoning_content: "think", reasoning_signature: "sig-1" })
+  })
+
+  it("ends an unterminated stream with an error line, never a fabricated stop", async () => {
+    // A clean EOF before any candidate reported a finishReason is a truncated
+    // response — the catch block never sees it, so the converter must track
+    // the terminal frame itself.
+    const raw = await readSse(
+      geminiSseToOpenAIStream(
+        sse({ response: { candidates: [{ content: { parts: [{ text: "par" }] } }] } }),
+        "m",
+      ),
+    )
+    expect(raw).not.toContain("[DONE]")
+    const last = chunks(raw).at(-1)!
+    expect(last.error).toMatchObject({ type: "upstream_error" })
+  })
+
+  it("finishes a candidate-less safety block as content_filter", async () => {
+    const raw = await readSse(
+      geminiSseToOpenAIStream(sse({ response: { promptFeedback: { blockReason: "SAFETY" } } }), "m"),
+    )
+    expect(raw.endsWith("data: [DONE]\n\n")).toBe(true)
+    const last = chunks(raw).at(-1)!
+    expect((last.choices as Array<Record<string, unknown>>)[0].finish_reason).toBe("content_filter")
+  })
+
+  it("cancels the upstream body when the client cancels the converted stream", async () => {
+    let upstreamCancelled = false
+    const upstream = new ReadableStream<Uint8Array>({
+      // Never closes on its own — only cancellation can end it.
+      cancel() {
+        upstreamCancelled = true
+      },
+    })
+    const converted = geminiSseToOpenAIStream(upstream, "m")
+    await converted.cancel("client went away")
+    expect(upstreamCancelled).toBe(true)
   })
 })
