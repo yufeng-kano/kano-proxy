@@ -60,7 +60,10 @@ const resetText = computed(() =>
 <style scoped>
 .usage {
   display: grid;
-  grid-template-columns: 60px minmax(0, 1fr) 44px;
+  /* The label column is fixed so bars line up down the card. Sized for the
+     longest label any adapter emits — Antigravity's group-prefixed
+     "Gemini Week" (docs/providers.md § Antigravity) — not for a bare "5h". */
+  grid-template-columns: 78px minmax(0, 1fr) 44px;
   align-items: center;
   gap: var(--space-3);
 }
@@ -111,7 +114,7 @@ const resetText = computed(() =>
 
 @media (max-width: 640px) {
   .usage {
-    grid-template-columns: 48px minmax(0, 1fr) 40px;
+    grid-template-columns: 68px minmax(0, 1fr) 40px;
     gap: var(--space-2);
   }
 }

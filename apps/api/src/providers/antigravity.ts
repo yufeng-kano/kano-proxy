@@ -223,12 +223,40 @@ export async function loadCodeAssist(
   }
 }
 
+/** Emission order within a group, matching the pair claude-code pushes. */
+const WINDOW_ORDER = ["5h", "Week"]
+
 /**
- * One `QuotaSummaryGroup`'s buckets → `UsageWindow`s, appended to `out`.
- * `groupName` is null for the response's ungrouped top-level `buckets`.
+ * Upstream bucket names are sentences ("Five Hour Limit Remaining"); the
+ * Providers page gives a window label one short column. Compress to the
+ * strings every other adapter already emits, and leave anything unrecognized
+ * alone rather than mangling it.
+ */
+function windowShortName(bucketName: string): string {
+  if (/five[\s_-]*hour|\b5\s*h\b/i.test(bucketName)) return "5h"
+  if (/week/i.test(bucketName)) return "Week"
+  return bucketName
+}
+
+/**
+ * "GEMINI MODELS" → "Gemini". Every other group bundles more than one vendor
+ * ("CLAUDE AND GPT MODELS"), so naming it after either would be wrong and
+ * spelling it out does not fit the column — it becomes "Other". A third Google
+ * group would land there too and need its own rule (docs/providers.md).
+ */
+function groupShortName(groupName: string): string {
+  return /gemini/i.test(groupName) ? "Gemini" : "Other"
+}
+
+/**
+ * One `QuotaSummaryGroup`'s buckets → `UsageWindow`s, appended to `out`
+ * 5h-before-Week. `groupName` is null for the response's ungrouped top-level
+ * `buckets`, which then carry no prefix.
  */
 function collectQuotaBuckets(raw: unknown, groupName: string | null, out: UsageWindow[]): void {
   if (!Array.isArray(raw)) return
+  const prefix = groupName ? groupShortName(groupName) : null
+  const ranked: Array<{ rank: number; window: UsageWindow }> = []
   for (const entry of raw) {
     if (!entry || typeof entry !== "object") continue
     const bucket = entry as {
@@ -244,18 +272,25 @@ function collectQuotaBuckets(raw: unknown, groupName: string | null, out: UsageW
       (typeof bucket.bucketId === "string" && bucket.bucketId.trim()) ||
       null
     if (!name) continue
+    const short = windowShortName(name)
+    const rank = WINDOW_ORDER.indexOf(short)
     // `remaining_fraction` and `remaining_amount` are one oneof: only the
     // fraction carries a denominator, so a bucket reporting the bare amount
     // gets a null utilization rather than an invented percentage.
     const fraction = Number(bucket.remainingFraction)
-    out.push({
-      label: groupName ? `${groupName} · ${name}` : name,
-      utilization: Number.isFinite(fraction)
-        ? Math.min(100, Math.max(0, (1 - fraction) * 100))
-        : null,
-      resets_at: typeof bucket.resetTime === "string" ? bucket.resetTime : null,
+    ranked.push({
+      rank: rank === -1 ? WINDOW_ORDER.length : rank,
+      window: {
+        label: prefix ? `${prefix} ${short}` : short,
+        utilization: Number.isFinite(fraction)
+          ? Math.min(100, Math.max(0, (1 - fraction) * 100))
+          : null,
+        resets_at: typeof bucket.resetTime === "string" ? bucket.resetTime : null,
+      },
     })
   }
+  ranked.sort((a, b) => a.rank - b.rank)
+  for (const { window } of ranked) out.push(window)
 }
 
 /**

@@ -622,10 +622,11 @@ describe("antigravityAdapter.fetchUsage quota windows", () => {
     )
   }
 
-  it("turns each group's buckets into a labelled window with a real reset time", async () => {
+  it("compresses the labels and emits 5h before Week, upstream order notwithstanding", async () => {
     const calls = stubQuota({
       groups: [
         {
+          // Upstream lists Weekly first; the card wants the short window first.
           displayName: "GEMINI MODELS",
           buckets: [
             {
@@ -643,9 +644,11 @@ describe("antigravityAdapter.fetchUsage quota windows", () => {
           ],
         },
         {
+          // Bundles two vendors, so it is named after neither.
           displayName: "CLAUDE AND GPT MODELS",
           buckets: [
             { displayName: "Weekly Limit Remaining", remainingFraction: 1, resetTime: null },
+            { displayName: "Five Hour Limit Remaining", remainingFraction: 1, resetTime: null },
           ],
         },
       ],
@@ -655,22 +658,38 @@ describe("antigravityAdapter.fetchUsage quota windows", () => {
     // utilization is percent *used*, so a 0.9998 remaining fraction is ~0.02.
     expect(usage.windows).toEqual([
       {
-        label: "GEMINI MODELS · Weekly Limit Remaining",
-        utilization: expect.closeTo(0.02, 5),
-        resets_at: "2026-08-29T09:00:00Z",
-      },
-      {
-        label: "GEMINI MODELS · Five Hour Limit Remaining",
+        label: "Gemini 5h",
         utilization: expect.closeTo(0.13, 5),
         resets_at: "2026-08-22T14:00:00Z",
       },
       {
-        label: "CLAUDE AND GPT MODELS · Weekly Limit Remaining",
-        utilization: 0,
-        resets_at: null,
+        label: "Gemini Week",
+        utilization: expect.closeTo(0.02, 5),
+        resets_at: "2026-08-29T09:00:00Z",
       },
+      { label: "Other 5h", utilization: 0, resets_at: null },
+      { label: "Other Week", utilization: 0, resets_at: null },
     ])
     expect(usage.error).toBeUndefined()
+  })
+
+  it("keeps an unrecognized bucket name verbatim, after the two known windows", async () => {
+    stubQuota({
+      groups: [
+        {
+          displayName: "GEMINI MODELS",
+          buckets: [
+            { displayName: "Monthly Allowance", remainingFraction: 0.5 },
+            { displayName: "Five Hour Limit Remaining", remainingFraction: 0.5 },
+          ],
+        },
+      ],
+    })
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    expect(usage.windows.map((w) => w.label)).toEqual([
+      "Gemini 5h",
+      "Gemini Monthly Allowance",
+    ])
   })
 
   it("sends the stored project id and marks an exhausted bucket fully used", async () => {
@@ -691,9 +710,10 @@ describe("antigravityAdapter.fetchUsage quota windows", () => {
     })
     const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
     expect(body).toEqual({ project: "proj-42" })
-    // 100 is what the routing module reads as "unusable until resets_at".
+    // Ungrouped top-level buckets carry no prefix. 100 is what the routing
+    // module reads as "unusable until resets_at".
     expect(usage.windows).toEqual([
-      { label: "Weekly", utilization: 100, resets_at: "2026-09-01T00:00:00Z" },
+      { label: "Week", utilization: 100, resets_at: "2026-09-01T00:00:00Z" },
     ])
   })
 
@@ -712,7 +732,7 @@ describe("antigravityAdapter.fetchUsage quota windows", () => {
     const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
     // A bare amount has no denominator, so no percentage is invented from it.
     expect(usage.windows).toEqual([
-      { label: "GEMINI MODELS · Credits", utilization: null, resets_at: null },
+      { label: "Gemini Credits", utilization: null, resets_at: null },
     ])
   })
 
