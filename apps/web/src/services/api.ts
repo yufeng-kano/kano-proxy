@@ -11,7 +11,7 @@ import type {
   LoginStart,
   LogsResponse,
   ModelGroup,
-  ModelGroupTargetInput,
+  ModelGroupModelInput,
   ModelsResponse,
   ProviderId,
   RoutingStrategy,
@@ -44,6 +44,20 @@ export function clientBaseUrls(): { openai: string; anthropic: string } {
   return {
     openai: `${origin}/openai/v1`,
     anthropic: `${origin}/anthropic`,
+  }
+}
+
+/**
+ * A model group's own base URLs (docs/api.md § Group endpoints) — what a
+ * client's `base_url` is set to for that group's virtual endpoint.
+ */
+export function groupBaseUrls(slug: string): { openai: string; anthropic: string } {
+  const origin =
+    API_ORIGIN ||
+    (typeof window !== "undefined" ? window.location.origin : "")
+  return {
+    openai: `${origin}/g/${slug}/openai/v1`,
+    anthropic: `${origin}/g/${slug}/anthropic`,
   }
 }
 
@@ -352,8 +366,9 @@ export async function testCustomProvider(
   })
 }
 
-// Model groups — bare-name aliases over ordered provider/model targets.
-// Session-cookie auth, same as the routes above. See docs/auth.md § Model groups.
+// Model groups — virtual endpoints whose model names map to ordered
+// provider/model targets. Session-cookie auth, same as the routes above.
+// See docs/auth.md § Model groups.
 
 export async function listModelGroups(): Promise<ModelGroup[]> {
   const data = await request<{ groups: ModelGroup[] }>("/api/model-groups")
@@ -361,15 +376,16 @@ export async function listModelGroups(): Promise<ModelGroup[]> {
 }
 
 /**
- * `name` is the display label; `aliases` are the callable ids. Targets go up as
- * `{model, account_id}` objects — a bare string is still accepted by the API as
- * shorthand for an unpinned target, but sending objects keeps the pin explicit,
- * including when it is deliberately null.
+ * `name` is the display label; `slug` is the endpoint's URL id; `models` are
+ * the callable names, each with its targets. Targets go up as
+ * `{model, account_id}` objects — a bare string is still accepted by the API
+ * as shorthand for an unpinned target, but sending objects keeps the pin
+ * explicit, including when it is deliberately null.
  */
 export async function createModelGroup(body: {
   name: string
-  aliases: string[]
-  targets: ModelGroupTargetInput[]
+  slug: string
+  models: ModelGroupModelInput[]
   strategy?: RoutingStrategy
 }): Promise<ModelGroup> {
   return request<ModelGroup>("/api/model-groups", {
@@ -379,16 +395,17 @@ export async function createModelGroup(body: {
 }
 
 /**
- * `aliases` and `targets`, when sent, each replace their whole list — there is
- * no per-entry patching, because for targets the order *is* the routing
- * priority, and an alias set is what the group answers to as a whole.
+ * `models`, when sent, replaces the whole set — there is no per-entry
+ * patching, because each model's target order *is* the routing priority and
+ * the model set is saved as one unit. Changing `slug` moves the endpoint URL
+ * immediately.
  */
 export async function updateModelGroup(
   id: string,
   body: {
     name?: string
-    aliases?: string[]
-    targets?: ModelGroupTargetInput[]
+    slug?: string
+    models?: ModelGroupModelInput[]
     strategy?: RoutingStrategy
   },
 ): Promise<ModelGroup> {

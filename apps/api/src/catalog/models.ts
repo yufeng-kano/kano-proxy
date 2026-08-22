@@ -9,7 +9,6 @@ import type { Env, ProviderId } from "../env"
 import { PROVIDERS } from "../env"
 import { listAccounts } from "../db/accounts"
 import { listCustomProviders, type CustomProviderRow } from "../db/custom_providers"
-import { listAliasesForGroup, listModelGroups } from "../db/model_groups"
 import { decryptJson } from "../crypto/token_crypto"
 import type { StoredCredential } from "../pool/acquire"
 import { benchUntilFromRow } from "../pool/bench"
@@ -246,34 +245,6 @@ async function fetchCustomProviderModels(
 }
 
 /**
- * Model groups (docs/providers.md § Model groups): one row per **alias**,
- * not per group — a group with 3 aliases lists as 3 catalog entries, `id` =
- * the alias, `display_name` = the group's display name shared across them.
- * Cheap D1 reads, no KV cache needed. Listed regardless of current target
- * usability — groups are user config, never fabricated, and never expanded
- * into their targets here.
- */
-async function fetchModelGroups(env: Env, userId: string): Promise<ProviderModelsSection> {
-  const rows = await listModelGroups(env.DB, userId)
-  const models: CatalogModel[] = []
-  for (const row of rows) {
-    const aliasRows = await listAliasesForGroup(env.DB, row.id)
-    for (const a of aliasRows) {
-      models.push({
-        id: a.alias,
-        provider: "group",
-        upstream: a.alias,
-        display_name: row.name,
-        available: true,
-        owned_by: "group",
-        object: "model" as const,
-      })
-    }
-  }
-  return { provider: "group", models, error: null, cached: false }
-}
-
-/**
  * Live models for a user. Only providers with bound accounts are queried.
  * `availableOnly` is kept for API shape; all returned models are available.
  */
@@ -298,7 +269,8 @@ export async function listModelsForUser(
     sections.push(await fetchCustomProviderModels(env, userId, row, force))
   }
 
-  sections.push(await fetchModelGroups(env, userId))
+  // Model groups are deliberately absent here (since v4): each group is its
+  // own endpoint whose /models lists its names (docs/api.md § Group endpoints).
 
   const models = sections.flatMap((s) => s.models)
   // availableOnly has no extra filter: we never invent unavailable catalog rows

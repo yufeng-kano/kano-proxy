@@ -150,7 +150,7 @@ export const en = {
   // apart from a direct call to the same model; "Account removed" and
   // "Key removed" are records deleted since the request ran — which happened
   // all the same, so the row stays and says which part of it is gone.
-  "logs.via": "via {alias}",
+  "logs.via": "via {group}",
   "logs.accountRemoved": "Account removed",
   "logs.keyRemoved": "Key removed",
   "logs.type.oauth": "OAuth",
@@ -375,48 +375,54 @@ export const en = {
     "This provider doesn't publish a model list — use the model id from your ChatGPT plan.",
   // The catalog's fixed `group` section. Every other section is named by the
   // provider it came from; this one is the user's own names, so it gets a label.
-  "models.section.groups": "Groups",
   "models.error.load": "Couldn't load models",
 
   // --- Groups -------------------------------------------------------------
   "groups.title": "Groups",
   "groups.create": "Create group",
   "groups.column.name": "Name",
-  "groups.column.aliases": "Aliases",
-  "groups.column.targets": "Targets",
+  "groups.column.endpoint": "Endpoint",
+  "groups.column.models": "Models",
   "groups.column.updated": "Updated",
   // Accessible names for the row controls: several rows offer the same two
   // words, so the subject goes in the name. Each contains the visible label
-  // verbatim (WCAG 2.5.3) — the alias itself, and "Edit".
-  "groups.copyAlias": "Copy {alias}",
+  // verbatim (WCAG 2.5.3) — the copied value itself, and "Edit".
+  "groups.copyModel": "Copy {model}",
+  "groups.copyUrl": "Copy {url}",
   "groups.editGroup": "Edit {name}",
   "groups.empty.title": "No groups yet",
   "groups.empty.body":
-    "A group gives a model your own name. Point a client's fixed model id at whatever you actually run, or gather one model from several accounts and endpoints behind a single name.",
+    "A group is an endpoint of your own. Point a client at its base URL, and the model names you define there route to whatever you actually run — one name can try several accounts and providers in order.",
   "groups.delete": "Delete group",
-  "groups.deleteConfirm": "Delete this group? Requests using its aliases stop working immediately.",
+  "groups.deleteConfirm": "Delete this group? Its endpoint stops working immediately.",
   "groups.dialog.editTitle": "Edit group",
   "groups.dialog.save": "Save changes",
-  // The two column heads. Nouns, not verbs: they name what each side holds, and
-  // they sit on one row, so they are read together.
+  // The three column heads. Nouns, not verbs: they name what each side holds,
+  // and they sit on one row, so they are read together.
   "groups.dialog.identityLabel": "Group",
   "groups.dialog.nameLabel": "Name",
-  "groups.dialog.namePlaceholder": "Fast Sonnet",
-  "groups.dialog.nameHint": "A label for this list. Clients never send it.",
-  // The callable ids, plural by design: a client with a hard-coded model name
-  // gets its own alias without anything else having to change.
-  "groups.dialog.aliasesLabel": "Aliases",
-  "groups.dialog.aliasesHint":
-    "Model ids clients can send, on both base URLs. Any of them routes here. Enter or a comma adds one.",
-  "groups.dialog.aliasField": "New alias",
-  "groups.dialog.aliasPlaceholder": "gpt-4o",
-  "groups.dialog.addAlias": "Add alias {alias}",
-  "groups.dialog.removeAlias": "Remove alias {alias}",
-  "groups.dialog.pickerLabel": "Models",
-  "groups.dialog.targetsLabel": "Targets",
-  "groups.dialog.targetsHint":
-    "Requests try these in order and use the first one that can take them. A target pinned to an account uses only that account; the rest use the whole provider.",
-  "groups.dialog.targetsEmpty": "Pick an account, then choose the models it should serve.",
+  "groups.dialog.namePlaceholder": "Claude Code setup",
+  "groups.dialog.nameHint": "A label for this group. Clients never send it.",
+  // The endpoint identity: the slug is the URL, so the hint says what it makes
+  // and the preview below shows it live.
+  "groups.dialog.slugLabel": "Endpoint slug",
+  "groups.dialog.slugPlaceholder": "my-tools",
+  "groups.dialog.slugHint":
+    "Lowercase letters, digits and hyphens. It becomes this group's base URLs:",
+  "groups.dialog.slugMoves": "Changing the slug moves these URLs immediately.",
+  "groups.dialog.pickerLabel": "Pick targets",
+  "groups.dialog.modelsLabel": "Group models",
+  "groups.dialog.modelField": "New model name",
+  "groups.dialog.modelPlaceholder": "gpt-4o",
+  "groups.dialog.addModel": "Add model",
+  "groups.dialog.addModelNamed": "Add model {name}",
+  "groups.dialog.removeModel": "Remove model {name}",
+  "groups.dialog.selectModel": "Edit targets of {name}",
+  "groups.dialog.modelNameLabel": "Model name {name}",
+  "groups.dialog.modelsHint":
+    "Add a model name clients will send on this endpoint, then pick its targets from the catalog on the left.",
+  "groups.dialog.targetsEmpty":
+    "No targets yet — pick an account on the left, then choose the models it should serve.",
   // The account dimension. "Any account" is the unpinned state the picker no
   // longer creates but older groups still hold — the provider's own pool and
   // priority — and it reads the same on the list page and here.
@@ -458,18 +464,22 @@ export const en = {
   "groups.error.nameLength": "Use {max} characters or fewer",
   // Alias rules are the id rules — no spaces, no "/" — stated as the fix, not
   // as the constraint that was broken.
-  "groups.error.aliasesEmpty": "Add at least one alias",
-  "groups.error.aliasLength": "An alias can be at most {max} characters",
-  "groups.error.aliasWhitespace": "An alias can't contain spaces",
-  "groups.error.aliasSlash": "An alias can't contain \"/\"",
-  "groups.error.aliasDuplicate": "{alias} is already an alias of this group",
-  "groups.error.aliasesMax": "A group holds at most {max} aliases",
+  "groups.error.slug": "Enter a slug",
+  "groups.error.slugFormat":
+    "Use 2-32 lowercase letters, digits and hyphens, starting and ending with a letter or digit",
+  "groups.error.modelName": "Enter a model name",
+  "groups.error.modelNameLength": "A model name can be at most {max} characters",
+  "groups.error.modelNameWhitespace": "A model name can't contain spaces",
+  "groups.error.modelNameDuplicate": "{name} is already a model of this group",
+  "groups.error.modelsMax": "A group holds at most {max} models",
+  "groups.error.modelNeedsTargets": "Every model needs at least one target",
+  "groups.error.noActiveModel": "Add a model first — targets belong to a model",
   "groups.error.targetFormat": "Use a full model id in the form {example}",
-  // A model may appear twice as long as the two entries use different
+  // A target may appear twice as long as the two entries use different
   // accounts, so the message says how to make the second one legal.
   "groups.error.targetDuplicate":
-    "That model is already in this group on this account. Pick another account to add it again.",
-  "groups.error.targetsMax": "A group holds at most {max} models",
+    "That model is already a target here on this account. Pick another account to add it again.",
+  "groups.error.targetsMax": "A model holds at most {max} targets",
   "groups.error.save": "Couldn't save the group",
   "groups.error.delete": "Couldn't delete the group",
 

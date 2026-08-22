@@ -8,8 +8,10 @@ import type { HonoEnv } from "./session"
 /** Resolve sk-kano-proxy API key from Authorization or x-api-key. */
 export const apiKeyAuth: MiddlewareHandler<HonoEnv> = async (c, next) => {
   // Error envelope is surface-shaped, not provider-shaped: Anthropic clients
-  // on /anthropic expect the Anthropic error shape even for auth failures.
-  const isAnthropic = c.req.path.startsWith("/anthropic")
+  // on /anthropic (shared base or a group endpoint's anthropic mount) expect
+  // the Anthropic error shape even for auth failures.
+  const isAnthropic =
+    c.req.path.startsWith("/anthropic") || /^\/g\/[^/]+\/anthropic(\/|$)/.test(c.req.path)
   const unauthorized = (message: string) =>
     isAnthropic
       ? c.json({ type: "error", error: { type: "authentication_error", message } }, 401)

@@ -1,67 +1,56 @@
 /** Validation and limits for user-defined model groups (docs/providers.md § Model groups). */
 
-import type { GroupTarget } from "../db/model_groups"
+import type { GroupModelInput, GroupTarget } from "../db/model_groups"
 import { DEFAULT_STRATEGY } from "../routing/strategy"
 import { splitModelId } from "./model"
 
 export const MAX_MODEL_GROUPS_PER_USER = 50
-export const MAX_TARGETS_PER_GROUP = 20
-export const MAX_ALIASES_PER_GROUP = 10
-export const MAX_ALIAS_LENGTH = 128
+export const MAX_MODELS_PER_GROUP = 20
+export const MAX_TARGETS_PER_MODEL = 20
+export const MAX_MODEL_NAME_LENGTH = 128
 export const MAX_DISPLAY_NAME_LENGTH = 64
 
 /**
- * One callable alias: trimmed, 1-128 chars, no whitespace, no "/" — the
- * missing slash is the namespace isolation from `provider/model` ids
- * (`splitModelId` requires a slash), so an alias can never collide with a
- * real model id.
+ * Same shape as a custom-provider slug (docs/providers.md § Model groups
+ * "Slug") — but with **no reserved-word list**: the `/g/` path prefix is its
+ * own namespace, so a group slug can never collide with a provider id or any
+ * other route.
  */
-export function validateAlias(alias: string): string | null {
-  if (!alias || alias.length > MAX_ALIAS_LENGTH) {
-    return `alias must be 1-${MAX_ALIAS_LENGTH} characters`
+const GROUP_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/
+
+export function validateGroupSlug(slug: string): string | null {
+  if (slug.length < 2 || slug.length > 32) {
+    return "slug must be 2-32 characters"
   }
-  if (/\s/.test(alias)) return "alias must not contain whitespace"
-  if (alias.includes("/")) return "alias must not contain '/'"
+  if (!GROUP_SLUG_RE.test(slug)) {
+    return "slug must be lowercase alphanumeric with hyphens, starting and ending with a letter or digit"
+  }
+  return null
+}
+
+/**
+ * One callable model name on a group endpoint: trimmed, 1-128 chars, no
+ * whitespace. Unlike the v3 bare-name aliases, `/` **is allowed** — a group
+ * endpoint has no `provider/model` resolution to collide with, so a group
+ * can mirror full ids as well as bare ones.
+ */
+export function validateModelName(name: string): string | null {
+  if (!name || name.length > MAX_MODEL_NAME_LENGTH) {
+    return `model name must be 1-${MAX_MODEL_NAME_LENGTH} characters`
+  }
+  if (/\s/.test(name)) return "model name must not contain whitespace"
   return null
 }
 
 /**
  * A group's display name: trimmed, 1-64 chars, free text (spaces fine — a
- * label, never a callable id; the callable ids are `aliases`).
+ * label, never part of the URL; the callable surface is the slug + models).
  */
 export function validateDisplayName(name: string): string | null {
   if (!name || name.length > MAX_DISPLAY_NAME_LENGTH) {
     return `name must be 1-${MAX_DISPLAY_NAME_LENGTH} characters`
   }
   return null
-}
-
-export type AliasesValidation = { ok: true; aliases: string[] } | { ok: false; error: string }
-
-/**
- * 1-10 entries, each a valid alias (`validateAlias`), no duplicates within
- * the payload itself — cross-group uniqueness (docs/auth.md § Model groups)
- * is a DB-backed check (`findAliasConflicts`) done by the route, not here.
- */
-export function validateAliases(aliases: unknown): AliasesValidation {
-  if (!Array.isArray(aliases) || aliases.length === 0) {
-    return { ok: false, error: "aliases must be a non-empty array" }
-  }
-  if (aliases.length > MAX_ALIASES_PER_GROUP) {
-    return { ok: false, error: `aliases must have at most ${MAX_ALIASES_PER_GROUP} entries` }
-  }
-  const out: string[] = []
-  const seen = new Set<string>()
-  for (const a of aliases) {
-    if (typeof a !== "string") return { ok: false, error: "aliases entries must be strings" }
-    const trimmed = a.trim()
-    const err = validateAlias(trimmed)
-    if (err) return { ok: false, error: err }
-    if (seen.has(trimmed)) return { ok: false, error: `duplicate alias "${trimmed}"` }
-    seen.add(trimmed)
-    out.push(trimmed)
-  }
-  return { ok: true, aliases: out }
 }
 
 /**
@@ -90,8 +79,8 @@ export type GroupTargetsValidation = { ok: true; targets: GroupTarget[] } | { ok
  * stays free of DB access.
  *
  * Each target entry may be a bare `"provider/model"` string (shorthand for
- * `{model}`, still accepted on the wire and in storage — v3.0.0 rows) or an
- * object `{model, account_id?}`. Duplicate identity is `model` + `account_id`
+ * `{model}`, still accepted on the wire and in storage) or an object
+ * `{model, account_id?}`. Duplicate identity is `model` + `account_id`
  * together, so the same model pinned to two different accounts (or once
  * pinned and once not) is two legitimate targets.
  */
@@ -103,8 +92,8 @@ export async function validateGroupTargets(
   if (!Array.isArray(targets) || targets.length === 0) {
     return { ok: false, error: "targets must be a non-empty array" }
   }
-  if (targets.length > MAX_TARGETS_PER_GROUP) {
-    return { ok: false, error: `targets must have at most ${MAX_TARGETS_PER_GROUP} entries` }
+  if (targets.length > MAX_TARGETS_PER_MODEL) {
+    return { ok: false, error: `targets must have at most ${MAX_TARGETS_PER_MODEL} entries` }
   }
   const out: GroupTarget[] = []
   const seen = new Set<string>()
@@ -131,8 +120,8 @@ export async function validateGroupTargets(
       return { ok: false, error: `target "${trimmed}" must be provider/model` }
     }
     // A bare name (no slash) is rejected above by splitModelId already, but
-    // spell it out: a group can never target another group — no nesting, no
-    // cycles, structurally.
+    // spell it out: a group can never target another group's model — no
+    // nesting, no cycles, structurally.
     if (!resolvePrefix(split.prefix)) {
       return { ok: false, error: `target "${trimmed}" has an unknown provider "${split.prefix}"` }
     }
@@ -167,4 +156,50 @@ export async function validateGroupTargets(
     out.push({ model: trimmed, account_id: accountId })
   }
   return { ok: true, targets: out }
+}
+
+export type GroupModelsValidation = { ok: true; models: GroupModelInput[] } | { ok: false; error: string }
+
+/**
+ * The group's whole model set: 1-20 entries of `{name, targets}`, names
+ * unique **within the payload** (= within the group — the set replaces the
+ * stored one wholesale, and other groups may reuse a name freely since the
+ * endpoint is the namespace). Each entry's targets go through
+ * `validateGroupTargets`, with the model's name prefixed onto any error so
+ * the message says which model it is about.
+ */
+export async function validateGroupModels(
+  models: unknown,
+  resolvePrefix: (prefix: string) => boolean,
+  resolveAccount: (accountId: string, provider: string) => Promise<boolean>,
+): Promise<GroupModelsValidation> {
+  if (!Array.isArray(models) || models.length === 0) {
+    return { ok: false, error: "models must be a non-empty array" }
+  }
+  if (models.length > MAX_MODELS_PER_GROUP) {
+    return { ok: false, error: `models must have at most ${MAX_MODELS_PER_GROUP} entries` }
+  }
+  const out: GroupModelInput[] = []
+  const seen = new Set<string>()
+  for (const entry of models) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return { ok: false, error: "models entries must be {name, targets} objects" }
+    }
+    const obj = entry as Record<string, unknown>
+    if (typeof obj.name !== "string") {
+      return { ok: false, error: "model name must be a string" }
+    }
+    const name = obj.name.trim()
+    const nameErr = validateModelName(name)
+    if (nameErr) return { ok: false, error: nameErr }
+    if (seen.has(name)) return { ok: false, error: `duplicate model name "${name}"` }
+    seen.add(name)
+
+    const targetsRes = await validateGroupTargets(obj.targets, resolvePrefix, resolveAccount)
+    if (!targetsRes.ok) {
+      return { ok: false, error: `model "${name}": ${targetsRes.error}` }
+    }
+    out.push({ name, targets: targetsRes.targets })
+  }
+  return { ok: true, models: out }
 }

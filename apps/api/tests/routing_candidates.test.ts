@@ -8,8 +8,13 @@
  */
 import { describe, expect, it } from "vitest"
 import type { Env } from "../src/env"
-import { groupCandidates, poolCandidates, resolveCandidates } from "../src/routing/candidates"
-import type { ModelGroupRow } from "../src/db/model_groups"
+import {
+  groupModelCandidates,
+  poolCandidates,
+  resolveCandidates,
+  resolveGroupModelCandidates,
+} from "../src/routing/candidates"
+import type { ModelGroupModelRow, ModelGroupRow } from "../src/db/model_groups"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
 function envWith(db: FakeD1): Env {
@@ -61,8 +66,21 @@ function groupRow(overrides: Partial<ModelGroupRow> = {}): ModelGroupRow {
     id: "mgrp_1",
     user_id: "user_1",
     name: "group",
-    targets_json: JSON.stringify(["claude-code/claude-opus-5"]),
+    slug: "my-group",
     strategy: "ordered",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  }
+}
+
+function modelRow(targets: unknown[], overrides: Partial<ModelGroupModelRow> = {}): ModelGroupModelRow {
+  return {
+    id: "mgmodel_1",
+    user_id: "user_1",
+    group_id: "mgrp_1",
+    name: "opus",
+    targets_json: JSON.stringify(targets),
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",
     ...overrides,
@@ -113,15 +131,15 @@ describe("poolCandidates — direct provider/model call", () => {
   })
 })
 
-describe("groupCandidates — expanding a group's targets", () => {
+describe("groupModelCandidates — expanding one group model's targets", () => {
   it("unpinned target contributes every pool account in priority order", async () => {
     const db = new FakeD1()
     const high = seedAccount(db, "claude-code", "user_1", 10)
     const low = seedAccount(db, "claude-code", "user_1", 1)
-    const { candidates, resolvedTargets } = await groupCandidates(
+    const { candidates, resolvedTargets } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({ targets_json: JSON.stringify(["claude-code/claude-opus-5"]) }),
+      modelRow(["claude-code/claude-opus-5"]),
     )
     expect(resolvedTargets).toHaveLength(1)
     expect(candidates.map((c) => c.account.id)).toEqual([high, low])
@@ -131,12 +149,10 @@ describe("groupCandidates — expanding a group's targets", () => {
     const db = new FakeD1()
     seedAccount(db, "claude-code", "user_1", 10)
     const pinned = seedAccount(db, "claude-code", "user_1", 1)
-    const { candidates } = await groupCandidates(
+    const { candidates } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({
-        targets_json: JSON.stringify([{ model: "claude-code/claude-opus-5", account_id: pinned }]),
-      }),
+      modelRow([{ model: "claude-code/claude-opus-5", account_id: pinned }]),
     )
     expect(candidates).toHaveLength(1)
     expect(candidates[0]!.account.id).toBe(pinned)
@@ -148,15 +164,10 @@ describe("groupCandidates — expanding a group's targets", () => {
     const pinned = seedAccount(db, "claude-code", "user_1", 1)
     const grokHigh = seedAccount(db, "grok", "user_1", 10)
     const grokLow = seedAccount(db, "grok", "user_1", 1)
-    const { candidates } = await groupCandidates(
+    const { candidates } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({
-        targets_json: JSON.stringify([
-          { model: "claude-code/claude-opus-5", account_id: pinned },
-          "grok/grok-4.5",
-        ]),
-      }),
+      modelRow([{ model: "claude-code/claude-opus-5", account_id: pinned }, "grok/grok-4.5"]),
     )
     expect(candidates.map((c) => ({ id: c.account.id, targetIndex: c.targetIndex, pinned: c.pinned }))).toEqual([
       { id: pinned, targetIndex: 0, pinned: true },
@@ -169,10 +180,10 @@ describe("groupCandidates — expanding a group's targets", () => {
     const db = new FakeD1()
     // "gone" is never seeded as a custom_providers row — simulates deletion.
     const acc = seedAccount(db, "claude-code")
-    const { candidates, resolvedTargets } = await groupCandidates(
+    const { candidates, resolvedTargets } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({ targets_json: JSON.stringify(["gone/some-model", "claude-code/claude-opus-5"]) }),
+      modelRow(["gone/some-model", "claude-code/claude-opus-5"]),
     )
     expect(resolvedTargets).toHaveLength(1)
     expect(resolvedTargets[0]!.provider).toBe("claude-code")
@@ -182,15 +193,13 @@ describe("groupCandidates — expanding a group's targets", () => {
   it("a pinned target whose account was deleted contributes nothing for that target", async () => {
     const db = new FakeD1()
     const grokAcc = seedAccount(db, "grok")
-    const { candidates, resolvedTargets } = await groupCandidates(
+    const { candidates, resolvedTargets } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({
-        targets_json: JSON.stringify([
-          { model: "claude-code/claude-opus-5", account_id: "acc_never_existed" },
-          "grok/grok-4.5",
-        ]),
-      }),
+      modelRow([
+        { model: "claude-code/claude-opus-5", account_id: "acc_never_existed" },
+        "grok/grok-4.5",
+      ]),
     )
     // Both targets resolve (their provider prefixes are valid) but target 0
     // contributes zero candidates (its pinned account is gone).
@@ -202,15 +211,10 @@ describe("groupCandidates — expanding a group's targets", () => {
     const db = new FakeD1()
     const grokAcc = seedAccount(db, "grok")
     const codexAcc = seedAccount(db, "codex")
-    const { candidates } = await groupCandidates(
+    const { candidates } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({
-        targets_json: JSON.stringify([
-          { model: "claude-code/claude-opus-5", account_id: grokAcc },
-          "codex/gpt-5.2",
-        ]),
-      }),
+      modelRow([{ model: "claude-code/claude-opus-5", account_id: grokAcc }, "codex/gpt-5.2"]),
     )
     expect(candidates.map((c) => c.account.id)).toEqual([codexAcc])
   })
@@ -219,10 +223,10 @@ describe("groupCandidates — expanding a group's targets", () => {
     const db = new FakeD1()
     seedCustomProvider(db, "my-endpoint", "openai")
     const acc = seedAccount(db, "my-endpoint")
-    const { candidates } = await groupCandidates(
+    const { candidates } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({ targets_json: JSON.stringify(["my-endpoint/gpt-4o"]) }),
+      modelRow(["my-endpoint/gpt-4o"]),
     )
     expect(candidates).toHaveLength(1)
     expect(candidates[0]!.account.id).toBe(acc)
@@ -233,10 +237,10 @@ describe("groupCandidates — expanding a group's targets", () => {
 
   it("no target resolves at all: resolvedTargets and candidates are both empty (invalid_model at the route level)", async () => {
     const db = new FakeD1()
-    const { candidates, resolvedTargets } = await groupCandidates(
+    const { candidates, resolvedTargets } = await groupModelCandidates(
       envWith(db),
       "user_1",
-      groupRow({ targets_json: JSON.stringify(["gone-1/model", "gone-2/model"]) }),
+      modelRow(["gone-1/model", "gone-2/model"]),
     )
     expect(resolvedTargets).toEqual([])
     expect(candidates).toEqual([])
@@ -265,36 +269,55 @@ describe("resolveCandidates — top-level combinator used by routes", () => {
     expect(resolved!.strategy).toBe("ordered")
   })
 
-  it("group alias: primary is the first resolved target, candidates span every target", async () => {
+  it("group model: primary is the first resolved target, candidates span every target, groupName is slug/name", async () => {
     const db = new FakeD1()
-    db.seed("model_groups", [groupRow({ targets_json: JSON.stringify(["claude-code/claude-opus-5", "grok/grok-4.5"]) })])
-    db.seed("model_group_aliases", [
-      { id: "a1", user_id: "user_1", group_id: "mgrp_1", alias: "opus", created_at: "2026-01-01T00:00:00.000Z" },
+    const group = groupRow()
+    db.seed("model_groups", [group as unknown as Record<string, unknown>])
+    db.seed("model_group_models", [
+      modelRow(["claude-code/claude-opus-5", "grok/grok-4.5"]) as unknown as Record<string, unknown>,
     ])
     const cc = seedAccount(db, "claude-code")
     const grok = seedAccount(db, "grok")
-    const resolved = await resolveCandidates(envWith(db), "user_1", "opus")
+    const resolved = await resolveGroupModelCandidates(envWith(db), "user_1", group, "opus")
     expect(resolved!.primary.provider).toBe("claude-code")
-    expect(resolved!.groupName).toBe("opus")
+    expect(resolved!.groupName).toBe("my-group/opus")
     expect(resolved!.candidates.map((c) => c.account.id)).toEqual([cc, grok])
   })
 
-  it("unknown group alias and unknown provider both miss as null (invalid_model)", async () => {
+  it("bare names no longer resolve on the shared bases; unknown provider misses too (invalid_model)", async () => {
     const db = new FakeD1()
-    expect(await resolveCandidates(envWith(db), "user_1", "no-such-alias")).toBeNull()
+    db.seed("model_groups", [groupRow() as unknown as Record<string, unknown>])
+    db.seed("model_group_models", [
+      modelRow(["claude-code/claude-opus-5"]) as unknown as Record<string, unknown>,
+    ])
+    seedAccount(db, "claude-code")
+    // Even a name a group defines is a miss on the shared resolution path.
+    expect(await resolveCandidates(envWith(db), "user_1", "opus")).toBeNull()
     expect(await resolveCandidates(envWith(db), "user_1", "not-a-provider/model")).toBeNull()
+  })
+
+  it("a name the group does not define misses as null (invalid_model)", async () => {
+    const db = new FakeD1()
+    const group = groupRow()
+    db.seed("model_groups", [group as unknown as Record<string, unknown>])
+    db.seed("model_group_models", [
+      modelRow(["claude-code/claude-opus-5"]) as unknown as Record<string, unknown>,
+    ])
+    seedAccount(db, "claude-code")
+    expect(await resolveGroupModelCandidates(envWith(db), "user_1", group, "other")).toBeNull()
   })
 
   it("primary is target-index-0 regardless of bench state — selection among candidates is dispatch's job, not resolution's", async () => {
     const db = new FakeD1()
-    db.seed("model_groups", [groupRow({ targets_json: JSON.stringify(["claude-code/claude-opus-5", "grok/grok-4.5"]) })])
-    db.seed("model_group_aliases", [
-      { id: "a1", user_id: "user_1", group_id: "mgrp_1", alias: "opus", created_at: "2026-01-01T00:00:00.000Z" },
+    const group = groupRow()
+    db.seed("model_groups", [group as unknown as Record<string, unknown>])
+    db.seed("model_group_models", [
+      modelRow(["claude-code/claude-opus-5", "grok/grok-4.5"]) as unknown as Record<string, unknown>,
     ])
     // claude-code has zero bound accounts at all — target 0 still resolves
     // (its prefix is valid) and is still `primary`; only grok has an account.
     const grok = seedAccount(db, "grok")
-    const resolved = await resolveCandidates(envWith(db), "user_1", "opus")
+    const resolved = await resolveGroupModelCandidates(envWith(db), "user_1", group, "opus")
     expect(resolved!.primary.provider).toBe("claude-code")
     expect(resolved!.candidates.map((c) => c.account.id)).toEqual([grok])
   })

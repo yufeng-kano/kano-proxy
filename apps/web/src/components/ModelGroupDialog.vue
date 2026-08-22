@@ -1,29 +1,22 @@
 <script setup lang="ts">
 /**
- * Create / edit a model group (docs/admin-ui.md § Groups page).
+ * Create / edit a model group — since v4 a virtual endpoint: a `/g/<slug>/…`
+ * base URL plus the models callable on it, each with its own ordered target
+ * list (docs/admin-ui.md § Groups page).
  *
- * Two panes: **pick on the left, order on the right.** Building a group is
- * browsing — which provider, whose account, which model — so the left pane is a
- * picker and the right pane is the ordered list the picker feeds. The order is
- * the routing priority, which is why the right pane is built with move controls
- * rather than checkboxes, and why saving always sends the whole list.
- *
- * The picker is an inverted L: a horizontally scrollable provider tab strip
- * across the top (the Models page pattern, reused as-is), an account rail down
- * the left edge, and the model list filling the rest. Tab → accounts (lazily
- * loaded, cache-first, the same data the Providers page reads); account →
- * models, filtered client-side over the catalog the page already holds so a
- * keystroke never hits the network. Catalog only — the free-text add row was
- * removed 2026-08-14 (not this dialog's job); an id the catalog misses is the
- * catalog's problem to fix, not a hole every group editor papers over.
+ * Three columns, one surface: ① identity (name, slug + live endpoint URL
+ * preview, strategy), ② the picker, ③ the group's models. Column ③ is a stack
+ * of model sections; exactly one is **active**, and the picker feeds it —
+ * clicking a catalog model adds it as a target of the active model, pinned to
+ * the selected account. The picker itself is unchanged from v3: an inverted L
+ * of provider tabs, account rail, and the model list between them.
  *
  * **Every target this dialog creates pins an account** — there is no "Any
  * account" entry in the rail (docs, 2026-08-13). The wire still accepts
  * unpinned targets, and a group created before this design still renders its
- * unpinned targets on the right with the "Any account" tag; the picker just
- * cannot make new ones. Duplicate identity is therefore model + account,
- * exactly as the server checks it, and "same model, different account" is two
- * clicks: pick account A, click the model, pick account B, click it again.
+ * unpinned targets with the "Any account" tag; the picker just cannot make
+ * new ones. Duplicate identity is model + account within one group model,
+ * exactly as the server checks it.
  *
  * Delete lives in the footer, same reasoning as key revoke: rare and
  * irreversible, so it costs opening the group first and confirming.
@@ -38,13 +31,15 @@ import {
   ApiError,
   createModelGroup,
   deleteModelGroup,
+  groupBaseUrls,
   updateModelGroup,
 } from "@/services/api"
 import {
   DEFAULT_ROUTING_STRATEGY,
-  MODEL_GROUP_ALIASES_MAX,
-  MODEL_GROUP_ALIAS_MAX,
+  MODEL_GROUP_MODEL_NAME_MAX,
+  MODEL_GROUP_MODELS_MAX,
   MODEL_GROUP_NAME_MAX,
+  MODEL_GROUP_SLUG_RE,
   MODEL_GROUP_TARGETS_MAX,
   PROVIDERS,
   PROVIDER_IDS,
@@ -117,24 +112,32 @@ const MAX_MODELS = 50
 const isEdit = computed(() => !!props.group)
 
 /**
- * A row carries a `uid` the group itself never has: the right pane is keyed by
- * it, so re-pinning a broken target edits that row instead of replacing it —
- * and takes the control the user is holding down with it.
+ * Rows carry a `uid` the group itself never has: sections and target rows are
+ * keyed by it, so renames and re-pins edit the row in place instead of
+ * replacing it — and take the control the user is holding down with them.
  */
 type TargetRow = ModelGroupTarget & { uid: number }
+type ModelRow = { uid: number; name: string; targets: TargetRow[] }
 
 let nextUid = 0
 
-function toRow(target: ModelGroupTarget): TargetRow {
+function toTargetRow(target: ModelGroupTarget): TargetRow {
   return { ...target, uid: nextUid++ }
 }
 
-/** The display label — free text, and never what a client sends. */
+function toModelRow(model: { name: string; targets: ModelGroupTarget[] }): ModelRow {
+  return { uid: nextUid++, name: model.name, targets: model.targets.map(toTargetRow) }
+}
+
+/** The display label — free text, and never part of the URL. */
 const name = ref(props.group?.name ?? "")
-/** The callable ids. Working copies: both lists are only sent on Save. */
-const aliases = ref<string[]>([...(props.group?.aliases ?? [])])
-const aliasDraft = ref("")
-const targets = ref<TargetRow[]>((props.group?.targets ?? []).map(toRow))
+/** The endpoint's URL id. Working copies: everything is only sent on Save. */
+const slug = ref(props.group?.slug ?? "")
+/** The group's models, each with its ordered targets. */
+const models = ref<ModelRow[]>((props.group?.models ?? []).map(toModelRow))
+/** The model the picker feeds. Defaults to the first, so edit mode starts live. */
+const activeModelUid = ref<number | null>(models.value[0]?.uid ?? null)
+const modelDraft = ref("")
 /**
  * How the group orders its targets. A group saved before the field existed
  * (or read from a cache entry that predates it) means the server's default.
@@ -142,15 +145,17 @@ const targets = ref<TargetRow[]>((props.group?.targets ?? []).map(toRow))
 const strategy = ref<RoutingStrategy>(props.group?.strategy ?? DEFAULT_ROUTING_STRATEGY)
 
 /** Picker state: which provider tab, which account in its rail, what is typed. */
-const selectedTab = ref<string>(prefixOf(props.group?.targets[0]?.model ?? "") || PROVIDERS[0]!.id)
+const selectedTab = ref<string>(
+  prefixOf(props.group?.models[0]?.targets[0]?.model ?? "") || PROVIDERS[0]!.id,
+)
 const selectedAccountId = ref<string | null>(null)
 const query = ref("")
 
 const saving = ref(false)
 const deleting = ref(false)
 const nameError = ref<string | null>(null)
-const aliasError = ref<string | null>(null)
-const targetError = ref<string | null>(null)
+const slugError = ref<string | null>(null)
+const modelsError = ref<string | null>(null)
 const error = ref<string | null>(null)
 /** The move buttons' only feedback for a screen-reader user. */
 const announcement = ref("")
@@ -183,7 +188,23 @@ function asBuiltin(key: string): ProviderId | null {
   return PROVIDER_IDS.includes(key as ProviderId) ? (key as ProviderId) : null
 }
 
-/* --- Providers, accounts, models ----------------------------------------- */
+/* --- Endpoint preview ----------------------------------------------------- */
+
+/**
+ * The two live base URLs the typed slug produces — updated as the user types,
+ * so the field answers "where will clients point" before Save. A blank slug
+ * previews with a placeholder token rather than a broken URL.
+ */
+const endpointPreview = computed(() => {
+  const value = slug.value.trim() || "<slug>"
+  const urls = groupBaseUrls(value)
+  return [
+    { label: "OpenAI", url: urls.openai },
+    { label: "Anthropic", url: urls.anthropic },
+  ]
+})
+
+/* --- Providers, accounts, models (picker) --------------------------------- */
 
 /** The tab strip: the builtins in their declared order, then each custom endpoint. */
 const tabs = computed<SectionItem[]>(() => [
@@ -253,8 +274,7 @@ const trimmedQuery = computed(() => query.value.trim())
 
 /**
  * The active tab's models. Keyed on each row's own `provider`, which is the
- * catalog's section — so the fixed `group` section never appears under a
- * provider tab, and a group can never target another group.
+ * catalog's section.
  *
  * `display_name` is a **search key only** — the list renders the id alone
  * (docs/admin-ui.md § Groups page), but "Opus 4.8" still has to find
@@ -305,10 +325,12 @@ onMounted(() => {
   requestedCustom = true
   void customProviders.load()
   ensureRail(activeTab.value)
-  // An existing target whose pin no longer resolves is re-picked on the right
-  // pane, which needs that provider's accounts even if its tab is never opened.
-  for (const target of targets.value) {
-    if (target.account_id) ensureRail(prefixOf(target.model))
+  // An existing target whose pin no longer resolves is re-picked in place,
+  // which needs that provider's accounts even if its tab is never opened.
+  for (const model of models.value) {
+    for (const target of model.targets) {
+      if (target.account_id) ensureRail(prefixOf(target.model))
+    }
   }
 })
 
@@ -331,12 +353,65 @@ watch(
   { immediate: true },
 )
 
-/* --- Targets ------------------------------------------------------------- */
+/* --- Group models --------------------------------------------------------- */
+
+const activeModel = computed<ModelRow | null>(
+  () => models.value.find((m) => m.uid === activeModelUid.value) ?? null,
+)
 
 /**
- * Identity the server dedupes on: model *and* account together. The separator
- * is a NUL — never legal inside a model id or an account id — written as an
- * escape so this file stays plain text, exactly as the server writes it.
+ * One callable model name, by the server's rule: 1-128 chars, no whitespace —
+ * `/` is fine, a group endpoint has no provider/model resolution to collide
+ * with (docs/providers.md § Model groups).
+ */
+function modelNameError(value: string): string | null {
+  if (!value) return t("groups.error.modelName")
+  if (value.length > MODEL_GROUP_MODEL_NAME_MAX) {
+    return t("groups.error.modelNameLength", { max: MODEL_GROUP_MODEL_NAME_MAX })
+  }
+  if (/\s/.test(value)) return t("groups.error.modelNameWhitespace")
+  return null
+}
+
+/** Adds one model section and makes it active, so the next pick lands in it. */
+function commitModelDraft() {
+  const value = modelDraft.value.trim()
+  modelsError.value = null
+  if (!value) return
+  const invalid = modelNameError(value)
+  if (invalid) {
+    modelsError.value = invalid
+    return
+  }
+  if (models.value.some((m) => m.name.trim() === value)) {
+    modelsError.value = t("groups.error.modelNameDuplicate", { name: value })
+    return
+  }
+  if (models.value.length >= MODEL_GROUP_MODELS_MAX) {
+    modelsError.value = t("groups.error.modelsMax", { max: MODEL_GROUP_MODELS_MAX })
+    return
+  }
+  const row: ModelRow = { uid: nextUid++, name: value, targets: [] }
+  models.value.push(row)
+  activeModelUid.value = row.uid
+  modelDraft.value = ""
+}
+
+function removeModel(uid: number) {
+  const idx = models.value.findIndex((m) => m.uid === uid)
+  if (idx === -1) return
+  models.value.splice(idx, 1)
+  modelsError.value = null
+  if (activeModelUid.value === uid) activeModelUid.value = models.value[0]?.uid ?? null
+}
+
+/* --- Targets (of the active model) ---------------------------------------- */
+
+/**
+ * Identity the server dedupes on: model *and* account together, within one
+ * group model. The separator is a NUL — never legal inside a model id or an
+ * account id — written as an escape so this file stays plain text, exactly as
+ * the server writes it.
  */
 function identityOf(target: { model: string; account_id: string | null }): string {
   return `${target.model}\u0000${target.account_id ?? ""}`
@@ -364,20 +439,28 @@ function isMissingAccount(target: ModelGroupTarget): boolean {
   return !!target.account_id && !pinnedLabel(target)
 }
 
-/** Already in the list, on the account the rail currently has selected. */
+/** Already in the active model's list, on the account the rail has selected. */
 function isAdded(modelId: string): boolean {
+  const active = activeModel.value
+  if (!active) return false
   const identity = identityOf({ model: modelId, account_id: selectedAccountId.value })
-  return targets.value.some((t) => identityOf(t) === identity)
+  return active.targets.some((t) => identityOf(t) === identity)
 }
 
-/** Adds the model pinned to the selected account — the only kind this dialog makes. */
+/** Adds the model pinned to the selected account, into the active group model. */
 function addTarget(modelId: string) {
   const value = modelId.trim()
   const account = selectedAccount.value
-  targetError.value = null
+  modelsError.value = null
   if (!account) return
+  const active = activeModel.value
+  if (!active) {
+    // The picker has nowhere to put the pick — say so where the models live.
+    modelsError.value = t("groups.error.noActiveModel")
+    return
+  }
   if (!isTargetId(value)) {
-    targetError.value = t("groups.error.targetFormat", { example: MODEL_ID_FORM })
+    modelsError.value = t("groups.error.targetFormat", { example: MODEL_ID_FORM })
     return
   }
   const target: ModelGroupTarget = {
@@ -385,17 +468,17 @@ function addTarget(modelId: string) {
     account_id: account.id,
     account_label: account.label,
   }
-  if (targets.value.some((t) => identityOf(t) === identityOf(target))) {
+  if (active.targets.some((t) => identityOf(t) === identityOf(target))) {
     // Rejected here rather than at save: the list is what the user is reading,
-    // so the moment to say "already in this group" is the moment they add it.
-    targetError.value = t("groups.error.targetDuplicate")
+    // so the moment to say "already in this model" is the moment they add it.
+    modelsError.value = t("groups.error.targetDuplicate")
     return
   }
-  if (targets.value.length >= MODEL_GROUP_TARGETS_MAX) {
-    targetError.value = t("groups.error.targetsMax", { max: MODEL_GROUP_TARGETS_MAX })
+  if (active.targets.length >= MODEL_GROUP_TARGETS_MAX) {
+    modelsError.value = t("groups.error.targetsMax", { max: MODEL_GROUP_TARGETS_MAX })
     return
   }
-  targets.value.push(toRow(target))
+  active.targets.push(toTargetRow(target))
 }
 
 /**
@@ -405,19 +488,19 @@ function addTarget(modelId: string) {
  * the row keeps what it had — the same rule the server applies on Save, applied
  * where the user can see it. Returns whether the change was taken.
  */
-function setAccount(index: number, accountId: string): boolean {
-  const target = targets.value[index]
+function setAccount(model: ModelRow, index: number, accountId: string): boolean {
+  const target = model.targets[index]
   if (!target) return false
   const next = accountId || null
   if (next === target.account_id) return true
 
   const candidate = { ...target, account_id: next }
-  if (targets.value.some((t, i) => i !== index && identityOf(t) === identityOf(candidate))) {
-    targetError.value = t("groups.error.targetDuplicate")
+  if (model.targets.some((t, i) => i !== index && identityOf(t) === identityOf(candidate))) {
+    modelsError.value = t("groups.error.targetDuplicate")
     return false
   }
 
-  targetError.value = null
+  modelsError.value = null
   target.account_id = next
   // The label is display data the server resolves; keep it in step locally so
   // the row stops reading as a removed account the moment it is re-pinned.
@@ -431,9 +514,9 @@ function setAccount(index: number, accountId: string): boolean {
  * to the new option, and Vue patches nothing back because the bound value never
  * changed — so the element is put back by hand.
  */
-function onAccountChange(index: number, event: Event) {
+function onAccountChange(model: ModelRow, index: number, event: Event) {
   const el = event.target as HTMLSelectElement
-  if (!setAccount(index, el.value)) el.value = targets.value[index]?.account_id ?? ""
+  if (!setAccount(model, index, el.value)) el.value = model.targets[index]?.account_id ?? ""
 }
 
 /**
@@ -457,92 +540,29 @@ function repickOptions(target: ModelGroupTarget) {
   return options
 }
 
-function removeTarget(index: number) {
-  targets.value.splice(index, 1)
-  targetError.value = null
+function removeTarget(model: ModelRow, index: number) {
+  model.targets.splice(index, 1)
+  modelsError.value = null
   announcement.value = ""
 }
 
-function move(from: number, to: number) {
-  if (to < 0 || to >= targets.value.length) return
-  const [moved] = targets.value.splice(from, 1)
+function move(model: ModelRow, from: number, to: number) {
+  if (to < 0 || to >= model.targets.length) return
+  const [moved] = model.targets.splice(from, 1)
   if (!moved) return
-  targets.value.splice(to, 0, moved)
+  model.targets.splice(to, 0, moved)
   announcement.value = t("groups.dialog.moved", {
     target: moved.model,
     position: to + 1,
-    total: targets.value.length,
+    total: model.targets.length,
   })
 }
 
-const canSave = computed(() => targets.value.length > 0)
+const canSave = computed(
+  () => models.value.length > 0 && models.value.every((m) => m.targets.length > 0),
+)
 
-/* --- Aliases ------------------------------------------------------------- */
-
-/**
- * One alias, by the server's rule: 1-128 chars, no whitespace, no "/" — the
- * missing slash is what keeps a bare id from ever colliding with a
- * `provider/model` one.
- */
-function aliasRuleError(alias: string): string | null {
-  if (alias.length > MODEL_GROUP_ALIAS_MAX) {
-    return t("groups.error.aliasLength", { max: MODEL_GROUP_ALIAS_MAX })
-  }
-  if (/\s/.test(alias)) return t("groups.error.aliasWhitespace")
-  if (alias.includes("/")) return t("groups.error.aliasSlash")
-  return null
-}
-
-/** Takes one alias into the chip list. Returns whether it was taken. */
-function addAlias(raw: string): boolean {
-  const value = raw.trim()
-  aliasError.value = null
-  if (!value) return false
-  const invalid = aliasRuleError(value)
-  if (invalid) {
-    aliasError.value = invalid
-    return false
-  }
-  if (aliases.value.includes(value)) {
-    aliasError.value = t("groups.error.aliasDuplicate", { alias: value })
-    return false
-  }
-  if (aliases.value.length >= MODEL_GROUP_ALIASES_MAX) {
-    aliasError.value = t("groups.error.aliasesMax", { max: MODEL_GROUP_ALIASES_MAX })
-    return false
-  }
-  aliases.value.push(value)
-  return true
-}
-
-function commitAliasDraft() {
-  if (addAlias(aliasDraft.value)) aliasDraft.value = ""
-}
-
-/**
- * A comma commits too, so a pasted `a,b,c` becomes three chips. Everything up
- * to the last comma is committed; whatever follows stays in the field. A part
- * the rules reject stops the run and stays in the field with the rest of it, so
- * nothing is dropped on the way to an error message.
- */
-watch(aliasDraft, (value) => {
-  if (!value.includes(",")) return
-  const parts = value.split(",")
-  let i = 0
-  for (; i < parts.length - 1; i++) {
-    const part = parts[i]!.trim()
-    if (!part) continue
-    if (!addAlias(part)) break
-  }
-  aliasDraft.value = parts.slice(i).join(",")
-})
-
-function removeAlias(alias: string) {
-  aliases.value = aliases.value.filter((a) => a !== alias)
-  aliasError.value = null
-}
-
-/* --- Save / delete ------------------------------------------------------- */
+/* --- Save / delete -------------------------------------------------------- */
 
 /** Mirrors the server rule so a violation never costs a round trip. */
 function validateName(): string | null {
@@ -554,13 +574,34 @@ function validateName(): string | null {
   return null
 }
 
+function validateSlug(): string | null {
+  const value = slug.value.trim()
+  if (!value) return t("groups.error.slug")
+  if (!MODEL_GROUP_SLUG_RE.test(value) || value.length < 2 || value.length > 32) {
+    return t("groups.error.slugFormat")
+  }
+  return null
+}
+
+/** The model set, by the server's rules — names valid and unique in the group. */
+function validateModels(): string | null {
+  const seen = new Set<string>()
+  for (const model of models.value) {
+    const value = model.name.trim()
+    const invalid = modelNameError(value)
+    if (invalid) return invalid
+    if (seen.has(value)) return t("groups.error.modelNameDuplicate", { name: value })
+    seen.add(value)
+  }
+  return null
+}
+
 /**
  * A rejected write answers with a single `error` string rather than a field map
  * (docs/auth.md § Model groups), so the message is placed by what it is about:
- * anything naming an alias lands under the chips — including the cross-group
- * conflict, whose text names the alias it clashed with — anything naming the
- * group's name lands on the name field, anything naming a target lands under
- * the target list, and everything else is a banner.
+ * anything naming the slug lands on the slug field, anything naming the group's
+ * name lands on the name field, anything naming a model or target lands under
+ * the model list, and everything else is a banner.
  */
 function applyServerError(e: unknown, fallback: string) {
   const message = e instanceof ApiError && e.status === 400 ? e.message : null
@@ -568,25 +609,28 @@ function applyServerError(e: unknown, fallback: string) {
     error.value = fallback
     return
   }
-  if (/^alias(es)?\b|^duplicate alias/i.test(message)) aliasError.value = message
+  if (/^slug\b/i.test(message)) slugError.value = message
   else if (/^name\b|^a model group named/i.test(message)) nameError.value = message
-  else if (/^targets?\b|^duplicate target/i.test(message)) targetError.value = message
-  else error.value = message
+  else if (/^models?\b|^duplicate model|^targets?\b|^duplicate target/i.test(message)) {
+    modelsError.value = message
+  } else error.value = message
 }
 
 async function submit() {
   if (saving.value || !canSave.value) return
   nameError.value = null
-  aliasError.value = null
-  targetError.value = null
+  slugError.value = null
+  modelsError.value = null
   error.value = null
 
-  // An alias typed but not yet committed is one the user means to save; taking
-  // it here beats silently dropping it because they reached for Save instead of
-  // Enter. A rejected one stops the save with its own message.
-  if (aliasDraft.value.trim()) {
-    commitAliasDraft()
-    if (aliasError.value) return
+  // A model name typed but not yet committed is one the user means to save;
+  // taking it here beats silently dropping it because they reached for Save
+  // instead of Enter. A rejected one stops the save with its own message —
+  // and a fresh model has no targets yet, which the canSave gate below the
+  // commit would block, so only commit when the draft is non-empty.
+  if (modelDraft.value.trim()) {
+    commitModelDraft()
+    if (modelsError.value) return
   }
 
   const invalidName = validateName()
@@ -594,8 +638,18 @@ async function submit() {
     nameError.value = invalidName
     return
   }
-  if (!aliases.value.length) {
-    aliasError.value = t("groups.error.aliasesEmpty")
+  const invalidSlug = validateSlug()
+  if (invalidSlug) {
+    slugError.value = invalidSlug
+    return
+  }
+  const invalidModels = validateModels()
+  if (invalidModels) {
+    modelsError.value = invalidModels
+    return
+  }
+  if (!canSave.value) {
+    modelsError.value = t("groups.error.modelNeedsTargets")
     return
   }
 
@@ -603,10 +657,13 @@ async function submit() {
   try {
     const body = {
       name: name.value.trim(),
-      aliases: [...aliases.value],
+      slug: slug.value.trim(),
       // `account_label` is read-only display data — it goes no further than
       // this dialog.
-      targets: targets.value.map((t) => ({ model: t.model, account_id: t.account_id })),
+      models: models.value.map((m) => ({
+        name: m.name.trim(),
+        targets: m.targets.map((t) => ({ model: t.model, account_id: t.account_id })),
+      })),
       strategy: strategy.value,
     }
     if (props.group) await updateModelGroup(props.group.id, body)
@@ -643,13 +700,13 @@ async function remove() {
     :title="isEdit ? t('groups.dialog.editTitle') : t('groups.create')"
     @close="emit('close')"
   >
-    <!-- Three columns, one surface: identity, picker, order — a hairline
+    <!-- Three columns, one surface: identity, picker, models — a hairline
          between each adjacent pair, all three heads on the same row, the same
          padding in every column. Boxing them separately read as unrelated
          cards and was rejected; so did stacking identity above the picker. -->
     <div class="board">
-      <!-- ① What the group is called, what clients may call it, and how it
-           picks among the targets column ③ holds. -->
+      <!-- ① What the group is called, where clients point (the slug and the
+           URLs it produces), and how it picks among each model's targets. -->
       <section class="col" aria-labelledby="group-col-identity">
         <h3 id="group-col-identity" class="col-head">
           {{ t("groups.dialog.identityLabel") }}
@@ -673,61 +730,38 @@ async function remove() {
           />
         </FormField>
 
-        <!-- The callable ids. A fieldset so the chips and the add field reach
-             assistive tech as one named group. -->
-        <fieldset class="fieldset">
-          <legend class="field-label">{{ t("groups.dialog.aliasesLabel") }}</legend>
-          <p class="field-hint">{{ t("groups.dialog.aliasesHint") }}</p>
+        <FormField
+          v-slot="field"
+          hint-above
+          :label="t('groups.dialog.slugLabel')"
+          :hint="t('groups.dialog.slugHint')"
+          :error="slugError ?? undefined"
+        >
+          <TextInput
+            :id="field.id"
+            v-model="slug"
+            mono
+            :placeholder="t('groups.dialog.slugPlaceholder')"
+            :described-by="field.describedBy"
+            :invalid="field.invalid"
+            :disabled="saving || deleting"
+            @enter="submit"
+          />
+        </FormField>
 
-          <ul v-if="aliases.length" class="chips">
-            <li v-for="alias in aliases" :key="alias" class="chip">
-              <code class="mono chip-id">{{ alias }}</code>
-              <button
-                type="button"
-                class="chip-remove"
-                :aria-label="t('groups.dialog.removeAlias', { alias })"
-                :disabled="saving || deleting"
-                @click="removeAlias(alias)"
-              >
-                <ActionIcon name="close" />
-              </button>
-            </li>
-          </ul>
-
-          <div class="alias-add">
-            <label class="alias-field">
-              <span class="sr-only">{{ t("groups.dialog.aliasField") }}</span>
-              <TextInput
-                v-model="aliasDraft"
-                mono
-                :placeholder="t('groups.dialog.aliasPlaceholder')"
-                :invalid="!!aliasError"
-                :disabled="saving || deleting"
-                @enter="commitAliasDraft"
-              />
-            </label>
-            <AppButton
-              size="sm"
-              :label="
-                aliasDraft.trim()
-                  ? t('groups.dialog.addAlias', { alias: aliasDraft.trim() })
-                  : undefined
-              "
-              :disabled="!aliasDraft.trim() || saving || deleting"
-              @click="commitAliasDraft"
-            >
-              {{ t("groups.dialog.add") }}
-            </AppButton>
-          </div>
-
-          <p v-if="aliasError" class="field-error" role="alert">{{ aliasError }}</p>
-        </fieldset>
+        <!-- The URLs the slug produces, live as the user types — wire values,
+             not copy, so they render the same in every locale. -->
+        <div class="endpoint-preview">
+          <p v-for="entry in endpointPreview" :key="entry.label" class="endpoint-line">
+            <span class="endpoint-kind">{{ entry.label }}</span>
+            <code class="mono endpoint-url" :title="entry.url">{{ entry.url }}</code>
+          </p>
+          <p class="field-hint">{{ t("groups.dialog.slugMoves") }}</p>
+        </div>
 
         <!-- How the group picks among its targets. One option today, and the
              select still renders: it is the seam future strategies appear in,
-             and it says the group has a routing policy at all. The line sits
-             between the label and the control, like the name field above —
-             guidance to read before choosing, not after. -->
+             and it says the group has a routing policy at all. -->
         <FormField
           v-slot="field"
           hint-above
@@ -793,8 +827,7 @@ async function remove() {
               </button>
             </div>
 
-            <!-- The models an account can run, plus the way in for the ids no
-                 catalog lists. -->
+            <!-- The models an account can run. -->
             <div class="models">
               <template v-if="selectedAccount">
                 <label class="models-search">
@@ -856,100 +889,168 @@ async function remove() {
         </div>
       </section>
 
-      <!-- ③ What the group actually routes to, in the order it is tried. -->
-      <section class="col" aria-labelledby="group-col-targets">
-        <h3 id="group-col-targets" class="col-head">{{ t("groups.dialog.targetsLabel") }}</h3>
+      <!-- ③ The group's models, each with its ordered targets. One is active
+           — the one the picker feeds. -->
+      <section class="col" aria-labelledby="group-col-models">
+        <h3 id="group-col-models" class="col-head">{{ t("groups.dialog.modelsLabel") }}</h3>
 
-        <!-- A real fieldset/legend so the list's name reaches assistive tech
-             natively, matching the endpoint dialog's models block. -->
-        <fieldset class="fieldset">
-          <legend class="sr-only">{{ t("groups.dialog.targetsLabel") }}</legend>
-          <!-- Only while there is nothing else to read: once targets exist the
-               list itself says what the column is, and the paragraph is just
-               distance between the head and the data (rejected 2026-08-13). -->
-          <p v-if="!targets.length" class="field-hint">{{ t("groups.dialog.targetsHint") }}</p>
+        <!-- The way in: name a model clients will send, then feed it targets. -->
+        <div class="add-model">
+          <label class="add-model-field">
+            <span class="sr-only">{{ t("groups.dialog.modelField") }}</span>
+            <TextInput
+              v-model="modelDraft"
+              mono
+              :placeholder="t('groups.dialog.modelPlaceholder')"
+              :invalid="!!modelsError"
+              :disabled="saving || deleting"
+              @enter="commitModelDraft"
+            />
+          </label>
+          <AppButton
+            size="sm"
+            :label="
+              modelDraft.trim()
+                ? t('groups.dialog.addModelNamed', { name: modelDraft.trim() })
+                : undefined
+            "
+            :disabled="!modelDraft.trim() || saving || deleting"
+            @click="commitModelDraft"
+          >
+            {{ t("groups.dialog.addModel") }}
+          </AppButton>
+        </div>
 
-          <!-- The position is the routing rule, so it is real text in the row
-               rather than a list marker: `list-style: none` drops list semantics
-               in Safari, and the number is the one thing that must survive. -->
-          <ol v-if="targets.length" class="targets">
-            <li v-for="(target, index) in targets" :key="target.uid" class="target">
-              <span class="pos tabular">{{ index + 1 }}</span>
-              <code class="mono target-id" :title="target.model">{{ target.model }}</code>
+        <p v-if="modelsError" class="field-error" role="alert">{{ modelsError }}</p>
 
-              <div class="target-actions">
-                <AppButton
-                  icon-only
-                  size="sm"
-                  variant="ghost"
-                  :label="t('groups.dialog.moveUp', { target: target.model })"
-                  :disabled="index === 0 || saving || deleting"
-                  @click="move(index, index - 1)"
-                >
-                  <template #icon><ActionIcon name="arrow-up" /></template>
-                </AppButton>
-                <AppButton
-                  icon-only
-                  size="sm"
-                  variant="ghost"
-                  :label="t('groups.dialog.moveDown', { target: target.model })"
-                  :disabled="index === targets.length - 1 || saving || deleting"
-                  @click="move(index, index + 1)"
-                >
-                  <template #icon><ActionIcon name="arrow-down" /></template>
-                </AppButton>
-                <!-- Labelled, not a glyph: the row's subject goes in the
-                     accessible name because "Remove" repeats down the list. -->
-                <AppButton
-                  size="sm"
-                  variant="ghost"
-                  :label="t('groups.dialog.removeTarget', { target: target.model })"
-                  :disabled="saving || deleting"
-                  @click="removeTarget(index)"
-                >
-                  {{ t("action.remove") }}
-                </AppButton>
-              </div>
+        <p v-if="!models.length" class="field-hint">{{ t("groups.dialog.modelsHint") }}</p>
 
-              <!-- Per-target facts sit in their own line under the id: the
-                   account today, weight and live usage when balancing lands. -->
-              <div class="target-facts">
-                <template v-if="isMissingAccount(target)">
-                  <Badge tone="warn">{{ t("groups.account.missing") }}</Badge>
-                  <label class="sr-only" :for="`target-account-${target.uid}`">
-                    {{ t("groups.dialog.accountLabel", { target: target.model }) }}
-                  </label>
-                  <select
-                    :id="`target-account-${target.uid}`"
-                    class="select repick"
-                    :value="target.account_id ?? ''"
-                    :disabled="saving || deleting"
-                    @change="onAccountChange(index, $event)"
+        <!-- The model sections. Exactly one is active (radio semantics — the
+             picker feeds one model at a time); the active one is marked by a
+             fill plus a weight step, never color alone. -->
+        <div v-if="models.length" class="model-sections" role="radiogroup" :aria-label="t('groups.dialog.modelsLabel')">
+          <section
+            v-for="model in models"
+            :key="model.uid"
+            class="model-section"
+            :class="{ active: model.uid === activeModelUid }"
+            @click="activeModelUid = model.uid"
+          >
+            <div class="model-head">
+              <input
+                :id="`model-active-${model.uid}`"
+                class="model-radio"
+                type="radio"
+                name="active-model"
+                :checked="model.uid === activeModelUid"
+                :disabled="saving || deleting"
+                @change="activeModelUid = model.uid"
+              />
+              <label class="sr-only" :for="`model-active-${model.uid}`">
+                {{ t("groups.dialog.selectModel", { name: model.name }) }}
+              </label>
+              <label class="sr-only" :for="`model-name-${model.uid}`">
+                {{ t("groups.dialog.modelNameLabel", { name: model.name }) }}
+              </label>
+              <TextInput
+                :id="`model-name-${model.uid}`"
+                v-model="model.name"
+                mono
+                class="model-name"
+                :disabled="saving || deleting"
+                @focus="activeModelUid = model.uid"
+              />
+              <AppButton
+                size="sm"
+                variant="ghost"
+                :label="t('groups.dialog.removeModel', { name: model.name })"
+                :disabled="saving || deleting"
+                @click.stop="removeModel(model.uid)"
+              >
+                {{ t("action.remove") }}
+              </AppButton>
+            </div>
+
+            <!-- The position is the routing rule, so it is real text in the
+                 row rather than a list marker: `list-style: none` drops list
+                 semantics in Safari, and the number must survive. -->
+            <ol v-if="model.targets.length" class="targets">
+              <li v-for="(target, index) in model.targets" :key="target.uid" class="target">
+                <span class="pos tabular">{{ index + 1 }}</span>
+                <code class="mono target-id" :title="target.model">{{ target.model }}</code>
+
+                <div class="target-actions">
+                  <AppButton
+                    icon-only
+                    size="sm"
+                    variant="ghost"
+                    :label="t('groups.dialog.moveUp', { target: target.model })"
+                    :disabled="index === 0 || saving || deleting"
+                    @click.stop="move(model, index, index - 1)"
                   >
-                    <option
-                      v-for="option in repickOptions(target)"
-                      :key="option.value"
-                      :value="option.value"
-                      :disabled="option.disabled"
-                    >
-                      {{ option.label }}
-                    </option>
-                  </select>
-                  <span class="target-warning">{{ t("groups.account.skipped") }}</span>
-                </template>
-                <Badge v-else-if="target.account_id" tone="neutral">
-                  {{ pinnedLabel(target) }}
-                </Badge>
-                <!-- Made before this design, or by the API directly: the whole
-                     pool, still valid, still shown for what it is. -->
-                <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
-              </div>
-            </li>
-          </ol>
-          <p v-else class="field-hint">{{ t("groups.dialog.targetsEmpty") }}</p>
+                    <template #icon><ActionIcon name="arrow-up" /></template>
+                  </AppButton>
+                  <AppButton
+                    icon-only
+                    size="sm"
+                    variant="ghost"
+                    :label="t('groups.dialog.moveDown', { target: target.model })"
+                    :disabled="index === model.targets.length - 1 || saving || deleting"
+                    @click.stop="move(model, index, index + 1)"
+                  >
+                    <template #icon><ActionIcon name="arrow-down" /></template>
+                  </AppButton>
+                  <!-- Labelled, not a glyph: the row's subject goes in the
+                       accessible name because "Remove" repeats down the list. -->
+                  <AppButton
+                    size="sm"
+                    variant="ghost"
+                    :label="t('groups.dialog.removeTarget', { target: target.model })"
+                    :disabled="saving || deleting"
+                    @click.stop="removeTarget(model, index)"
+                  >
+                    {{ t("action.remove") }}
+                  </AppButton>
+                </div>
 
-          <p v-if="targetError" class="field-error" role="alert">{{ targetError }}</p>
-        </fieldset>
+                <!-- Per-target facts sit in their own line under the id: the
+                     account today, weight and live usage when balancing lands. -->
+                <div class="target-facts">
+                  <template v-if="isMissingAccount(target)">
+                    <Badge tone="warn">{{ t("groups.account.missing") }}</Badge>
+                    <label class="sr-only" :for="`target-account-${target.uid}`">
+                      {{ t("groups.dialog.accountLabel", { target: target.model }) }}
+                    </label>
+                    <select
+                      :id="`target-account-${target.uid}`"
+                      class="select repick"
+                      :value="target.account_id ?? ''"
+                      :disabled="saving || deleting"
+                      @change="onAccountChange(model, index, $event)"
+                    >
+                      <option
+                        v-for="option in repickOptions(target)"
+                        :key="option.value"
+                        :value="option.value"
+                        :disabled="option.disabled"
+                      >
+                        {{ option.label }}
+                      </option>
+                    </select>
+                    <span class="target-warning">{{ t("groups.account.skipped") }}</span>
+                  </template>
+                  <Badge v-else-if="target.account_id" tone="neutral">
+                    {{ pinnedLabel(target) }}
+                  </Badge>
+                  <!-- Made before this design, or by the API directly: the
+                       whole pool, still valid, still shown for what it is. -->
+                  <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
+                </div>
+              </li>
+            </ol>
+            <p v-else class="field-hint section-hint">{{ t("groups.dialog.targetsEmpty") }}</p>
+          </section>
+        </div>
 
         <Banner v-if="error" tone="error">{{ error }}</Banner>
 
@@ -994,30 +1095,25 @@ async function remove() {
  * adjacent pair, and nothing inside any column is boxed — structure is drawn
  * with hairlines only. The board bleeds through Modal's body padding (which it
  * then restates per column, so the spacing is unchanged) because those dividers
- * have to reach the panel's edges: a rule floating inside a padded box is
- * exactly what made an earlier version read as cards parked next to each other.
+ * have to reach the panel's edges.
  *
  * The columns stretch to a common height — the default, deliberately not
  * `align-items: start` — so each divider runs the full height of the surface
  * rather than stopping wherever the shortest column ends.
  *
  * Tracks: identity is a form and needs the least; the picker holds a rail *and*
- * a list and needs the most; the order column sits between them, wide enough
- * that a target's id and its three controls share one line.
+ * a list; the models column now holds names + targets + controls, so it takes
+ * the widest track (the v4 reweighting behind the wider `wide` panel).
  */
 .board {
   display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.3fr) minmax(0, 1.05fr);
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.15fr) minmax(0, 1.3fr);
   margin: calc(var(--space-5) * -1);
-  /* Shared height of the two scrolling regions (picker body, target list).
-     Viewport-driven, not fixed: the wide panel now grows with the screen
-     (Modal lifts its 760px cap for `wide`), and a fixed 400px left half the
-     dialog empty on a tall display — the "not enough height" complaint,
-     2026-08-13. The 380px budget is everything that is not this region:
-     overlay padding, panel header/footer, column padding, the column head,
-     and the model search row. The floor keeps small screens exactly where the
-     fixed height had them; the ceiling stops a 4K display from rendering a
-     list taller than anyone scans. */
+  /* Shared height of the two scrolling regions (picker body, model sections).
+     Viewport-driven, not fixed: the wide panel grows with the screen, and a
+     fixed height left half the dialog empty on a tall display. The 380px
+     budget is everything that is not this region: overlay padding, panel
+     header/footer, column padding, the column head, and the search row. */
   --pane-h: clamp(400px, calc(100dvh - 380px), 760px);
 }
 
@@ -1029,9 +1125,8 @@ async function remove() {
   padding: var(--space-5);
 }
 
-/* Targets is last: drop its bottom pad so a full list meets the footer the
-   picker now meets (bottom-bleed). Heads stay on one row — top pad is
-   unchanged. */
+/* Models is last: drop its bottom pad so a full list meets the footer the
+   picker meets (bottom-bleed). Heads stay on one row — top pad unchanged. */
 .col:last-child {
   padding-bottom: 0;
 }
@@ -1052,21 +1147,46 @@ async function remove() {
   letter-spacing: var(--tracking-tight);
 }
 
+/* --- Endpoint preview ----------------------------------------------------- */
+
+.endpoint-preview {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.endpoint-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+}
+
+.endpoint-kind {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-2xs);
+}
+
+.endpoint-url {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--text-xs);
+}
+
 /* --- Picker -------------------------------------------------------------- */
 
 /* Unframed: the tab strip's underline and the rail's edge are the only lines,
    which is what makes the inverted L read as structure on the surface rather
-   than as a widget dropped onto it. It owns its column, so it takes the height
-   that column has.
+   than as a widget dropped onto it.
 
    Full bleed: the picker cancels its column's horizontal *and* bottom padding
    so the tabs, rail, and model list run divider to divider and the rail meets
-   the panel footer's top rule. Side gutters read as empty vertical bands
-   (rejected 2026-08-14); leftover column padding under a height-capped body
-   is the same unfinished L (reported 2026-08-17). The column head above
-   keeps the padding, which is what holds the three heads on one aligned row.
-
-   No `gap`: a gutter between the tab strip and the body is a break in the L. */
+   the panel footer's top rule. No `gap`: a gutter between the tab strip and
+   the body is a break in the L. */
 .picker {
   display: flex;
   flex-direction: column;
@@ -1083,15 +1203,7 @@ async function remove() {
 
 /* The inverted L: rail down the left, models filling the rest. A declared
    height, not a content-driven one — the two regions scroll inside it, so the
-   dialog's own height never depends on how many models a provider lists. The
-   height itself is the board's viewport-driven `--pane-h`. `flex: 1` lets the
-   body grow a few pixels when a sibling column is taller, so the rail still
-   meets the footer instead of leaving an empty band under a capped list
-   (reported 2026-08-17).
-
-   The rail is a proportion between two bounds rather than a fixed 128px: on a
-   small desktop the panel is narrower than 3/4 of a wide one, and a fixed rail
-   would take that difference out of the model list, which has less to give. */
+   dialog's own height never depends on how many models a provider lists. */
 .picker-body {
   display: grid;
   grid-template-columns: clamp(96px, 28%, 128px) minmax(0, 1fr);
@@ -1111,8 +1223,7 @@ async function remove() {
 }
 
 /* A full-bleed list row, not a card: the selection fill runs the rail's whole
-   width, edge to edge (the inset boxed version was rejected 2026-08-13 — a
-   bordered rectangle inside a 128px rail read as a widget, not a selection). */
+   width, edge to edge. */
 .rail-item {
   display: flex;
   flex-direction: column;
@@ -1180,10 +1291,7 @@ async function remove() {
 }
 
 /* Flush like everything else in this column: a full-bleed row with a hairline
-   under it, not a rounded field inset in a flush region — a box drawn inside a
-   box, the same objection that rejected the bordered rail card (docs/admin-ui.md
-   § Groups page). The row's only inset is what lines the placeholder up with
-   the ids below it: `--space-1` here plus the button's own `--space-2`. */
+   under it, not a rounded field inset in a flush region. */
 .models-search {
   display: flex;
   flex-shrink: 0;
@@ -1200,10 +1308,7 @@ async function remove() {
   background: transparent;
 }
 
-/* Focus moves to the row, since the field no longer has a box to ring. Inset,
-   because the row runs edge to edge: an outward ring would sit on the rail
-   divider and on the tab strip above it. 2px in `--ring-border` is the app's
-   one focus convention (styles.css `:focus-visible`), not a local invention. */
+/* Focus moves to the row, since the field no longer has a box to ring. */
 .models-search :deep(.control:focus) {
   box-shadow: none;
 }
@@ -1213,21 +1318,8 @@ async function remove() {
 }
 
 /* The one region that grows with its data, so it is the one that scrolls —
-   vertically, and only vertically.
-   `align-content: start` is load-bearing: a stretched grid distributes two
-   rows across the whole tall track and reads as items floating in space —
-   a list packs from the top whatever its count (rejected 2026-08-14).
-
-   `grid-template-columns: minmax(0, 1fr)` is what stops the sideways scroll,
-   and it has to be declared: an *implicit* `auto` track cannot go below its
-   items' min-content, and a row's min-content here is the whole un-wrappable
-   id (AppButton sets `white-space: nowrap`) — `min-width: 0` on `.model-id`
-   lets it shrink *within* a line but does not lower what the row contributes
-   to the track. The track then out-grew the region, and because `overflow-y:
-   auto` computes the other axis from `visible` to `auto`, the horizontal bar
-   appeared unasked and slid the ids out from under the tabs and rail that name
-   them. A 0-min track plus `min-width: 0` on the item caps it at the source,
-   which is what leaves `.model-id`'s ellipsis something to do. */
+   vertically, and only vertically. See the v3 notes: the 0-min declared track
+   plus `min-width: 0` on items is what stops the sideways scroll. */
 .models-list {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1242,23 +1334,17 @@ async function remove() {
   list-style: none;
 }
 
-/* A grid item's automatic minimum is content-based, so it would overflow the
-   0-min track above without this. */
 .models-list > li {
   min-width: 0;
 }
 
 /* A full-width row rather than a pill: the id is what the user reads down the
-   list, so the button is shaped to it. Selected through the list so these
-   outrank AppButton's own single-class rules rather than depending on style
-   order. */
+   list, so the button is shaped to it. */
 .models-list :deep(.model) {
   width: 100%;
   justify-content: flex-start;
 }
 
-/* The default slot lands in one flex item, so the id and its Added tag are laid
-   out inside it: the id takes the line and the tag sits at the trailing edge. */
 .models-list :deep(.model .btn-label) {
   display: flex;
   align-items: baseline;
@@ -1291,25 +1377,19 @@ async function remove() {
   text-align: center;
 }
 
-/* --- Selected targets ---------------------------------------------------- */
+/* --- Group models (column ③) ---------------------------------------------- */
 
-/* A fieldset's default margin, padding, and border are browser chrome this
-   design does not use — the legend alone carries the grouping. */
-.fieldset {
-  display: grid;
+.add-model {
+  display: flex;
+  align-items: center;
   gap: var(--space-2);
-  margin: 0;
-  padding: 0;
-  border: none;
-  min-width: 0;
+  width: 100%;
 }
 
-.field-label {
-  /* A legend carries its own inline padding in every engine. */
-  padding: 0;
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  font-weight: var(--weight-medium);
+.add-model-field {
+  display: block;
+  flex: 1;
+  min-width: 0;
 }
 
 .field-hint,
@@ -1328,114 +1408,78 @@ async function remove() {
   color: var(--danger);
 }
 
-.targets {
-  display: grid;
-  align-content: start;
-  /* Flush to the column divider and the panel edge — the same cancel the
-     picker uses — so a row hairline is one line, not a stub that stops a
-     gutter short of the structure (reported 2026-08-17). */
+/* The stack of model sections scrolls as one region, flush to the column
+   divider and the panel edge — the same cancel the picker uses — so section
+   hairlines run edge to edge. Content stays inset per row. */
+.model-sections {
+  display: flex;
+  flex-direction: column;
   margin: 0 calc(var(--space-5) * -1);
-  padding: 0;
-  /* Tab strip is SectionNav's 38px row; the picker no longer spends a gap
-     under the tabs, so a full list and a full model list still end on the
-     same line. */
-  max-height: calc(var(--pane-h) + 38px);
+  max-height: var(--pane-h);
   overflow-y: auto;
   overscroll-behavior: contain;
-  list-style: none;
 }
 
-/* --- Aliases ------------------------------------------------------------- */
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-  margin: 0;
-  padding: 0;
-  list-style: none;
+.model-section {
+  padding: var(--space-2) 0 var(--space-1);
 }
 
-/* The chip is the id plus the one thing that can be done to it, so the border
-   belongs to the pair — this is a control, not a panel. */
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  max-width: 100%;
-  padding: 1px 1px 1px var(--space-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-full);
-  background: var(--surface-2);
+.model-section + .model-section {
+  border-top: 1px solid var(--border);
 }
 
-.chip-id {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-  font-size: var(--text-xs);
-}
-
-.chip-remove {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  border: none;
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--faint);
-  cursor: pointer;
-  transition:
-    background var(--duration-fast) var(--ease),
-    color var(--duration-fast) var(--ease);
-}
-
-.chip-remove:hover {
+/* The active section — the one the picker feeds — carries the same fill +
+   weight convention as the rail's selection: never color alone (the radio
+   beside the name states it for assistive tech). */
+.model-section.active {
   background: var(--hover);
-  color: var(--text);
 }
 
-.chip-remove:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-.chip-remove :deep(svg) {
-  width: 12px;
-  height: 12px;
-}
-
-.alias-add {
+.model-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  width: 100%;
+  padding: 0 var(--space-5);
 }
 
-.alias-field {
-  display: block;
+.model-radio {
+  flex-shrink: 0;
+  margin: 0;
+  accent-color: var(--accent, currentColor);
+}
+
+.model-head :deep(.model-name) {
   flex: 1;
   min-width: 0;
 }
 
-/* Three tracks — position, subject, controls — and a second line under the
-   subject for the row's facts. The facts line is where per-target balancing
-   lands later (weight, live usage) beside the account, so growing it costs a
-   chip rather than a new row shape.
+.model-section.active .model-head :deep(input) {
+  font-weight: var(--weight-medium);
+}
 
-   Rows are separated by a hairline rather than each being boxed: twenty
-   outlined rectangles inside a column is the same "card" noise the two-panel
-   layout was rejected for. */
+.section-hint {
+  padding: var(--space-1) var(--space-5) var(--space-2);
+}
+
+/* --- Target rows ----------------------------------------------------------- */
+
+.targets {
+  display: grid;
+  align-content: start;
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Three tracks — position, subject, controls — and a second line under the
+   subject for the row's facts. Rows are separated by a hairline rather than
+   each being boxed. */
 .target {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--space-1) var(--space-2);
-  /* Horizontal inset restates the column gutter the list cancelled, so
+  /* Horizontal inset restates the column gutter the sections cancelled, so
      numbers / ids / buttons stay aligned with the column head while the
      hairline runs edge to edge. */
   padding: var(--space-2) var(--space-5);
@@ -1495,8 +1539,7 @@ async function remove() {
 }
 
 /* The re-pick borrows the warn tone from the badge beside it: the row is
-   telling the user something is wrong, and the control is the fix. Declared
-   above `:focus`, at the same weight, so focus still takes the border. */
+   telling the user something is wrong, and the control is the fix. */
 .select.repick {
   border-color: var(--warn-border);
 }
@@ -1535,10 +1578,8 @@ async function remove() {
 }
 
 /* Below the table breakpoint three columns no longer fit, so they stack in
-   reading order — identity, picker, order — and the dividers turn with them,
-   staying one hairline between each pair. The picker gives back some height
-   here: it is now one region in a scrolling column rather than one of three
-   side by side. */
+   reading order — identity, picker, models — and the dividers turn with them,
+   staying one hairline between each pair. */
 @media (max-width: 768px) {
   .board {
     grid-template-columns: minmax(0, 1fr);
@@ -1555,7 +1596,7 @@ async function remove() {
     min-height: 0;
   }
 
-  .targets {
+  .model-sections {
     max-height: 338px;
   }
 }
@@ -1605,26 +1646,16 @@ async function remove() {
 }
 
 /* Touch targets: the select matches what a small button gets here, and 16px
-   type so iOS Safari does not zoom the sheet when it takes focus. The chip's
-   remove grows too — not to the full 40px floor, which would double the height
-   of every chip, but to the same 28px the dialog's own close button uses. */
+   type so iOS Safari does not zoom the sheet when it takes focus. */
 @media (pointer: coarse) {
   .select {
     min-height: 34px;
     font-size: var(--text-md);
   }
 
-  /* Higher specificity than the rule above, so it has to restate the type size
-     it would otherwise keep — and it takes TextInput's coarse height, since it
-     is a form field rather than a control on a row. */
   .select.strategy {
     min-height: 40px;
     font-size: var(--text-md);
-  }
-
-  .chip-remove {
-    width: 28px;
-    height: 28px;
   }
 }
 </style>

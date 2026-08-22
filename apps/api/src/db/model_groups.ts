@@ -3,9 +3,13 @@ import { newId, nowIso } from "../utils/id"
 export type ModelGroupRow = {
   id: string
   user_id: string
-  /** Display name (free text, unique per user) since `0009_model_group_aliases.sql` — the callable ids live in `model_group_aliases`. */
+  /** Display name (free text, unique per user) — a label, never part of the URL. */
   name: string
-  targets_json: string
+  /**
+   * The endpoint's URL id (`/g/<slug>/…`), unique per user, mutable
+   * (docs/providers.md § Model groups). Added in `0014_group_endpoints.sql`.
+   */
+  slug: string
   /**
    * `NOT NULL DEFAULT 'ordered'` since `0010_routing_strategy.sql`
    * (docs/providers.md § Routing module). Raw column value — an
@@ -18,22 +22,31 @@ export type ModelGroupRow = {
   updated_at: string
 }
 
-/** One callable bare id for a group — 1..10 per group, unique per user across all of that user's groups (docs/database.md `model_group_aliases`). */
-export type ModelGroupAliasRow = {
+/**
+ * One callable model of a group — 1..20 per group, name unique within the
+ * group, each with its own ordered target list (docs/database.md
+ * `model_group_models`). Added in `0014_group_endpoints.sql`.
+ */
+export type ModelGroupModelRow = {
   id: string
   user_id: string
   group_id: string
-  alias: string
+  name: string
+  targets_json: string
   created_at: string
+  updated_at: string
 }
 
 /**
- * Normalized target shape (docs/database.md `model_groups.targets_json`):
+ * Normalized target shape (docs/database.md `model_group_models.targets_json`):
  * `account_id` pins the target to one `upstream_accounts` row — `null` for
  * an unpinned (whole-pool) target. No FK; a deleted account just makes the
  * target skip at resolve time, mirroring the custom-provider convention.
  */
 export type GroupTarget = { model: string; account_id: string | null }
+
+/** Wire/storage shape of one group model: a callable name plus its targets. */
+export type GroupModelInput = { name: string; targets: GroupTarget[] }
 
 export async function listModelGroups(db: D1Database, userId: string): Promise<ModelGroupRow[]> {
   const res = await db
@@ -57,89 +70,89 @@ export async function getModelGroupById(
 }
 
 /**
- * A group's current aliases. No `ORDER BY`: real SQLite (and `FakeD1`) both
- * return an unordered-clause `SELECT` in insertion order for a plain table
- * scan, which best preserves the order the caller submitted — aliases carry
- * no priority semantics (unlike `targets`) so this is a display nicety, not
- * a correctness requirement.
+ * Resolves an endpoint slug to its group, scoped to `userId` — a slug must
+ * never resolve cross-user (docs/api.md § Group endpoints). Exact match; the
+ * `UNIQUE(user_id, slug)` constraint makes the hit unambiguous.
  */
-export async function listAliasesForGroup(
+export async function getGroupBySlug(
+  db: D1Database,
+  userId: string,
+  slug: string,
+): Promise<ModelGroupRow | null> {
+  return (
+    (await db
+      .prepare(`SELECT * FROM model_groups WHERE user_id = ? AND slug = ?`)
+      .bind(userId, slug)
+      .first<ModelGroupRow>()) ?? null
+  )
+}
+
+/**
+ * A group's models. No `ORDER BY`: real SQLite (and `FakeD1`) both return an
+ * unordered-clause `SELECT` in insertion order for a plain table scan, which
+ * best preserves the order the caller submitted — the model list carries no
+ * priority semantics (unlike each model's `targets`), so this is a display
+ * nicety, not a correctness requirement.
+ */
+export async function listModelsForGroup(
   db: D1Database,
   groupId: string,
-): Promise<ModelGroupAliasRow[]> {
+): Promise<ModelGroupModelRow[]> {
   const res = await db
-    .prepare(`SELECT * FROM model_group_aliases WHERE group_id = ?`)
+    .prepare(`SELECT * FROM model_group_models WHERE group_id = ?`)
     .bind(groupId)
-    .all<ModelGroupAliasRow>()
+    .all<ModelGroupModelRow>()
   return res.results ?? []
 }
 
 /**
- * Resolves an alias to its group, scoped to `userId` — an alias must never
- * resolve cross-user. Exact, case-sensitive match (docs/providers.md §
- * Model groups "Aliases"). Two queries rather than a join: `FakeD1` has no
- * join support, and this is a two-row point lookup either way.
+ * Resolves a request's `model` on a group endpoint: exact, case-sensitive
+ * match against the group's model names (docs/providers.md § Model groups
+ * "Resolution"). Indexed point lookup via `UNIQUE(group_id, name)` — never a
+ * JSON scan.
  */
-export async function getGroupByAlias(
+export async function getGroupModelByName(
   db: D1Database,
-  userId: string,
-  alias: string,
-): Promise<ModelGroupRow | null> {
-  const aliasRow = await db
-    .prepare(`SELECT * FROM model_group_aliases WHERE user_id = ? AND alias = ?`)
-    .bind(userId, alias)
-    .first<ModelGroupAliasRow>()
-  if (!aliasRow) return null
-  return getModelGroupById(db, userId, aliasRow.group_id)
+  groupId: string,
+  name: string,
+): Promise<ModelGroupModelRow | null> {
+  return (
+    (await db
+      .prepare(`SELECT * FROM model_group_models WHERE group_id = ? AND name = ?`)
+      .bind(groupId, name)
+      .first<ModelGroupModelRow>()) ?? null
+  )
 }
 
 /**
- * The subset of `aliases` already owned by a *different* group of this user
- * — a `400`-worthy cross-group conflict (docs/auth.md § Model groups).
- * `excludeGroupId` lets an update check against every other group without
- * false-positiving on the group's own current aliases (which, on a replace,
- * are about to be deleted and reinserted anyway). One query per candidate
- * alias — bounded by `MAX_ALIASES_PER_GROUP` (≤ 10), a write-path cost, not
- * a hot read path.
+ * Atomic replace of a group's whole model set: delete the current rows and
+ * insert the new list in one D1 batch (same batch-as-transaction convention
+ * as `reorderCustomProviders`) — never a visible in-between state with zero
+ * or partial models. Callers validate first (`validateGroupModels`); this
+ * function trusts its input.
  */
-export async function findAliasConflicts(
+export async function replaceGroupModels(
   db: D1Database,
-  userId: string,
-  aliases: string[],
-  excludeGroupId?: string,
-): Promise<string[]> {
-  const conflicts: string[] = []
-  for (const alias of aliases) {
-    const row = await db
-      .prepare(`SELECT * FROM model_group_aliases WHERE user_id = ? AND alias = ?`)
-      .bind(userId, alias)
-      .first<ModelGroupAliasRow>()
-    if (row && row.group_id !== excludeGroupId) conflicts.push(alias)
-  }
-  return conflicts
-}
-
-/**
- * Atomic replace: delete the group's current aliases and insert the new
- * ordered list in one D1 batch (same batch-as-transaction convention as
- * `reorderCustomProviders`) — never a visible in-between state with zero or
- * partial aliases. Callers validate + resolve cross-group conflicts first
- * (`findAliasConflicts`); this function trusts its input.
- */
-export async function replaceAliases(
-  db: D1Database,
-  input: { userId: string; groupId: string; aliases: string[] },
+  input: { userId: string; groupId: string; models: GroupModelInput[] },
 ): Promise<void> {
   const ts = nowIso()
   const statements = [
-    db.prepare(`DELETE FROM model_group_aliases WHERE group_id = ?`).bind(input.groupId),
-    ...input.aliases.map((alias) =>
+    db.prepare(`DELETE FROM model_group_models WHERE group_id = ?`).bind(input.groupId),
+    ...input.models.map((model) =>
       db
         .prepare(
-          `INSERT INTO model_group_aliases (id, user_id, group_id, alias, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO model_group_models (id, user_id, group_id, name, targets_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .bind(newId("mgalias"), input.userId, input.groupId, alias, ts),
+        .bind(
+          newId("mgmodel"),
+          input.userId,
+          input.groupId,
+          model.name,
+          JSON.stringify(model.targets),
+          ts,
+          ts,
+        ),
     ),
   ]
   await db.batch(statements)
@@ -155,24 +168,23 @@ export async function countModelGroups(db: D1Database, userId: string): Promise<
 
 export async function insertModelGroup(
   db: D1Database,
-  input: { userId: string; name: string; targets: GroupTarget[]; strategy?: string },
+  input: { userId: string; name: string; slug: string; strategy?: string },
 ): Promise<ModelGroupRow> {
   const id = newId("mgrp")
   const ts = nowIso()
-  const targetsJson = JSON.stringify(input.targets)
   const strategy = input.strategy ?? "ordered"
   await db
     .prepare(
-      `INSERT INTO model_groups (id, user_id, name, targets_json, strategy, created_at, updated_at)
+      `INSERT INTO model_groups (id, user_id, name, slug, strategy, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(id, input.userId, input.name, targetsJson, strategy, ts, ts)
+    .bind(id, input.userId, input.name, input.slug, strategy, ts, ts)
     .run()
   return {
     id,
     user_id: input.userId,
     name: input.name,
-    targets_json: targetsJson,
+    slug: input.slug,
     strategy,
     created_at: ts,
     updated_at: ts,
@@ -186,34 +198,42 @@ export async function insertModelGroup(
 export async function updateModelGroupFields(
   db: D1Database,
   id: string,
-  patch: { name?: string; targets?: GroupTarget[]; strategy?: string },
+  patch: { name?: string; slug?: string; strategy?: string },
 ): Promise<void> {
   const ts = nowIso()
   await db
     .prepare(
       `UPDATE model_groups SET
          name = COALESCE(?, name),
-         targets_json = COALESCE(?, targets_json),
+         slug = COALESCE(?, slug),
          strategy = COALESCE(?, strategy),
          updated_at = ?
        WHERE id = ?`,
     )
-    .bind(patch.name ?? null, patch.targets ? JSON.stringify(patch.targets) : null, patch.strategy ?? null, ts, id)
+    .bind(patch.name ?? null, patch.slug ?? null, patch.strategy ?? null, ts, id)
     .run()
 }
 
+/**
+ * Deletes the group and its model rows in one batch. The schema's
+ * `ON DELETE CASCADE` would cover the child rows on real D1, but the explicit
+ * delete keeps the behavior identical under `FakeD1` (no FK enforcement) and
+ * costs one statement in the same transaction.
+ */
 export async function deleteModelGroup(db: D1Database, userId: string, id: string): Promise<boolean> {
-  const r = await db
-    .prepare(`DELETE FROM model_groups WHERE id = ? AND user_id = ?`)
-    .bind(id, userId)
-    .run()
-  return (r.meta.changes ?? 0) > 0
+  const existing = await getModelGroupById(db, userId, id)
+  if (!existing) return false
+  await db.batch([
+    db.prepare(`DELETE FROM model_group_models WHERE group_id = ?`).bind(id),
+    db.prepare(`DELETE FROM model_groups WHERE id = ? AND user_id = ?`).bind(id, userId),
+  ])
+  return true
 }
 
 /**
  * Tolerant parse, normalizing every entry to `{model, account_id}`:
- * - A plain `"provider/model"` string (v3.0.0 rows, and still-accepted wire
- *   shorthand) is `{model: entry, account_id: null}`.
+ * - A plain `"provider/model"` string (still-accepted wire shorthand) is
+ *   `{model: entry, account_id: null}`.
  * - An object entry reads `model` (string) and optional `account_id`
  *   (string; anything else, including `null`/absent, normalizes to `null`).
  *   Future per-target fields (balancing weights) are simply ignored here,

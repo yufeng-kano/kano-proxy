@@ -6,7 +6,7 @@ Pick any hostname you control (example: `proxy.example.com`). Same host for UI +
 
 | Host | Role |
 |------|------|
-| `https://<your-domain>` | Pages (UI) + Worker routes for `/openai/*`, `/anthropic/*`, `/api/*` |
+| `https://<your-domain>` | Pages (UI) + Worker routes for `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*` |
 
 Public LLM bases and admin “copy base URL” use the **request / browser origin** — no domain is hard-coded in app source. After deploy, set production vars to match:
 
@@ -43,6 +43,7 @@ Suggested Worker routes (replace host):
 
 - `<your-domain>/openai/*`
 - `<your-domain>/anthropic/*`
+- `<your-domain>/g/*` (model-group endpoints — required since v4)
 - `<your-domain>/api/*`
 
 Pages serves remaining paths (SPA).
@@ -169,7 +170,7 @@ A `VITE_*` variable set in the Cloudflare Pages build environment **overrides** 
 ### DNS + routes
 
 1. Pages custom domain: `<your-domain>`
-2. Worker routes: `/openai/*`, `/anthropic/*`, `/api/*` (optional `/health`) on that host
+2. Worker routes: `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*` (optional `/health`) on that host
 3. DNS CNAME/A, Proxied
 
 | Surface | URL |

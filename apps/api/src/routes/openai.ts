@@ -1,10 +1,11 @@
 import { Hono } from "hono"
+import type { Context } from "hono"
 import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
 import { logRequest } from "../logging/request_log"
 import { isNativeAnthropicPassthrough } from "./anthropic"
-import { resolveCandidates } from "../routing/candidates"
+import { resolveRequestModel } from "./resolve_request"
 import { dispatchChatCompletions } from "../proxy/dispatch"
 import { detectOpenAIToolLoop, loopDetectedMessage } from "../utils/loop_guard"
 import { loggingProviderFromRawModel } from "../utils/model"
@@ -29,7 +30,13 @@ openaiRoutes.get("/models", async (c) => {
   })
 })
 
-openaiRoutes.post("/chat/completions", async (c) => {
+/**
+ * Shared by the shared base (`/openai/v1/chat/completions`) and the group
+ * mounts (`/g/:slug/openai/v1/chat/completions`) — resolution branches on the
+ * `slug` param inside `resolveRequestModel` (docs/api.md § Group endpoints);
+ * everything past resolution is identical.
+ */
+export async function handleChatCompletions(c: Context<HonoEnv>): Promise<Response> {
   const started = Date.now()
   const userId = c.get("apiKeyUserId")!
   const apiKeyId = c.get("apiKeyId")
@@ -43,24 +50,32 @@ openaiRoutes.post("/chat/completions", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const resolved = await resolveCandidates(c.env, userId, modelRaw)
-  if (!resolved) {
+  const res = await resolveRequestModel(c, userId, modelRaw)
+  if (res.kind !== "ok") {
     c.executionCtx.waitUntil(
       logRequest(c.env, {
         userId,
         apiKeyId,
         provider: loggingProviderFromRawModel(modelRaw),
         model: modelRaw.slice(0, 200),
-        statusCode: 400,
+        statusCode: res.kind === "group_not_found" ? 404 : 400,
         latencyMs: Date.now() - started,
-        errorCode: "invalid_model",
+        errorCode: res.kind === "group_not_found" ? "group_not_found" : "invalid_model",
       }),
     )
+    if (res.kind === "group_not_found") {
+      return c.json(
+        { error: { message: `unknown group endpoint "${res.slug}"`, code: "not_found" } },
+        404,
+        { "x-should-retry": "false" },
+      )
+    }
     return c.json(
       {
         error: {
-          message:
-            "model must be provider/model (e.g. claude-code/claude-opus-5) or one of your model group aliases",
+          message: res.groupSlug
+            ? `model must be one of this group endpoint's configured models (see GET /g/${res.groupSlug}/openai/v1/models)`
+            : "model must be provider/model (e.g. claude-code/claude-opus-5)",
           code: "invalid_model",
         },
       },
@@ -68,6 +83,7 @@ openaiRoutes.post("/chat/completions", async (c) => {
       { "x-should-retry": "false" },
     )
   }
+  const resolved = res.resolution
   const effort = parseReasoningEffort(body.reasoning_effort)
   if (effort === "invalid") {
     return c.json(
@@ -177,4 +193,6 @@ openaiRoutes.post("/chat/completions", async (c) => {
       rawBody: body,
     },
   })
-})
+}
+
+openaiRoutes.post("/chat/completions", handleChatCompletions)

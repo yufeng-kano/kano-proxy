@@ -1,51 +1,73 @@
 import { describe, expect, it } from "vitest"
 import {
-  MAX_ALIAS_LENGTH,
-  MAX_ALIASES_PER_GROUP,
   MAX_DISPLAY_NAME_LENGTH,
   MAX_MODEL_GROUPS_PER_USER,
-  MAX_TARGETS_PER_GROUP,
-  validateAlias,
-  validateAliases,
+  MAX_MODEL_NAME_LENGTH,
+  MAX_MODELS_PER_GROUP,
+  MAX_TARGETS_PER_MODEL,
   validateDisplayName,
+  validateGroupModels,
+  validateGroupSlug,
   validateGroupTargets,
+  validateModelName,
 } from "../src/utils/model_group"
 import { parseGroupTargets } from "../src/db/model_groups"
 
-describe("validateAlias", () => {
-  it("accepts a plain bare alias", () => {
-    expect(validateAlias("opus")).toBeNull()
+describe("validateModelName", () => {
+  it("accepts a plain bare name", () => {
+    expect(validateModelName("opus")).toBeNull()
   })
 
   it("accepts the maximum length (128 chars)", () => {
-    expect(validateAlias("a".repeat(MAX_ALIAS_LENGTH))).toBeNull()
+    expect(validateModelName("a".repeat(MAX_MODEL_NAME_LENGTH))).toBeNull()
   })
 
   it("rejects empty", () => {
-    expect(validateAlias("")).not.toBeNull()
+    expect(validateModelName("")).not.toBeNull()
   })
 
   it("rejects above maximum length", () => {
-    expect(validateAlias("a".repeat(MAX_ALIAS_LENGTH + 1))).not.toBeNull()
+    expect(validateModelName("a".repeat(MAX_MODEL_NAME_LENGTH + 1))).not.toBeNull()
   })
 
   it("rejects internal whitespace", () => {
-    expect(validateAlias("my alias")).not.toBeNull()
+    expect(validateModelName("my model")).not.toBeNull()
   })
 
   it("rejects a leading/trailing space (caller is expected to trim first, but this still must reject)", () => {
-    expect(validateAlias(" opus")).not.toBeNull()
-    expect(validateAlias("opus ")).not.toBeNull()
+    expect(validateModelName(" opus")).not.toBeNull()
+    expect(validateModelName("opus ")).not.toBeNull()
   })
 
-  it("rejects any '/'", () => {
-    expect(validateAlias("claude-code/opus")).not.toBeNull()
-    expect(validateAlias("a/b")).not.toBeNull()
+  it("accepts '/' — a group endpoint has no provider/model resolution to collide with", () => {
+    expect(validateModelName("claude-code/claude-opus-5")).toBeNull()
+    expect(validateModelName("a/b")).toBeNull()
   })
 
-  it("accepts punctuation other than whitespace and '/'", () => {
-    expect(validateAlias("gpt-4o")).toBeNull()
-    expect(validateAlias("my_group.v2")).toBeNull()
+  it("accepts punctuation other than whitespace", () => {
+    expect(validateModelName("gpt-4o")).toBeNull()
+    expect(validateModelName("my_group.v2")).toBeNull()
+  })
+})
+
+describe("validateGroupSlug", () => {
+  it("accepts a plain slug", () => {
+    expect(validateGroupSlug("my-tools")).toBeNull()
+  })
+
+  it("rejects too short, too long, and bad shapes", () => {
+    expect(validateGroupSlug("a")).not.toBeNull()
+    expect(validateGroupSlug("a".repeat(33))).not.toBeNull()
+    expect(validateGroupSlug("-lead")).not.toBeNull()
+    expect(validateGroupSlug("trail-")).not.toBeNull()
+    expect(validateGroupSlug("UPPER")).not.toBeNull()
+    expect(validateGroupSlug("has space")).not.toBeNull()
+  })
+
+  it("has no reserved-word list — /g/ is its own namespace", () => {
+    expect(validateGroupSlug("openai")).toBeNull()
+    expect(validateGroupSlug("api")).toBeNull()
+    expect(validateGroupSlug("claude-code")).toBeNull()
   })
 })
 
@@ -75,59 +97,82 @@ describe("validateDisplayName", () => {
   })
 })
 
-describe("validateAliases", () => {
-  it("accepts a single alias", () => {
-    expect(validateAliases(["gpt-4o"])).toEqual({ ok: true, aliases: ["gpt-4o"] })
+describe("validateGroupModels", () => {
+  const builtinOnly = (prefix: string) => prefix === "claude-code" || prefix === "grok"
+  const noAccounts = async () => false
+
+  it("accepts a single model with targets, trimming the name", async () => {
+    const res = await validateGroupModels(
+      [{ name: " gpt-4o ", targets: ["claude-code/claude-opus-5"] }],
+      builtinOnly,
+      noAccounts,
+    )
+    expect(res).toEqual({
+      ok: true,
+      models: [{ name: "gpt-4o", targets: [{ model: "claude-code/claude-opus-5", account_id: null }] }],
+    })
   })
 
-  it("accepts up to the max alias count (10)", () => {
-    const aliases = Array.from({ length: MAX_ALIASES_PER_GROUP }, (_, i) => `alias-${i}`)
-    const res = validateAliases(aliases)
+  it("accepts up to the max model count", async () => {
+    const models = Array.from({ length: MAX_MODELS_PER_GROUP }, (_, i) => ({
+      name: `model-${i}`,
+      targets: ["grok/grok-4.5"],
+    }))
+    const res = await validateGroupModels(models, builtinOnly, noAccounts)
     expect(res.ok).toBe(true)
   })
 
-  it("rejects an empty array", () => {
-    expect(validateAliases([]).ok).toBe(false)
+  it("rejects an empty array, a non-array, and above-max counts", async () => {
+    expect((await validateGroupModels([], builtinOnly, noAccounts)).ok).toBe(false)
+    expect((await validateGroupModels("gpt-4o", builtinOnly, noAccounts)).ok).toBe(false)
+    const models = Array.from({ length: MAX_MODELS_PER_GROUP + 1 }, (_, i) => ({
+      name: `model-${i}`,
+      targets: ["grok/grok-4.5"],
+    }))
+    expect((await validateGroupModels(models, builtinOnly, noAccounts)).ok).toBe(false)
   })
 
-  it("rejects a non-array", () => {
-    expect(validateAliases("gpt-4o").ok).toBe(false)
+  it("rejects a non-object entry and a non-string name", async () => {
+    expect((await validateGroupModels(["gpt-4o"], builtinOnly, noAccounts)).ok).toBe(false)
+    expect(
+      (await validateGroupModels([{ name: 42, targets: ["grok/grok-4.5"] }], builtinOnly, noAccounts)).ok,
+    ).toBe(false)
   })
 
-  it("rejects more than the max alias count", () => {
-    const aliases = Array.from({ length: MAX_ALIASES_PER_GROUP + 1 }, (_, i) => `alias-${i}`)
-    expect(validateAliases(aliases).ok).toBe(false)
+  it("rejects an in-payload duplicate name (trimmed first; case still distinguishes)", async () => {
+    const dup = await validateGroupModels(
+      [
+        { name: "gpt-4o", targets: ["grok/grok-4.5"] },
+        { name: " gpt-4o ", targets: ["claude-code/claude-opus-5"] },
+      ],
+      builtinOnly,
+      noAccounts,
+    )
+    expect(dup.ok).toBe(false)
+    const cased = await validateGroupModels(
+      [
+        { name: "GPT-4o", targets: ["grok/grok-4.5"] },
+        { name: "gpt-4o", targets: ["claude-code/claude-opus-5"] },
+      ],
+      builtinOnly,
+      noAccounts,
+    )
+    expect(cased.ok).toBe(true)
   })
 
-  it("rejects a non-string entry", () => {
-    expect(validateAliases([42]).ok).toBe(false)
+  it("a model's target error is prefixed with the model name", async () => {
+    const res = await validateGroupModels([{ name: "gpt-4o", targets: [] }], builtinOnly, noAccounts)
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.error).toContain('model "gpt-4o"')
   })
 
-  it("rejects an entry that fails validateAlias (e.g. contains whitespace)", () => {
-    expect(validateAliases(["bad alias"]).ok).toBe(false)
-  })
-
-  it("trims each alias", () => {
-    const res = validateAliases([" gpt-4o "])
-    expect(res).toEqual({ ok: true, aliases: ["gpt-4o"] })
-  })
-
-  it("rejects an in-payload duplicate (exact, case-sensitive)", () => {
-    expect(validateAliases(["gpt-4o", "gpt-4o"]).ok).toBe(false)
-  })
-
-  it("a duplicate after trimming is still caught", () => {
-    expect(validateAliases(["gpt-4o", " gpt-4o "]).ok).toBe(false)
-  })
-
-  it("does not treat differently-cased aliases as duplicates (matched exactly, case-sensitive)", () => {
-    const res = validateAliases(["GPT-4o", "gpt-4o"])
-    expect(res).toEqual({ ok: true, aliases: ["GPT-4o", "gpt-4o"] })
-  })
-
-  it("accepts multiple distinct aliases in order", () => {
-    const res = validateAliases(["gpt-4o", "gpt-4", "gpt-4-turbo"])
-    expect(res).toEqual({ ok: true, aliases: ["gpt-4o", "gpt-4", "gpt-4-turbo"] })
+  it("a slash-carrying name is legal and can mirror a full provider/model id", async () => {
+    const res = await validateGroupModels(
+      [{ name: "claude-code/claude-opus-5", targets: ["grok/grok-4.5"] }],
+      builtinOnly,
+      noAccounts,
+    )
+    expect(res.ok).toBe(true)
   })
 })
 
@@ -152,7 +197,7 @@ describe("validateGroupTargets", () => {
   })
 
   it("accepts up to the max target count", async () => {
-    const targets = Array.from({ length: MAX_TARGETS_PER_GROUP }, (_, i) => `claude-code/model-${i}`)
+    const targets = Array.from({ length: MAX_TARGETS_PER_MODEL }, (_, i) => `claude-code/model-${i}`)
     const res = await validateGroupTargets(targets, builtinOnly, noAccounts)
     expect(res.ok).toBe(true)
   })
@@ -168,7 +213,7 @@ describe("validateGroupTargets", () => {
   })
 
   it("rejects more than the max target count", async () => {
-    const targets = Array.from({ length: MAX_TARGETS_PER_GROUP + 1 }, (_, i) => `claude-code/model-${i}`)
+    const targets = Array.from({ length: MAX_TARGETS_PER_MODEL + 1 }, (_, i) => `claude-code/model-${i}`)
     const res = await validateGroupTargets(targets, builtinOnly, noAccounts)
     expect(res.ok).toBe(false)
   })
@@ -400,11 +445,11 @@ describe("limits", () => {
     expect(MAX_MODEL_GROUPS_PER_USER).toBe(50)
   })
 
-  it("MAX_TARGETS_PER_GROUP is 20 per docs/providers.md", () => {
-    expect(MAX_TARGETS_PER_GROUP).toBe(20)
+  it("MAX_TARGETS_PER_MODEL is 20 per docs/providers.md", () => {
+    expect(MAX_TARGETS_PER_MODEL).toBe(20)
   })
 
-  it("MAX_ALIASES_PER_GROUP is 10 per docs/providers.md", () => {
-    expect(MAX_ALIASES_PER_GROUP).toBe(10)
+  it("MAX_MODELS_PER_GROUP is 20 per docs/providers.md", () => {
+    expect(MAX_MODELS_PER_GROUP).toBe(20)
   })
 })

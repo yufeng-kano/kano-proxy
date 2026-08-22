@@ -7,7 +7,7 @@
 3. **Every bound subscription provider** (`claude-code`, `codex`, `grok`) is available on **both** surfaces via format adapters — not “one API format per provider.”
 4. **Per-user subscription account pools** (not shared Platform API keys as the product).
 5. **User-defined custom upstream providers:** bring your own OpenAI- or Anthropic-compatible endpoint (base URL + API key) and it behaves like a built-in provider — a slug, model ids `slug/upstream`, both surfaces, pool/bench inherited (see [providers.md](./providers.md)).
-6. **Model groups:** per-user bare-name aliases that expand to an ordered list of `provider/model` targets — one mechanism for both model mapping (client's hard-coded name → any target) and joining the same model across different accounts/prefixes, with cross-provider failover by target order (see [providers.md](./providers.md)).
+6. **Model groups:** per-user virtual endpoints (`/g/<slug>/openai/v1`, `/g/<slug>/anthropic`) whose configured model names each expand to an ordered list of `provider/model` targets — one mechanism for both per-client model mapping (a client's hard-coded names get their own endpoint) and joining the same model across different accounts/prefixes, with cross-provider failover by target order (see [providers.md](./providers.md)).
 7. **Admin web UI:** bind accounts, see 5h/Week (or weekly) usage %, manage API keys, manage custom endpoints and model groups.
 8. **Multi-tenant isolation:** User A’s pool never serves User B.
 
@@ -61,9 +61,9 @@ Examples:
 - `antigravity/gemini-3-flash`
 - `<your-slug>/<upstream_model_id>` — a user-defined custom endpoint. Only the *first* `/` splits the id, so an upstream id that itself contains `/` (e.g. an OpenRouter-style `org/model`) still routes: `openrouter/anthropic/claude-3.7-sonnet` is slug `openrouter`, upstream id `anthropic/claude-3.7-sonnet`.
 
-**One exception to the prefix rule:** a bare id (no `/`) that matches one of the caller's **model group aliases** (a group carries 1–10 of them) expands to that group's first usable `provider/model` target before dispatch ([providers.md](./providers.md) § Model groups). Any other bare id is rejected. The missing slash is what keeps the two namespaces from ever colliding.
+On the shared bases every id must carry a prefix — bare ids are rejected. **Model groups** are called through their own endpoints instead: on `/g/<slug>/…` only that group's configured model names resolve, each expanding to its first usable `provider/model` target before dispatch ([providers.md](./providers.md) § Model groups). The path prefix is what keeps the two namespaces from ever colliding.
 
-`GET /openai/v1/models` and `GET /anthropic/v1/models` list the same live catalog for the **authenticated user’s currently usable accounts** (ids always `provider/upstream`), plus the user's model groups under their bare names.
+`GET /openai/v1/models` and `GET /anthropic/v1/models` list the same live catalog for the **authenticated user’s currently usable accounts** (ids always `provider/upstream`); each group endpoint's own `/models` lists that group's model names.
 
 ## Client capabilities (required)
 

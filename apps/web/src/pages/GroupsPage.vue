@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * Model groups: the names the user invented, and the real models each one
- * stands for (docs/admin-ui.md § Groups page).
+ * Model groups: each one a virtual endpoint — a `/g/<slug>/…` base URL of its
+ * own, and the models callable on it (docs/admin-ui.md § Groups page).
  *
  * One bounded card filling the content region, list scrolling inside it — the
  * Keys-page shape rather than the Providers edit gate: groups are few, and
@@ -27,7 +27,7 @@ import PageHeader from "@/components/ui/PageHeader.vue"
 import { useAuth } from "@/composables/useAuth"
 import { useModelGroups } from "@/composables/useModelGroups"
 import { useI18n } from "@/i18n"
-import { listModels } from "@/services/api"
+import { groupBaseUrls, listModels } from "@/services/api"
 import {
   CACHE_TTL_MS,
   isModelsCacheFresh,
@@ -37,6 +37,7 @@ import {
 import type {
   CatalogModel,
   ModelGroup,
+  ModelGroupModel,
   ModelGroupTarget,
   ModelGroupTargetRouting,
 } from "@/types"
@@ -49,8 +50,11 @@ const catalog = ref<CatalogModel[]>([])
 const error = ref<string | null>(null)
 const showDialog = ref(false)
 const editing = ref<ModelGroup | null>(null)
-/** Which alias last landed on the clipboard — aliases are unique per user, so the id is enough. */
-const copiedAlias = ref<string | null>(null)
+/**
+ * Which copyable last landed on the clipboard, keyed so a model name in one
+ * group and the same name in another never share a check mark.
+ */
+const copiedKey = ref<string | null>(null)
 
 let copyTimer: number | undefined
 
@@ -60,13 +64,13 @@ const showSkeleton = computed(() => groups.state.loading && !groups.state.data)
 /**
  * Four data columns plus the edit control at the far right, which gets a
  * declared width and its own unlabelled track rather than riding beside the
- * name (docs/admin-ui.md § Component primitives). Name is the label the user
- * gave the group; the callable ids are the Aliases beside it.
+ * name (docs/admin-ui.md § Component primitives). Endpoint is v4's new
+ * column: where a client points; Models is what it may send there.
  */
 const columns = computed<Column<ModelGroup>[]>(() => [
-  { key: "name", header: t("groups.column.name"), width: "20%" },
-  { key: "aliases", header: t("groups.column.aliases"), width: "26%" },
-  { key: "targets", header: t("groups.column.targets") },
+  { key: "name", header: t("groups.column.name"), width: "16%" },
+  { key: "endpoint", header: t("groups.column.endpoint"), width: "22%" },
+  { key: "models", header: t("groups.column.models") },
   { key: "updated", header: t("groups.column.updated"), width: "132px" },
   { key: "edit", header: "", srHeader: t("action.edit"), align: "end", width: "56px" },
 ])
@@ -90,35 +94,30 @@ function isMissingAccount(target: ModelGroupTarget): boolean {
 }
 
 /**
- * Current-route indicator (docs/admin-ui.md § Groups page). `routing` is
- * index-aligned with `targets` and computed from the same stored facts
- * dispatch uses, so it says what the next request would actually do.
- *
- * It is optional throughout: a cache entry written before the field existed
- * has none, and the rows then render exactly as they used to instead of
- * breaking on a missing index.
+ * Current-route indicator, per model (docs/admin-ui.md § Groups page).
+ * `routing` is index-aligned with the model's `targets` and computed from the
+ * same stored facts dispatch uses, so it says what the next request would
+ * actually do. Optional throughout: a cache entry written before the field
+ * existed has none, and the rows then render without the markers.
  */
-function routingFor(group: ModelGroup, index: number): ModelGroupTargetRouting | null {
-  return group.routing?.targets?.[index] ?? null
+function routingFor(model: ModelGroupModel, index: number): ModelGroupTargetRouting | null {
+  return model.routing?.targets?.[index] ?? null
 }
 
-function isCurrentTarget(group: ModelGroup, index: number): boolean {
-  return group.routing?.current_target_index === index
+function isCurrentTarget(model: ModelGroupModel, index: number): boolean {
+  return model.routing?.current_target_index === index
 }
 
-function isUnusable(group: ModelGroup, index: number): boolean {
-  return routingFor(group, index)?.usable === false
+function isUnusable(model: ModelGroupModel, index: number): boolean {
+  return routingFor(model, index)?.usable === false
 }
 
 /**
  * Why this target cannot take a request, in the user's own terms — the text is
  * the state, the warning tone only reinforces it.
- *
- * Without `routing` (stale cache) the one fact the payload still carries is a
- * pin whose account is gone, which keeps its long-standing note.
  */
-function unusableReason(group: ModelGroup, target: ModelGroupTarget, index: number): string | null {
-  const routing = routingFor(group, index)
+function unusableReason(model: ModelGroupModel, target: ModelGroupTarget, index: number): string | null {
+  const routing = routingFor(model, index)
   if (!routing) return isMissingAccount(target) ? t("groups.account.skipped") : null
   if (routing.usable) return null
 
@@ -144,8 +143,8 @@ function unusableReason(group: ModelGroup, target: ModelGroupTarget, index: numb
 }
 
 /** Exact recovery time behind the relative one, same as the Updated column. */
-function unusableTitle(group: ModelGroup, index: number): string | undefined {
-  const until = routingFor(group, index)?.unusable_until
+function unusableTitle(model: ModelGroupModel, index: number): string | undefined {
+  const until = routingFor(model, index)?.unusable_until
   return until ? format.dateTime(until) : undefined
 }
 
@@ -166,8 +165,7 @@ async function loadGroups() {
 
 /**
  * Cache-first over the shared models entry: the picker only needs ids, and a
- * failure here leaves the page working — free-text entry covers every id the
- * catalog would have offered.
+ * failure here leaves the page working.
  */
 async function loadCatalog() {
   const uid = user.value?.id ?? null
@@ -180,7 +178,7 @@ async function loadCatalog() {
     catalog.value = res.data
     writeModelsCache(uid, res)
   } catch {
-    /* keep whatever is painted — the dialog still takes typed ids */
+    /* keep whatever is painted — the dialog picker degrades gracefully */
   }
 }
 
@@ -205,21 +203,31 @@ async function onSaved() {
 }
 
 /**
- * An alias *is* a model id a client sends, so copying one is the row's primary
- * read action — confirmed in place by the chip's icon swapping to a check, like
- * the Models page rows. The display name is a label and copies nothing.
+ * Two kinds of copyable per row: the endpoint base URLs (what goes in a
+ * client's `base_url`) and each model name (what goes in `model`). Both are
+ * confirmed in place by the chip's icon swapping to a check, like the Models
+ * page rows. The display name is a label and copies nothing.
  */
-async function copyAlias(alias: string) {
+async function copyValue(key: string, value: string) {
   try {
-    await navigator.clipboard.writeText(alias)
-    copiedAlias.value = alias
+    await navigator.clipboard.writeText(value)
+    copiedKey.value = key
     window.clearTimeout(copyTimer)
     copyTimer = window.setTimeout(() => {
-      if (copiedAlias.value === alias) copiedAlias.value = null
+      if (copiedKey.value === key) copiedKey.value = null
     }, 1600)
   } catch {
     error.value = t("state.copyFailed")
   }
+}
+
+/** The two base URLs a group's slug produces, labeled by wire shape. */
+function endpointUrls(group: ModelGroup): Array<{ key: string; label: string; url: string }> {
+  const urls = groupBaseUrls(group.slug)
+  return [
+    { key: `url:${group.id}:openai`, label: "OpenAI", url: urls.openai },
+    { key: `url:${group.id}:anthropic`, label: "Anthropic", url: urls.anthropic },
+  ]
 }
 </script>
 
@@ -275,78 +283,93 @@ async function copyAlias(alias: string) {
           <span class="name">{{ row.name }}</span>
         </template>
 
-        <!-- Every alias is a model id a client can send, so every chip is a
-             copy control — the accessible name spells out which one it copies,
-             because "Copy" repeats down the whole column. -->
-        <template #cell-aliases="{ row }">
-          <ul class="aliases">
-            <li v-for="alias in row.aliases" :key="alias">
+        <!-- The endpoint identity: the slug, then one copy chip per base URL —
+             a base URL is exactly what goes in a client's base_url setting, so
+             copying it is this column's primary action. -->
+        <template #cell-endpoint="{ row }">
+          <div class="endpoint">
+            <code class="mono slug" :title="`/g/${row.slug}/`">{{ row.slug }}</code>
+            <ul class="urls">
+              <li v-for="entry in endpointUrls(row)" :key="entry.key">
+                <AppButton
+                  size="sm"
+                  variant="ghost"
+                  class="copy-chip"
+                  :class="{ copied: copiedKey === entry.key }"
+                  :label="t('groups.copyUrl', { url: entry.url })"
+                  :title="entry.url"
+                  @click="copyValue(entry.key, entry.url)"
+                >
+                  <template #icon>
+                    <ActionIcon :name="copiedKey === entry.key ? 'check' : 'copy'" />
+                  </template>
+                  <span class="chip-text">{{ entry.label }}</span>
+                </AppButton>
+              </li>
+            </ul>
+          </div>
+        </template>
+
+        <!-- One line per group model: the copyable name (exactly what a client
+             sends as `model` on this endpoint), then its ordered targets with
+             the per-model current-route facts. -->
+        <template #cell-models="{ row }">
+          <ul class="models">
+            <li v-for="model in row.models ?? []" :key="model.name" class="model">
               <AppButton
                 size="sm"
                 variant="ghost"
-                class="alias-copy"
-                :class="{ copied: copiedAlias === alias }"
-                :label="t('groups.copyAlias', { alias })"
-                @click="copyAlias(alias)"
+                class="copy-chip model-chip"
+                :class="{ copied: copiedKey === `model:${row.id}:${model.name}` }"
+                :label="t('groups.copyModel', { model: model.name })"
+                @click="copyValue(`model:${row.id}:${model.name}`, model.name)"
               >
                 <template #icon>
-                  <ActionIcon :name="copiedAlias === alias ? 'check' : 'copy'" />
+                  <ActionIcon
+                    :name="copiedKey === `model:${row.id}:${model.name}` ? 'check' : 'copy'"
+                  />
                 </template>
-                <span class="mono alias">{{ alias }}</span>
+                <span class="mono chip-text">{{ model.name }}</span>
               </AppButton>
+
+              <ol class="targets">
+                <li
+                  v-for="(target, index) in model.targets"
+                  :key="targetKey(target, index)"
+                  class="target"
+                  :class="{ unusable: isUnusable(model, index) }"
+                >
+                  <span class="pos tabular">{{ index + 1 }}</span>
+                  <span class="target-body">
+                    <code class="mono">{{ target.model }}</code>
+                    <span class="facts">
+                      <!-- A pin whose account is gone still has to say which
+                           slot is broken — there is no label left to print. -->
+                      <Badge v-if="isMissingAccount(target)" tone="warn">
+                        {{ t("groups.account.missing") }}
+                      </Badge>
+                      <Badge v-else-if="target.account_label" tone="neutral">
+                        {{ target.account_label }}
+                      </Badge>
+                      <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
+
+                      <!-- What the next request would actually do. -->
+                      <Badge v-if="isCurrentTarget(model, index)" tone="accent">
+                        {{ t("groups.route.current") }}
+                      </Badge>
+                      <span
+                        v-if="unusableReason(model, target, index)"
+                        class="fact-note"
+                        :title="unusableTitle(model, index)"
+                      >
+                        {{ unusableReason(model, target, index) }}
+                      </span>
+                    </span>
+                  </span>
+                </li>
+              </ol>
             </li>
           </ul>
-        </template>
-
-        <!-- Priority order, numbered: the position is the routing rule, so it
-             is real text in the row — visible when the card layout takes over
-             below 768px, and read out where `list-style: none` costs Safari
-             its list semantics.
-
-             Each entry is position + model + its account, the account as a tag
-             so the later balancing facts (weight, live usage) join it as more
-             tags on the same line instead of forcing a new shape.
-
-             The routing facts join them there: a Current badge on the target
-             the next request would take, and a reason on any target that
-             cannot take one. -->
-        <template #cell-targets="{ row }">
-          <ol class="targets">
-            <li
-              v-for="(target, index) in row.targets"
-              :key="targetKey(target, index)"
-              class="target"
-              :class="{ unusable: isUnusable(row, index) }"
-            >
-              <span class="pos tabular">{{ index + 1 }}</span>
-              <span class="target-body">
-                <code class="mono">{{ target.model }}</code>
-                <span class="facts">
-                  <!-- A pin whose account is gone still has to say which slot
-                       is broken — there is no label left to print. -->
-                  <Badge v-if="isMissingAccount(target)" tone="warn">
-                    {{ t("groups.account.missing") }}
-                  </Badge>
-                  <Badge v-else-if="target.account_label" tone="neutral">
-                    {{ target.account_label }}
-                  </Badge>
-                  <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
-
-                  <!-- What the next request would actually do. -->
-                  <Badge v-if="isCurrentTarget(row, index)" tone="accent">
-                    {{ t("groups.route.current") }}
-                  </Badge>
-                  <span
-                    v-if="unusableReason(row, target, index)"
-                    class="fact-note"
-                    :title="unusableTitle(row, index)"
-                  >
-                    {{ unusableReason(row, target, index) }}
-                  </span>
-                </span>
-              </span>
-            </li>
-          </ol>
         </template>
 
         <template #cell-updated="{ row }">
@@ -369,7 +392,7 @@ async function copyAlias(alias: string) {
       </DataTable>
 
       <span class="sr-only" role="status" aria-live="polite">
-        {{ copiedAlias ? t("action.copied") : "" }}
+        {{ copiedKey ? t("action.copied") : "" }}
       </span>
     </AppCard>
 
@@ -423,10 +446,25 @@ async function copyAlias(alias: string) {
   font-size: var(--text-sm);
 }
 
-/* A group answers to several ids, so the cell is a list of them — wrapped, not
-   truncated to the first: which id a client may send is the question this
-   column exists to answer. */
-.aliases {
+/* The endpoint cell: the slug names the group's URL identity, the chips below
+   it copy the two full base URLs — labeled by wire shape, full value on the
+   title, so the column stays scannable at any hostname length. */
+.endpoint {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.slug {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--text-sm);
+}
+
+.urls {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-1);
@@ -437,29 +475,28 @@ async function copyAlias(alias: string) {
 }
 
 /* The button is the chip: quiet by default and full strength under the pointer,
-   so a column of ids still reads as ids rather than as a stack of buttons.
-   Always *present* though — never revealed on hover, which would read as the
-   control having disappeared. Selected through the card so these outrank
-   AppButton's own single-class rules rather than depending on style order. */
-.list :deep(.alias-copy) {
+   so a column of copyables still reads as data rather than a stack of buttons.
+   Always *present* though — never revealed on hover. Selected through the card
+   so these outrank AppButton's own single-class rules. */
+.list :deep(.copy-chip) {
   max-width: 100%;
   padding: 0 var(--space-2) 0 var(--space-1);
   color: var(--faint);
 }
 
-.list :deep(.alias-copy:hover),
-.list :deep(.alias-copy.copied) {
+.list :deep(.copy-chip:hover),
+.list :deep(.copy-chip.copied) {
   color: var(--text);
 }
 
 /* The label is a flex item, so it needs its own zero floor before the block
    inside it can ellipsize. */
-.list :deep(.alias-copy .btn-label) {
+.list :deep(.copy-chip .btn-label) {
   min-width: 0;
   overflow: hidden;
 }
 
-.alias {
+.chip-text {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -468,12 +505,32 @@ async function copyAlias(alias: string) {
   font-size: var(--text-sm);
 }
 
-.targets {
+/* One block per group model: the copyable name, then that model's ordered
+   targets indented beneath it — the indent is what keeps a multi-model row
+   readable as name → its routes, not one long run of chips. */
+.models {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-1) var(--space-3);
+  flex-direction: column;
+  gap: var(--space-2);
   margin: 0;
   padding: 0;
+  min-width: 0;
+  list-style: none;
+}
+
+.model {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.targets {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0 0 0 var(--space-4);
   list-style: none;
 }
 
@@ -549,15 +606,5 @@ async function copyAlias(alias: string) {
 
 .skeleton-meta {
   width: 85%;
-}
-
-/* Below the table breakpoint each row is a card, so the targets read as a
-   numbered stack rather than a wrapped run of ids. */
-@media (max-width: 768px) {
-  .targets {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: var(--space-1);
-  }
 }
 </style>

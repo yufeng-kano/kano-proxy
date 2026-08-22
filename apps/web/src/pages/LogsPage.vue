@@ -423,7 +423,7 @@ function typeLabel(row: RequestLogRow): string {
           <template #cell-model="{ row }">
             <code class="mono model-id" :title="row.model">{{ row.model }}</code>
             <Badge v-if="row.group_name" tone="neutral" class="alias">
-              {{ t("logs.via", { alias: row.group_name }) }}
+              {{ t("logs.via", { group: row.group_name }) }}
             </Badge>
           </template>
 

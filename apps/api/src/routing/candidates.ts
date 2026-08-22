@@ -1,11 +1,11 @@
 /**
  * Candidate expansion (docs/providers.md § Routing module "Candidates").
- * Turns a resolved request — a direct `provider/model`, or a model-group
- * alias — into one flat, ordered `RoutingCandidate[]`:
+ * Turns a resolved request — a direct `provider/model`, or a group
+ * endpoint's model — into one flat, ordered `RoutingCandidate[]`:
  *
  * - A **direct** call is one implicit unpinned target: that pool's accounts
  *   in priority order.
- * - A **group alias** expands each target in array order: a pinned target
+ * - A **group model** expands each target of its list in array order: a pinned target
  *   contributes exactly its one account (if it still exists); an unpinned
  *   target contributes every account of that provider's pool, in
  *   pool-priority order.
@@ -18,7 +18,13 @@
  */
 import { getAccount, listAccounts } from "../db/accounts"
 import { getCustomProviderBySlug, type CustomProviderRow } from "../db/custom_providers"
-import { getGroupByAlias, parseGroupTargets, type GroupTarget, type ModelGroupRow } from "../db/model_groups"
+import {
+  getGroupModelByName,
+  parseGroupTargets,
+  type GroupTarget,
+  type ModelGroupModelRow,
+  type ModelGroupRow,
+} from "../db/model_groups"
 import { getProviderStrategy } from "../db/provider_settings"
 import type { Env, ProviderId } from "../env"
 import { isProviderId } from "../env"
@@ -168,12 +174,16 @@ export type GroupExpansion = {
 }
 
 /**
- * Expand every target of a group, in array order, into the flat candidate
- * list — the same failover loop now runs cross-target and in-pool
+ * Expand every target of one group model, in array order, into the flat
+ * candidate list — the same failover loop now runs cross-target and in-pool
  * (docs/providers.md § Routing module).
  */
-export async function groupCandidates(env: Env, userId: string, group: ModelGroupRow): Promise<GroupExpansion> {
-  const targets = parseGroupTargets(group.targets_json)
+export async function groupModelCandidates(
+  env: Env,
+  userId: string,
+  modelRow: ModelGroupModelRow,
+): Promise<GroupExpansion> {
+  const targets = parseGroupTargets(modelRow.targets_json)
   const resolvedTargets: ResolvedTarget[] = []
   for (let i = 0; i < targets.length; i++) {
     const resolved = await resolveTargetPrefix(env, userId, i, targets[i]!)
@@ -185,9 +195,9 @@ export async function groupCandidates(env: Env, userId: string, group: ModelGrou
 
 /** Top-level combinator result for a raw `model` string — used by routes. */
 export type RoutingResolution = {
-  /** The exact client-sent string (group alias, or `provider/model`). */
+  /** The exact client-sent string (a group endpoint's model name, or `provider/model`). */
   raw: string
-  /** Set when `model` was a model-group alias. */
+  /** Set when the request came through a group endpoint: `<slug>/<model name>` (docs/database.md `request_logs.group_name`). */
   groupName?: string
   /**
    * The first resolved target's provider/adapter — shape/logging metadata
@@ -211,11 +221,10 @@ export type RoutingResolution = {
 /**
  * Shared model-id resolution for `/openai/v1` and `/anthropic`: split on the
  * first "/", try the builtin `ProviderId` union first, then a per-user
- * `custom_providers` lookup; a `model` with no "/" is a candidate model-group
- * alias, looked up in `model_group_aliases` scoped to `userId`. A miss either
- * way is `null` (`invalid_model`). Mirrors `resolveModel`'s old contract
- * (docs/api.md "Model routing") but returns the full candidate list instead
- * of one pre-selected target.
+ * `custom_providers` lookup. A `model` with no "/" is `null` (`invalid_model`)
+ * — since v4 nothing bare resolves on the shared bases; group models live on
+ * their own endpoints and resolve via `resolveGroupModelCandidates`
+ * (docs/api.md "Model routing").
  */
 export async function resolveCandidates(
   env: Env,
@@ -223,7 +232,7 @@ export async function resolveCandidates(
   model: string,
 ): Promise<RoutingResolution | null> {
   const split = splitModelId(model)
-  if (!split) return resolveGroupCandidates(env, userId, model)
+  if (!split) return null
 
   if (isProviderId(split.prefix)) {
     const adapter = getAdapter(split.prefix)
@@ -259,26 +268,34 @@ export async function resolveCandidates(
   }
 }
 
-async function resolveGroupCandidates(
+/**
+ * Group-endpoint resolution (docs/api.md § Group endpoints): the route has
+ * already resolved the slug to `group` (scoped to the caller — an unknown
+ * slug is the route's 404, not this function's concern); the request's
+ * `model` is matched exactly against that group's model names. A miss — or a
+ * hit whose targets all fail to resolve — is `null` (`invalid_model`).
+ */
+export async function resolveGroupModelCandidates(
   env: Env,
   userId: string,
+  group: ModelGroupRow,
   model: string,
 ): Promise<RoutingResolution | null> {
   const trimmed = model.trim()
   if (!trimmed) return null
 
-  const group = await getGroupByAlias(env.DB, userId, trimmed)
-  if (!group) return null
+  const modelRow = await getGroupModelByName(env.DB, group.id, trimmed)
+  if (!modelRow) return null
 
-  const { candidates, resolvedTargets } = await groupCandidates(env, userId, group)
+  const { candidates, resolvedTargets } = await groupModelCandidates(env, userId, modelRow)
   // No target's prefix resolves at all (e.g. every target pointed at a
-  // since-deleted custom provider) — the group behaves as invalid_model.
+  // since-deleted custom provider) — the model behaves as invalid_model.
   if (resolvedTargets.length === 0) return null
 
   const first = resolvedTargets[0]!
   return {
     raw: trimmed,
-    groupName: trimmed,
+    groupName: `${group.slug}/${modelRow.name}`,
     primary: {
       provider: first.provider,
       upstreamModel: first.upstreamModel,

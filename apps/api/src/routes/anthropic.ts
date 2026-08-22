@@ -1,10 +1,11 @@
 import { Hono } from "hono"
+import type { Context } from "hono"
 import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { listModelsForUser } from "../catalog/models"
 import type { ProviderId } from "../env"
 import { logRequest } from "../logging/request_log"
-import { resolveCandidates } from "../routing/candidates"
+import { resolveRequestModel, type RequestModelResolution } from "./resolve_request"
 import { relayCountTokens } from "../providers/codex_count"
 import { dispatchAnthropicMessages, dispatchAnthropicViaOpenAI } from "../proxy/dispatch"
 import { detectAnthropicToolLoop, loopDetectedMessage } from "../utils/loop_guard"
@@ -44,7 +45,61 @@ anthropicRoutes.get("/v1/models", async (c) => {
   })
 })
 
-anthropicRoutes.post("/v1/messages", async (c) => {
+/**
+ * Anthropic-shaped answers for the two non-ok resolution outcomes, logged
+ * with the outcome's own status/error code. Shared by messages and
+ * count_tokens (docs/api.md § Group endpoints).
+ */
+function resolutionFailure(
+  c: Context<HonoEnv>,
+  res: Exclude<RequestModelResolution, { kind: "ok" }>,
+  input: { modelRaw: string; started: number },
+): Response {
+  const userId = c.get("apiKeyUserId")!
+  const apiKeyId = c.get("apiKeyId")
+  c.executionCtx.waitUntil(
+    logRequest(c.env, {
+      userId,
+      apiKeyId,
+      provider: loggingProviderFromRawModel(input.modelRaw),
+      model: input.modelRaw.slice(0, 200),
+      statusCode: res.kind === "group_not_found" ? 404 : 400,
+      latencyMs: Date.now() - input.started,
+      errorCode: res.kind === "group_not_found" ? "group_not_found" : "invalid_model",
+    }),
+  )
+  if (res.kind === "group_not_found") {
+    return c.json(
+      {
+        type: "error",
+        error: { type: "not_found_error", message: `unknown group endpoint "${res.slug}"` },
+      },
+      404,
+      { "x-should-retry": "false" },
+    )
+  }
+  return c.json(
+    {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: res.groupSlug
+          ? `model must be one of this group endpoint's configured models (see GET /g/${res.groupSlug}/anthropic/v1/models)`
+          : "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5)",
+      },
+    },
+    400,
+    { "x-should-retry": "false" },
+  )
+}
+
+/**
+ * Shared by the shared base (`/anthropic/v1/messages`) and the group mounts
+ * (`/g/:slug/anthropic/v1/messages`) — resolution branches on the `slug`
+ * param inside `resolveRequestModel`; everything past resolution is
+ * identical.
+ */
+export async function handleAnthropicMessages(c: Context<HonoEnv>): Promise<Response> {
   const started = Date.now()
   const userId = c.get("apiKeyUserId")!
   const apiKeyId = c.get("apiKeyId")
@@ -58,32 +113,9 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const resolved = await resolveCandidates(c.env, userId, modelRaw)
-  if (!resolved) {
-    c.executionCtx.waitUntil(
-      logRequest(c.env, {
-        userId,
-        apiKeyId,
-        provider: loggingProviderFromRawModel(modelRaw),
-        model: modelRaw.slice(0, 200),
-        statusCode: 400,
-        latencyMs: Date.now() - started,
-        errorCode: "invalid_model",
-      }),
-    )
-    return c.json(
-      {
-        type: "error",
-        error: {
-          type: "invalid_request_error",
-          message:
-            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group aliases",
-        },
-      },
-      400,
-      { "x-should-retry": "false" },
-    )
-  }
+  const res = await resolveRequestModel(c, userId, modelRaw)
+  if (res.kind !== "ok") return resolutionFailure(c, res, { modelRaw, started })
+  const resolved = res.resolution
 
   // Grok sticky headers: forward if client supplied; never invent
   const affinity = {
@@ -211,9 +243,12 @@ anthropicRoutes.post("/v1/messages", async (c) => {
     isBuiltin: resolved.primary.isBuiltin,
     customProvider: resolved.primary.customProvider,
   })
-})
+}
 
-anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
+anthropicRoutes.post("/v1/messages", handleAnthropicMessages)
+
+/** Shared by the shared base and the group mounts, same as messages above. */
+export async function handleAnthropicCountTokens(c: Context<HonoEnv>): Promise<Response> {
   const started = Date.now()
   const userId = c.get("apiKeyUserId")!
   const apiKeyId = c.get("apiKeyId")
@@ -227,31 +262,9 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     )
   }
   const modelRaw = String(body.model ?? "")
-  const resolved = await resolveCandidates(c.env, userId, modelRaw)
-  if (!resolved) {
-    c.executionCtx.waitUntil(
-      logRequest(c.env, {
-        userId,
-        apiKeyId,
-        provider: loggingProviderFromRawModel(modelRaw),
-        model: modelRaw.slice(0, 200),
-        statusCode: 400,
-        latencyMs: Date.now() - started,
-        errorCode: "invalid_model",
-      }),
-    )
-    return c.json(
-      {
-        type: "error",
-        error: {
-          type: "invalid_request_error",
-          message:
-            "model must be provider/model (e.g. claude-code/claude-opus-5, grok/grok-4.5) or one of your model group aliases",
-        },
-      },
-      400,
-    )
-  }
+  const res = await resolveRequestModel(c, userId, modelRaw)
+  if (res.kind !== "ok") return resolutionFailure(c, res, { modelRaw, started })
+  const resolved = res.resolution
 
   // Providers with no upstream counting endpoint are answered locally —
   // codex via the relay tokenizer, grok and url-less custom-openai with the
@@ -306,7 +319,9 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     isBuiltin: resolved.primary.isBuiltin,
     customProvider: resolved.primary.customProvider,
   })
-})
+}
+
+anthropicRoutes.post("/v1/messages/count_tokens", handleAnthropicCountTokens)
 
 /**
  * How count_tokens answers when the provider has no upstream counting

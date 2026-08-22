@@ -226,29 +226,37 @@ export type ModelGroupRouting = {
 }
 
 /**
- * A user-defined model group: one or more callable bare-name **aliases** over
- * an ordered list of targets. `GET /api/model-groups` item shape — see
- * docs/providers.md § Model groups.
+ * One callable model of a group: the name a client sends as `model` on the
+ * group's endpoint, over its own ordered target list.
  */
-export type ModelGroup = {
-  id: string
-  /** Display label. Free text, never callable — the ids clients send are `aliases`. */
+export type ModelGroupModel = {
+  /** The callable id on this group's endpoint — 1-128 chars, no whitespace, `/` allowed. */
   name: string
-  /**
-   * The model ids clients send. Bare by contract, so an alias can never
-   * collide with a `provider/model` id; any one of them routes to this group.
-   */
-  aliases: string[]
   /** Ordered targets — array order **is** priority. */
   targets: ModelGroupTarget[]
-  /** How the group orders its targets. Absent (old cache entry) reads as `ordered`. */
-  strategy?: RoutingStrategy
   /**
    * Live routing state per target. Optional because a cache entry written
    * before the field existed has none — the rows then render without the
    * current/unusable markers rather than breaking.
    */
   routing?: ModelGroupRouting
+}
+
+/**
+ * A user-defined model group — since v4 a **virtual endpoint**: a URL slug
+ * under `/g/` plus the models callable on it. `GET /api/model-groups` item
+ * shape — see docs/providers.md § Model groups.
+ */
+export type ModelGroup = {
+  id: string
+  /** Display label. Free text, never part of the URL. */
+  name: string
+  /** The endpoint's URL id: `/g/<slug>/openai/v1` and `/g/<slug>/anthropic`. Mutable. */
+  slug: string
+  /** The models callable on this endpoint, each with its own target list. */
+  models: ModelGroupModel[]
+  /** How the group orders its targets. Absent (old cache entry) reads as `ordered`. */
+  strategy?: RoutingStrategy
   created_at: string
   updated_at: string
 }
@@ -259,11 +267,19 @@ export type ModelGroupTargetInput = {
   account_id: string | null
 }
 
+/** What a write sends per model: name + targets, replacing the whole set. */
+export type ModelGroupModelInput = {
+  name: string
+  targets: ModelGroupTargetInput[]
+}
+
 /** Server-side limits, mirrored client-side so a violation is caught before the request (docs/auth.md § Model groups). */
 export const MODEL_GROUP_NAME_MAX = 64
-export const MODEL_GROUP_ALIAS_MAX = 128
-export const MODEL_GROUP_ALIASES_MAX = 10
+export const MODEL_GROUP_MODEL_NAME_MAX = 128
+export const MODEL_GROUP_MODELS_MAX = 20
 export const MODEL_GROUP_TARGETS_MAX = 20
+/** Same shape as a custom-provider slug; no reserved list — `/g/` is its own namespace. */
+export const MODEL_GROUP_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/
 
 /** `POST /api/custom-providers/test` result — always HTTP 200. */
 export type CustomProviderTestResult = {

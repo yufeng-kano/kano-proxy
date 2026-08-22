@@ -219,7 +219,10 @@ onBeforeUnmount(() => {
  * ultrawide display.
  */
 .panel.wide {
-  max-width: min(1440px, max(75vw, 980px));
+  /* Widened for v4's Groups dialog (docs/admin-ui.md § Groups page): its
+     third column now holds model names *and* their target lists, so the
+     panel takes ~7/8 of the viewport instead of 3/4. */
+  max-width: min(1600px, max(88vw, 980px));
   /* A workspace dialog uses the viewport's height too: the 760px cap that
      suits a form would strand a third of a desktop screen as empty overlay
      (rejected 2026-08-13). The content inside sizes itself to the viewport,

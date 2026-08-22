@@ -2,9 +2,11 @@
  * Model groups, driven through the real dispatch path with stubbed fetch
  * (docs/providers.md warns this repo has been burned before by asserting on
  * builders instead of the wire — see the v2.7.2 note there). Two contracts:
- * client-visible `model` keeps echoing the group name the client sent, while
- * `request_logs` stores the expanded canonical target plus `group_name`
- * (docs/api.md "Model routing", docs/database.md `request_logs.group_name`).
+ * client-visible `model` keeps echoing the group model name the client sent,
+ * while `request_logs` stores the expanded canonical target plus `group_name`
+ * = `<slug>/<model name>` (docs/api.md § Group endpoints, docs/database.md
+ * `request_logs.group_name`). Requests go through the group's own endpoint
+ * (`/g/<slug>/…`) — which also covers the slug-param plumbing end to end.
  */
 import { afterEach, describe, expect, it } from "vitest"
 import { app } from "../src/index"
@@ -69,35 +71,38 @@ async function seedAccount(db: FakeD1, opts: { userId: string; provider: string 
 }
 
 /**
- * Seeds a group row plus its `model_group_aliases` rows. Defaults to a
- * single alias equal to `name`, so every existing test here (which sends
- * `name`'s value as `model`) keeps resolving unchanged; pass `aliases`
- * explicitly to exercise multi-alias dispatch.
+ * Seeds a group row (slug defaults to "team", so tests call
+ * `/g/team/…`) plus its `model_group_models` rows. Defaults to a single
+ * model named `name`, all sharing `targets`; pass `modelNames` explicitly to
+ * exercise a multi-model group.
  */
 function seedGroup(
   db: FakeD1,
-  opts: { userId: string; name: string; targets: unknown[]; aliases?: string[] },
+  opts: { userId: string; name: string; targets: unknown[]; modelNames?: string[]; slug?: string },
 ): void {
-  const id = `mgrp_${opts.name}`
+  const id = `mgrp_${opts.name.replace(/[^a-zA-Z0-9]/g, "_")}`
   db.seed("model_groups", [
     {
       id,
       user_id: opts.userId,
       name: opts.name,
-      targets_json: JSON.stringify(opts.targets),
+      slug: opts.slug ?? "team",
+      strategy: "ordered",
       created_at: "2026-01-01T00:00:00.000Z",
       updated_at: "2026-01-01T00:00:00.000Z",
     },
   ])
-  const aliases = opts.aliases ?? [opts.name]
+  const names = opts.modelNames ?? [opts.name]
   db.seed(
-    "model_group_aliases",
-    aliases.map((alias, i) => ({
-      id: `${id}_alias_${i}`,
+    "model_group_models",
+    names.map((name, i) => ({
+      id: `${id}_model_${i}`,
       user_id: opts.userId,
       group_id: id,
-      alias,
+      name,
+      targets_json: JSON.stringify(opts.targets),
       created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
     })),
   )
 }
@@ -155,7 +160,7 @@ describe("/openai/v1/chat/completions — model group dispatch", () => {
       )) as typeof fetch
 
     const res = await app.request(
-      "/openai/v1/chat/completions",
+      "/g/team/openai/v1/chat/completions",
       {
         method: "POST",
         headers: authHeaders(),
@@ -174,7 +179,7 @@ describe("/openai/v1/chat/completions — model group dispatch", () => {
     expect(rows[0]).toMatchObject({
       provider: "claude-code",
       model: "claude-code/claude-opus-5",
-      group_name: "opus",
+      group_name: "team/opus",
     })
   })
 
@@ -196,7 +201,7 @@ describe("/openai/v1/chat/completions — model group dispatch", () => {
       )) as typeof fetch
 
     const res = await app.request(
-      "/openai/v1/chat/completions",
+      "/g/team/openai/v1/chat/completions",
       {
         method: "POST",
         headers: authHeaders(),
@@ -212,18 +217,18 @@ describe("/openai/v1/chat/completions — model group dispatch", () => {
     expect(rows[0]).toMatchObject({
       provider: "grok",
       model: "grok/grok-4.5",
-      group_name: "fast",
+      group_name: "team/fast",
     })
   })
 
-  it("multi-alias group: whichever alias the client sends is what's echoed and logged, never the display name or a sibling alias", async () => {
+  it("multi-model-name group: whichever name the client sends is what's echoed and logged, never the display name or a sibling", async () => {
     const db = new FakeD1()
     await seedApiKey(db, "user_1")
     await seedAccount(db, { userId: "user_1", provider: "claude-code" })
     seedGroup(db, {
       userId: "user_1",
       name: "OpenAI GPT-4o family", // free-text display name — not callable
-      aliases: ["gpt-4o", "gpt-4", "gpt-4-turbo"],
+      modelNames: ["gpt-4o", "gpt-4", "gpt-4-turbo"],
       targets: ["claude-code/claude-opus-5"],
     })
 
@@ -239,7 +244,7 @@ describe("/openai/v1/chat/completions — model group dispatch", () => {
       )) as typeof fetch
 
     const res = await app.request(
-      "/openai/v1/chat/completions",
+      "/g/team/openai/v1/chat/completions",
       {
         method: "POST",
         headers: authHeaders(),
@@ -257,7 +262,7 @@ describe("/openai/v1/chat/completions — model group dispatch", () => {
     expect(rows[0]).toMatchObject({
       provider: "claude-code",
       model: "claude-code/claude-opus-5",
-      group_name: "gpt-4",
+      group_name: "team/gpt-4",
     })
   })
 
@@ -310,7 +315,7 @@ describe("/anthropic/v1/messages — model group dispatch", () => {
       )) as typeof fetch
 
     const res = await app.request(
-      "/anthropic/v1/messages",
+      "/g/team/anthropic/v1/messages",
       {
         method: "POST",
         headers: authHeaders(),
@@ -329,7 +334,7 @@ describe("/anthropic/v1/messages — model group dispatch", () => {
     expect(rows[0]).toMatchObject({
       provider: "claude-code",
       model: "claude-code/claude-opus-5",
-      group_name: "opus",
+      group_name: "team/opus",
     })
   })
 
@@ -351,7 +356,7 @@ describe("/anthropic/v1/messages — model group dispatch", () => {
       )) as typeof fetch
 
     const res = await app.request(
-      "/anthropic/v1/messages",
+      "/g/team/anthropic/v1/messages",
       {
         method: "POST",
         headers: authHeaders(),
@@ -375,7 +380,7 @@ describe("/anthropic/v1/messages — model group dispatch", () => {
     expect(rows[0]).toMatchObject({
       provider: "grok",
       model: "grok/grok-4.5",
-      group_name: "fast",
+      group_name: "team/fast",
     })
   })
 
@@ -397,7 +402,7 @@ describe("/anthropic/v1/messages — model group dispatch", () => {
       )) as typeof fetch
 
     const res = await app.request(
-      "/anthropic/v1/messages",
+      "/g/team/anthropic/v1/messages",
       {
         method: "POST",
         headers: authHeaders(),
@@ -419,11 +424,11 @@ describe("/anthropic/v1/messages — model group dispatch", () => {
     expect(rows[0]).toMatchObject({
       provider: "codex",
       model: "codex/gpt-5.2",
-      group_name: "gpt-4o",
+      group_name: "team/gpt-4o",
     })
   })
 
-  it("a miss (unknown group name) is invalid_model, logged with the raw string and no group_name", async () => {
+  it("a bare name on the shared base is invalid_model since v4, logged with the raw string and no group_name", async () => {
     const db = new FakeD1()
     await seedApiKey(db, "user_1")
 
@@ -502,7 +507,7 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     }) as typeof fetch
 
     const res = await app.request(
-      "/openai/v1/chat/completions",
+      "/g/team/openai/v1/chat/completions",
       {
         method: "POST",
         headers: authHeaders(),
@@ -558,7 +563,7 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     }) as typeof fetch
 
     const res = await app.request(
-      "/anthropic/v1/messages",
+      "/g/team/anthropic/v1/messages",
       {
         method: "POST",
         headers: authHeaders(),
@@ -611,7 +616,7 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     }) as typeof fetch
 
     const res = await app.request(
-      "/openai/v1/chat/completions",
+      "/g/team/openai/v1/chat/completions",
       {
         method: "POST",
         headers: authHeaders(),
@@ -630,7 +635,7 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     expect(rows[0]).toMatchObject({
       provider: "claude-code",
       model: "claude-code/claude-opus-5",
-      group_name: "opus",
+      group_name: "team/opus",
       status_code: 503,
       error_code: "upstream_unavailable",
     })
@@ -679,7 +684,7 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     }) as typeof fetch
 
     const res = await app.request(
-      "/openai/v1/chat/completions",
+      "/g/team/openai/v1/chat/completions",
       {
         method: "POST",
         headers: authHeaders(),
@@ -690,5 +695,125 @@ describe("account pinning — dispatch actually uses exactly the pinned account 
     )
     expect(res.status).toBe(200)
     expect(seenAuth).toEqual(["Bearer token-first", "Bearer token-second"])
+  })
+})
+
+describe("group endpoint errors (docs/api.md § Group endpoints)", () => {
+  it("an unknown slug is a 404 with the surface-shaped envelope", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+
+    const res = await app.request(
+      "/g/no-such-slug/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "anything", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(404)
+    const json = (await res.json()) as { error: { code: string } }
+    expect(json.error.code).toBe("not_found")
+    expect(db.rows("request_logs")[0]).toMatchObject({ status_code: 404, error_code: "group_not_found" })
+  })
+
+  it("another user's slug is the same 404 — slugs never resolve cross-user", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    seedGroup(db, { userId: "user_2", name: "opus", targets: ["claude-code/claude-opus-5"] })
+
+    const res = await app.request(
+      "/g/team/anthropic/v1/messages",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "opus", max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(404)
+    const json = (await res.json()) as { type: string; error: { type: string } }
+    expect(json.error.type).toBe("not_found_error")
+  })
+
+  it("a model the group does not define is invalid_model naming the group's models listing", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    seedGroup(db, { userId: "user_1", name: "opus", targets: ["claude-code/claude-opus-5"] })
+
+    const res = await app.request(
+      "/g/team/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "not-in-group", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+    const json = (await res.json()) as { error: { code: string; message: string } }
+    expect(json.error.code).toBe("invalid_model")
+    expect(json.error.message).toContain("/g/team/openai/v1/models")
+  })
+
+  it("a provider/model id does not pass through a group endpoint — the group is a closed mapping table", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    seedGroup(db, { userId: "user_1", name: "opus", targets: ["claude-code/claude-opus-5"] })
+
+    const res = await app.request(
+      "/g/team/openai/v1/chat/completions",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ model: "grok/grok-4.5", messages: [{ role: "user", content: "hi" }] }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it("GET /g/:slug/openai/v1/models lists exactly the group's model names", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    seedGroup(db, {
+      userId: "user_1",
+      name: "opus",
+      targets: ["claude-code/claude-opus-5"],
+      modelNames: ["gpt-4o", "gpt-4"],
+    })
+
+    const res = await app.request(
+      "/g/team/openai/v1/models",
+      { method: "GET", headers: authHeaders() },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { data: Array<{ id: string; owned_by: string }> }
+    expect(json.data.map((m) => m.id)).toEqual(["gpt-4o", "gpt-4"])
+    expect(json.data.every((m) => m.owned_by === "group")).toBe(true)
+  })
+
+  it("GET /g/:slug/anthropic/v1/models mirrors the same list in the Anthropic envelope", async () => {
+    const db = new FakeD1()
+    await seedApiKey(db, "user_1")
+    seedGroup(db, { userId: "user_1", name: "opus", targets: ["claude-code/claude-opus-5"] })
+
+    const res = await app.request(
+      "/g/team/anthropic/v1/models",
+      { method: "GET", headers: authHeaders() },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { data: Array<{ id: string; type: string }> }
+    expect(json.data).toEqual([{ id: "opus", display_name: "opus", type: "model" }])
   })
 })

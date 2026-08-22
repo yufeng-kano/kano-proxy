@@ -6,14 +6,14 @@ import { listCustomProviders } from "../db/custom_providers"
 import {
   countModelGroups,
   deleteModelGroup,
-  findAliasConflicts,
   getModelGroupById,
   insertModelGroup,
-  listAliasesForGroup,
+  listModelsForGroup,
   listModelGroups,
   parseGroupTargets,
-  replaceAliases,
+  replaceGroupModels,
   updateModelGroupFields,
+  type GroupModelInput,
   type GroupTarget,
   type ModelGroupRow,
 } from "../db/model_groups"
@@ -24,9 +24,9 @@ import type { CandidateFacts } from "../routing/types"
 import { DEFAULT_STRATEGY } from "../routing/strategy"
 import {
   MAX_MODEL_GROUPS_PER_USER,
-  validateAliases,
   validateDisplayName,
-  validateGroupTargets,
+  validateGroupModels,
+  validateGroupSlug,
   validateStrategy,
 } from "../utils/model_group"
 
@@ -106,9 +106,13 @@ async function routingForTarget(env: Env, userId: string, index: number, target:
   }
 }
 
-async function toListItem(env: Env, userId: string, row: ModelGroupRow): Promise<Record<string, unknown>> {
-  const aliasRows = await listAliasesForGroup(env.DB, row.id)
-  const targets = parseGroupTargets(row.targets_json)
+/** One group model's read shape: name, enriched targets, per-model routing. */
+async function toModelItem(
+  env: Env,
+  userId: string,
+  name: string,
+  targets: GroupTarget[],
+): Promise<Record<string, unknown>> {
   const [enriched, routingTargets] = await Promise.all([
     Promise.all(
       targets.map(async (t) => ({
@@ -120,15 +124,11 @@ async function toListItem(env: Env, userId: string, row: ModelGroupRow): Promise
     Promise.all(targets.map((target, index) => routingForTarget(env, userId, index, target))),
   ])
   return {
-    id: row.id,
-    name: row.name,
-    aliases: aliasRows.map((a) => a.alias),
+    name,
     targets: enriched,
-    // Raw column value, not run through the dispatch-time forward-compat
-    // degrade (`routing/strategy.ts` normalizeStrategy) — today the two are
-    // identical since `ordered` is the only writable value, but the read
-    // API should still surface exactly what's stored.
-    strategy: row.strategy ?? DEFAULT_STRATEGY,
+    // The current-route indicator, per model (docs/providers.md § Routing
+    // module): what the ordered walk would dispatch right now, from stored
+    // facts only.
     routing: {
       current_target_index: (() => {
         const index = routingTargets.findIndex((target) => target.usable)
@@ -136,6 +136,24 @@ async function toListItem(env: Env, userId: string, row: ModelGroupRow): Promise
       })(),
       targets: routingTargets,
     },
+  }
+}
+
+async function toListItem(env: Env, userId: string, row: ModelGroupRow): Promise<Record<string, unknown>> {
+  const modelRows = await listModelsForGroup(env.DB, row.id)
+  const models = await Promise.all(
+    modelRows.map((m) => toModelItem(env, userId, m.name, parseGroupTargets(m.targets_json))),
+  )
+  return {
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    models,
+    // Raw column value, not run through the dispatch-time forward-compat
+    // degrade (`routing/strategy.ts` normalizeStrategy) — today the two are
+    // identical since `ordered` is the only writable value, but the read
+    // API should still surface exactly what's stored.
+    strategy: row.strategy ?? DEFAULT_STRATEGY,
     created_at: row.created_at,
     updated_at: row.updated_at,
   }
@@ -164,19 +182,14 @@ modelGroupRoutes.post("/", async (c) => {
   const nameErr = validateDisplayName(name)
   if (nameErr) return c.json({ error: nameErr }, 400)
 
-  const aliasesRes = validateAliases(body.aliases)
-  if (!aliasesRes.ok) return c.json({ error: aliasesRes.error }, 400)
-  // Cross-group uniqueness: no group of this user's yet owns any of these
-  // aliases (a brand-new group has nothing of its own to exclude).
-  const conflicts = await findAliasConflicts(c.env.DB, user.id, aliasesRes.aliases)
-  if (conflicts.length > 0) {
-    return c.json({ error: `alias "${conflicts[0]}" is already used by another of your groups` }, 400)
-  }
+  const slug = typeof body.slug === "string" ? body.slug.trim() : ""
+  const slugErr = validateGroupSlug(slug)
+  if (slugErr) return c.json({ error: slugErr }, 400)
 
   const resolvePrefix = await prefixResolver(c.env.DB, user.id)
   const resolveAccount = accountResolver(c.env.DB, user.id)
-  const targetsRes = await validateGroupTargets(body.targets, resolvePrefix, resolveAccount)
-  if (!targetsRes.ok) return c.json({ error: targetsRes.error }, 400)
+  const modelsRes = await validateGroupModels(body.models, resolvePrefix, resolveAccount)
+  if (!modelsRes.ok) return c.json({ error: modelsRes.error }, 400)
 
   // `strategy` defaults to `ordered`; only `ordered` is accepted today
   // (docs/providers.md § Routing module).
@@ -193,14 +206,17 @@ modelGroupRoutes.post("/", async (c) => {
   if (existing.some((g) => g.name === name)) {
     return c.json({ error: `a model group named "${name}" already exists` }, 400)
   }
+  if (existing.some((g) => g.slug === slug)) {
+    return c.json({ error: `slug "${slug}" is already used by another of your groups` }, 400)
+  }
 
   const row = await insertModelGroup(c.env.DB, {
     userId: user.id,
     name,
-    targets: targetsRes.targets,
+    slug,
     strategy: strategy as string,
   })
-  await replaceAliases(c.env.DB, { userId: user.id, groupId: row.id, aliases: aliasesRes.aliases })
+  await replaceGroupModels(c.env.DB, { userId: user.id, groupId: row.id, models: modelsRes.models })
   return c.json(await toListItem(c.env, user.id, row), 201)
 })
 
@@ -229,26 +245,24 @@ modelGroupRoutes.put("/:id", async (c) => {
     }
   }
 
-  let aliases: string[] | undefined
-  if (body.aliases !== undefined) {
-    const res = validateAliases(body.aliases)
-    if (!res.ok) return c.json({ error: res.error }, 400)
-    // Exclude this group's own id — replacing a group's aliases with (a
-    // superset of) what it already had must never false-positive.
-    const conflicts = await findAliasConflicts(c.env.DB, user.id, res.aliases, id)
-    if (conflicts.length > 0) {
-      return c.json({ error: `alias "${conflicts[0]}" is already used by another of your groups` }, 400)
+  let slug: string | undefined
+  if (body.slug !== undefined) {
+    slug = typeof body.slug === "string" ? body.slug.trim() : ""
+    const err = validateGroupSlug(slug)
+    if (err) return c.json({ error: err }, 400)
+    const rows = await listModelGroups(c.env.DB, user.id)
+    if (rows.some((g) => g.id !== id && g.slug === slug)) {
+      return c.json({ error: `slug "${slug}" is already used by another of your groups` }, 400)
     }
-    aliases = res.aliases
   }
 
-  let targets: GroupTarget[] | undefined
-  if (body.targets !== undefined) {
+  let models: GroupModelInput[] | undefined
+  if (body.models !== undefined) {
     const resolvePrefix = await prefixResolver(c.env.DB, user.id)
     const resolveAccount = accountResolver(c.env.DB, user.id)
-    const res = await validateGroupTargets(body.targets, resolvePrefix, resolveAccount)
+    const res = await validateGroupModels(body.models, resolvePrefix, resolveAccount)
     if (!res.ok) return c.json({ error: res.error }, 400)
-    targets = res.targets
+    models = res.models
   }
 
   let strategy: string | undefined
@@ -258,9 +272,9 @@ modelGroupRoutes.put("/:id", async (c) => {
     strategy = body.strategy as string
   }
 
-  await updateModelGroupFields(c.env.DB, id, { name, targets, strategy })
-  if (aliases) {
-    await replaceAliases(c.env.DB, { userId: user.id, groupId: id, aliases })
+  await updateModelGroupFields(c.env.DB, id, { name, slug, strategy })
+  if (models) {
+    await replaceGroupModels(c.env.DB, { userId: user.id, groupId: id, models })
   }
   const updated = await getModelGroupById(c.env.DB, user.id, id)
   return c.json(await toListItem(c.env, user.id, updated ?? existing))

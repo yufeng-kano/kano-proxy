@@ -9,6 +9,7 @@ import { anthropicRoutes } from "./routes/anthropic"
 import { authRoutes } from "./routes/auth"
 import { changelogRoutes } from "./routes/changelog"
 import { customProviderRoutes } from "./routes/custom_providers"
+import { groupEndpointRoutes } from "./routes/group_endpoints"
 import { keysRoutes } from "./routes/keys"
 import { logsRoutes } from "./routes/logs"
 import { modelGroupRoutes } from "./routes/model_groups"
@@ -42,6 +43,7 @@ app.use(
 // authenticate with a project API key, never the session cookie.
 app.use("/openai/*", cors())
 app.use("/anthropic/*", cors())
+app.use("/g/*", cors())
 app.use("/health", cors())
 
 app.use("*", async (c, next) => {
@@ -67,6 +69,9 @@ app.route("/api/changelog", changelogRoutes)
 
 app.route("/openai/v1", openaiRoutes)
 app.route("/anthropic", anthropicRoutes)
+// Model-group virtual endpoints: /g/<slug>/openai/v1/* and
+// /g/<slug>/anthropic/* (docs/api.md § Group endpoints).
+app.route("/g", groupEndpointRoutes)
 
 app.notFound((c) => c.json({ error: "not found" }, 404))
 

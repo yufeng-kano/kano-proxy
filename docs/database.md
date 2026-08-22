@@ -99,33 +99,37 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 ### `model_groups`
 
-User-defined bare-name model aliases → ordered `provider/model` target lists (full contract in [providers.md](./providers.md) § Model groups). Added in `0008_model_groups.sql`.
+User-defined **virtual endpoints** (full contract in [providers.md](./providers.md) § Model groups): each row is one group — name, URL slug, strategy — whose callable models live in `model_group_models`. Added in `0008_model_groups.sql`; rebuilt to the endpoint shape by `0014_group_endpoints.sql` (see below).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | `ON DELETE CASCADE` |
-| name | TEXT | **display name** (since `0009_model_group_aliases.sql`): trimmed, 1–64 chars, free text, a label only — the callable ids live in `model_group_aliases`. Still unique per user (original constraint kept; also avoids indistinguishable cards). Mutable |
-| targets_json | TEXT | JSON array of target objects `{model: "provider/model", account_id?}`, array order = priority; `account_id` (nullable) pins the target to one `upstream_accounts` row — no FK, a deleted account makes the target skip at resolve time, mirroring the custom-provider convention. Bare strings are accepted as `{model}` shorthand (v3.0.0 rows). Parse must tolerate further per-target fields (future balancing weights) |
+| name | TEXT | **display name**: trimmed, 1–64 chars, free text, a label only. Unique per user. Mutable |
+| slug | TEXT | the endpoint's URL id (`/g/<slug>/…`): custom-provider slug shape (`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`), unique per user, **mutable** (renaming moves the endpoint URL — nothing else references it). Added in `0014_group_endpoints.sql` |
 | strategy | TEXT | `NOT NULL DEFAULT 'ordered'`; how the group orders its candidates ([providers.md](./providers.md) § Routing module). `ordered` is the only accepted value today — unknown values are rejected at write time, and reads treat an unrecognized stored value as `ordered` (forward compat). Added in `0010_routing_strategy.sql` |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
-`UNIQUE(user_id, name)`. Targets are validated at write time (prefix must be a builtin or the caller's own custom slug; never a bare name, so groups cannot nest). No `status` column — usability is computed per-request from the targets' pools.
+`UNIQUE(user_id, name)`, `UNIQUE(user_id, slug)`. No `status` column — usability is computed per-request from the targets' pools. The pre-v4 `targets_json` column is gone: targets now live per model row.
 
-### `model_group_aliases`
+### `model_group_models`
 
-The callable bare model ids of a group, 1–10 per group ([providers.md](./providers.md) § Model groups). Added in `0009_model_group_aliases.sql`, which also seeds one alias per pre-existing group from its then-`name`, so every previously callable name keeps resolving.
+The callable models of a group, 1–20 per group, each with its own ordered target list ([providers.md](./providers.md) § Model groups). Added in `0014_group_endpoints.sql`, replacing `model_group_aliases`.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | `ON DELETE CASCADE` |
 | group_id | TEXT FK | → `model_groups.id`, `ON DELETE CASCADE` |
-| alias | TEXT | trimmed, 1–128 chars, no whitespace, no `/` |
+| name | TEXT | the callable model id on that group's endpoint: trimmed, 1–128 chars, no whitespace, `/` allowed |
+| targets_json | TEXT | JSON array of target objects `{model: "provider/model", account_id?}`, array order = priority; `account_id` (nullable) pins the target to one `upstream_accounts` row — no FK, a deleted account makes the target skip at resolve time, mirroring the custom-provider convention. Bare strings are accepted as `{model}` shorthand. Parse must tolerate further per-target fields (future balancing weights) |
 | created_at | TEXT | |
+| updated_at | TEXT | |
 
-`UNIQUE(user_id, alias)` — an alias resolves to exactly one group, enforced by the constraint, and bare-name resolution reads this table (indexed lookup), never a JSON scan.
+`UNIQUE(group_id, name)` — a name resolves to exactly one model **within its group**; different groups may reuse a name (the endpoint is the namespace, so the v3 per-user uniqueness constraint is gone). Model resolution on a group endpoint reads this table via `(group_id, name)` (indexed lookup), never a JSON scan. Targets are validated at write time (prefix must be a builtin or the caller's own custom slug; never a bare name, so groups cannot nest).
+
+**Migration `0014_group_endpoints.sql` (v3 → v4).** Rebuilds `model_groups` without `targets_json` and with `slug` (backfilled deterministically from the row id — `'g-' || substr(id, 6, 13)`, valid per the slug regex and collision-free since ids are unique; operators rename it to something meaningful in the UI). Creates `model_group_models` and seeds **one model per former alias**, each copying its group's whole `targets_json` — every `(group, alias)` pair that was callable before maps to a `(slug, model name)` pair that is callable on the group's endpoint, with identical routing. Then drops `model_group_aliases`. `request_logs.group_name` values written before v4 (bare aliases) are left as history.
 
 ### `provider_settings`
 
@@ -171,7 +175,7 @@ Created by `0001_init.sql` as an "optional cache", never read or written by any 
 | cost | REAL | nullable; estimated USD cost computed at write time from the LiteLLM price table ([pricing.md](./pricing.md)); `NULL` = unpriced/unknown, never 0-as-guess |
 | error_code | TEXT | nullable |
 | upstream_status | INTEGER | nullable; the last upstream HTTP status observed while serving this request (`0011_bench_and_refresh_state.sql`). `NULL` = no upstream response (pre-dispatch failure, transport failure before headers). Diagnoses what `status_code` hides: an eager stream logs `status_code: 200` and a synthesized `503` masks the bench-status that exhausted the pool — this column keeps the real upstream answer (see [logging.md](./logging.md)) |
-| group_name | TEXT | nullable; the group **alias** the request was addressed to, when it came through one (`0008_model_groups.sql`; alias semantics since `0009`). `provider`/`model` always store the **expanded** target so pricing and Overview aggregation stay canonical; this column preserves the alias for future per-group reporting |
+| group_name | TEXT | nullable; `<group slug>/<model name>` when the request came through a group endpoint (`0008_model_groups.sql`; endpoint semantics since `0014` — rows written before v4 hold the bare alias, left as history). `provider`/`model` always store the **expanded** target so pricing and Overview aggregation stay canonical; this column preserves which endpoint model the request was addressed to |
 | created_at | TEXT | |
 
 **No message content, no prompts, no completions.**
