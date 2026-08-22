@@ -55,6 +55,16 @@ Before eager commit, a client that abandoned the connection while the Worker was
 
 Retention: swept by a daily Worker Cron Trigger — see below.
 
+## Temporary diagnostics
+
+A short-lived `console.*` probe is allowed when production is the only place a question can be answered for free, provided it logs no forbidden value above, is scoped to the failing branch, and **names the release that removes it**. Anything still in the tree past that release is a bug.
+
+| Probe | Added | Remove by | Question |
+|---|---|---|---|
+| `[antigravity] no GOOGLE_ONE_AI credit entry` (`providers/antigravity.ts`, `loadCodeAssist`) | v3.11.2 | v3.11.3 | Does a paid tier that shows no credit balance ([providers.md](./providers.md) § Antigravity) genuinely carry no `availableCredits`, or one under a `creditType` the parser does not match? Logs the response's top-level keys and its `paidTier` subtree (tier ids and credit amounts — no tokens, no prompts), only on the branch where the parse found nothing. |
+
+Read it with `wrangler tail` or Dashboard → Workers → Logs while the Providers page refreshes an Antigravity account; `loadCodeAssist` is a free metadata call, so no upstream generation is billed to produce it.
+
 ## Retention sweep
 
 A daily Cron Trigger (`[triggers] crons` in every Wrangler config — committed `wrangler.toml`, `wrangler.production.example.toml`, the CI generator, and the operator's gitignored `wrangler.production.toml`; `scheduled` handler in `apps/api/src/index.ts`) deletes:

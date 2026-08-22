@@ -207,6 +207,18 @@ export async function loadCodeAssist(
       break
     }
   }
+  // TEMPORARY (added v3.11.2, remove in v3.11.3 — docs/logging.md § Temporary
+  // diagnostics). A paid tier reporting no balance is indistinguishable from
+  // here between "this plan has no credit pool" and "the pool is under a
+  // creditType this parser does not match", and the response is only
+  // observable in production. Tier ids and credit amounts only — the payload
+  // carries no token, prompt, or completion.
+  if (credits === null && paidTier) {
+    console.log("[antigravity] no GOOGLE_ONE_AI credit entry", {
+      topLevelKeys: Object.keys(json),
+      paidTier: JSON.stringify(paidTier).slice(0, 1000),
+    })
+  }
   return {
     projectId: extractProject(json),
     tierId: defaultTierId(json),
