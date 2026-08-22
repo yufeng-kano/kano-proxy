@@ -306,17 +306,31 @@ export function anthropicToGeminiRequest(
 
 // ── Response: Gemini → Anthropic ───────────────────────────────────────────
 
+/**
+ * Only the fields this frame actually reported. Gemini repeats
+ * `promptTokenCount` on later frames without always repeating the output
+ * counts, so a caller merging frame-by-frame must not receive a defaulted
+ * `output_tokens: 0` that would overwrite a real number it already had.
+ */
 function usageToAnthropic(resp: GeminiResponse | null): Record<string, number> {
   const usage = normalizeGeminiUsage(resp?.usageMetadata)
-  if (!usage) return { input_tokens: 0, output_tokens: 0 }
+  if (!usage) return {}
   const cacheRead = usage.cachedTokens ?? 0
-  return {
+  const out: Record<string, number> = {}
+  if (usage.promptTokens !== null) {
     // Anthropic's `input_tokens` excludes cache reads; Gemini's
     // `promptTokenCount` includes them, so the cached half is subtracted out.
-    input_tokens: Math.max(0, (usage.promptTokens ?? 0) - cacheRead),
-    ...(cacheRead ? { cache_read_input_tokens: cacheRead } : {}),
-    output_tokens: (usage.completionTokens ?? 0) + (usage.reasoningTokens ?? 0),
+    // The two are reported as a **pair**, `cache_read_input_tokens` included
+    // when it is zero: a merging caller that took a later frame's
+    // `promptTokenCount` while keeping an earlier frame's cache number would
+    // count the cached tokens twice.
+    out.input_tokens = Math.max(0, usage.promptTokens - cacheRead)
+    out.cache_read_input_tokens = cacheRead
   }
+  if (usage.completionTokens !== null || usage.reasoningTokens !== null) {
+    out.output_tokens = (usage.completionTokens ?? 0) + (usage.reasoningTokens ?? 0)
+  }
+  return out
 }
 
 function toolUseBlock(part: GeminiPart, index: number): Record<string, unknown> | null {
@@ -420,7 +434,7 @@ export function geminiResponseToAnthropic(
       ? "refusal"
       : anthropicStopReason(resp?.candidates?.[0]?.finishReason, sawToolCall),
     stop_sequence: null,
-    usage: usageToAnthropic(resp),
+    usage: { input_tokens: 0, output_tokens: 0, ...usageToAnthropic(resp) },
   }
 }
 
@@ -453,17 +467,57 @@ export function geminiSseToAnthropicStream(
    *  clean EOF without one is a truncated stream, not a completion. */
   let sawTerminal = false
   let blockReason = ""
-  let usage: Record<string, number> = { input_tokens: 0, output_tokens: 0 }
+  /** Merged field-wise across frames — see `usageToAnthropic`. */
+  const usage: Record<string, number> = { input_tokens: 0, output_tokens: 0 }
+  /** A frame has reported `promptTokenCount`, so `input_tokens` is real. */
+  let sawInputTokens = false
+  let messageStarted = false
 
   // Pull-driven pump, same shape as the OpenAI converter: each pull()
   // consumes upstream frames only until it has enqueued something, so a slow
   // or paused client applies backpressure to the paid upstream generation
   // instead of the whole remainder buffering in Worker memory.
   return new ReadableStream({
-    start(controller) {
-      controller.enqueue(
-        encoder.encode(
-          `event: message_start\ndata: ${JSON.stringify({
+    // No `start()`: `message_start` is emitted from `pull()` instead, once a
+    // frame has carried `usageMetadata`. Anthropic clients read the context
+    // size off its `usage.input_tokens`, and Gemini reports counts on its
+    // stream frames, not before them — emitting the event up front can only
+    // put a zero there, which is what left Claude Code's ctx blank
+    // (docs/api.md § Streaming).
+    async pull(controller) {
+      if (finished || clientCancelled) return
+      const emitRaw = (event: string, data: unknown) => {
+        if (clientCancelled) return
+        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
+        emitted++
+      }
+      /**
+       * Every event except `error` is preceded by `message_start`, which is
+       * held back until a frame reported `promptTokenCount`. If content is
+       * ready and no count ever arrived, the turn fails instead of shipping a
+       * zero: a wrong context size is worse than a visible error, and there is
+       * no honest number to substitute (docs/api.md § Streaming).
+       */
+      const emit = (event: string, data: unknown) => {
+        // Not gated on `finished`: the terminal branch sets it *before*
+        // emitting message_delta / message_stop, and swallowing those
+        // truncates every stream.
+        if (clientCancelled) return
+        if (event !== "error" && !messageStarted) {
+          if (!sawInputTokens) {
+            finished = true
+            emitRaw("error", {
+              type: "error",
+              error: {
+                type: "api_error",
+                message: "upstream reported no prompt token count before its first content frame",
+              },
+            })
+            controller.close()
+            return
+          }
+          messageStarted = true
+          emitRaw("message_start", {
             type: "message_start",
             message: {
               id: msgId,
@@ -473,18 +527,11 @@ export function geminiSseToAnthropicStream(
               content: [],
               stop_reason: null,
               stop_sequence: null,
-              usage: { input_tokens: 0, output_tokens: 0 },
+              usage: { ...usage, output_tokens: 0 },
             },
-          })}\n\n`,
-        ),
-      )
-    },
-    async pull(controller) {
-      if (finished || clientCancelled) return
-      const emit = (event: string, data: unknown) => {
-        if (clientCancelled) return
-        controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`))
-        emitted++
+          })
+        }
+        emitRaw(event, data)
       }
       const closeBlock = () => {
         if (!open) return
@@ -565,6 +612,17 @@ export function geminiSseToAnthropicStream(
             continue
           }
           const resp = unwrapAntigravityResponse(json)
+          // Before anything is emitted from this frame: `message_start` is
+          // gated on a real `input_tokens`, and Gemini carries the count on
+          // the same frame as the first content part, so reading it after the
+          // parts loop would fail the turn on a frame that did report it.
+          if (resp?.usageMetadata) {
+            const reported = usageToAnthropic(resp)
+            Object.assign(usage, reported)
+            // `usage` is seeded with a zero, so the flag has to key off what
+            // *this frame* carried, not off the merged object.
+            if (reported.input_tokens !== undefined) sawInputTokens = true
+          }
           if (resp?.promptFeedback?.blockReason) blockReason = resp.promptFeedback.blockReason
 
           for (const part of geminiParts(resp)) {
@@ -644,7 +702,6 @@ export function geminiSseToAnthropicStream(
             sawTerminal = true
             finishReason = resp.candidates[0].finishReason
           }
-          if (resp?.usageMetadata) usage = usageToAnthropic(resp)
 
           // Something went out — yield to the client until it pulls again.
           if (emitted > before) return

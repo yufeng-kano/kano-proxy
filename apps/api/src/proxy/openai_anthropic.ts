@@ -512,9 +512,24 @@ export function openaiSseToAnthropicStream(
           encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
         )
       }
+      /**
+       * `message_start.usage.input_tokens` is what an Anthropic client shows
+       * as its context size (docs/api.md § `message_start` and the client's
+       * context indicator), so it carries the real count whenever the
+       * upstream has already reported one. OpenAI-shaped upstreams normally
+       * report usage only on a final chunk — after this event must be on the
+       * wire — and then it stays `0`; there is no honest number to invent and
+       * the stream cannot be buffered to wait for one. The count is read from
+       * any chunk carrying `usage`, so an upstream that reports early is
+       * picked up here.
+       */
       const ensureStart = () => {
         if (started) return
         started = true
+        const input =
+          promptTokens != null
+            ? promptTokens - (cacheReadInputTokens ?? 0) - (cacheCreationInputTokens ?? 0)
+            : 0
         emitEvent("message_start", {
           type: "message_start",
           message: {
@@ -525,7 +540,16 @@ export function openaiSseToAnthropicStream(
             content: [],
             stop_reason: null,
             stop_sequence: null,
-            usage: { input_tokens: 0, output_tokens: 0 },
+            usage: {
+              input_tokens: Math.max(0, input),
+              output_tokens: 0,
+              ...(cacheReadInputTokens != null
+                ? { cache_read_input_tokens: cacheReadInputTokens }
+                : {}),
+              ...(cacheCreationInputTokens != null
+                ? { cache_creation_input_tokens: cacheCreationInputTokens }
+                : {}),
+            },
           },
         })
       }

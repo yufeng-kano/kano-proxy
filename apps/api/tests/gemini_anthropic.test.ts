@@ -397,6 +397,7 @@ describe("geminiSseToAnthropicStream", () => {
               candidates: [
                 { content: { parts: [{ text: "think", thought: true, thoughtSignature: "sig" }] } },
               ],
+              usageMetadata: { promptTokenCount: 9 },
             },
           },
           { response: { candidates: [{ content: { parts: [{ text: "Hel" }] } }] } },
@@ -433,6 +434,113 @@ describe("geminiSseToAnthropicStream", () => {
     })
   })
 
+  it("holds message_start until a frame reports the prompt token count", async () => {
+    // Anthropic clients read the context size off message_start.usage, and
+    // Gemini carries promptTokenCount on the same frame as the first content
+    // part — so the event must wait for it rather than ship a zero.
+    const raw = await readSse(
+      geminiSseToAnthropicStream(
+        sse(
+          {
+            response: {
+              candidates: [{ content: { parts: [{ text: "Hi" }] } }],
+              usageMetadata: { promptTokenCount: 11, cachedContentTokenCount: 4 },
+            },
+          },
+          {
+            response: {
+              candidates: [{ finishReason: "STOP" }],
+              usageMetadata: {
+                promptTokenCount: 11,
+                cachedContentTokenCount: 4,
+                candidatesTokenCount: 6,
+              },
+            },
+          },
+        ),
+        "m",
+      ),
+    )
+    const seq = events(raw)
+    // input_tokens excludes the cached half; output is not known yet.
+    expect((seq[0]!.data.message as Record<string, unknown>).usage).toEqual({
+      input_tokens: 7,
+      cache_read_input_tokens: 4,
+      output_tokens: 0,
+    })
+    expect(seq.at(-2)!.data).toMatchObject({
+      usage: { input_tokens: 7, cache_read_input_tokens: 4, output_tokens: 6 },
+    })
+  })
+
+  it("fails the turn when content arrives and no frame ever reported a count", async () => {
+    // No honest number exists for message_start, and a wrong context size is
+    // worse than a visible failure (docs/api.md § Streaming).
+    const raw = await readSse(
+      geminiSseToAnthropicStream(
+        sse({ response: { candidates: [{ content: { parts: [{ text: "Hi" }] } }] } }),
+        "m",
+      ),
+    )
+    const seq = events(raw)
+    expect(seq.map((e) => e.event)).toEqual(["error"])
+    expect(seq[0]!.data.error).toMatchObject({ type: "api_error" })
+  })
+
+  it("does not double count cache reads when a later frame omits the cache field", async () => {
+    const raw = await readSse(
+      geminiSseToAnthropicStream(
+        sse(
+          {
+            response: {
+              candidates: [{ content: { parts: [{ text: "Hi" }] } }],
+              usageMetadata: { promptTokenCount: 10, cachedContentTokenCount: 4 },
+            },
+          },
+          {
+            response: {
+              candidates: [{ finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+            },
+          },
+        ),
+        "m",
+      ),
+    )
+    // The second frame reports the input side without a cache number, so its
+    // pair wins whole: 10 uncached, not 10 + a stale 4.
+    expect(events(raw).at(-2)!.data).toMatchObject({
+      usage: { input_tokens: 10, cache_read_input_tokens: 0, output_tokens: 3 },
+    })
+  })
+
+  it("keeps an output count a later count-less frame would otherwise erase", async () => {
+    // Gemini repeats promptTokenCount on trailing frames without repeating
+    // the output counts; merging field-wise is what stops completion_tokens
+    // from being logged as 0.
+    const raw = await readSse(
+      geminiSseToAnthropicStream(
+        sse(
+          {
+            response: {
+              candidates: [{ content: { parts: [{ text: "Hi" }] } }],
+              usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 12 },
+            },
+          },
+          {
+            response: {
+              candidates: [{ finishReason: "STOP" }],
+              usageMetadata: { promptTokenCount: 5, totalTokenCount: 17 },
+            },
+          },
+        ),
+        "m",
+      ),
+    )
+    const seq = events(raw)
+    expect(seq.at(-2)!.data).toMatchObject({ usage: { input_tokens: 5, output_tokens: 12 } })
+  })
+
   it("streams a tool call as a complete input_json_delta and stops as tool_use", async () => {
     const raw = await readSse(
       geminiSseToAnthropicStream(
@@ -446,6 +554,7 @@ describe("geminiSseToAnthropicStream", () => {
                   },
                 },
               ],
+              usageMetadata: { promptTokenCount: 4 },
             },
           },
           { response: { candidates: [{ finishReason: "STOP" }] } },
@@ -468,6 +577,7 @@ describe("geminiSseToAnthropicStream", () => {
           {
             response: {
               candidates: [{ content: { parts: [{ text: "think", thought: true }] } }],
+              usageMetadata: { promptTokenCount: 4 },
             },
           },
           {
@@ -493,7 +603,15 @@ describe("geminiSseToAnthropicStream", () => {
 
   it("finishes a candidate-less safety block as a refusal", async () => {
     const raw = await readSse(
-      geminiSseToAnthropicStream(sse({ response: { promptFeedback: { blockReason: "SAFETY" } } }), "m"),
+      geminiSseToAnthropicStream(
+        sse({
+          response: {
+            promptFeedback: { blockReason: "SAFETY" },
+            usageMetadata: { promptTokenCount: 4 },
+          },
+        }),
+        "m",
+      ),
     )
     const seq = events(raw)
     expect(seq.at(-1)!.event).toBe("message_stop")
@@ -524,7 +642,10 @@ describe("geminiSseToAnthropicStream", () => {
           return
         }
         const frame = {
-          response: { candidates: [{ content: { parts: [{ text: `chunk-${served}` }] } }] },
+          response: {
+            candidates: [{ content: { parts: [{ text: `chunk-${served}` }] } }],
+            usageMetadata: { promptTokenCount: 3 },
+          },
         }
         served++
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`))
@@ -546,7 +667,7 @@ describe("geminiSseToAnthropicStream", () => {
     // the terminal frame itself.
     const raw = await readSse(geminiSseToAnthropicStream(sse(), "m"))
     const seq = events(raw)
-    expect(seq.map((e) => e.event)).toEqual(["message_start", "error"])
+    expect(seq.map((e) => e.event)).toEqual(["error"])
     expect(seq.at(-1)!.data.error).toMatchObject({ type: "api_error" })
   })
 })

@@ -549,9 +549,27 @@ export function grokResponsesSseToAnthropicStream(
         if (reasoningOpen) deferredEvents.push(run)
         else run()
       }
+      /**
+       * Responses usage, from whichever event carries it. Called for *every*
+       * event, not just the terminal one: `message_start.usage.input_tokens`
+       * is the client's context indicator (docs/api.md), so an upstream that
+       * reports the input side early is worth catching before the first
+       * content block opens.
+       */
+      const harvestUsage = (u: NonNullable<GrokResponsesEvent["response"]>["usage"]) => {
+        if (!u) return
+        if (typeof u.input_tokens === "number") promptTokens = u.input_tokens
+        // Responses output_tokens already includes reasoning for xAI.
+        if (typeof u.output_tokens === "number") completionTokens = u.output_tokens
+        if (typeof u.input_tokens_details?.cached_tokens === "number") {
+          cacheReadInputTokens = u.input_tokens_details.cached_tokens
+        }
+      }
       const ensureStart = () => {
         if (started) return
         started = true
+        const input =
+          promptTokens != null ? promptTokens - (cacheReadInputTokens ?? 0) : 0
         emitEvent("message_start", {
           type: "message_start",
           message: {
@@ -562,7 +580,13 @@ export function grokResponsesSseToAnthropicStream(
             content: [],
             stop_reason: null,
             stop_sequence: null,
-            usage: { input_tokens: 0, output_tokens: 0 },
+            usage: {
+              input_tokens: Math.max(0, input),
+              output_tokens: 0,
+              ...(cacheReadInputTokens != null
+                ? { cache_read_input_tokens: cacheReadInputTokens }
+                : {}),
+            },
           },
         })
       }
@@ -785,6 +809,8 @@ export function grokResponsesSseToAnthropicStream(
             if (stopped) continue
             try {
               const ev = JSON.parse(data) as GrokResponsesEvent
+              // Every event, not just the terminal one — see harvestUsage.
+              harvestUsage(ev.response?.usage)
               if (ev.type === "response.failed" || ev.type === "error") {
                 emitUpstreamError(
                   ev.response?.error?.message ||
@@ -917,19 +943,7 @@ export function grokResponsesSseToAnthropicStream(
                 ev.type === "response.completed" ||
                 ev.type === "response.done"
               ) {
-                const u = ev.response?.usage
-                if (u) {
-                  if (typeof u.input_tokens === "number") {
-                    promptTokens = u.input_tokens
-                  }
-                  if (typeof u.output_tokens === "number") {
-                    // Responses output_tokens already includes reasoning for xAI.
-                    completionTokens = u.output_tokens
-                  }
-                  if (typeof u.input_tokens_details?.cached_tokens === "number") {
-                    cacheReadInputTokens = u.input_tokens_details.cached_tokens
-                  }
-                }
+                harvestUsage(ev.response?.usage)
                 // Also harvest encrypted_content from completed output if stream
                 // events omitted it.
                 if (!encryptedContent && Array.isArray(ev.response?.output)) {

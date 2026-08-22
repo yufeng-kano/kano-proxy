@@ -257,6 +257,18 @@ Effort inputs, in priority order where applicable: (1) `reasoning_effort` (OpenA
 
 Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive / eager-commit wrapper (`proxy/sse.ts`). Both wrappers are **demand-driven**: while the client is not consuming, the pump stops reading upstream (backpressure propagates instead of the remainder buffering in Worker memory), and the keepalive/idle timers pause with it — a client-side stall is not an upstream silence gap, so it neither draws keepalives into an unread queue nor counts toward the 120s upstream idle timeout.
 
+### `message_start` and the client's context indicator
+
+On the `/anthropic` surface, Anthropic clients read the **context size** off `message_start.usage.input_tokens` — Claude Code's `ctx` indicator is that field. The three conversion paths cannot always fill it, and what they do about that differs:
+
+| Path | `message_start.input_tokens` |
+|---|---|
+| `claude-code` (native passthrough) | Upstream's own, untouched |
+| **Gemini → Anthropic** (`antigravity`) | **Real.** The event is withheld until an upstream frame reports `promptTokenCount`, which Gemini carries on the same frame as the first content part (measured against CloudCode, 2026-08-22). If content is ready and no frame ever reported a count, the turn ends as an `error` event — a wrong context size is worse than a visible failure, and there is no honest number to substitute. An upstream that streams nothing at all therefore emits `error` with no preceding `message_start`. |
+| OpenAI → Anthropic (`codex`, `grok`, custom) | **Real when the upstream reports usage before its first content chunk; `0` otherwise.** Usage is harvested from *every* chunk/event carrying it, not just the terminal one, and `message_start` is emitted lazily (first content block), so an early report lands in it. Measured against codex (`gpt-5.4-mini`, 2026-08-22) the Responses stream reports usage only on completion, so `0` is what those clients get; the same is expected of grok. Some OpenAI-compatible custom endpoints do emit usage on every chunk under `stream_options.include_usage`, and those now work. Neither codex nor grok exposes a `countTokens` method, so there is no second source to consult, and the stream is never buffered to wait for the final usage chunk. Do not invent a number here. |
+
+Usage from later frames is merged **field-wise**, not replaced: Gemini repeats `promptTokenCount` on trailing frames without repeating `candidatesTokenCount`, and replacing the object wholesale zeroed the output count (it logged `completion_tokens: 0` for every Antigravity request through v3.12.1). `input_tokens` and `cache_read_input_tokens` move as a **pair** — taking a later frame's prompt count while keeping an earlier frame's cache number would count the cached tokens twice.
+
 ### Eager streaming commit
 
 When the client requests `stream: true` (OpenAI body field, or Anthropic Messages body field — `count_tokens` never streams), the proxy **commits the HTTP response immediately**:

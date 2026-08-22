@@ -847,6 +847,42 @@ describe("openaiSseToAnthropicStream", () => {
     return out
   }
 
+  it("puts a real input count on message_start when the upstream reports usage early", async () => {
+    // Most OpenAI-shaped upstreams report usage only on a final chunk, after
+    // message_start is already on the wire — but some emit it on every chunk
+    // with stream_options.include_usage, and an Anthropic client reads its
+    // context size off that field (docs/api.md).
+    const sse =
+      'data: {"choices":[{"delta":{"content":"hi"}}],"usage":{"prompt_tokens":30,"prompt_tokens_details":{"cached_tokens":8}}}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+      "data: [DONE]\n\n"
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 4000), "codex/m"))
+    const start = JSON.parse(
+      out.split("event: message_start\ndata: ")[1]!.split("\n")[0]!,
+    ) as { message: { usage: Record<string, number> } }
+    // prompt_tokens is cache-inclusive; Anthropic input_tokens is not.
+    expect(start.message.usage).toMatchObject({
+      input_tokens: 22,
+      output_tokens: 0,
+      cache_read_input_tokens: 8,
+    })
+  })
+
+  it("leaves message_start at zero when usage only arrives at the end", async () => {
+    // The documented, measured case for codex/grok: there is no honest number
+    // to put there and the stream must not be buffered to wait for one.
+    const sse =
+      'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":11}}\n\n' +
+      "data: [DONE]\n\n"
+    const out = await collect(openaiSseToAnthropicStream(chunked(sse, 4000), "codex/m"))
+    const start = JSON.parse(
+      out.split("event: message_start\ndata: ")[1]!.split("\n")[0]!,
+    ) as { message: { usage: Record<string, number> } }
+    expect(start.message.usage).toEqual({ input_tokens: 0, output_tokens: 0 })
+    expect(out).toContain('"output_tokens":11')
+  })
+
   it("emits Anthropic text deltas and message_stop", async () => {
     const out = await collect(openaiSseToAnthropicStream(chunked(OPENAI_SSE, 11), "grok/m"))
     expect(out).toContain("event: message_start")
