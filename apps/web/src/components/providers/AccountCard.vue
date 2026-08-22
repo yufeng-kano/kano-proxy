@@ -131,19 +131,17 @@ const hideUsageError = computed(() => {
 const windows = computed(() => props.account.usage?.windows ?? [])
 
 /**
- * "Usage will appear once this account is used" is a promise, and for
- * Antigravity it is one the backend cannot keep: Google reports a tier and a
- * credit balance, never a percentage window with a reset, so the bars would
- * never arrive (docs/providers.md § Antigravity). What it does report is the
- * balance, so print that instead of waiting — verbatim, with no total to make
- * a percentage from. A tier without a credit entry has nothing to print.
+ * Antigravity's Google One AI credit balance — a real upstream number with no
+ * total and no reset, so it can never be a bar (docs/providers.md
+ * § Antigravity). It rides alongside the quota bars as a plain line, and is
+ * frequently absent: Google often sends the usage floor without the balance.
  */
-const noUsageText = computed(() => {
-  if (props.provider !== "antigravity") return t("providers.account.noUsage")
+const creditsText = computed(() => {
+  if (props.provider !== "antigravity") return null
   const credits = props.account.account?.credits_remaining
   return typeof credits === "number"
     ? t("providers.account.credits", { credits: credits.toLocaleString() })
-    : t("providers.account.creditsUnavailable")
+    : null
 })
 </script>
 
@@ -221,8 +219,13 @@ const noUsageText = computed(() => {
     <div v-if="windows.length" class="windows">
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
     </div>
-    <p v-else-if="!hideUsageError" class="no-usage">
-      {{ noUsageText }}
+    <!-- The balance sits under the bars when both exist, and stands in for
+         them when the quota read came back empty. -->
+    <p v-if="creditsText" class="no-usage">
+      {{ creditsText }}
+    </p>
+    <p v-else-if="!windows.length && !hideUsageError" class="no-usage">
+      {{ t("providers.account.noUsage") }}
     </p>
 
     <Banner v-if="account.error && !hideUsageError" tone="warn">

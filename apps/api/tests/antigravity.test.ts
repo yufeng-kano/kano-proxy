@@ -610,6 +610,133 @@ describe("antigravityAdapter.listModels", () => {
   })
 })
 
+describe("antigravityAdapter.fetchUsage quota windows", () => {
+  /** loadCodeAssist then retrieveUserQuotaSummary, in the order fetchUsage calls them. */
+  function stubQuota(summary: unknown, tier: Record<string, unknown> = {}) {
+    return stubFetch((call) =>
+      call.url.includes("loadCodeAssist")
+        ? new Response(JSON.stringify({ cloudaicompanionProject: "proj-42", ...tier }), {
+            status: 200,
+          })
+        : new Response(JSON.stringify(summary), { status: 200 }),
+    )
+  }
+
+  it("turns each group's buckets into a labelled window with a real reset time", async () => {
+    const calls = stubQuota({
+      groups: [
+        {
+          displayName: "GEMINI MODELS",
+          buckets: [
+            {
+              bucketId: "gemini-weekly",
+              displayName: "Weekly Limit Remaining",
+              remainingFraction: 0.9998,
+              resetTime: "2026-08-29T09:00:00Z",
+            },
+            {
+              bucketId: "gemini-5h",
+              displayName: "Five Hour Limit Remaining",
+              remainingFraction: 0.9987,
+              resetTime: "2026-08-22T14:00:00Z",
+            },
+          ],
+        },
+        {
+          displayName: "CLAUDE AND GPT MODELS",
+          buckets: [
+            { displayName: "Weekly Limit Remaining", remainingFraction: 1, resetTime: null },
+          ],
+        },
+      ],
+    })
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    expect(calls.some((c) => c.url.includes("retrieveUserQuotaSummary"))).toBe(true)
+    // utilization is percent *used*, so a 0.9998 remaining fraction is ~0.02.
+    expect(usage.windows).toEqual([
+      {
+        label: "GEMINI MODELS · Weekly Limit Remaining",
+        utilization: expect.closeTo(0.02, 5),
+        resets_at: "2026-08-29T09:00:00Z",
+      },
+      {
+        label: "GEMINI MODELS · Five Hour Limit Remaining",
+        utilization: expect.closeTo(0.13, 5),
+        resets_at: "2026-08-22T14:00:00Z",
+      },
+      {
+        label: "CLAUDE AND GPT MODELS · Weekly Limit Remaining",
+        utilization: 0,
+        resets_at: null,
+      },
+    ])
+    expect(usage.error).toBeUndefined()
+  })
+
+  it("sends the stored project id and marks an exhausted bucket fully used", async () => {
+    let body: unknown
+    stubFetch((call) => {
+      if (call.url.includes("loadCodeAssist")) {
+        return new Response(JSON.stringify({ cloudaicompanionProject: "proj-42" }), {
+          status: 200,
+        })
+      }
+      body = JSON.parse(call.init.body as string)
+      return new Response(
+        JSON.stringify({
+          buckets: [{ displayName: "Weekly", remainingFraction: 0, resetTime: "2026-09-01T00:00:00Z" }],
+        }),
+        { status: 200 },
+      )
+    })
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    expect(body).toEqual({ project: "proj-42" })
+    // 100 is what the routing module reads as "unusable until resets_at".
+    expect(usage.windows).toEqual([
+      { label: "Weekly", utilization: 100, resets_at: "2026-09-01T00:00:00Z" },
+    ])
+  })
+
+  it("skips disabled buckets and leaves an amount-only bucket without a percentage", async () => {
+    stubQuota({
+      groups: [
+        {
+          displayName: "GEMINI MODELS",
+          buckets: [
+            { displayName: "Retired", remainingFraction: 0.5, disabled: true },
+            { displayName: "Credits", remainingAmount: "250", resetTime: null },
+          ],
+        },
+      ],
+    })
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    // A bare amount has no denominator, so no percentage is invented from it.
+    expect(usage.windows).toEqual([
+      { label: "GEMINI MODELS · Credits", utilization: null, resets_at: null },
+    ])
+  })
+
+  it("keeps the account metadata and reports stale when only the quota call fails", async () => {
+    stubFetch((call) =>
+      call.url.includes("loadCodeAssist")
+        ? new Response(
+            JSON.stringify({
+              cloudaicompanionProject: "proj-42",
+              paidTier: { id: "g1-pro-tier", name: "Google AI Pro" },
+            }),
+            { status: 200 },
+          )
+        : new Response("nope", { status: 500 }),
+    )
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    expect(usage.windows).toEqual([])
+    expect(usage.stale).toBe(true)
+    expect(usage.error).toMatch(/retrieveUserQuotaSummary 500/)
+    // The cache merges this over the last good windows, so the tier must survive.
+    expect(usage.account).toMatchObject({ plan_type: "Google AI Pro", project_id: "proj-42" })
+  })
+})
+
 describe("antigravityAdapter.fetchUsage", () => {
   it("reports the tier and credit balance with no fabricated usage window", async () => {
     stubFetch(

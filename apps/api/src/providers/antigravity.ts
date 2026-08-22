@@ -32,6 +32,7 @@ const GENERATE_PATH = "/v1internal:generateContent"
 const STREAM_PATH = "/v1internal:streamGenerateContent?alt=sse"
 const COUNT_TOKENS_PATH = "/v1internal:countTokens"
 const LOAD_CODE_ASSIST_PATH = "/v1internal:loadCodeAssist"
+const RETRIEVE_QUOTA_PATH = "/v1internal:retrieveUserQuotaSummary"
 const ONBOARD_USER_PATH = "/v1internal:onboardUser"
 const MODELS_PATH = "/v1internal:fetchAvailableModels"
 
@@ -220,6 +221,79 @@ export async function loadCodeAssist(
     paidTierName: typeof paidTier?.name === "string" && paidTier.name.trim() ? paidTier.name : null,
     paidTierId: typeof paidTier?.id === "string" ? paidTier.id : null,
   }
+}
+
+/**
+ * One `QuotaSummaryGroup`'s buckets → `UsageWindow`s, appended to `out`.
+ * `groupName` is null for the response's ungrouped top-level `buckets`.
+ */
+function collectQuotaBuckets(raw: unknown, groupName: string | null, out: UsageWindow[]): void {
+  if (!Array.isArray(raw)) return
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue
+    const bucket = entry as {
+      bucketId?: unknown
+      displayName?: unknown
+      remainingFraction?: unknown
+      resetTime?: unknown
+      disabled?: unknown
+    }
+    if (bucket.disabled === true) continue
+    const name =
+      (typeof bucket.displayName === "string" && bucket.displayName.trim()) ||
+      (typeof bucket.bucketId === "string" && bucket.bucketId.trim()) ||
+      null
+    if (!name) continue
+    // `remaining_fraction` and `remaining_amount` are one oneof: only the
+    // fraction carries a denominator, so a bucket reporting the bare amount
+    // gets a null utilization rather than an invented percentage.
+    const fraction = Number(bucket.remainingFraction)
+    out.push({
+      label: groupName ? `${groupName} · ${name}` : name,
+      utilization: Number.isFinite(fraction)
+        ? Math.min(100, Math.max(0, (1 - fraction) * 100))
+        : null,
+      resets_at: typeof bucket.resetTime === "string" ? bucket.resetTime : null,
+    })
+  }
+}
+
+/**
+ * `v1internal:retrieveUserQuotaSummary` — the per-group quota the Antigravity
+ * CLI prints under `/model`. CLIProxyAPI does not implement this endpoint; the
+ * wire shape is read from the CLI's embedded protobuf descriptor
+ * (`…v1internal.QuotaSummary*`) — see docs/providers.md § Antigravity.
+ */
+export async function retrieveUserQuotaSummary(
+  env: Env,
+  accessToken: string,
+  project: string,
+): Promise<UsageWindow[]> {
+  const res = await fetch(`${BASE_URLS[1]}${RETRIEVE_QUOTA_PATH}`, {
+    method: "POST",
+    headers: apiHeaders(env, accessToken, "*/*"),
+    body: JSON.stringify({ project }),
+    signal: AbortSignal.timeout(SIDE_FETCH_TIMEOUT_MS),
+  })
+  if (!res.ok) {
+    const detail = (await res.text()).trim().slice(0, 200) || `HTTP ${res.status}`
+    throw new Error(`retrieveUserQuotaSummary ${res.status}: ${detail}`)
+  }
+  const json = (await res.json()) as { buckets?: unknown; groups?: unknown }
+  const windows: UsageWindow[] = []
+  collectQuotaBuckets(json.buckets, null, windows)
+  if (Array.isArray(json.groups)) {
+    for (const raw of json.groups) {
+      if (!raw || typeof raw !== "object") continue
+      const group = raw as { displayName?: unknown; buckets?: unknown }
+      const name =
+        typeof group.displayName === "string" && group.displayName.trim()
+          ? group.displayName.trim()
+          : null
+      collectQuotaBuckets(group.buckets, name, windows)
+    }
+  }
+  return windows
 }
 
 /**
@@ -723,33 +797,43 @@ export const antigravityAdapter: ProviderAdapter = {
   },
 
   /**
-   * Antigravity publishes **no** percentage-based quota window: `loadCodeAssist`
-   * reports the tier and, on paid tiers, a Google One AI credit balance with no
-   * total and no reset time. Deriving a utilisation percentage from that would
-   * be an invented number, so the windows list stays empty and the tier/credit
-   * facts go into the account metadata instead (docs/providers.md
-   * § Antigravity) — the UI prints the balance verbatim. Limit handling rides
-   * entirely on the 429 classifier; `credits_remaining` gates nothing.
+   * Two calls: `loadCodeAssist` for the tier, project and credit balance, then
+   * `retrieveUserQuotaSummary` for the real quota windows (docs/providers.md
+   * § Antigravity). The credit balance never becomes a window — it has no
+   * total and no reset — so it stays in the account metadata for the UI to
+   * print verbatim. A quota failure alone keeps the metadata and reports
+   * `stale`, which the usage cache merges over the last good windows.
    */
   async fetchUsage(env, account) {
     const acc = await refreshAntigravity(env, account)
-    const windows: UsageWindow[] = []
     try {
       const loaded = await loadCodeAssist(env, acc.credential.access_token)
-      return {
-        windows,
-        account: {
-          email: acc.credential.email ?? null,
-          plan_type: loaded.paidTierName ?? loaded.paidTierId ?? loaded.tierId,
-          project_id: loaded.projectId || storedProject(acc.credential) || null,
-          // `!== null` and not a truthiness check: a balance of 0 is a fact
-          // worth printing, not a missing one.
-          ...(loaded.credits !== null ? { credits_remaining: loaded.credits } : {}),
-        },
+      const project = loaded.projectId || storedProject(acc.credential) || null
+      const meta = {
+        email: acc.credential.email ?? null,
+        plan_type: loaded.paidTierName ?? loaded.paidTierId ?? loaded.tierId,
+        project_id: project,
+        // `!== null` and not a truthiness check: a balance of 0 is a fact
+        // worth printing, not a missing one.
+        ...(loaded.credits !== null ? { credits_remaining: loaded.credits } : {}),
+      }
+      if (!project) return { windows: [], account: meta }
+      try {
+        return {
+          windows: await retrieveUserQuotaSummary(env, acc.credential.access_token, project),
+          account: meta,
+        }
+      } catch (e) {
+        return {
+          windows: [],
+          account: meta,
+          stale: true,
+          error: e instanceof Error ? e.message : "retrieveUserQuotaSummary failed",
+        }
       }
     } catch (e) {
       return {
-        windows,
+        windows: [],
         account: { email: acc.credential.email ?? null },
         stale: true,
         error: e instanceof Error ? e.message : "loadCodeAssist failed",
