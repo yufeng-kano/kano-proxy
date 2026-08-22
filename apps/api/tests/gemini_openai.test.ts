@@ -202,6 +202,84 @@ describe("openaiToGeminiRequest", () => {
     })
   })
 
+  it("strips propertyNames and any other keyword Gemini's Schema has no field for", () => {
+    // The measured production failure (2026-08-22): Claude Code sends
+    // `propertyNames`, the backend 400s the whole request naming it, and every
+    // tool call through Antigravity failed. The sanitizer is an allowlist for
+    // exactly this reason — an unknown keyword must be dropped, not forwarded.
+    const out = openaiToGeminiRequest(
+      req({
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "edit",
+              parameters: {
+                type: "object",
+                propertyNames: { pattern: "^[a-z]+$" },
+                uniqueItems: true,
+                $comment: "ignore me",
+                dependentRequired: { a: ["b"] },
+                properties: { path: { type: "string", minLength: 1 } },
+                required: ["path"],
+              },
+            },
+          },
+        ],
+      }),
+    )
+    const declaration = (out.tools![0]!.functionDeclarations as Array<Record<string, unknown>>)[0]!
+    expect(declaration.parameters).toEqual({
+      type: "object",
+      properties: { path: { type: "string", minLength: 1 } },
+      required: ["path"],
+    })
+  })
+
+  it("keeps the Schema fields Gemini does support", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "search",
+              parameters: {
+                type: "object",
+                properties: {
+                  q: { type: "string", pattern: "^.+$", maxLength: 40, example: "hi" },
+                  n: { type: "integer", minimum: 1, maximum: 10, format: "int32" },
+                  tags: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 5 },
+                  mode: { type: "string", enum: ["a", "b"], nullable: true },
+                },
+                required: ["q"],
+                propertyOrdering: ["q", "n"],
+                minProperties: 1,
+                maxProperties: 4,
+              },
+            },
+          },
+        ],
+      }),
+    )
+    const params = (out.tools![0]!.functionDeclarations as Array<Record<string, unknown>>)[0]!
+      .parameters as Record<string, unknown>
+    expect(Object.keys(params).sort()).toEqual([
+      "maxProperties",
+      "minProperties",
+      "properties",
+      "propertyOrdering",
+      "required",
+      "type",
+    ])
+    expect((params.properties as Record<string, unknown>).n).toEqual({
+      type: "integer",
+      minimum: 1,
+      maximum: 10,
+      format: "int32",
+    })
+  })
+
   it("keeps a tool property that shares its name with a stripped schema keyword", () => {
     const out = openaiToGeminiRequest(
       req({

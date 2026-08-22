@@ -192,33 +192,42 @@ export async function* sseDataLines(
 }
 
 /**
- * A JSON Schema Gemini will accept. The backend rejects the JSON Schema
- * keywords Gemini's own `Schema` proto has no field for, so they are dropped
- * rather than passed through — the same set CLIProxyAPI strips in
- * `util.CleanJSONSchemaForAntigravityTool`. `additionalProperties` is the one
- * that bites in practice: OpenAI clients set it on every strict tool.
+ * The fields Gemini's `Schema` actually has, read from the Antigravity CLI's
+ * embedded descriptor for `google.cloud.aiplatform.master.Schema` (extracted
+ * 2026-08-22). This is an **allowlist**, and deliberately so: the backend
+ * rejects the whole request with a `400` naming any field its proto lacks, so
+ * a denylist fails open — every JSON Schema keyword nobody thought of is an
+ * outage. `propertyNames` was exactly that (Claude Code sends it; every tool
+ * call 400'd until it was added).
+ *
+ * Fields the proto *does* have but that are annotated `GOOGLE_INTERNAL` — and
+ * are rejected for external callers — are omitted here on purpose:
+ * `prefix_items`, `one_of`, `all_of`, `additional_properties_schema`. So are
+ * `additionalProperties`, `title`, `default` and `defs`, which the backend
+ * rejects in practice (the first is the one that bites: OpenAI clients set it
+ * on every strict tool).
  */
-const UNSUPPORTED_SCHEMA_KEYS = new Set([
-  "$schema",
-  "$id",
-  "$ref",
-  "$defs",
-  "definitions",
-  "additionalProperties",
-  "unevaluatedProperties",
-  "patternProperties",
-  "const",
-  "examples",
-  "default",
-  "title",
-  "exclusiveMinimum",
-  "exclusiveMaximum",
-  "allOf",
-  "oneOf",
-  "not",
-  "if",
-  "then",
-  "else",
+const SUPPORTED_SCHEMA_KEYS = new Set([
+  "type",
+  "format",
+  "description",
+  "nullable",
+  "enum",
+  "items",
+  "minItems",
+  "maxItems",
+  "properties",
+  "propertyOrdering",
+  "required",
+  "minProperties",
+  "maxProperties",
+  "minimum",
+  "maximum",
+  "minLength",
+  "maxLength",
+  "pattern",
+  "example",
+  "anyOf",
 ])
 
 export function sanitizeJsonSchema(schema: unknown): unknown {
@@ -226,7 +235,7 @@ export function sanitizeJsonSchema(schema: unknown): unknown {
   if (!schema || typeof schema !== "object") return schema
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
-    if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue
+    if (!SUPPORTED_SCHEMA_KEYS.has(key)) continue
     // `properties` maps arbitrary *property names* to schemas — the names are
     // not schema keywords, so a property that happens to be called "title" or
     // "default" must survive while its schema value is still sanitized.
