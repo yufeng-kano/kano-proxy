@@ -769,13 +769,24 @@ export const antigravityAdapter: ProviderAdapter = {
 
   /**
    * `POST /anthropic/v1/messages/count_tokens` — a real upstream count, not an
-   * estimate. `v1internal:countTokens` takes the same envelope minus `model`
-   * and `project` (CLIProxyAPI `antigravity_executor_tokens.go`) and answers
-   * `{totalTokens}`.
+   * estimate. `v1internal:countTokens` takes a **bare** `{request}` body, not
+   * the CloudCode generate envelope: the envelope-only fields (`userAgent`,
+   * `requestType`, `requestId`, `request.sessionId`) and the Claude-only
+   * `VALIDATED` toolConfig injection all 400 the whole call — which is what
+   * made every Claude Code `/context` probe fail and retry-storm the account
+   * (docs/providers.md § Antigravity). CLIProxyAPI
+   * `antigravity_executor_tokens.go` is the wire reference: it never runs its
+   * generate-path `buildRequest`, and strips `model`/`project`/
+   * `safetySettings` (this converter never emits safetySettings). Answers
+   * `{totalTokens}`; `tools` are accepted but ignored by the count
+   * (CLIProxyAPI issue #840), so this can undercount tool schemas.
    */
   async countTokens(env, account, body, headers, extras) {
     void headers
-    const acc = await ensureProject(env, await refreshAntigravity(env, account))
+    // No ensureProject: the bare countTokens body carries no project id, and
+    // bootstrapping one here would add loadCodeAssist/onboardUser calls to an
+    // endpoint clients fire in parallel bursts (Claude Code `/context`).
+    const acc = await refreshAntigravity(env, account)
     const { anthropicToGeminiRequest, InvalidGeminiReasoningEffortError } = await import(
       "../proxy/gemini_anthropic"
     )
@@ -798,19 +809,11 @@ export const antigravityAdapter: ProviderAdapter = {
       }
       throw e
     }
-    const envelope = await buildAntigravityEnvelope({
-      model: String(reqBody.model ?? ""),
-      projectId: storedProject(acc.credential),
-      request: converted.request as unknown as Record<string, unknown>,
-    })
-    delete envelope.model
-    delete envelope.project
-
     const result = await postWithFallback(
       env,
       acc.credential.access_token,
       COUNT_TOKENS_PATH,
-      envelope,
+      { request: converted.request },
       { stream: false, signal: extras?.signal },
     )
     if (!result.response.ok) return errorResponse(result)

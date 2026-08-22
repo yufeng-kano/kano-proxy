@@ -475,7 +475,7 @@ describe("antigravityAdapter.messages", () => {
 })
 
 describe("antigravityAdapter.countTokens", () => {
-  it("posts the envelope without model or project and answers Anthropic-shaped", async () => {
+  it("posts a bare {request} body with no CloudCode envelope fields and answers Anthropic-shaped", async () => {
     const calls = stubFetch(
       () => new Response(JSON.stringify({ totalTokens: 1234 }), { status: 200 }),
     )
@@ -488,10 +488,40 @@ describe("antigravityAdapter.countTokens", () => {
 
     expect(calls[0]!.url).toBe(`${DAILY}/v1internal:countTokens`)
     const body = JSON.parse(calls[0]!.init.body as string) as Record<string, unknown>
-    expect(body).not.toHaveProperty("model")
-    expect(body).not.toHaveProperty("project")
-    expect(body.request).toBeDefined()
+    // countTokens' request proto only knows `request`: any generate-envelope
+    // field (model, project, userAgent, requestType, requestId) or a
+    // request.sessionId 400s the whole call (docs/providers.md § Antigravity).
+    expect(Object.keys(body)).toEqual(["request"])
+    expect(body.request).not.toHaveProperty("sessionId")
     expect(await res.json()).toEqual({ input_tokens: 1234 })
+  })
+
+  it("never injects the Claude VALIDATED toolConfig into a count", async () => {
+    const calls = stubFetch(
+      () => new Response(JSON.stringify({ totalTokens: 99 }), { status: 200 }),
+    )
+    await antigravityAdapter.countTokens!(
+      buildEnv(),
+      account(),
+      {
+        model: "claude-opus-4-6-thinking",
+        messages: [{ role: "user", content: "hi" }],
+        tools: [
+          {
+            name: "get_weather",
+            input_schema: { type: "object", properties: { city: { type: "string" } } },
+          },
+        ],
+      },
+      new Headers(),
+    )
+    const body = JSON.parse(calls[0]!.init.body as string) as {
+      request: Record<string, unknown>
+    }
+    // VALIDATED is a generateContent-only rule; countTokens rejects it, which
+    // is what made every Claude Code `/context` probe 400 in production.
+    expect(body.request).not.toHaveProperty("toolConfig")
+    expect(body.request.tools).toBeDefined()
   })
 
   it("rejects an invalid reasoning_effort with a 400 before calling upstream", async () => {
