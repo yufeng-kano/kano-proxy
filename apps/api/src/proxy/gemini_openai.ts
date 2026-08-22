@@ -19,6 +19,8 @@ import {
   normalizeGeminiUsage,
   openaiFinishReason,
   sanitizeJsonSchema,
+  schemaDialectFor,
+  type SchemaDialect,
   sseDataLines,
   unwrapAntigravityResponse,
   type GeminiContent,
@@ -200,7 +202,7 @@ function messagesToGemini(messages: unknown[]): {
   }
 }
 
-function mapTools(tools: unknown): GeminiRequest["tools"] {
+function mapTools(tools: unknown, dialect: SchemaDialect): GeminiRequest["tools"] {
   if (!Array.isArray(tools)) return undefined
   const declarations: unknown[] = []
   for (const raw of tools) {
@@ -210,7 +212,10 @@ function mapTools(tools: unknown): GeminiRequest["tools"] {
     const fn = tool.function
     const name = typeof fn.name === "string" ? fn.name : ""
     if (!name) continue
-    const parameters = sanitizeJsonSchema(fn.parameters) ?? { type: "object", properties: {} }
+    const parameters = sanitizeJsonSchema(fn.parameters, dialect) ?? {
+      type: "object",
+      properties: {},
+    }
     declarations.push({
       name,
       ...(typeof fn.description === "string" ? { description: fn.description } : {}),
@@ -233,7 +238,10 @@ function mapToolChoice(toolChoice: unknown): GeminiRequest["toolConfig"] {
   return undefined
 }
 
-function mapResponseFormat(responseFormat: unknown): Record<string, unknown> {
+function mapResponseFormat(
+  responseFormat: unknown,
+  dialect: SchemaDialect,
+): Record<string, unknown> {
   if (!responseFormat || typeof responseFormat !== "object") return {}
   const format = responseFormat as { type?: string; json_schema?: { schema?: unknown } }
   if (format.type === "json_object") return { responseMimeType: "application/json" }
@@ -241,7 +249,7 @@ function mapResponseFormat(responseFormat: unknown): Record<string, unknown> {
   const schema = format.json_schema?.schema
   return {
     responseMimeType: "application/json",
-    ...(schema ? { responseSchema: sanitizeJsonSchema(schema) } : {}),
+    ...(schema ? { responseSchema: sanitizeJsonSchema(schema, dialect) } : {}),
   }
 }
 
@@ -250,13 +258,16 @@ function mapResponseFormat(responseFormat: unknown): Record<string, unknown> {
  * envelope (`model` / `project` / `requestId` / `sessionId`).
  */
 export function openaiToGeminiRequest(req: ChatCompletionRequest): GeminiRequest {
+  // Claude behind Antigravity rejects a union its Gemini sibling accepts, so
+  // the schema dialect follows the model family (gemini_wire.ts).
+  const dialect = schemaDialectFor(req.model ?? "")
   const { contents, systemInstruction } = messagesToGemini(req.messages)
   const generationConfig: Record<string, unknown> = {}
   if (req.temperature != null) generationConfig.temperature = req.temperature
   if (req.top_p != null) generationConfig.topP = req.top_p
   if (req.max_tokens != null) generationConfig.maxOutputTokens = req.max_tokens
   if (req.stop?.length) generationConfig.stopSequences = req.stop
-  Object.assign(generationConfig, mapResponseFormat(req.response_format))
+  Object.assign(generationConfig, mapResponseFormat(req.response_format, dialect))
 
   const mapped = mapReasoning("antigravity", req.reasoning_effort)
   if (mapped.thinkingConfig) {
@@ -271,7 +282,7 @@ export function openaiToGeminiRequest(req: ChatCompletionRequest): GeminiRequest
     generationConfig.thinkingConfig = { includeThoughts: true }
   }
 
-  const tools = mapTools(req.tools)
+  const tools = mapTools(req.tools, dialect)
   const toolConfig = tools ? mapToolChoice(req.tool_choice) : undefined
 
   return {

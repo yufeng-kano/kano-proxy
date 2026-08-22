@@ -202,6 +202,60 @@ describe("openaiToGeminiRequest", () => {
     })
   })
 
+  it("folds the two nullable spellings Gemini's type enum cannot hold", () => {
+    // Gemini `Schema.type` is an enum with no NULL member, so `anyOf: [X, null]`
+    // and `type: ["string","null"]` both become the `nullable` field. Measured:
+    // forwarding either reaches Claude-behind-Antigravity as an invalid schema.
+    const out = openaiToGeminiRequest(
+      req({
+        model: "gemini-3-flash",
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "f",
+              parameters: {
+                type: "object",
+                properties: {
+                  mode: { anyOf: [{ type: "string", enum: ["a"] }, { type: "null" }] },
+                  size: { type: ["integer", "null"], minimum: 1 },
+                },
+              },
+            },
+          },
+        ],
+      }),
+    )
+    const params = (out.tools![0]!.functionDeclarations as Array<Record<string, unknown>>)[0]!
+      .parameters as Record<string, Record<string, unknown>>
+    // Single surviving branch is inlined — no anyOf wrapper left behind.
+    expect(params.properties!.mode).toEqual({ type: "string", enum: ["a"], nullable: true })
+    expect(params.properties!.size).toEqual({ type: "integer", minimum: 1, nullable: true })
+  })
+
+  it("keeps a real union for Gemini and drops it for Claude behind Antigravity", () => {
+    const parameters = {
+      type: "object",
+      properties: { v: { anyOf: [{ type: "string" }, { type: "integer" }], description: "d" } },
+    }
+    const tools = [{ type: "function", function: { name: "f", parameters } }]
+    const paramsFor = (model: string) =>
+      (
+        (openaiToGeminiRequest(req({ model, tools })).tools![0]!.functionDeclarations as Array<
+          Record<string, unknown>
+        >)[0]!.parameters as Record<string, Record<string, unknown>>
+      ).properties!.v as Record<string, unknown>
+
+    // Measured 2026-08-22: Gemini accepts a two-branch union; the Claude model
+    // behind the same endpoint answers "input_schema: JSON schema is invalid".
+    expect(paramsFor("gemini-3-flash")).toEqual({
+      anyOf: [{ type: "string" }, { type: "integer" }],
+      description: "d",
+    })
+    // Unconstrained but valid, and the description still guides the model.
+    expect(paramsFor("claude-opus-4-6-thinking")).toEqual({ description: "d" })
+  })
+
   it("strips propertyNames and any other keyword Gemini's Schema has no field for", () => {
     // The measured production failure (2026-08-22): Claude Code sends
     // `propertyNames`, the backend 400s the whole request naming it, and every

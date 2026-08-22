@@ -230,8 +230,71 @@ const SUPPORTED_SCHEMA_KEYS = new Set([
   "anyOf",
 ])
 
-export function sanitizeJsonSchema(schema: unknown): unknown {
-  if (Array.isArray(schema)) return schema.map(sanitizeJsonSchema)
+/** `{"type": "null"}` and nothing else — JSON Schema's way of saying nullable. */
+function isNullSchema(v: unknown): boolean {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return false
+  const keys = Object.keys(v as Record<string, unknown>)
+  return keys.length === 1 && (v as Record<string, unknown>).type === "null"
+}
+
+/**
+ * JSON Schema spells "nullable" two ways Gemini's `Schema` cannot hold, because
+ * its `type` is an enum with no NULL member: `anyOf: [X, {"type": "null"}]` and
+ * `type: ["string", "null"]`. Forwarding either reaches Claude-behind-Antigravity
+ * as a schema its own validator rejects (`tools.N.custom.input_schema: JSON
+ * schema is invalid`, measured 2026-08-22), so both are folded into the
+ * `nullable: true` field Gemini does have.
+ */
+function foldNullable(out: Record<string, unknown>): Record<string, unknown> {
+  if (Array.isArray(out.type)) {
+    const types = (out.type as unknown[]).filter((t) => t !== "null")
+    if (types.length < (out.type as unknown[]).length) out.nullable = true
+    // More than one non-null type has no Gemini representation either; keeping
+    // the first is closer than emitting an array the backend will reject.
+    if (types.length) out.type = types[0]
+    else delete out.type
+  }
+  if (Array.isArray(out.anyOf)) {
+    const members = (out.anyOf as unknown[]).filter((m) => !isNullSchema(m))
+    if (members.length < (out.anyOf as unknown[]).length) out.nullable = true
+    if (members.length === 1 && members[0] && typeof members[0] === "object") {
+      // A single remaining branch is the schema itself; anyOf around one member
+      // is noise, and Gemini rejects an anyOf that also carries sibling fields.
+      const { anyOf: _drop, ...rest } = out
+      return { ...(members[0] as Record<string, unknown>), ...rest }
+    }
+    if (members.length) out.anyOf = members
+    else delete out.anyOf
+  }
+  return out
+}
+
+/**
+ * Per-model-family schema limits. Measured against Antigravity 2026-08-22 with
+ * a two-branch `anyOf` on a tool parameter: a **Gemini** model accepts it, a
+ * **Claude** model behind the same endpoint answers `tools.N.custom
+ * .input_schema: JSON schema is invalid` from its own Vertex-side validator.
+ * Google's Gemini→Claude translation evidently cannot carry the union, so on
+ * that family the union is dropped and the parameter is left unconstrained —
+ * a typeless property is accepted by both, and the description survives to
+ * guide the model. Same shape of rule as VALIDATED function calling
+ * (docs/providers.md § Antigravity).
+ */
+export type SchemaDialect = { allowAnyOf: boolean }
+
+export const GEMINI_SCHEMA_DIALECT: SchemaDialect = { allowAnyOf: true }
+export const CLAUDE_SCHEMA_DIALECT: SchemaDialect = { allowAnyOf: false }
+
+/** `claude` in the upstream model id — the same test the request builder uses. */
+export function schemaDialectFor(model: string): SchemaDialect {
+  return model.toLowerCase().includes("claude") ? CLAUDE_SCHEMA_DIALECT : GEMINI_SCHEMA_DIALECT
+}
+
+export function sanitizeJsonSchema(
+  schema: unknown,
+  dialect: SchemaDialect = GEMINI_SCHEMA_DIALECT,
+): unknown {
+  if (Array.isArray(schema)) return schema.map((v) => sanitizeJsonSchema(v, dialect))
   if (!schema || typeof schema !== "object") return schema
   const out: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(schema as Record<string, unknown>)) {
@@ -242,12 +305,16 @@ export function sanitizeJsonSchema(schema: unknown): unknown {
     if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
       const properties: Record<string, unknown> = {}
       for (const [name, sub] of Object.entries(value as Record<string, unknown>)) {
-        properties[name] = sanitizeJsonSchema(sub)
+        properties[name] = sanitizeJsonSchema(sub, dialect)
       }
       out[key] = properties
       continue
     }
-    out[key] = sanitizeJsonSchema(value)
+    out[key] = sanitizeJsonSchema(value, dialect)
   }
-  return out
+  const folded = foldNullable(out)
+  // A surviving multi-branch anyOf is a genuine union; foldNullable already
+  // collapsed the `[X, null]` spelling into a single schema.
+  if (!dialect.allowAnyOf && Array.isArray(folded.anyOf)) delete folded.anyOf
+  return folded
 }

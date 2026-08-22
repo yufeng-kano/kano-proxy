@@ -20,6 +20,8 @@ import {
   inlineDataOf,
   normalizeGeminiUsage,
   sanitizeJsonSchema,
+  schemaDialectFor,
+  type SchemaDialect,
   sseDataLines,
   unwrapAntigravityResponse,
   type GeminiContent,
@@ -161,7 +163,7 @@ function blocksToParts(content: unknown): GeminiPart[] {
   return parts
 }
 
-function mapAnthropicTools(tools: unknown): GeminiRequest["tools"] {
+function mapAnthropicTools(tools: unknown, dialect: SchemaDialect): GeminiRequest["tools"] {
   if (!Array.isArray(tools)) return undefined
   const declarations: unknown[] = []
   for (const raw of tools) {
@@ -174,7 +176,7 @@ function mapAnthropicTools(tools: unknown): GeminiRequest["tools"] {
     declarations.push({
       name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
-      parameters: sanitizeJsonSchema(tool.input_schema),
+      parameters: sanitizeJsonSchema(tool.input_schema, dialect),
     })
   }
   return declarations.length ? [{ functionDeclarations: declarations }] : undefined
@@ -289,7 +291,12 @@ export function anthropicToGeminiRequest(
   generationConfig.thinkingConfig = thinking.thinkingConfig
 
   const systemParts = systemToParts(body.system)
-  const tools = mapAnthropicTools(body.tools)
+  // Claude behind Antigravity rejects a union its Gemini sibling accepts, so
+  // the schema dialect follows the model family (gemini_wire.ts).
+  const tools = mapAnthropicTools(
+    body.tools,
+    schemaDialectFor(typeof body.model === "string" ? body.model : ""),
+  )
   const toolConfig = tools ? mapAnthropicToolChoice(body.tool_choice) : undefined
 
   return {
