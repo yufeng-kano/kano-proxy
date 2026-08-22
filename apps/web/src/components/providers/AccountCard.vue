@@ -134,13 +134,17 @@ const windows = computed(() => props.account.usage?.windows ?? [])
  * "Usage will appear once this account is used" is a promise, and for
  * Antigravity it is one the backend cannot keep: Google reports a tier and a
  * credit balance, never a percentage window with a reset, so the bars would
- * never arrive (docs/providers.md § Antigravity). Say that instead of waiting.
+ * never arrive (docs/providers.md § Antigravity). What it does report is the
+ * balance, so print that instead of waiting — verbatim, with no total to make
+ * a percentage from. A tier without a credit entry has nothing to print.
  */
-const noUsageKey = computed(() =>
-  props.provider === "antigravity"
-    ? ("providers.account.noUsageWindows" as const)
-    : ("providers.account.noUsage" as const),
-)
+const noUsageText = computed(() => {
+  if (props.provider !== "antigravity") return t("providers.account.noUsage")
+  const credits = props.account.account?.credits_remaining
+  return typeof credits === "number"
+    ? t("providers.account.credits", { credits: credits.toLocaleString() })
+    : t("providers.account.creditsUnavailable")
+})
 </script>
 
 <template>
@@ -218,7 +222,7 @@ const noUsageKey = computed(() =>
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
     </div>
     <p v-else-if="!hideUsageError" class="no-usage">
-      {{ t(noUsageKey) }}
+      {{ noUsageText }}
     </p>
 
     <Banner v-if="account.error && !hideUsageError" tone="warn">

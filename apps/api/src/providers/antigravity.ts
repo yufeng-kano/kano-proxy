@@ -162,8 +162,13 @@ function defaultTierId(payload: unknown): string {
 export type LoadCodeAssist = {
   projectId: string
   tierId: string
-  /** `paidTier.availableCredits` entry for Google One AI, when the tier has one. */
-  credits: { amount: number; minimumForUsage: number } | null
+  /**
+   * `paidTier.availableCredits` Google One AI balance, when the tier has one.
+   * The entry's `minimumCreditAmountForUsage` is deliberately not read: it
+   * would be a usability gate on credits whose semantics are unverified
+   * (docs/providers.md § Antigravity).
+   */
+  credits: number | null
   paidTierId: string | null
 }
 
@@ -191,21 +196,14 @@ export async function loadCodeAssist(
   const paidTier = json.paidTier as
     | { id?: unknown; availableCredits?: unknown }
     | undefined
-  let credits: LoadCodeAssist["credits"] = null
+  let credits: number | null = null
   if (Array.isArray(paidTier?.availableCredits)) {
     for (const raw of paidTier.availableCredits) {
       if (!raw || typeof raw !== "object") continue
-      const credit = raw as {
-        creditType?: unknown
-        creditAmount?: unknown
-        minimumCreditAmountForUsage?: unknown
-      }
+      const credit = raw as { creditType?: unknown; creditAmount?: unknown }
       if (String(credit.creditType ?? "").toUpperCase() !== "GOOGLE_ONE_AI") continue
       const amount = Number(credit.creditAmount)
-      const minimum = Number(credit.minimumCreditAmountForUsage)
-      if (Number.isFinite(amount) && Number.isFinite(minimum)) {
-        credits = { amount, minimumForUsage: minimum }
-      }
+      if (Number.isFinite(amount)) credits = amount
       break
     }
   }
@@ -723,7 +721,8 @@ export const antigravityAdapter: ProviderAdapter = {
    * total and no reset time. Deriving a utilisation percentage from that would
    * be an invented number, so the windows list stays empty and the tier/credit
    * facts go into the account metadata instead (docs/providers.md
-   * § Antigravity). Limit handling rides entirely on the 429 classifier.
+   * § Antigravity) — the UI prints the balance verbatim. Limit handling rides
+   * entirely on the 429 classifier; `credits_remaining` gates nothing.
    */
   async fetchUsage(env, account) {
     const acc = await refreshAntigravity(env, account)
@@ -736,12 +735,9 @@ export const antigravityAdapter: ProviderAdapter = {
           email: acc.credential.email ?? null,
           plan_type: loaded.paidTierId ?? loaded.tierId,
           project_id: loaded.projectId || storedProject(acc.credential) || null,
-          ...(loaded.credits
-            ? {
-                credits_remaining: loaded.credits.amount,
-                credits_minimum: loaded.credits.minimumForUsage,
-              }
-            : {}),
+          // `!== null` and not a truthiness check: a balance of 0 is a fact
+          // worth printing, not a missing one.
+          ...(loaded.credits !== null ? { credits_remaining: loaded.credits } : {}),
         },
       }
     } catch (e) {

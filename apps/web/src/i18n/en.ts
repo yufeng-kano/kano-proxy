@@ -197,8 +197,10 @@ export const en = {
   "providers.account.removeConfirm":
     "Remove this account? Requests will stop routing through it.",
   "providers.account.noUsage": "Usage will appear once this account is used",
-  // Antigravity has no percentage quota to report — see docs/providers.md.
-  "providers.account.noUsageWindows": "This provider doesn't report usage limits",
+  // Antigravity reports a credit balance instead of a percentage quota, and a
+  // free tier reports neither — see docs/providers.md § Antigravity.
+  "providers.account.credits": "{credits} credits left",
+  "providers.account.creditsUnavailable": "Credit balance not available",
   "providers.account.plan": "{plan} plan",
   "providers.rename.title": "Rename account",
   "providers.rename.label": "Name",

@@ -639,9 +639,47 @@ describe("antigravityAdapter.fetchUsage", () => {
       plan_type: "ai-pro",
       project_id: "proj-42",
       credits_remaining: 1500,
-      credits_minimum: 10,
     })
+    // The usage floor is deliberately not surfaced: it would be a gate on
+    // credits whose semantics are unverified (docs/providers.md § Antigravity).
+    expect(usage.account).not.toHaveProperty("credits_minimum")
     expect(usage.error).toBeUndefined()
+  })
+
+  it("keeps a zero balance as a fact rather than dropping it as falsy", async () => {
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            cloudaicompanionProject: "proj-42",
+            paidTier: {
+              id: "ai-pro",
+              availableCredits: [{ creditType: "GOOGLE_ONE_AI", creditAmount: "0" }],
+            },
+          }),
+          { status: 200 },
+        ),
+    )
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    expect(usage.account).toMatchObject({ credits_remaining: 0 })
+  })
+
+  it("omits the balance for a tier that carries no Google One AI credit entry", async () => {
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            cloudaicompanionProject: "proj-42",
+            currentTier: { id: "free-tier" },
+          }),
+          { status: 200 },
+        ),
+    )
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    // The row says the balance is unavailable rather than printing a zero the
+    // upstream never reported.
+    expect(usage.account).not.toHaveProperty("credits_remaining")
+    expect(usage.account).toMatchObject({ plan_type: "free-tier" })
   })
 
   it("marks the snapshot stale on failure rather than blanking it", async () => {
