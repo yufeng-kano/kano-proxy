@@ -222,7 +222,7 @@ describe("custom provider routing — /anthropic/v1/messages/count_tokens", () =
     expect(capturedUrl).toBe("https://upstream.example.com/v1/messages/count_tokens")
   })
 
-  it("rejects a custom openai-format slug with the same 400 grok/codex get", async () => {
+  it("answers a url-less custom openai-format slug with the sentinel zero, no upstream call", async () => {
     const db = new FakeD1()
     await seedApiKey(db, "user_1")
     await seedCustomProvider(db, { slug: "my-oa3", format: "openai", userId: "user_1" })
@@ -241,15 +241,11 @@ describe("custom provider routing — /anthropic/v1/messages/count_tokens", () =
       execCtx,
     )
 
-    expect(res.status).toBe(400)
-    const json = (await res.json()) as Record<string, unknown>
-    expect(json).toEqual({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "count_tokens is only supported for claude-code and antigravity models",
-      },
-    })
+    // A 400 here sends Claude Code into a max_tokens:1 probe burst against
+    // the real upstream (docs/api.md § count_tokens) — the sentinel zero is
+    // the deliberate lesser evil.
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ input_tokens: 0 })
   })
 
   it("forwards a custom openai-format slug with count_tokens_url configured to that exact URL", async () => {

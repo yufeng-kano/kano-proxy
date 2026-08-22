@@ -6,12 +6,14 @@ FROM denoland/deno:alpine-2.9.3
 
 WORKDIR /app
 
-COPY main.ts relay.ts deno.json ./
+COPY main.ts relay.ts tokenizer.ts deno.json ./
 
-# Pre-compile so the first request after a cold start isn't also paying for
-# a JIT/type-check pass — this app has zero external deps, so there is
-# nothing to fetch here, only local compilation.
-RUN deno cache main.ts
+# Pre-compile and pre-fetch so the first request after a cold start isn't
+# also paying for a JIT/type-check pass or an npm download. tokenizer.ts is
+# cached explicitly: relay.ts only loads it lazily (dynamic import on the
+# first /count-tokens), and the ranks it pulls must be baked into the image,
+# not fetched at runtime.
+RUN deno cache main.ts tokenizer.ts
 
 USER deno
 

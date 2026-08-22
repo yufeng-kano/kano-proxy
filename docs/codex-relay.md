@@ -26,6 +26,7 @@ The relay serves exactly one upstream, hardcoded: `https://chatgpt.com`. It is *
 | URL mapping | `https://<relay>.run.app<path>?<query>` → `https://chatgpt.com<path>?<query>`, query preserved verbatim |
 | Allowed methods | `GET`, `POST` |
 | Allowed path prefixes | `/backend-api/codex/`, `/backend-api/wham/` (the usage alias lives under `/wham/`) |
+| Local endpoints | `POST /count-tokens` — computed **in** the relay, never proxied (see [Token counting](#token-counting-local-no-upstream)) |
 | Health | `GET /healthz` → `200 ok` (still behind Cloud Run IAM) |
 
 **Request headers are rebuilt from an allowlist — never copied verbatim.** This is the single most important line in the design. The Worker's own outbound fetch *to the relay* also gets stamped with `CF-Worker` / `CF-Connecting-IP` by Cloudflare, so the inbound request at Cloud Run already carries the poison. Any generic reverse-proxy behavior (nginx `proxy_pass`, Go `httputil.ReverseProxy`, Express middleware) forwards headers verbatim and reproduces the exact `403` this relay exists to escape. The relay therefore constructs the upstream request with **only** these inbound headers:
@@ -68,6 +69,21 @@ The Worker applies a tri-state guard to every relay response:
 2. `x-relay-fault` present → return 502 to the client; log; **do not bench**.
 3. Neither, status 401/403 → assume a stale ID token: mint a fresh token, retry **once**; if still marker-less, return 502 as a relay fault. Any other marker-less response → 502 relay fault.
 
+### Token counting (local, no upstream)
+
+**Status: approved 2026-08-22, operator decision — merged into this service; split it out if it ever causes problems** (see Operations). This is the one deliberate exception to "the relay is a dumb byte pipe": OpenAI publishes its tokenizer (tiktoken) but offers **no** counting API, Claude Code's `/context` requires a `count_tokens` endpoint, and a failing `count_tokens` makes the client probe with real `max_tokens: 1` generation requests in parallel (measured 2026-08-22 — the burst that suspended an Antigravity account). A real local tokenizer run is the only honest count available, and the Worker cannot host the multi-MB `o200k_base` ranks comfortably (bundle + 128 MB isolate memory), while this container doesn't care.
+
+| Rule | Value |
+|---|---|
+| Endpoint | `POST /count-tokens` — handled before the proxy path check; never touches chatgpt.com |
+| Request | `{"texts": ["...", ...]}` — pre-serialized text segments; the **Worker** owns the Anthropic-body → text serialization ("everything smart stays in the Worker") |
+| Response | `200` `{"tokens": <total o200k_base count>}` + `x-relay-count: 1` |
+| Malformed body | `400` `{"error":{"type":"count_bad_request"}}` — a Worker bug, not a relay fault; no `x-relay-fault` |
+| Encoding | `o200k_base` (gpt-4o/o1/gpt-5 family), lazily loaded on the **first count** per instance so codex stream cold-starts never pay for ranks parsing |
+| Auth / logging | Same Cloud Run IAM front door; request bodies are prompt content — **never logged**, same as proxied traffic |
+
+The Worker degrades **any** failure of this endpoint (unconfigured relay, IAM error, 4xx/5xx, timeout, unreachable) to the sentinel `{"input_tokens": 0}` — never an error status back to the client, per [api.md](./api.md) § count_tokens. Accuracy caveat, stated honestly: this is the real public tokenizer over the Worker's serialization of the request; the ChatGPT backend's own prompt framing (message headers, tool schema rendering) adds a few percent no outside count can see. It is a real count of an approximation — one quality level below claude-code/antigravity's true upstream counts, and one above a sentinel zero.
+
 ## Auth: Cloud Run IAM
 
 The service deploys with `--no-allow-unauthenticated`. Google Front End validates a Google-signed ID token **before the container is invoked** — unauthenticated probes never start an instance and never bill. The relay app itself contains zero auth code.
@@ -100,7 +116,7 @@ Service `kano-codex-relay`, region **us-central1** (always-free egress tier is N
 | `--min-instances` | `0` | Scale to zero; accept ~1s cold start on first turn after idle |
 | `--max-instances` | `10` | With concurrency 1 this is the concurrent-codex-stream ceiling *and* the runaway-cost fuse; requests past it get a marker-less 429 → Worker guard → non-benching 502 |
 | `--concurrency` | `1` | Forced: Cloud Run rejects CPU < 1 with concurrency > 1 (measured 2026-08-03). Instance-per-stream at 0.25 vCPU bills less than shared instances at 1 vCPU |
-| `--cpu` / `--memory` | `0.25` / `256Mi` (accepted) | CPU size is the only real cost lever — see below |
+| `--cpu` / `--memory` | `0.25` / `512Mi` | CPU size is the only real cost lever — see below. Memory raised from the original 256Mi when `/count-tokens` landed: the `o200k_base` ranks stay resident in any instance that has served a count (~tens of MB on top of the Deno baseline), and memory is billed only while requests are active, so the bump costs ~nothing |
 | billing mode | request-based (default; **no** `--no-cpu-throttling`) | See correction below |
 
 **Billing model, corrected from the original proposal.** The proposal implied request-based billing makes SSE waits free. It does not: request-based billing charges configured vCPU + memory for **wall-clock time while ≥1 request is active on an instance** — a 10-minute agentic stream is 600 billed seconds. What request-based billing avoids is idle-between-requests time. Mitigations are structural: small vCPU (forwarding uses ~none) and scale to zero. Because the platform ties fractional CPU to `concurrency=1`, each stream runs on its own instance and billing scales per stream: ~11k req/month × ~60s active ≈ 660k stream-seconds × 0.25 vCPU ≈ 165k vCPU-s, inside the 180k vCPU-s free tier (memory: 165k GiB-s vs 360k free). The rejected alternative — 1 vCPU shared at concurrency 80 — would bill ~660k vCPU-s ≈ $10/month at the same load unless streams overlap heavily. Config, not luck, keeps this near $0.
@@ -110,7 +126,8 @@ Service `kano-codex-relay`, region **us-central1** (always-free egress tier is N
 ## Operations
 
 - **Deploys are manual** (`gcloud run deploy` from `apps/relay` — commands in [deployment.md](./deployment.md#codex-egress-relay-cloud-run)). The relay is not in release CI; its change rate should be ~zero. Run `deno task test` + `deno task check` before any relay deploy.
-- **Failure mode:** relay down → codex requests fail 502 with `x-relay-fault` semantics; no accounts benched; every other provider unaffected. The codex route is only as available as the relay — that is the accepted trade.
+- **Failure mode:** relay down → codex requests fail 502 with `x-relay-fault` semantics; no accounts benched; every other provider unaffected. The codex route is only as available as the relay — that is the accepted trade. `count_tokens` additionally degrades to the sentinel zero instead of erroring (see Token counting).
+- **Split trigger — written down so future-us acts on it.** `/count-tokens` shares this service's `concurrency=1` / `max-instances=10` pool with live codex SSE streams: a `/context` run fires ~15–20 parallel counts, each briefly holding an instance. Operator decision 2026-08-22: **merged here first** for zero new deploy surface. If counting ever contends with stream capacity in practice (counts queuing behind long streams, streams 429ing during count bursts — visible as marker-less 429s in Worker logs / `count_tokens_stub` spikes in `request_logs`), the fix is mechanical, not architectural: move `/count-tokens` to its own tiny Cloud Run service (`cpu=1`, `concurrency=80`, `max-instances=1–2`, same IAM), point a new env var at it, and revert this service to a pure pipe. Nothing in the Worker's degrade contract changes.
 - **Logs:** Cloud Run request logs (URL, status, latency) only. The relay never logs bodies, tokens, or headers. This matches [logging.md](./logging.md).
 - **The rule could change.** If OpenAI later blocks by other means (IP reputation of GCP ranges, TLS fingerprint), the relay may stop helping; if they drop the CF-header rule, the relay becomes dead weight. Either way the Worker's direct path remains the fallback by unsetting `CODEX_RELAY_URL`.
 
@@ -124,6 +141,7 @@ Relay (`deno task test` in `apps/relay`):
 2. No-buffering proof: a stub upstream that emits chunk A, then later chunk B — the client must receive A while the upstream stream is still open.
 3. Path/method allowlist → `502` + `x-relay-fault`, and `/backend-api/wham/usage` is allowed.
 4. Query string preserved; upstream `set-cookie` not forwarded; proxied responses carry `x-relay-upstream`.
+5. `/count-tokens`: counts a known string deterministically, sums multiple `texts`, never calls the upstream fetch stub, `400` on a malformed body without `x-relay-fault`.
 
 Worker (`pnpm --filter api test`):
 

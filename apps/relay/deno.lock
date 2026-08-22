@@ -1,0 +1,22 @@
+{
+  "version": "5",
+  "specifiers": {
+    "npm:js-tiktoken@1.0.21": "1.0.21"
+  },
+  "npm": {
+    "base64-js@1.5.1": {
+      "integrity": "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA=="
+    },
+    "js-tiktoken@1.0.21": {
+      "integrity": "sha512-biOj/6M5qdgx5TKjDnFT1ymSpM5tbd3ylwDtrQvFQSu0Z7bBYko2dF+W/aUkXUPuk6IVpRxk/3Q2sHOzGlS36g==",
+      "dependencies": [
+        "base64-js"
+      ]
+    }
+  },
+  "workspace": {
+    "dependencies": [
+      "npm:js-tiktoken@1.0.21"
+    ]
+  }
+}

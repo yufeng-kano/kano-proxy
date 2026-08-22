@@ -57,6 +57,13 @@ export function createRelayHandler(
       return new Response("ok", { status: 200 })
     }
 
+    // Local compute, never proxied (docs/codex-relay.md § Token counting).
+    // Handled before the path allowlist: this is the one endpoint that is
+    // not a byte pipe to chatgpt.com.
+    if (req.method === "POST" && url.pathname === "/count-tokens") {
+      return handleCountTokens(req)
+    }
+
     // Method and path are self-errors, not upstream ones — reject before
     // ever touching the network. Method is checked first: a wrong-method
     // request to an otherwise-valid path is a "method" fault, not "path".
@@ -113,6 +120,30 @@ export function createRelayHandler(
       headers: outHeaders,
     })
   }
+}
+
+/**
+ * `POST /count-tokens` — `{texts: string[]}` in, `{tokens: <o200k_base
+ * total>}` out. The Worker owns the Anthropic-body → text serialization;
+ * this side only tokenizes. A malformed body is the caller's 400, not an
+ * `x-relay-fault` (the Worker degrades any non-200 to its sentinel zero).
+ * Bodies are prompt content — never logged, same as proxied traffic.
+ */
+async function handleCountTokens(req: Request): Promise<Response> {
+  let texts: unknown
+  try {
+    texts = ((await req.json()) as { texts?: unknown }).texts
+  } catch {
+    texts = undefined
+  }
+  if (!Array.isArray(texts) || !texts.every((t) => typeof t === "string")) {
+    return Response.json({ error: { type: "count_bad_request" } }, { status: 400 })
+  }
+  const { countTokens } = await import("./tokenizer.ts")
+  return Response.json(
+    { tokens: countTokens(texts as string[]) },
+    { headers: { "x-relay-count": "1" } },
+  )
 }
 
 /**

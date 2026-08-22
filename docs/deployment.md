@@ -200,7 +200,7 @@ cd apps/relay
 deno task test && deno task check
 gcloud run deploy kano-codex-relay --source . --region us-central1 \
   --no-allow-unauthenticated --timeout=3600 --min-instances=0 --max-instances=10 \
-  --concurrency=1 --cpu=0.25 --memory=256Mi
+  --concurrency=1 --cpu=0.25 --memory=512Mi
 gcloud run services add-iam-policy-binding kano-codex-relay --region=us-central1 \
   --member="serviceAccount:kano-relay-invoker@<gcp-project-id>.iam.gserviceaccount.com" \
   --role="roles/run.invoker"

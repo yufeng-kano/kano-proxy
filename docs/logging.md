@@ -21,6 +21,7 @@
 | `client_abort` | Streaming response: the client cancelled before the upstream reported a completion signal |
 | `incomplete_stream` | Streaming response: the upstream connection ended — cleanly or with a transport error — before a completion signal ever arrived |
 | `spend_limit_exceeded` | Authenticated request refused pre-dispatch because the key's spend-limit window is exhausted (429, [pricing.md](./pricing.md)) |
+| `count_tokens_stub` | `count_tokens` answered locally with the sentinel `{"input_tokens": 0}` (grok, custom-openai without `count_tokens_url`, or a codex relay count that failed/was unconfigured) — 200, no upstream call, no account touched ([api.md](./api.md) § count_tokens) |
 | `NULL` | Success, or a streamed response that reached its documented completion signal before closing |
 
 ## Pre-dispatch logging policy

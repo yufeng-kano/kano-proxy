@@ -1,9 +1,9 @@
 /**
  * Zero real network anywhere in this file — every case stubs `fetchImpl`.
- * Mirrors docs/codex-relay.md "Testing and verification", item 1-4.
+ * Mirrors docs/codex-relay.md "Testing and verification", items 1-5.
  *
- * No assertion library: this app is deliberately dependency-free (see
- * deno.json — "no imports map needed"), tests included.
+ * No assertion library: the only dependency in this app is the tokenizer
+ * `/count-tokens` needs (js-tiktoken, see deno.json); tests stay bare.
  */
 
 import { createRelayHandler } from "./relay.ts"
@@ -316,4 +316,52 @@ Deno.test("forwards the POST body bytes intact", async () => {
 
   assert(capturedBody instanceof ArrayBuffer, "body was not forwarded as raw bytes")
   assertEquals(new TextDecoder().decode(capturedBody), payload)
+})
+
+// ---------------------------------------------------------------------------
+// (j) POST /count-tokens — local compute, never proxied
+// ---------------------------------------------------------------------------
+
+Deno.test("count-tokens sums o200k_base counts across texts without touching the upstream", async () => {
+  let fetchCalled = false
+  const fetchImpl = (async () => {
+    fetchCalled = true
+    return new Response("never")
+  }) as typeof fetch
+  const handler = createRelayHandler({ upstreamBase: UPSTREAM, fetchImpl })
+
+  const single = await handler(
+    new Request(`${UPSTREAM}/count-tokens`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ texts: ["hello world"] }),
+    }),
+  )
+  assertEquals(single.status, 200)
+  assertEquals(single.headers.get("x-relay-count"), "1")
+  const { tokens } = (await single.json()) as { tokens: number }
+  assert(Number.isInteger(tokens) && tokens > 0, `expected a positive count, got ${tokens}`)
+
+  const double = await handler(
+    new Request(`${UPSTREAM}/count-tokens`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ texts: ["hello world", "hello world"] }),
+    }),
+  )
+  const doubled = (await double.json()) as { tokens: number }
+  assertEquals(doubled.tokens, tokens * 2, "two identical texts must count exactly double")
+  assert(!fetchCalled, "count-tokens must never call the upstream")
+})
+
+Deno.test("count-tokens rejects a malformed body with a 400 that is not a relay fault", async () => {
+  const handler = createRelayHandler({ upstreamBase: UPSTREAM })
+  for (const body of ["not json", JSON.stringify({}), JSON.stringify({ texts: [1, 2] })]) {
+    const res = await handler(
+      new Request(`${UPSTREAM}/count-tokens`, { method: "POST", body }),
+    )
+    assertEquals(res.status, 400)
+    assert(!res.headers.has("x-relay-fault"), "a caller bug is not a relay fault")
+    assertEquals(await res.json(), { error: { type: "count_bad_request" } })
+  }
 })

@@ -1,28 +1,17 @@
 import { describe, expect, it } from "vitest"
-import { countTokensProviderError } from "../src/routes/anthropic"
+import { countTokensLocalMode } from "../src/routes/anthropic"
 
-describe("countTokensProviderError", () => {
-  it("allows claude-code — no rejection, no upstream call needed at this layer", () => {
-    expect(countTokensProviderError("claude-code")).toBeNull()
+describe("countTokensLocalMode", () => {
+  it("passes claude-code and antigravity through to their real upstream counts", () => {
+    expect(countTokensLocalMode("claude-code")).toBeNull()
+    expect(countTokensLocalMode("antigravity")).toBeNull()
   })
 
-  it("rejects grok with a 400 Anthropic envelope", () => {
-    expect(countTokensProviderError("grok")).toEqual({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "count_tokens is only supported for claude-code and antigravity models",
-      },
-    })
+  it("routes codex to the relay tokenizer", () => {
+    expect(countTokensLocalMode("codex")).toBe("relay")
   })
 
-  it("rejects codex the same way", () => {
-    expect(countTokensProviderError("codex")).toEqual({
-      type: "error",
-      error: {
-        type: "invalid_request_error",
-        message: "count_tokens is only supported for claude-code and antigravity models",
-      },
-    })
+  it("answers grok with the sentinel stub — never a 400, which triggers client probe bursts", () => {
+    expect(countTokensLocalMode("grok")).toBe("stub")
   })
 })

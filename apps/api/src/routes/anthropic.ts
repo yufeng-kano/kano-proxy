@@ -5,6 +5,7 @@ import { listModelsForUser } from "../catalog/models"
 import type { ProviderId } from "../env"
 import { logRequest } from "../logging/request_log"
 import { resolveCandidates } from "../routing/candidates"
+import { relayCountTokens } from "../providers/codex_count"
 import { dispatchAnthropicMessages, dispatchAnthropicViaOpenAI } from "../proxy/dispatch"
 import { detectAnthropicToolLoop, loopDetectedMessage } from "../utils/loop_guard"
 import { loggingProviderFromRawModel } from "../utils/model"
@@ -252,14 +253,31 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
     )
   }
 
-  // Builtins keep the exact prior provider-identity check (and its test);
-  // custom providers are rejected the same way, by adapter capability —
-  // custom anthropic-format has countTokens, custom openai-format does not.
-  if (resolved.primary.isBuiltin) {
-    const rejection = countTokensProviderError(resolved.primary.provider as ProviderId)
-    if (rejection) return c.json(rejection, 400)
-  } else if (!resolved.primary.adapter.countTokens) {
-    return c.json(COUNT_TOKENS_UNSUPPORTED, 400)
+  // Providers with no upstream counting endpoint are answered locally —
+  // codex via the relay tokenizer, grok and url-less custom-openai with the
+  // sentinel zero. Never a 400: a failed count_tokens sends Claude Code into
+  // a parallel max_tokens:1 probe burst against the real upstream
+  // (docs/api.md § count_tokens, measured 2026-08-22).
+  const localMode = resolved.primary.isBuiltin
+    ? countTokensLocalMode(resolved.primary.provider as ProviderId)
+    : resolved.primary.adapter.countTokens
+      ? null
+      : "stub"
+  if (localMode) {
+    const tokens = localMode === "relay" ? await relayCountTokens(c.env, body) : null
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: resolved.primary.provider,
+        model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
+        statusCode: 200,
+        latencyMs: Date.now() - started,
+        errorCode: tokens === null ? "count_tokens_stub" : null,
+        groupName: resolved.groupName ?? null,
+      }),
+    )
+    return c.json({ input_tokens: tokens ?? 0 })
   }
 
   // Native passthrough only, same as /v1/messages: normalize model to bare
@@ -290,22 +308,16 @@ anthropicRoutes.post("/v1/messages/count_tokens", async (c) => {
   })
 })
 
-const COUNT_TOKENS_UNSUPPORTED = {
-  type: "error",
-  error: {
-    type: "invalid_request_error",
-    message: "count_tokens is only supported for claude-code and antigravity models",
-  },
-} as const
-
 /**
- * count_tokens needs a real upstream token count to forward to; grok and codex
- * have no such endpoint on their Chat Completions/Responses surfaces, so they
- * are rejected rather than answered with a local estimate. claude-code
- * forwards natively; antigravity converts the body to Gemini and calls
- * `v1internal:countTokens`. Exported as a pure function for unit testing.
+ * How count_tokens answers when the provider has no upstream counting
+ * endpoint: `"relay"` = the egress relay's local o200k_base tokenizer
+ * (codex), `"stub"` = the sentinel `{input_tokens: 0}` (grok), `null` = a
+ * real upstream count exists and dispatch handles it (claude-code forwards
+ * natively, antigravity calls `v1internal:countTokens`). Exported as a pure
+ * function for unit testing.
  */
-export function countTokensProviderError(provider: ProviderId): Record<string, unknown> | null {
-  if (provider === "claude-code" || provider === "antigravity") return null
-  return COUNT_TOKENS_UNSUPPORTED
+export function countTokensLocalMode(provider: ProviderId): "relay" | "stub" | null {
+  if (provider === "codex") return "relay"
+  if (provider === "grok") return "stub"
+  return null
 }
