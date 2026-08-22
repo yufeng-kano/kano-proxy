@@ -664,6 +664,50 @@ describe("antigravityAdapter.fetchUsage", () => {
     expect(usage.account).toMatchObject({ credits_remaining: 0 })
   })
 
+  it("omits the balance when the matching entry reports only a usage floor", async () => {
+    // The shape Google actually returns for a Google AI Pro account
+    // (measured 2026-08-22): the GOOGLE_ONE_AI entry matches, but there is no
+    // creditAmount to read — see docs/providers.md § Antigravity.
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            cloudaicompanionProject: "proj-42",
+            paidTier: {
+              id: "g1-pro-tier",
+              name: "Google AI Pro",
+              availableCredits: [
+                { creditType: "GOOGLE_ONE_AI", minimumCreditAmountForUsage: "50" },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+    )
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    expect(usage.account).not.toHaveProperty("credits_remaining")
+    // The plan's own name beats title-casing "g1-pro-tier" ourselves.
+    expect(usage.account).toMatchObject({ plan_type: "Google AI Pro" })
+    // A floor with no balance is not a failed read.
+    expect(usage.error).toBeUndefined()
+    expect(usage.stale).toBeUndefined()
+  })
+
+  it("falls back to the paid tier id when the response carries no plan name", async () => {
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            cloudaicompanionProject: "proj-42",
+            paidTier: { id: "g1-ultra-tier" },
+          }),
+          { status: 200 },
+        ),
+    )
+    const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
+    expect(usage.account).toMatchObject({ plan_type: "g1-ultra-tier" })
+  })
+
   it("omits the balance for a tier that carries no Google One AI credit entry", async () => {
     stubFetch(
       () =>

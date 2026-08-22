@@ -163,12 +163,16 @@ export type LoadCodeAssist = {
   projectId: string
   tierId: string
   /**
-   * `paidTier.availableCredits` Google One AI balance, when the tier has one.
-   * The entry's `minimumCreditAmountForUsage` is deliberately not read: it
+   * `paidTier.availableCredits` Google One AI balance, when the tier reports
+   * one — measured on Google AI Pro, the matching entry carries only
+   * `minimumCreditAmountForUsage` and no `creditAmount`, so `null` is the
+   * common case, not an error. That floor is deliberately not read either: it
    * would be a usability gate on credits whose semantics are unverified
    * (docs/providers.md § Antigravity).
    */
   credits: number | null
+  /** `paidTier.name` — the plan's own name, preferred over the id for display. */
+  paidTierName: string | null
   paidTierId: string | null
 }
 
@@ -194,7 +198,7 @@ export async function loadCodeAssist(
   }
   const json = (await res.json()) as Record<string, unknown>
   const paidTier = json.paidTier as
-    | { id?: unknown; availableCredits?: unknown }
+    | { id?: unknown; name?: unknown; availableCredits?: unknown }
     | undefined
   let credits: number | null = null
   if (Array.isArray(paidTier?.availableCredits)) {
@@ -207,22 +211,13 @@ export async function loadCodeAssist(
       break
     }
   }
-  // TEMPORARY (added v3.11.2, remove in v3.11.3 — docs/logging.md § Temporary
-  // diagnostics). A paid tier reporting no balance is indistinguishable from
-  // here between "this plan has no credit pool" and "the pool is under a
-  // creditType this parser does not match", and the response is only
-  // observable in production. Tier ids and credit amounts only — the payload
-  // carries no token, prompt, or completion.
-  if (credits === null && paidTier) {
-    console.log("[antigravity] no GOOGLE_ONE_AI credit entry", {
-      topLevelKeys: Object.keys(json),
-      paidTier: JSON.stringify(paidTier).slice(0, 1000),
-    })
-  }
   return {
     projectId: extractProject(json),
     tierId: defaultTierId(json),
     credits,
+    // Google ships both halves: "g1-pro-tier" and "Google AI Pro". The name is
+    // what it calls the plan, so it beats title-casing the slug ourselves.
+    paidTierName: typeof paidTier?.name === "string" && paidTier.name.trim() ? paidTier.name : null,
     paidTierId: typeof paidTier?.id === "string" ? paidTier.id : null,
   }
 }
@@ -745,7 +740,7 @@ export const antigravityAdapter: ProviderAdapter = {
         windows,
         account: {
           email: acc.credential.email ?? null,
-          plan_type: loaded.paidTierId ?? loaded.tierId,
+          plan_type: loaded.paidTierName ?? loaded.paidTierId ?? loaded.tierId,
           project_id: loaded.projectId || storedProject(acc.credential) || null,
           // `!== null` and not a truthiness check: a balance of 0 is a fact
           // worth printing, not a missing one.

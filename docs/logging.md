@@ -59,11 +59,9 @@ Retention: swept by a daily Worker Cron Trigger — see below.
 
 A short-lived `console.*` probe is allowed when production is the only place a question can be answered for free, provided it logs no forbidden value above, is scoped to the failing branch, and **names the release that removes it**. Anything still in the tree past that release is a bug.
 
-| Probe | Added | Remove by | Question |
-|---|---|---|---|
-| `[antigravity] no GOOGLE_ONE_AI credit entry` (`providers/antigravity.ts`, `loadCodeAssist`) | v3.11.2 | v3.11.3 | Does a paid tier that shows no credit balance ([providers.md](./providers.md) § Antigravity) genuinely carry no `availableCredits`, or one under a `creditType` the parser does not match? Logs the response's top-level keys and its `paidTier` subtree (tier ids and credit amounts — no tokens, no prompts), only on the branch where the parse found nothing. |
+Read one with `wrangler tail` or Dashboard → Workers → Logs while the relevant page refreshes.
 
-Read it with `wrangler tail` or Dashboard → Workers → Logs while the Providers page refreshes an Antigravity account; `loadCodeAssist` is a free metadata call, so no upstream generation is billed to produce it.
+**None active.** The last was `[antigravity] no GOOGLE_ONE_AI credit entry` (v3.11.2, removed in v3.11.3): it established that a Google AI Pro account returns the credit entry with no `creditAmount` field at all, recorded in [providers.md](./providers.md) § Antigravity. One caution learned from it — the `paidTier` subtree also carried the account's email inside `upgradeSubscriptionUri`. Scope a probe to the fields you need, not a whole subtree, and assume an unexamined payload holds an identifier you did not plan to log.
 
 ## Retention sweep
 
