@@ -264,14 +264,33 @@ export function anthropicToGeminiRequest(
     if (!raw || typeof raw !== "object") continue
     const message = raw as { role?: unknown; content?: unknown }
     const role = message.role === "assistant" ? "model" : "user"
-    const parts = blocksToParts(message.content)
-    for (const part of parts) {
-      if (part.functionCall?.name && part.functionCall.id) {
-        callNames.set(part.functionCall.id, part.functionCall.name)
+    const rawParts = blocksToParts(message.content)
+    const parts: GeminiPart[] = []
+    for (let index = 0; index < rawParts.length; index++) {
+      const part = rawParts[index]!
+      if (part.functionCall?.name) {
+        // Gemini requires a function-call signature to remain on the
+        // functionCall part. Anthropic has no corresponding field on tool_use,
+        // so the response places it in an immediately preceding, signature-only
+        // thinking block. Move it back and discard that transport-only block;
+        // replaying it plus an unsigned functionCall makes Google reject the
+        // turn as missing thought_signature in the functionCall part.
+        const preceding = rawParts[index - 1]
+        if (
+          !part.thoughtSignature &&
+          preceding?.thought &&
+          preceding.text === "" &&
+          preceding.thoughtSignature
+        ) {
+          part.thoughtSignature = preceding.thoughtSignature
+          if (parts.at(-1) === preceding) parts.pop()
+        }
+        if (part.functionCall.id) callNames.set(part.functionCall.id, part.functionCall.name)
       }
       if (part.functionResponse && !part.functionResponse.name) {
         part.functionResponse.name = callNames.get(part.functionResponse.id ?? "") ?? "tool"
       }
+      parts.push(part)
     }
     if (!parts.length) continue
     const last = contents[contents.length - 1]

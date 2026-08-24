@@ -158,7 +158,7 @@ describe("anthropicToGeminiRequest", () => {
     ])
   })
 
-  it("replays a signature-only thinking block instead of dropping the signature", () => {
+  it("replays a standalone signature-only thinking block instead of dropping the signature", () => {
     const out = anthropicToGeminiRequest({
       messages: [
         { role: "user", content: "hi" },
@@ -167,6 +167,50 @@ describe("anthropicToGeminiRequest", () => {
     })
     expect(out.request.contents[1]!.parts).toEqual([
       { text: "", thought: true, thoughtSignature: "sig-1" },
+    ])
+  })
+
+  it("restores a tool-use signature to its functionCall part", () => {
+    // Anthropic tool_use has nowhere to carry Gemini's functionCall signature,
+    // so the response converter emits this adjacent signature-only thinking
+    // block. Replaying it as a thought part leaves functionCall unsigned and
+    // Google rejects the next turn with missing thought_signature.
+    const out = anthropicToGeminiRequest({
+      messages: [
+        { role: "user", content: "search" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "", signature: "sig-fc" },
+            { type: "tool_use", id: "toolu_1", name: "search", input: { q: "x" } },
+          ],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+      ],
+    })
+    expect(out.request.contents[1]!.parts).toEqual([
+      {
+        functionCall: { id: "toolu_1", name: "search", args: { q: "x" } },
+        thoughtSignature: "sig-fc",
+      },
+    ])
+  })
+
+  it("does not move a textual thinking signature to a following tool call", () => {
+    const out = anthropicToGeminiRequest({
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "reasoning", signature: "sig-thought" },
+            { type: "tool_use", id: "toolu_1", name: "search", input: {} },
+          ],
+        },
+      ],
+    })
+    expect(out.request.contents[0]!.parts).toEqual([
+      { text: "reasoning", thought: true, thoughtSignature: "sig-thought" },
+      { functionCall: { id: "toolu_1", name: "search", args: {} } },
     ])
   })
 
