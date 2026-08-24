@@ -157,6 +157,13 @@ describe("input_audio → Gemini inlineData", () => {
     }
   })
 
+  it("reads m4a as the MP4 container it is, not as raw aac", () => {
+    const out = openaiToGeminiRequest(req({ messages: audioMessages({ data: WAV, format: "m4a" }) }))
+    expect(out.contents[0].parts![1]).toEqual({
+      inlineData: { mimeType: "audio/mp4", data: WAV },
+    })
+  })
+
   it("prefers a data: URL's own mime over the format field", () => {
     const out = openaiToGeminiRequest(
       req({ messages: audioMessages({ data: `data:audio/flac;base64,${WAV}`, format: "wav" }) }),

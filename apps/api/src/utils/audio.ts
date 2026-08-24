@@ -15,10 +15,15 @@ const MIME_BY_FORMAT: Record<string, string> = {
   ogg: "audio/ogg",
   opus: "audio/ogg",
   aiff: "audio/aiff",
+  // Apple's recorders (Voice Memos, `say`, iPhone) hand out `.m4a`: AAC in an
+  // MP4 container, which the backend reads as `audio/mp4`, not `audio/aac`
+  // (verified against the live Gemini backend 2026-08-24).
+  m4a: "audio/mp4",
+  mp4: "audio/mp4",
 }
 
 /** Human list for the `unsupported_audio_format` error — kept next to the map it describes. */
-export const SUPPORTED_AUDIO_FORMATS = "wav, mp3, aac, flac, ogg, opus or aiff"
+export const SUPPORTED_AUDIO_FORMATS = "wav, mp3, m4a, aac, flac, ogg, opus or aiff"
 
 /**
  * An `input_audio` part as inline data, or null when the part is not audio
