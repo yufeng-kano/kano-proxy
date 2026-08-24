@@ -599,6 +599,8 @@ function errorResponse(result: UpstreamResult): Response {
 
 export const antigravityAdapter: ProviderAdapter = {
   id: "antigravity",
+  /** Gemini reads audio as an ordinary `inlineData` part (docs/api.md § Audio input). */
+  audioInput: "convert",
 
   async refreshIfNeeded(env, account) {
     // Project bootstrap is part of making this credential usable, so it runs

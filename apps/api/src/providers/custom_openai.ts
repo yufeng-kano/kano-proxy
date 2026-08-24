@@ -28,6 +28,10 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
 
   const adapter: ProviderAdapter = {
     id: row.slug,
+    // The client body is forwarded near-verbatim, so an `input_audio` part
+    // reaches the endpoint untouched — that is how an audio-capable
+    // OpenRouter model is used through here (docs/api.md § Audio input).
+    audioInput: "passthrough",
 
     async chatCompletions(_env, account, req, extras) {
       const url = `${base}/chat/completions`

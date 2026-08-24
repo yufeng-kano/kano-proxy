@@ -7,7 +7,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | Doc | Summary |
 |-----|---------|
 | [product.md](./product.md) | Goals, non-goals, tenants, providers, model naming |
-| [api.md](./api.md) | Public LLM routes (`/openai/v1`, `/anthropic`), errors, reasoning, cache |
+| [api.md](./api.md) | Public LLM routes (`/openai/v1`, `/anthropic`), errors, reasoning, audio input, cache |
 | [auth.md](./auth.md) | Google OIDC admin, client API keys, OAuth account binding |
 | [database.md](./database.md) | D1 schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, routing module + strategies, failover, usage windows, manual unpause, adapters |

@@ -118,6 +118,8 @@ function affinityFromHeaders(headers: Headers): {
 
 export const grokAdapter: ProviderAdapter = {
   id: "grok",
+  /** `messages` goes to api.x.ai verbatim, so an audio part is xAI's call, not ours. */
+  audioInput: "passthrough",
 
   async refreshIfNeeded(env, account) {
     return refreshGrok(env, account)

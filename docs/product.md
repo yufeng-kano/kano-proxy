@@ -15,7 +15,7 @@
 
 - Official Platform API-key aggregation as primary product
 - Usage-balanced / weighted routing across model-group targets (groups ship ordered-priority only; balancing needs stickiness first — see [providers.md](./providers.md))
-- Embeddings / images / audio
+- Embeddings / image generation / audio **output** (audio **input** is supported on `/openai/v1` wherever the provider's wire carries it — see [api.md](./api.md) § Audio input)
 - Staging environment
 - ToS / legal warning copy in UI
 - Content logging or prompt audit storage

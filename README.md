@@ -131,7 +131,7 @@ Metadata is cache-first in the UI; proxy traffic itself is never served from a c
 ## What this is not
 
 - Not a shared Platform API-key reseller or aggregator
-- Not embeddings / images / audio (chat + messages for coding agents first)
+- Not embeddings / image generation / audio output (audio **input** does work on `/openai/v1` for providers that accept it — Antigravity, Grok, custom OpenAI endpoints)
 - Not a prompt audit store — content logging is intentionally out of scope
 
 Details and rationale: [docs/product.md](./docs/product.md).

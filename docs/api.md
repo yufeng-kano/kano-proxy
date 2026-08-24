@@ -60,6 +60,7 @@ Supported fields:
 | `temperature` | `grok`: forwarded when sent; defaults to `1` when the client omits it (see "Grok sampling defaults" below). `claude-code`: forwarded when sent, clamped to Anthropic's `0–1` range (OpenAI's client-facing range is `0–2`), **but dropped entirely when thinking is on** (see "Sampling under thinking" below). `antigravity`: forwarded when sent as Gemini `generationConfig.temperature`, no default. `codex`: **ignored** — no sampling field is ever added to the Responses body. A **custom openai-format** provider forwards it verbatim, unclamped, no default |
 | `top_p` | `grok`, `claude-code` and `antigravity`: forwarded only when the client sends it — no invented default (`antigravity` as Gemini `topP`). `claude-code` additionally drops it under thinking unless it falls in `[0.95, 1]` (below). `codex`: **ignored**, same as `temperature`. Custom openai-format: forwarded verbatim |
 | image parts | Vision when upstream supports |
+| `input_audio` parts | Accepted on this surface only, and only for providers whose upstream wire can carry audio — see "Audio input" below |
 
 **Sampling under thinking (`claude-code`).** Anthropic rejects `temperature` and `top_k` while thinking is active, and accepts `top_p` only within `[0.95, 1]`; on the newest models (Opus 5 / Sonnet 5 / Fable 5 / Opus 4.8 / 4.7 and Mythos) any non-default sampling value is a `400` regardless of thinking. The `/openai/v1` → `claude-code` conversion turns a client `reasoning_effort` into `output_config: {effort}` (see "Reasoning" below), so a request combining an effort with a plain `temperature` would otherwise `400` on a pairing the client never asked for. The converter therefore **drops** `temperature` — and a `top_p` outside `[0.95, 1]` — whenever thinking is on, i.e. whenever `thinking` or `output_config` is present and `thinking.type` is not `disabled`. Values are dropped, not silently retuned into range. Requests with no thinking config keep whatever sampling the client sent (temperature still clamped to `0–1`). The native `/anthropic` passthrough is unaffected: there the client owns the body and its own `thinking`/sampling combination.
 
@@ -94,6 +95,34 @@ Foreign / non-Grok `thinking.signature` values (Claude-native, GPT `gAAAA…`, p
 `thinking.budget_tokens` is still **not** mapped to an effort ladder (effort-only). The OpenAI→Anthropic convert path used by `codex` / custom-openai is unchanged (unsigned `reasoning_content` → thinking; no signature).
 
 > **xAI Chat Completions egress gate (verified 2026-08-02).** On the `/openai/v1` Chat Completions path, xAI strips plaintext `reasoning_content` from Cloudflare egress while still reporting `reasoning_tokens`. The `/anthropic` → Responses path uses opaque `encrypted_content` instead, which is what Claude Code needs for multi-turn thinking continuity and is not subject to that plaintext strip.
+
+### Audio input
+
+`/openai/v1/chat/completions` accepts the OpenAI / OpenRouter audio content part inside a user message:
+
+```json
+{"type": "input_audio", "input_audio": {"data": "<base64>", "format": "wav"}}
+```
+
+`data` is raw base64 or a `data:<mime>;base64,…` URL — when it is a data URL its own mime wins over `format`. Nothing else about the request changes.
+
+**Per provider.** "Carries audio" below means the body this proxy builds for that provider has somewhere to put the part. It is not a promise that the model accepts it — that answer comes from upstream:
+
+| Provider | Audio part |
+|----------|------------|
+| `antigravity` | Converted to a Gemini `inlineData` part (`mimeType` + base64). Gemini models answer from the audio and bill it as prompt tokens (~32 tok/s). A **Claude** model served behind Antigravity has no audio input, so that combination is an upstream rejection, not a proxy one |
+| `grok` | Forwarded verbatim inside `messages` to `api.x.ai` — xAI decides |
+| custom, `format=openai` | Forwarded verbatim in the near-passthrough body — the endpoint decides (this is how OpenRouter's audio-capable models are reached) |
+| `codex` | **`400 unsupported_modality`.** The Responses input this proxy builds has no audio content type, and no OAuth Codex model accepts audio |
+| `claude-code`, custom `format=anthropic` | **`400 unsupported_modality`.** Anthropic Messages defines no audio content block, so there is nothing to convert to |
+
+The rejection is decided from the **highest-priority resolved target only** — the same rule the loop guard uses — before any upstream call, and is logged with `error_code: "unsupported_modality"` and `x-should-retry: false`. Audio is never silently dropped: it either reaches the upstream or the request fails loudly.
+
+**`format` → mime, on conversion targets only.** `wav` → `audio/wav`, `mp3` / `mpeg` → `audio/mp3`, `aac` → `audio/aac`, `flac` → `audio/flac`, `ogg` / `opus` → `audio/ogg`, `aiff` → `audio/aiff`. An unrecognized `format` with no data-URL mime to fall back on is `400 unsupported_audio_format`, never a guessed mime — a wrong mime is a silent upstream misread. Passthrough providers (`grok`, custom-openai) never meet this validation: their body goes out as the client wrote it.
+
+**`/anthropic` has no audio.** The Messages wire format defines no audio content block, so the Anthropic surface neither accepts nor converts audio — including for `antigravity`, whose Gemini upstream would happily take it. Audio goes on `/openai/v1`.
+
+**Audio output is still out of scope**: no TTS, no `modalities: ["audio"]`. An inline audio part appearing in a *response* is surfaced the way an inline image is, as a data URI.
 
 ### Custom providers (`slug/upstream`, a user-defined endpoint)
 
@@ -361,6 +390,7 @@ JSON error objects; OpenAI-ish or Anthropic-ish envelope depending on surface.
 | Upstream non-2xx, non-bench status (outside 401/402/403/429/520/522/524) | pass through status when possible | **200** + in-stream error frame | `upstream_error` |
 | Reasoning rejected | 400 | 400 (pre-dispatch / adapter before stream body) | `invalid_reasoning` |
 | Degenerate tool-call loop (conversion path only — see above) | 400 | 400 (pre-dispatch) | `loop_detected` |
+| Audio part sent to a provider with no audio wire, or an unrecognized audio `format` (see "Audio input") | 400 | 400 (pre-dispatch) | `unsupported_modality` / `unsupported_audio_format` |
 | Key's spend limit reached ([pricing.md](./pricing.md)) | 429 | 429 (pre-dispatch) | `spend_limit_exceeded` (Anthropic surface: `rate_limit_error` type) |
 | Upstream idle / client abort mid-stream | n/a (stream only) | 200 + stall frame or clean cancel | `upstream_stall` / `client_abort` |
 
@@ -368,7 +398,7 @@ Auth failures (missing/invalid API key) are envelope-shaped per **surface**, mat
 
 `400 no_upstream_account` (non-stream) / in-stream `no_upstream_account` is reserved for the *unbound* case: the user has **zero** accounts for the resolved provider, so retrying can never help. When accounts exist but none is usable *right now* (every one benched — e.g. the pool's single account just got benched for its cooldown), non-stream returns `503 upstream_unavailable` with `Retry-After` set to the seconds until the earliest bench expiry (min 1, **capped at 60**) when known — a transient error agent clients retry instead of treating as fatal. The cap exists because well-behaved clients may honor `Retry-After` without an upper bound (the Anthropic SDK sleeps for whatever the header says): when the earliest recovery is a weekly usage reset days out, telling the client "come back in 3 days" turns one exhausted account into a client-side outage — a retry against a 503 costs microseconds, so err on retrying too soon. On `stream: true` the same condition is an in-stream error (HTTP already `200`). If the failover loop itself exhausts the candidate list mid-request (every candidate it reached failed with a bench-type status), the result is the **same synthesized `503 upstream_unavailable` + `Retry-After`**, recomputed from the just-updated bench/limit facts across the tried candidates — never the last upstream response passed through verbatim. Passing it through (the pre-v3.5.0 behavior) handed the client one account's raw `429` whose `Retry-After` can point at that account's weekly reset days out — a gateway-aware client honoring that header then benches this whole proxy for one account's reset (measured 2026-08-14: a downstream failover client cooled the proxy off for 2.3 days over exactly this) — or, for codex, an HTML edge-challenge wall. Stream mode emits the same condition as the in-stream `upstream_unavailable` frame. Non-bench upstream errors are unchanged: the first non-bench response still returns/pipes through immediately (`upstream_error`).
 
-**`x-should-retry` marker.** Claude Code's gateway protocol reads this response header to override its retry classification. The proxy sets `x-should-retry: false` on failures where a retry can never help — `400 no_upstream_account`, `400 invalid_model`, `400 loop_detected`, `429 spend_limit_exceeded` — so the client doesn't burn its ~10-attempt retry budget on them, and `x-should-retry: true` on the synthesized `503 upstream_unavailable` (transient by construction). Other statuses carry no marker and keep the client's default classification.
+**`x-should-retry` marker.** Claude Code's gateway protocol reads this response header to override its retry classification. The proxy sets `x-should-retry: false` on failures where a retry can never help — `400 no_upstream_account`, `400 invalid_model`, `400 loop_detected`, `400 unsupported_modality`, `429 spend_limit_exceeded` — so the client doesn't burn its ~10-attempt retry budget on them, and `x-should-retry: true` on the synthesized `503 upstream_unavailable` (transient by construction). Other statuses carry no marker and keep the client's default classification.
 
 Authenticated pre-dispatch failures (invalid model, no upstream account, loop-guard trip) are all logged as one `request_logs` row via `waitUntil`, same as a real dispatch; unauthenticated 401s are never logged — see [logging.md](./logging.md).
 

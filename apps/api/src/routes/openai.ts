@@ -7,6 +7,7 @@ import { logRequest } from "../logging/request_log"
 import { isNativeAnthropicPassthrough } from "./anthropic"
 import { resolveRequestModel } from "./resolve_request"
 import { dispatchChatCompletions } from "../proxy/dispatch"
+import { SUPPORTED_AUDIO_FORMATS, scanAudioParts } from "../utils/audio"
 import { detectOpenAIToolLoop, loopDetectedMessage } from "../utils/loop_guard"
 import { loggingProviderFromRawModel } from "../utils/model"
 import { parseReasoningEffort } from "../utils/reasoning"
@@ -124,6 +125,51 @@ export async function handleChatCompletions(c: Context<HonoEnv>): Promise<Respon
             message: loopDetectedMessage(loop),
             type: "invalid_request_error",
             code: "loop_detected",
+          },
+        },
+        400,
+        { "x-should-retry": "false" },
+      )
+    }
+  }
+
+  // Audio input (docs/api.md § Audio input). Decided from the highest-priority
+  // resolved target only, same as the loop guard above: an adapter whose
+  // upstream wire has no audio content part must fail the request rather than
+  // drop the part and answer as if the client had sent silence.
+  const audio = scanAudioParts((body.messages as unknown[]) ?? [])
+  if (audio.present) {
+    const audioInput = resolved.primary.adapter.audioInput
+    const rejection = !audioInput
+      ? {
+          code: "unsupported_modality",
+          message: `audio input is not supported by "${resolved.primary.provider}" — its upstream message format has no audio content part`,
+        }
+      : audioInput === "convert" && !audio.convertible
+        ? {
+            code: "unsupported_audio_format",
+            message: `input_audio part is not convertible: needs base64 input_audio.data plus a format of ${SUPPORTED_AUDIO_FORMATS}, or a data: URL carrying its own mime`,
+          }
+        : null
+    if (rejection) {
+      c.executionCtx.waitUntil(
+        logRequest(c.env, {
+          userId,
+          apiKeyId,
+          provider: resolved.primary.provider,
+          model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
+          statusCode: 400,
+          latencyMs: Date.now() - started,
+          errorCode: rejection.code,
+          groupName: resolved.groupName ?? null,
+        }),
+      )
+      return c.json(
+        {
+          error: {
+            message: rejection.message,
+            type: "invalid_request_error",
+            code: rejection.code,
           },
         },
         400,

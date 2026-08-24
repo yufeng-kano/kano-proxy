@@ -12,6 +12,7 @@
  */
 
 import type { ChatCompletionRequest } from "../providers/types"
+import { audioInline } from "../utils/audio"
 import { mapReasoning } from "../utils/reasoning"
 import {
   geminiParts,
@@ -79,6 +80,12 @@ function contentToParts(content: unknown): GeminiPart[] {
     } else if (item.type === "image_url") {
       const part = imageUrlPart(item.image_url?.url)
       if (part) parts.push(part)
+    } else if (item.type === "input_audio") {
+      // Gemini has one inline part for every modality; audio differs from an
+      // image only by mime (docs/api.md § Audio input). A format with no mime
+      // never gets here — the route already answered `unsupported_audio_format`.
+      const audio = audioInline(raw)
+      if (audio) parts.push({ inlineData: audio })
     }
   }
   return parts

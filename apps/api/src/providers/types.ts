@@ -72,6 +72,15 @@ export type ProviderAdapter = {
   /** Builtin `ProviderId`, or a custom provider's slug for BYO adapters. */
   id: string
   /**
+   * How an OpenAI `input_audio` part reaches this upstream (docs/api.md
+   * § Audio input). `"convert"` — the adapter builds a native audio part out
+   * of it; `"passthrough"` — the client's own part rides along in the
+   * forwarded body and the upstream judges it. **Absent** means the wire this
+   * adapter builds has nowhere to put audio, and the OpenAI route answers
+   * `400 unsupported_modality` rather than dropping the part silently.
+   */
+  audioInput?: "convert" | "passthrough"
+  /**
    * Forward OpenAI-shaped chat completion using acquired credential.
    * `extras` mirrors `messages()`: `apiKeyId` scopes per-caller KV state and
    * `waitUntil` keeps those writes alive past the Response on Workers. Both
