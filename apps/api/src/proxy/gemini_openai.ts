@@ -374,8 +374,11 @@ export function geminiResponseToOpenAI(json: unknown, model: string): Record<str
       })
       continue
     }
-    // A signature can ride on a thought part with no visible text.
-    if (part.thought && part.thoughtSignature) reasoningSignature = part.thoughtSignature
+    // A signature can ride on a thought part with no visible text, and Gemini
+    // signs plain text parts too (think-then-answer, no tool call) — both are
+    // the turn's chain of thought, so both go out as `reasoning_signature`.
+    // functionCall parts never reach here; they carry their own extension.
+    if (part.thoughtSignature) reasoningSignature = part.thoughtSignature
     if (typeof part.text !== "string" || !part.text) continue
     if (part.thought) reasoning += part.text
     else content += part.text
@@ -555,7 +558,13 @@ export function geminiSseToOpenAIStream(
               continue
             }
             if (typeof part.text !== "string" || !part.text) continue
-            chunk({ content: part.text })
+            // A signature on a plain text part is the same chain of thought a
+            // thought part carries — it goes out on this text delta, or it is
+            // lost for the client's next replay.
+            chunk({
+              content: part.text,
+              ...(part.thoughtSignature ? { reasoning_signature: part.thoughtSignature } : {}),
+            })
           }
           const upstreamFinish = resp?.candidates?.[0]?.finishReason
           if (upstreamFinish) {

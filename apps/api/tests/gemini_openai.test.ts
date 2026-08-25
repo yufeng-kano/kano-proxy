@@ -554,6 +554,35 @@ describe("geminiResponseToOpenAI", () => {
     expect(message.reasoning_signature).toBe("sig-9")
   })
 
+  it("surfaces a text-part signature as reasoning_signature on the message", () => {
+    // The think-then-answer turn with no tool call: Gemini signs the plain
+    // text part, and the client can only echo what the message exposes.
+    const out = geminiResponseToOpenAI(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "reasoning", thought: true },
+                  { text: "answer", thoughtSignature: "sig-t" },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+    )
+    const message = (out.choices as Array<Record<string, unknown>>)[0].message as Record<
+      string,
+      unknown
+    >
+    expect(message.content).toBe("answer")
+    expect(message.reasoning_signature).toBe("sig-t")
+  })
+
   it("maps a candidate-less safety block to content_filter, not an empty success", () => {
     const out = geminiResponseToOpenAI(
       { response: { promptFeedback: { blockReason: "SAFETY" } } },
@@ -683,6 +712,35 @@ describe("geminiSseToOpenAIStream", () => {
     )
     const deltas = chunks(raw).map((c) => (c.choices as Array<Record<string, unknown>>)[0]?.delta)
     expect(deltas[0]).toMatchObject({ reasoning_content: "think", reasoning_signature: "sig-1" })
+  })
+
+  it("streams a text-part signature alongside its content delta", async () => {
+    const raw = await readSse(
+      geminiSseToOpenAIStream(
+        sse(
+          {
+            response: {
+              candidates: [{ content: { parts: [{ text: "reasoning", thought: true }] } }],
+            },
+          },
+          {
+            response: {
+              candidates: [
+                {
+                  content: { parts: [{ text: "answer", thoughtSignature: "sig-t" }] },
+                  finishReason: "STOP",
+                },
+              ],
+            },
+          },
+        ),
+        "m",
+      ),
+    )
+    const deltas = chunks(raw).map((c) => (c.choices as Array<Record<string, unknown>>)[0]?.delta)
+    expect(deltas).toContainEqual(
+      expect.objectContaining({ content: "answer", reasoning_signature: "sig-t" }),
+    )
   })
 
   it("gives each streamed image its own monotonic index", async () => {

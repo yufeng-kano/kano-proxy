@@ -445,6 +445,74 @@ describe("geminiResponseToAnthropic", () => {
     ])
   })
 
+  it("carries a text-part signature on the adjacent thinking block", () => {
+    // The think-then-answer turn with no tool call: Gemini signs the plain
+    // text part, and dropping that signature silently severs the turn's chain
+    // of thought on the client's next replay.
+    const out = geminiResponseToAnthropic(
+      {
+        response: {
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "reasoning", thought: true },
+                  { text: "answer", thoughtSignature: "sig-t" },
+                ],
+              },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+    )
+    expect(out.content).toEqual([
+      { type: "thinking", thinking: "reasoning", signature: "sig-t" },
+      { type: "text", text: "answer" },
+    ])
+  })
+
+  it("opens a signature-only thinking block for a signed text part with no thoughts", () => {
+    const out = geminiResponseToAnthropic(
+      {
+        response: {
+          candidates: [
+            {
+              content: { parts: [{ text: "answer", thoughtSignature: "sig-t" }] },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+    )
+    expect(out.content).toEqual([
+      { type: "thinking", thinking: "", signature: "sig-t" },
+      { type: "text", text: "answer" },
+    ])
+  })
+
+  it("drops a text-part signature when the caller disabled thinking", () => {
+    // Same convention as a functionCall signature: with thinking off there is
+    // no thinking block to carry it, and one must not be invented.
+    const out = geminiResponseToAnthropic(
+      {
+        response: {
+          candidates: [
+            {
+              content: { parts: [{ text: "answer", thoughtSignature: "sig-t" }] },
+              finishReason: "STOP",
+            },
+          ],
+        },
+      },
+      "m",
+      { thinkingMode: "disabled" },
+    )
+    expect(out.content).toEqual([{ type: "text", text: "answer" }])
+  })
+
   it("maps a SAFETY finish to a refusal, not a successful end_turn", () => {
     const out = geminiResponseToAnthropic(
       { response: { candidates: [{ content: { parts: [] }, finishReason: "SAFETY" }] } },
@@ -683,6 +751,42 @@ describe("geminiSseToAnthropicStream", () => {
         (e.data.delta as Record<string, unknown>).type === "signature_delta",
     )!
     expect((signature.data.delta as Record<string, unknown>).signature).toBe("sig-3")
+  })
+
+  it("closes the thinking block with a text-part signature before the text opens", async () => {
+    const raw = await readSse(
+      geminiSseToAnthropicStream(
+        sse(
+          {
+            response: {
+              candidates: [{ content: { parts: [{ text: "reasoning", thought: true }] } }],
+              usageMetadata: { promptTokenCount: 4 },
+            },
+          },
+          {
+            response: {
+              candidates: [{ content: { parts: [{ text: "answer", thoughtSignature: "sig-t" }] } }],
+            },
+          },
+          { response: { candidates: [{ finishReason: "STOP" }] } },
+        ),
+        "m",
+      ),
+    )
+    const seq = events(raw)
+    const signatureAt = seq.findIndex(
+      (e) =>
+        e.event === "content_block_delta" &&
+        (e.data.delta as Record<string, unknown>).type === "signature_delta",
+    )
+    expect(signatureAt).toBeGreaterThan(-1)
+    expect((seq[signatureAt].data.delta as Record<string, unknown>).signature).toBe("sig-t")
+    const textStartAt = seq.findIndex(
+      (e) =>
+        e.event === "content_block_start" &&
+        (e.data.content_block as Record<string, unknown>).type === "text",
+    )
+    expect(signatureAt).toBeLessThan(textStartAt)
   })
 
   it("finishes a candidate-less safety block as a refusal", async () => {

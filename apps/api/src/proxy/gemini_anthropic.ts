@@ -442,6 +442,11 @@ export function geminiResponseToAnthropic(
       continue
     }
     if (typeof part.text !== "string" || !part.text) continue
+    // Gemini signs plain text parts too (think-then-answer, no tool call).
+    // The capture must precede the flush or the signature never reaches a
+    // block: it rides the adjacent thinking block, a signature-only one when
+    // nothing was accumulated, exactly like a functionCall signature.
+    if (emitThinking && part.thoughtSignature) thinkingSignature = part.thoughtSignature
     flushThinking()
     text += part.text
   }
@@ -718,6 +723,13 @@ export function geminiSseToAnthropicStream(
               continue
             }
             if (typeof part.text !== "string" || !part.text) continue
+            // A signature on a plain text part rides on the adjacent thinking
+            // block (opened empty when nothing was streaming), whose closing
+            // signature_delta goes out right before the text block opens.
+            if (emitThinking && part.thoughtSignature) {
+              openBlock("thinking", { type: "thinking", thinking: "" })
+              pendingSignature = part.thoughtSignature
+            }
             openBlock("text", { type: "text", text: "" })
             emit("content_block_delta", {
               type: "content_block_delta",
