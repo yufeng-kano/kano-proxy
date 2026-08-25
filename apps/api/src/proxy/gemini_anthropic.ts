@@ -271,19 +271,21 @@ export function anthropicToGeminiRequest(
       if (part.functionCall?.name) {
         // Gemini requires a function-call signature to remain on the
         // functionCall part. Anthropic has no corresponding field on tool_use,
-        // so the response places it in an immediately preceding, signature-only
-        // thinking block. Move it back and discard that transport-only block;
-        // replaying it plus an unsigned functionCall makes Google reject the
-        // turn as missing thought_signature in the functionCall part.
+        // so the response emits it on the adjacent thinking block — the textual
+        // one when thinking text was streaming, a signature-only one otherwise.
+        // Move it back: a signature-only block is pure transport and is
+        // dropped, a textual one stays as an unsigned thought part. Replaying
+        // an unsigned functionCall makes Google reject the turn as missing
+        // thought_signature in the functionCall part.
         const preceding = rawParts[index - 1]
-        if (
-          !part.thoughtSignature &&
-          preceding?.thought &&
-          preceding.text === "" &&
-          preceding.thoughtSignature
-        ) {
+        if (!part.thoughtSignature && preceding?.thought && preceding.thoughtSignature) {
           part.thoughtSignature = preceding.thoughtSignature
-          if (parts.at(-1) === preceding) parts.pop()
+          // `preceding` is the same object already pushed into `parts`.
+          if (preceding.text === "") {
+            if (parts.at(-1) === preceding) parts.pop()
+          } else {
+            delete preceding.thoughtSignature
+          }
         }
         if (part.functionCall.id) callNames.set(part.functionCall.id, part.functionCall.name)
       }

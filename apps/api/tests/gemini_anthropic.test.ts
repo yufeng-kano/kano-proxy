@@ -196,7 +196,7 @@ describe("anthropicToGeminiRequest", () => {
     ])
   })
 
-  it("does not move a textual thinking signature to a following tool call", () => {
+  it("moves a textual thinking signature to a following tool call", () => {
     const out = anthropicToGeminiRequest({
       messages: [
         {
@@ -209,8 +209,48 @@ describe("anthropicToGeminiRequest", () => {
       ],
     })
     expect(out.request.contents[0]!.parts).toEqual([
-      { text: "reasoning", thought: true, thoughtSignature: "sig-thought" },
-      { functionCall: { id: "toolu_1", name: "search", args: {} } },
+      { text: "reasoning", thought: true },
+      {
+        functionCall: { id: "toolu_1", name: "search", args: {} },
+        thoughtSignature: "sig-thought",
+      },
+    ])
+  })
+
+  it("signs parallel tool calls after streamed thinking", () => {
+    // The shape a real Claude Code turn replays: the first call's signature
+    // rides the textual thinking block, later calls get a signature-only one.
+    const out = anthropicToGeminiRequest({
+      messages: [
+        { role: "user", content: "run both" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "reasoning", signature: "sig-1" },
+            { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls" } },
+            { type: "thinking", thinking: "", signature: "sig-2" },
+            { type: "tool_use", id: "toolu_2", name: "Bash", input: { command: "pwd" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_1", content: "a" },
+            { type: "tool_result", tool_use_id: "toolu_2", content: "b" },
+          ],
+        },
+      ],
+    })
+    expect(out.request.contents[1]!.parts).toEqual([
+      { text: "reasoning", thought: true },
+      {
+        functionCall: { id: "toolu_1", name: "Bash", args: { command: "ls" } },
+        thoughtSignature: "sig-1",
+      },
+      {
+        functionCall: { id: "toolu_2", name: "Bash", args: { command: "pwd" } },
+        thoughtSignature: "sig-2",
+      },
     ])
   })
 
