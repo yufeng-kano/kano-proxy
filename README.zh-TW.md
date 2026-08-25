@@ -29,7 +29,7 @@
 
 ## 核心特色
 
-- **雙協議完整支援** — 不論是 Claude、GPT、Grok 還是 Gemini，皆可同時透過 `/openai/v1` 或 `/anthropic` 協議呼叫。
+- **在任意 Coding Agent 自由混用模型** — 打破工具與供應商綁定！直接在 **Claude Code 裡跑 GPT 與 Gemini**，或在 **Cursor 與 Cline 裡跑 Claude Opus 與 Grok**。雙向協議即時轉譯，完整支援 Tool Calling。
 - **多帳號池與自動切換** — 每個模型供應商可綁定多個帳號。遇到 Rate Limit (429/403) 時，系統自動移轉至下一個可用帳號。
 - **模型群組與自訂端點** — 支援自訂模型別名（如 `fast-code` 跨模型容錯備援）及串接任何相容 OpenAI / Anthropic 的第三方 API。
 - **視覺化用量儀表板** — 乾淨優雅的 Web 介面，即時掌握各帳號 5 小時及每週剩餘額度百分比。
@@ -55,10 +55,10 @@
 
 ### 1. 介面端點（Base URL）
 
-| 協議格式 | 端點 URL |
-|---|---|
-| **OpenAI 相容** | `https://<your-domain>/openai/v1` |
-| **Anthropic Messages** | `https://<your-domain>/anthropic` |
+| 協議格式 | 端點 URL | 適用客戶端工具 |
+|---|---|---|
+| **OpenAI 相容** | `https://<your-domain>/openai/v1` | Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
+| **Anthropic Messages** | `https://<your-domain>/anthropic` | Claude Code CLI, Anthropic SDK, Claude 格式工具 |
 
 ### 2. 身份驗證
 
@@ -77,7 +77,27 @@ Authorization: Bearer sk-kano-proxy-...
 - `antigravity/gemini-3-flash`
 - `<custom-slug>/<model-name>`
 
-### 4. 呼叫範例（OpenAI Chat Completions）
+---
+
+## 實用混用範例
+
+### 在 Claude Code 裡直接執行 GPT 與 Gemini
+
+將 Claude Code CLI 指向 Kano Proxy 的 `/anthropic` 端點，即可使用 GPT 或 Gemini 模型，且原生支援工具呼叫：
+
+```bash
+export ANTHROPIC_BASE_URL="https://<your-domain>/anthropic"
+export ANTHROPIC_API_KEY="sk-kano-proxy-..."
+
+# 在 Claude Code 內使用 GPT 或 Gemini
+claude --model codex/gpt-5.4
+# 或
+claude --model antigravity/gemini-3-flash
+```
+
+### 在 Cursor / OpenAI SDK 使用 Claude
+
+將任何支援 OpenAI 格式的工具指向 `/openai/v1`：
 
 ```bash
 curl https://<your-domain>/openai/v1/chat/completions \

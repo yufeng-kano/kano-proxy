@@ -29,8 +29,8 @@ Your upstream OAuth credentials never leave the server; clients only use isolate
 
 ## Key Features
 
-- **Unified API Surfaces** — Access Claude, GPT, Grok, and Gemini via either `/openai/v1` or `/anthropic` endpoints.
-- **Multi-Account Pooling & Failover** — Pool multiple accounts per provider. Hit a rate limit (429/403)? Kano automatically fails over to the next available  account.
+- **Mix & Match Any Model in Any Agent** — Run **GPT & Gemini inside Claude Code**, or run **Claude & Grok inside Cursor and Cline**. Full bidirectional protocol translation means your tools are no longer locked to a single model provider.
+- **Multi-Account Pooling & Failover** — Pool multiple accounts per provider. Hit a rate limit (429/403)? Kano automatically fails over to the next available account.
 - **Model Groups & Custom Providers** — Create virtual model aliases (e.g. `fast-code` → fallback across providers) or bring your own custom OpenAI/Anthropic-compatible endpoints.
 - **Visual Usage Dashboard** — Track real-time 5h and weekly quota usage per account in a clean Web UI.
 - **Privacy by Default** — Prompts and completions are never logged or stored.
@@ -55,10 +55,10 @@ Your upstream OAuth credentials never leave the server; clients only use isolate
 
 ### 1. Endpoint URLs
 
-| Protocol | Base URL |
-|---|---|
-| **OpenAI-compatible** | `https://<your-domain>/openai/v1` |
-| **Anthropic Messages** | `https://<your-domain>/anthropic` |
+| Protocol | Base URL | Supported Clients |
+|---|---|---|
+| **OpenAI-compatible** | `https://<your-domain>/openai/v1` | Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
+| **Anthropic Messages** | `https://<your-domain>/anthropic` | Claude Code CLI, Anthropic SDK, Claude-shaped tools |
 
 ### 2. Authentication
 
@@ -77,7 +77,27 @@ Use standard `provider/model` naming on **both** endpoints:
 - `antigravity/gemini-3-flash`
 - `<custom-slug>/<model-name>`
 
-### 4. Example: OpenAI Chat Completions
+---
+
+## Integration Examples
+
+### Run GPT & Gemini directly in Claude Code
+
+Point the Claude Code CLI at Kano Proxy to use OpenAI or Gemini models with native tool calling:
+
+```bash
+export ANTHROPIC_BASE_URL="https://<your-domain>/anthropic"
+export ANTHROPIC_API_KEY="sk-kano-proxy-..."
+
+# Run Claude Code powered by GPT or Gemini
+claude --model codex/gpt-5.4
+# or
+claude --model antigravity/gemini-3-flash
+```
+
+### Run Claude in Cursor / OpenAI SDK
+
+Point any OpenAI-compatible client at `/openai/v1`:
 
 ```bash
 curl https://<your-domain>/openai/v1/chat/completions \
