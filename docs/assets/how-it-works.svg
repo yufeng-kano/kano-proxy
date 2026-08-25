@@ -1,0 +1,198 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 400" width="100%" height="100%">
+  <defs>
+    <!-- Background Gradients -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B0F19" />
+      <stop offset="50%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#0B0F19" />
+    </linearGradient>
+
+    <!-- Kano Edge Gradient -->
+    <linearGradient id="kanoBorder" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F38020" />
+      <stop offset="50%" stop-color="#8B5CF6" />
+      <stop offset="100%" stop-color="#3B82F6" />
+    </linearGradient>
+
+    <linearGradient id="cardBg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1F2937" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#111827" stop-opacity="0.9" />
+    </linearGradient>
+
+    <linearGradient id="streamGrad" x1="100%" y1="0%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#10B981" />
+      <stop offset="100%" stop-color="#06B6D4" />
+    </linearGradient>
+
+    <!-- Shadows & Filters -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000000" flood-opacity="0.4" />
+    </filter>
+
+    <!-- Markers -->
+    <marker id="arrowRight" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#8B5CF6" />
+    </marker>
+    <marker id="arrowStream" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#10B981" />
+    </marker>
+  </defs>
+
+  <style>
+    .title-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 15px; font-weight: 700; fill: #F3F4F6; }
+    .sub-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #9CA3AF; }
+    .code-text { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; fill: #E5E7EB; }
+    .tag-text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 600; }
+  </style>
+
+  <!-- Canvas Outer Background -->
+  <rect width="960" height="400" rx="16" fill="url(#bgGrad)" stroke="#1F2937" stroke-width="1.5" />
+
+  <!-- Subtle Grid Dots Pattern -->
+  <g opacity="0.15">
+    <circle cx="100" cy="50" r="1.5" fill="#9CA3AF" /><circle cx="200" cy="50" r="1.5" fill="#9CA3AF" /><circle cx="300" cy="50" r="1.5" fill="#9CA3AF" />
+    <circle cx="400" cy="50" r="1.5" fill="#9CA3AF" /><circle cx="500" cy="50" r="1.5" fill="#9CA3AF" /><circle cx="600" cy="50" r="1.5" fill="#9CA3AF" />
+    <circle cx="700" cy="50" r="1.5" fill="#9CA3AF" /><circle cx="800" cy="50" r="1.5" fill="#9CA3AF" />
+    <circle cx="100" cy="350" r="1.5" fill="#9CA3AF" /><circle cx="200" cy="350" r="1.5" fill="#9CA3AF" /><circle cx="300" cy="350" r="1.5" fill="#9CA3AF" />
+    <circle cx="400" cy="350" r="1.5" fill="#9CA3AF" /><circle cx="500" cy="350" r="1.5" fill="#9CA3AF" /><circle cx="600" cy="350" r="1.5" fill="#9CA3AF" />
+    <circle cx="700" cy="350" r="1.5" fill="#9CA3AF" /><circle cx="800" cy="350" r="1.5" fill="#9CA3AF" />
+  </g>
+
+  <!-- ==================== LEFT: CLIENTS ==================== -->
+  <g transform="translate(40, 55)" filter="url(#shadow)">
+    <!-- Box Container -->
+    <rect width="220" height="290" rx="12" fill="url(#cardBg)" stroke="#374151" stroke-width="1.5" />
+    
+    <!-- Header Badge -->
+    <rect x="16" y="16" width="188" height="28" rx="6" fill="#374151" />
+    <text x="110" y="35" text-anchor="middle" class="title-text">Clients &amp; Coding Agents</text>
+
+    <!-- Client Items -->
+    <g transform="translate(16, 56)">
+      <!-- Item 1 -->
+      <rect width="188" height="38" rx="6" fill="#111827" stroke="#374151" stroke-width="1" />
+      <circle cx="20" cy="19" r="6" fill="#38BDF8" />
+      <text x="36" y="23" class="code-text" font-weight="600">Cursor / Claude Code</text>
+      
+      <!-- Item 2 -->
+      <rect y="46" width="188" height="38" rx="6" fill="#111827" stroke="#374151" stroke-width="1" />
+      <circle cx="20" cy="65" r="6" fill="#A855F7" />
+      <text x="36" y="69" class="code-text" font-weight="600">Cline / Roo / Aider</text>
+
+      <!-- Item 3 -->
+      <rect y="92" width="188" height="38" rx="6" fill="#111827" stroke="#374151" stroke-width="1" />
+      <circle cx="20" cy="111" r="6" fill="#10B981" />
+      <text x="36" y="115" class="code-text" font-weight="600">OpenAI / Anthropic SDK</text>
+
+      <!-- Protocol tags -->
+      <g transform="translate(0, 142)">
+        <rect width="188" height="74" rx="6" fill="#0B0F19" stroke="#1F2937" stroke-width="1" />
+        <text x="12" y="24" class="tag-text" fill="#9CA3AF">TARGET SURFACES</text>
+        <text x="12" y="44" class="code-text" fill="#F43F5E">/openai/v1</text>
+        <text x="96" y="44" class="code-text" fill="#8B5CF6">/anthropic</text>
+        <text x="12" y="62" class="sub-text" fill="#6B7280">sk-kano-proxy-...</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== CENTER: KANO PROXY ==================== -->
+  <g transform="translate(340, 35)" filter="url(#shadow)">
+    <!-- Glow Background -->
+    <rect width="280" height="330" rx="16" fill="#111827" stroke="url(#kanoBorder)" stroke-width="2" />
+    
+    <!-- Header -->
+    <rect x="20" y="16" width="240" height="32" rx="8" fill="#1E1B4B" stroke="#4338CA" stroke-width="1" />
+    <circle cx="36" cy="32" r="5" fill="#F38020" />
+    <text x="140" y="37" text-anchor="middle" class="title-text" fill="#C7D2FE">Kano Proxy (Cloudflare)</text>
+
+    <!-- Pipeline Stages inside Proxy -->
+    <g transform="translate(20, 60)">
+      <!-- Stage 1 -->
+      <rect width="240" height="42" rx="8" fill="#1F2937" stroke="#374151" stroke-width="1" />
+      <text x="16" y="22" class="title-text" font-size="12" fill="#E0E7FF">1. Multi-Tenant Auth</text>
+      <text x="16" y="35" class="sub-text">API Key isolation · Zero prompt logging</text>
+      
+      <!-- Stage 2 -->
+      <rect y="50" width="240" height="42" rx="8" fill="#1F2937" stroke="#374151" stroke-width="1" />
+      <text x="16" y="72" class="title-text" font-size="12" fill="#E0E7FF">2. Dual Protocol Adapter</text>
+      <text x="16" y="85" class="sub-text">OpenAI &lt;—&gt; Anthropic wire translation</text>
+
+      <!-- Stage 3 -->
+      <rect y="100" width="240" height="48" rx="8" fill="#1F2937" stroke="#374151" stroke-width="1" />
+      <text x="16" y="122" class="title-text" font-size="12" fill="#F59E0B">3. Multi-Account Failover</text>
+      <text x="16" y="138" class="sub-text">Auto-acquire · 429 bench · Model groups</text>
+
+      <!-- Stage 4 -->
+      <rect y="156" width="240" height="42" rx="8" fill="#1F2937" stroke="#374151" stroke-width="1" />
+      <text x="16" y="178" class="title-text" font-size="12" fill="#10B981">4. Eager SSE Streaming</text>
+      <text x="16" y="191" class="sub-text">Zero-buffering chunk relay &amp; keepalive</text>
+
+      <!-- Dashboard Footer Tag -->
+      <g transform="translate(0, 208)">
+        <rect width="240" height="40" rx="6" fill="#0B0F19" stroke="#1F2937" />
+        <text x="120" y="24" text-anchor="middle" class="sub-text" fill="#9CA3AF">Web UI: 5h / Weekly Quota Tracker</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== RIGHT: UPSTREAM ACCOUNTS ==================== -->
+  <g transform="translate(700, 55)" filter="url(#shadow)">
+    <!-- Box Container -->
+    <rect width="220" height="290" rx="12" fill="url(#cardBg)" stroke="#374151" stroke-width="1.5" />
+    
+    <!-- Header Badge -->
+    <rect x="16" y="16" width="188" height="28" rx="6" fill="#374151" />
+    <text x="110" y="35" text-anchor="middle" class="title-text">Upstream Subscriptions</text>
+
+    <!-- Upstream Items -->
+    <g transform="translate(16, 56)">
+      <!-- Claude -->
+      <rect width="188" height="34" rx="6" fill="#111827" stroke="#D97706" stroke-width="1" />
+      <rect x="8" y="9" width="16" height="16" rx="4" fill="#D97706" />
+      <text x="32" y="21" class="code-text">Claude Pro / Team</text>
+
+      <!-- Codex -->
+      <rect y="40" width="188" height="34" rx="6" fill="#111827" stroke="#00A67E" stroke-width="1" />
+      <rect x="8" y="49" width="16" height="16" rx="4" fill="#00A67E" />
+      <text x="32" y="62" class="code-text">ChatGPT Codex (Plus)</text>
+
+      <!-- Grok -->
+      <rect y="80" width="188" height="34" rx="6" fill="#111827" stroke="#4B5563" stroke-width="1" />
+      <rect x="8" y="89" width="16" height="16" rx="4" fill="#1F2937" stroke="#9CA3AF" />
+      <text x="32" y="102" class="code-text">xAI SuperGrok</text>
+
+      <!-- Antigravity -->
+      <rect y="120" width="188" height="34" rx="6" fill="#111827" stroke="#3B82F6" stroke-width="1" />
+      <rect x="8" y="129" width="16" height="16" rx="4" fill="#3B82F6" />
+      <text x="32" y="142" class="code-text">Google Gemini (AI Pro)</text>
+
+      <!-- Custom -->
+      <rect y="160" width="188" height="34" rx="6" fill="#111827" stroke="#6366F1" stroke-width="1" />
+      <rect x="8" y="169" width="16" height="16" rx="4" fill="#6366F1" />
+      <text x="32" y="182" class="code-text">Custom Endpoints</text>
+
+      <!-- Vault note -->
+      <g transform="translate(0, 202)">
+        <text x="94" y="14" text-anchor="middle" class="sub-text" fill="#10B981" font-size="10">🔒 OAuth Tokens Never Leave Worker</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- ==================== FLOW ARROWS ==================== -->
+  <!-- Forward Path 1: Client -> Kano -->
+  <path d="M 260 145 L 332 145" fill="none" stroke="#8B5CF6" stroke-width="2" marker-end="url(#arrowRight)" />
+  <text x="296" y="135" text-anchor="middle" class="tag-text" fill="#A78BFA" font-size="10">API Key</text>
+
+  <!-- Forward Path 2: Kano -> Upstream -->
+  <path d="M 620 145 L 692 145" fill="none" stroke="#8B5CF6" stroke-width="2" marker-end="url(#arrowRight)" />
+  <text x="656" y="135" text-anchor="middle" class="tag-text" fill="#A78BFA" font-size="10">OAuth</text>
+
+  <!-- Stream Path: Upstream -> Kano -> Client -->
+  <path d="M 692 255 L 620 255" fill="none" stroke="#10B981" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrowStream)" />
+  <path d="M 332 255 L 260 255" fill="none" stroke="#10B981" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrowStream)" />
+  <text x="480" y="380" text-anchor="middle" class="tag-text" fill="#10B981" font-size="11">⚡ Real-time SSE Stream (No Buffer)</text>
+</svg>
