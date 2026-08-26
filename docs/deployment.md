@@ -102,7 +102,9 @@ Optional overrides:
 CLAUDE_CODE_OAUTH_CLIENT_ID
 CODEX_OAUTH_CLIENT_ID
 GROK_OAUTH_CLIENT_ID
-ANTIGRAVITY_CLIENT_VERSION       # Antigravity Hub version in the upstream User-Agent; default is pinned
+ANTIGRAVITY_CLIENT_VERSION       # Antigravity CLI version in the upstream User-Agent; default is pinned
+ANTIGRAVITY_CLIENT_BUILD         # Antigravity CLI `cl=` build number in that User-Agent; default is pinned
+ANTIGRAVITY_HUB_VERSION          # Hub version used only by the onboardUser control-plane call; default is pinned
 REQUEST_LOG_RETENTION_DAYS   # retention sweep window in days; default 90
 GITHUB_TOKEN                 # optional; raises the /changelog GitHub rate limit (secret)
 ```

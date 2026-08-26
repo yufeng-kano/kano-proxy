@@ -37,13 +37,39 @@ const ONBOARD_USER_PATH = "/v1internal:onboardUser"
 const MODELS_PATH = "/v1internal:fetchAvailableModels"
 
 /**
- * `antigravity/hub/<version> <platform>` — CLIProxyAPI `AntigravityUserAgent()`
- * (misc/antigravity_version.go), which fetches the live version from the Hub
- * updater manifest and falls back to a pinned one. This proxy only pins:
- * an extra network call per request to look up a version string is not worth
- * it, and `ANTIGRAVITY_CLIENT_VERSION` exists for when the pin goes stale.
+ * The data-plane identity is the Antigravity **CLI**, not the Hub/IDE that
+ * CLIProxyAPI's `AntigravityUserAgent()` (misc/antigravity_version.go) builds.
+ * The backend gates its model catalog on this header — measured 2026-08-26
+ * through a logging relay in front of `fetchAvailableModels`, same account,
+ * same token, same body, UA the only variable:
+ *
+ *   CLI form → 28 models, incl. `gemini-3.7-flash-{high,medium,low}`,
+ *              `defaultAgentModelId: "gemini-3.7-flash-high"`
+ *   hub form → 25 models, those three absent (only `-tiered` left),
+ *              `defaultAgentModelId: "gemini-3.6-flash-high"`
+ *
+ * `experimentIds` was byte-identical between the two, so it is UA gating, not
+ * account/experiment gating. Antigravity encodes reasoning effort in the model
+ * id, so under the hub UA the effort-tiered ids are not callable at all — this
+ * divergence from CLIProxyAPI is deliberate, do not "fix" it back.
+ *
+ * Version and build are pinned (an extra network call per request to learn a
+ * version string is not worth it); `ANTIGRAVITY_CLIENT_VERSION` and
+ * `ANTIGRAVITY_CLIENT_BUILD` exist for when the pins go stale.
+ * docs/providers.md § Antigravity.
  */
-const FALLBACK_CLIENT_VERSION = "2.2.1"
+const FALLBACK_CLIENT_VERSION = "1.1.21"
+const FALLBACK_CLIENT_BUILD = "970856724"
+const CLIENT_OS_TYPE = "darwin"
+const CLIENT_ARCH = "arm64"
+const CLIENT_AUTH_METHOD = "consumer"
+
+/**
+ * `onboardUser` keeps the Hub identity: that control-plane call is verified
+ * working in this exact shape and the catalog experiment above says nothing
+ * about it. Pinned separately via `ANTIGRAVITY_HUB_VERSION`.
+ */
+const FALLBACK_HUB_VERSION = "2.2.1"
 const CLIENT_PLATFORM = "darwin/arm64"
 /** The long control-plane UA `onboardUser` expects. */
 const NODE_API_CLIENT_UA = "google-api-nodejs-client/10.3.0"
@@ -56,17 +82,30 @@ function clientVersion(env: Env): string {
   return env.ANTIGRAVITY_CLIENT_VERSION || FALLBACK_CLIENT_VERSION
 }
 
-function userAgent(env: Env): string {
-  return `antigravity/hub/${clientVersion(env)} ${CLIENT_PLATFORM}`
+function hubVersion(env: Env): string {
+  return env.ANTIGRAVITY_HUB_VERSION || FALLBACK_HUB_VERSION
 }
 
+/** CLI identity — every data-plane call. Unlocks the effort-tiered model ids. */
+function cliUserAgent(env: Env): string {
+  const build = env.ANTIGRAVITY_CLIENT_BUILD || FALLBACK_CLIENT_BUILD
+  return (
+    `antigravity/cli/${clientVersion(env)} (aidev_client; os_type=${CLIENT_OS_TYPE}; ` +
+    `arch=${CLIENT_ARCH}; cl=${build}; auth_method=${CLIENT_AUTH_METHOD})`
+  )
+}
+
+/** Hub identity — `onboardUser` only, which also appends the node client UA. */
+function hubUserAgent(env: Env): string {
+  return `antigravity/hub/${hubVersion(env)} ${CLIENT_PLATFORM}`
+}
 
 function apiHeaders(env: Env, accessToken: string, accept: string): Record<string, string> {
   return {
     authorization: `Bearer ${accessToken}`,
     "content-type": "application/json",
     accept,
-    "user-agent": userAgent(env),
+    "user-agent": cliUserAgent(env),
   }
 }
 
@@ -342,12 +381,12 @@ export async function onboardUser(
   accessToken: string,
   tierId: string,
 ): Promise<string> {
-  const ua = `${userAgent(env)} ${NODE_API_CLIENT_UA}`
+  const ua = `${hubUserAgent(env)} ${NODE_API_CLIENT_UA}`
   const body = JSON.stringify({
     tier_id: tierId,
     metadata: {
       ide_type: "ANTIGRAVITY",
-      ide_version: clientVersion(env),
+      ide_version: hubVersion(env),
       ide_name: "antigravity",
     },
   })

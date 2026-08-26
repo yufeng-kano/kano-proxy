@@ -14,8 +14,12 @@ export type Env = {
   /** Antigravity is a confidential Google OAuth client: both id and secret are needed (docs/auth.md § Antigravity). */
   ANTIGRAVITY_OAUTH_CLIENT_ID?: string
   ANTIGRAVITY_OAUTH_CLIENT_SECRET?: string
-  /** Antigravity Hub version inside the upstream `User-Agent`; unset uses the pinned fallback. */
+  /** Antigravity CLI version inside the upstream `User-Agent`; unset uses the pinned fallback. */
   ANTIGRAVITY_CLIENT_VERSION?: string
+  /** Antigravity CLI `cl=` build number in that `User-Agent`; unset uses the pinned fallback. */
+  ANTIGRAVITY_CLIENT_BUILD?: string
+  /** Hub version used only by the `onboardUser` control-plane call; unset uses the pinned fallback. */
+  ANTIGRAVITY_HUB_VERSION?: string
   /** Codex egress relay (docs/codex-relay.md) — both required to enable; either missing means direct to chatgpt.com. */
   CODEX_RELAY_URL?: string
   CODEX_RELAY_SA_KEY?: string

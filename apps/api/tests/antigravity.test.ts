@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest"
-import { antigravityAdapter, buildAntigravityEnvelope } from "../src/providers/antigravity"
+import {
+  antigravityAdapter,
+  buildAntigravityEnvelope,
+  onboardUser,
+} from "../src/providers/antigravity"
 import { ANTIGRAVITY_QUOTA_BENCH_MS } from "../src/providers/antigravity_limits"
 import type { ChatCompletionRequest } from "../src/providers/types"
 import type { AcquiredAccount } from "../src/pool/acquire"
@@ -9,6 +13,9 @@ import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
 const DAILY = "https://daily-cloudcode-pa.googleapis.com"
 const PROD = "https://cloudcode-pa.googleapis.com"
+/** The pinned CLI identity every data-plane call must send. */
+const CLI_UA =
+  "antigravity/cli/1.1.21 (aidev_client; os_type=darwin; arch=arm64; cl=970856724; auth_method=consumer)"
 
 function buildEnv(): Env {
   return {
@@ -271,7 +278,9 @@ describe("antigravityAdapter.chatCompletions", () => {
     expect(calls[0]!.url).toBe(`${DAILY}/v1internal:generateContent`)
     const headers = calls[0]!.init.headers as Record<string, string>
     expect(headers.authorization).toBe("Bearer at-1")
-    expect(headers["user-agent"]).toMatch(/^antigravity\/hub\/\d+\.\d+\.\d+ darwin\/arm64$/)
+    // The CLI identity, not the Hub one: the backend gates the effort-tiered
+    // model ids on it (docs/providers.md § Antigravity).
+    expect(headers["user-agent"]).toBe(CLI_UA)
     const body = JSON.parse(calls[0]!.init.body as string) as Record<string, unknown>
     expect(body.model).toBe("gemini-3-flash")
     expect(body.project).toBe("proj-42")
@@ -281,13 +290,14 @@ describe("antigravityAdapter.chatCompletions", () => {
     expect(json.model).toBe("antigravity/gemini-3-flash")
   })
 
-  it("honours an ANTIGRAVITY_CLIENT_VERSION override in the User-Agent", async () => {
+  it("honours the ANTIGRAVITY_CLIENT_VERSION / _BUILD overrides in the User-Agent", async () => {
     const calls = stubFetch(() => okGenerate())
     const env = buildEnv()
     env.ANTIGRAVITY_CLIENT_VERSION = "9.9.9"
+    env.ANTIGRAVITY_CLIENT_BUILD = "123456789"
     await antigravityAdapter.chatCompletions(env, account(), chatRequest())
     expect((calls[0]!.init.headers as Record<string, string>)["user-agent"]).toBe(
-      "antigravity/hub/9.9.9 darwin/arm64",
+      "antigravity/cli/9.9.9 (aidev_client; os_type=darwin; arch=arm64; cl=123456789; auth_method=consumer)",
     )
   })
 
@@ -908,5 +918,67 @@ describe("antigravityAdapter.fetchUsage", () => {
     const usage = await antigravityAdapter.fetchUsage!(buildEnv(), account())
     expect(usage.stale).toBe(true)
     expect(usage.error).toMatch(/loadCodeAssist 503/)
+  })
+})
+
+describe("Antigravity client identity", () => {
+  it("sends the CLI User-Agent on the Anthropic surface too", async () => {
+    const calls = stubFetch(() => okGenerate("hi there"))
+    await antigravityAdapter.messages!(
+      buildEnv(),
+      account(),
+      { model: "gemini-3-flash", messages: [{ role: "user", content: "hi" }], max_tokens: 64 },
+      new Headers({ "x-kano-raw-model": "antigravity/gemini-3-flash" }),
+    )
+    expect((calls[0]!.init.headers as Record<string, string>)["user-agent"]).toBe(CLI_UA)
+  })
+
+  it("sends the CLI User-Agent on fetchAvailableModels — it is what unlocks the tiered ids", async () => {
+    const calls = stubFetch(() => new Response(JSON.stringify({ models: {} }), { status: 200 }))
+    await antigravityAdapter.listModels!(buildEnv(), account())
+    expect(calls[0]!.url).toBe(`${DAILY}/v1internal:fetchAvailableModels`)
+    expect((calls[0]!.init.headers as Record<string, string>)["user-agent"]).toBe(CLI_UA)
+  })
+
+  it("keeps the Hub User-Agent on the onboardUser control-plane call", async () => {
+    const calls = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({ done: true, response: { cloudaicompanionProject: "proj-42" } }),
+          { status: 200 },
+        ),
+    )
+    const project = await onboardUser(buildEnv(), "at-1", "free-tier")
+    expect(project).toBe("proj-42")
+
+    const headers = calls[0]!.init.headers as Record<string, string>
+    expect(headers["user-agent"]).toBe(
+      "antigravity/hub/2.2.1 darwin/arm64 google-api-nodejs-client/10.3.0",
+    )
+    expect(headers["x-goog-api-client"]).toBe("gl-node/22.21.1")
+    // The metadata version tracks the hub pin, not the CLI one.
+    expect(JSON.parse(calls[0]!.init.body as string)).toMatchObject({
+      metadata: { ide_version: "2.2.1" },
+    })
+  })
+
+  it("honours ANTIGRAVITY_HUB_VERSION on onboardUser without touching the CLI UA", async () => {
+    const calls = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({ done: true, response: { cloudaicompanionProject: "proj-42" } }),
+          { status: 200 },
+        ),
+    )
+    const env = buildEnv()
+    env.ANTIGRAVITY_HUB_VERSION = "3.0.0"
+    await onboardUser(env, "at-1", "free-tier")
+    expect((calls[0]!.init.headers as Record<string, string>)["user-agent"]).toBe(
+      "antigravity/hub/3.0.0 darwin/arm64 google-api-nodejs-client/10.3.0",
+    )
+
+    const generate = stubFetch(() => okGenerate())
+    await antigravityAdapter.chatCompletions(env, account(), chatRequest())
+    expect((generate[0]!.init.headers as Record<string, string>)["user-agent"]).toBe(CLI_UA)
   })
 })

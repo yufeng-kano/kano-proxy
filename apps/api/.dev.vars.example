@@ -9,3 +9,7 @@ TOKEN_ENCRYPTION_KEY=<32-byte-base64-key>
 # Optional codex egress relay (docs/codex-relay.md) — both required to enable:
 # CODEX_RELAY_URL=
 # CODEX_RELAY_SA_KEY=
+# Optional Antigravity client identity pins (docs/providers.md § Antigravity):
+# ANTIGRAVITY_CLIENT_VERSION=<antigravity-cli-version>
+# ANTIGRAVITY_CLIENT_BUILD=<antigravity-cli-build-number>
+# ANTIGRAVITY_HUB_VERSION=<antigravity-hub-version>

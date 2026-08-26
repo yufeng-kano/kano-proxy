@@ -35,6 +35,10 @@ GITHUB_REPO = "yufeng-kano/kano-proxy"
 # wrangler.production.toml [vars] (or .dev.vars locally) and pair it with the
 # CODEX_RELAY_SA_KEY secret. Both unset = relay off (codex 403s direct).
 
+# Optional Antigravity client identity pins (docs/providers.md § Antigravity):
+# ANTIGRAVITY_CLIENT_VERSION (CLI version), ANTIGRAVITY_CLIENT_BUILD (cl= build),
+# ANTIGRAVITY_HUB_VERSION (onboardUser only). Unset = the pinned defaults in code.
+
 # Secrets via .dev.vars / wrangler secret (never commit):
 # GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, SESSION_SECRET, TOKEN_ENCRYPTION_KEY
 # GITHUB_TOKEN (optional — raises the GitHub rate limit from 60/hr to 5000/hr)
