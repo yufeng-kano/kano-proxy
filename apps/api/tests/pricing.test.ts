@@ -72,6 +72,15 @@ const LITELLM_JSON = {
     input_cost_per_token: 0.00000125,
     output_cost_per_token: 0.00001,
   },
+  "gemini-3.7-flash": {
+    input_cost_per_token: 0.00000075,
+    output_cost_per_token: 0.00000375,
+    cache_read_input_token_cost: 0.000000075,
+  },
+  "gemini-3-flash-preview": {
+    input_cost_per_token: 0.0000005,
+    output_cost_per_token: 0.0000025,
+  },
   "no-rates-model": { litellm_provider: "openai", mode: "chat" },
 }
 
@@ -193,6 +202,30 @@ describe("resolveModelPrice", () => {
   it("progressively strips the upstream id's own path segments", () => {
     // A custom endpoint that namespaces its models: upstream id "openai/gpt-4o-mini".
     expect(resolveModelPrice(table, "byok/openai/gpt-4o-mini")).toBeTruthy()
+  })
+
+  it("resolves effort-tiered and thinking variants to the base model rate", () => {
+    const expected = {
+      input: 0.00000075,
+      output: 0.00000375,
+      cacheRead: 0.000000075,
+      cacheCreation: null,
+    }
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-high")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-medium")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-low")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-thinking")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-tiered")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-high[1M]")).toEqual(expected)
+  })
+
+  it("resolves preview suffix variants when the table has the preview form", () => {
+    expect(resolveModelPrice(table, "antigravity/gemini-3-flash")).toEqual({
+      input: 0.0000005,
+      output: 0.0000025,
+      cacheRead: null,
+      cacheCreation: null,
+    })
   })
 
   it("returns null on no match — never a guessed rate", () => {

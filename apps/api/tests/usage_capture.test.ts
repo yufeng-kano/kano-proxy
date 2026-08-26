@@ -7,14 +7,14 @@ import {
 } from "../src/logging/usage_capture"
 
 describe("fromOpenAIUsage — completion_tokens_details.reasoning_tokens", () => {
-  it("adds reasoning_tokens into completionTokens when both are present", () => {
+  it("keeps completion_tokens as-is without double-adding reasoning_tokens", () => {
     expect(
       fromOpenAIUsage({
         prompt_tokens: 100,
         completion_tokens: 40,
         completion_tokens_details: { reasoning_tokens: 15 },
       }),
-    ).toMatchObject({ promptTokens: 100, completionTokens: 55 })
+    ).toMatchObject({ promptTokens: 100, completionTokens: 40 })
   })
 
   it("leaves completionTokens unchanged when reasoning_tokens is absent", () => {

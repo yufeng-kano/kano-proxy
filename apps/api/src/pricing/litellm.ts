@@ -243,24 +243,60 @@ export function resolveModelPrice(table: PriceTable, rawModel: string): ModelPri
     return hit?.source === "openrouter" ? hit : null
   }
 
-  const candidates: string[] = [upstream]
+  const baseCandidates: string[] = [upstream]
   let rest = upstream
   for (let i = rest.indexOf("/"); i !== -1; i = rest.indexOf("/")) {
     rest = rest.slice(i + 1)
-    if (rest) candidates.push(rest)
+    if (rest) baseCandidates.push(rest)
   }
 
-  for (const c of candidates) {
+  const PREFIXES = ["anthropic", "openai", "xai", "gemini", "vertex_ai", "openrouter"]
+
+  const lookup = (c: string): ModelPrice | null => {
     const hit = table[c]
     if (hit?.source !== "openrouter" && hit) return hit
-  }
-  const PREFIXES = ["anthropic", "openai", "xai", "gemini", "vertex_ai", "openrouter"]
-  for (const c of candidates) {
     for (const p of PREFIXES) {
-      const hit = table[`${p}/${c}`]
-      if (hit?.source !== "openrouter" && hit) return hit
+      const prefixed = table[`${p}/${c}`]
+      if (prefixed?.source !== "openrouter" && prefixed) return prefixed
+    }
+    return null
+  }
+
+  // 1. Exact candidate matches first
+  for (const c of baseCandidates) {
+    const hit = lookup(c)
+    if (hit) return hit
+  }
+
+  // 2. Effort / thinking tier suffix fallback (-high, -medium, -low, -thinking, -tiered, etc.)
+  for (const c of baseCandidates) {
+    const stripped = c
+      .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
+      .replace(/-(?:thinking|thought)$/, "")
+    if (stripped !== c) {
+      const hit = lookup(stripped)
+      if (hit) return hit
     }
   }
+
+  // 3. Preview suffix additions / removals
+  for (const c of baseCandidates) {
+    const stripped = c
+      .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
+      .replace(/-(?:thinking|thought)$/, "")
+    const previewVariants: string[] = []
+    if (!c.endsWith("-preview")) {
+      previewVariants.push(`${c}-preview`)
+      if (stripped !== c) previewVariants.push(`${stripped}-preview`)
+    } else {
+      previewVariants.push(c.slice(0, -"-preview".length))
+    }
+    for (const pv of previewVariants) {
+      const hit = lookup(pv)
+      if (hit) return hit
+    }
+  }
+
   return null
 }
 

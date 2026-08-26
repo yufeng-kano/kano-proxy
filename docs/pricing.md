@@ -19,7 +19,9 @@ Estimated USD cost per request, computed from logged token counts and a public p
 2. For an `openrouter/...` row, exact match only on a source-tagged OpenRouter catalog entry for `openrouter/<full upstream id>`. This preserves the OpenRouter provider-specific rate and prevents a LiteLLM, bare/provider, or Cloudflare price from pricing an OpenRouter request.
 3. For every other provider, exact match on the upstream id (everything after the first `/`).
 4. The upstream id with its own leading path segments progressively stripped (`openai/gpt-4o-mini` → `gpt-4o-mini`).
-5. Common LiteLLM prefix forms for the segment (`anthropic/<id>`, `openai/<id>`, `xai/<id>`, `gemini/<id>`, `openrouter/<full upstream id>`).
+5. Common LiteLLM prefix forms for the segment (`anthropic/<id>`, `openai/<id>`, `xai/<id>`, `gemini/<id>`, `vertex_ai/<id>`, `openrouter/<full upstream id>`).
+6. Effort/thinking tier suffix fallback: strip trailing `-high`, `-medium`, `-low`, `-thinking`, `-tiered`, `-thought` (and `-thinking-{high,medium,low}`) on the segment (`gemini-3.7-flash-high` → `gemini-3.7-flash`).
+7. Preview suffix fallback: try candidate with `-preview` appended (`gemini-3-flash` → `gemini-3-flash-preview`) or stripped.
 
 No match → `cost` stays `NULL` and the row is reported as unpriced. **Never fabricate a rate.**
 
