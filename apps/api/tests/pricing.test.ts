@@ -231,6 +231,9 @@ describe("resolveModelPrice", () => {
   it("restricts effort suffix fallback to Antigravity and Gemini models (P1)", () => {
     // Non-Gemini custom provider model ending in -high should NOT guess the base model rate
     expect(resolveModelPrice(table, "custom/gpt-4o-mini-high")).toBeNull()
+    // A model that contains "gemini" as a substring but is not a Gemini model ID segment should NOT match
+    const customTable = { notagemini: { input: 1, output: 1, cacheRead: null, cacheCreation: null } }
+    expect(resolveModelPrice(customTable, "custom/notagemini-high")).toBeNull()
   })
 
   it("preserves bare-candidate precedence over vendor-prefixed matches (P2)", () => {

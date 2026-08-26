@@ -267,26 +267,35 @@ export function resolveModelPrice(table: PriceTable, rawModel: string): ModelPri
   }
 
   // 3. Antigravity / Gemini reasoning effort & preview fallback
-  // Restrict to verified Antigravity or Gemini models to prevent guessing
-  // rates for arbitrary non-Gemini models that end in -high/-medium/-low/etc.
-  const isGeminiFamily = provider === "antigravity" || baseCandidates.some((c) => c.includes("gemini"))
-  if (isGeminiFamily) {
-    const variantCandidates: string[] = []
-    for (const c of baseCandidates) {
-      const stripped = c
-        .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
-        .replace(/-(?:thinking|thought)$/, "")
-      if (stripped !== c) {
-        variantCandidates.push(stripped)
-      }
-      if (!c.endsWith("-preview")) {
-        variantCandidates.push(`${c}-preview`)
-        if (stripped !== c) variantCandidates.push(`${stripped}-preview`)
-      } else {
-        variantCandidates.push(c.slice(0, -"-preview".length))
-      }
-    }
+  // Restrict to verified Antigravity or Gemini model ID segments (starting
+  // with "gemini-" or under the "antigravity" provider) to prevent guessing
+  // rates for arbitrary non-Gemini models (e.g. notagemini-high).
+  const isGeminiModel = (c: string): boolean =>
+    provider === "antigravity" ||
+    c.startsWith("gemini-") ||
+    c.startsWith("gemini/") ||
+    c === "gemini" ||
+    c.includes("/gemini-") ||
+    c.endsWith("/gemini")
 
+  const variantCandidates: string[] = []
+  for (const c of baseCandidates) {
+    if (!isGeminiModel(c)) continue
+    const stripped = c
+      .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
+      .replace(/-(?:thinking|thought)$/, "")
+    if (stripped !== c) {
+      variantCandidates.push(stripped)
+    }
+    if (!c.endsWith("-preview")) {
+      variantCandidates.push(`${c}-preview`)
+      if (stripped !== c) variantCandidates.push(`${stripped}-preview`)
+    } else {
+      variantCandidates.push(c.slice(0, -"-preview".length))
+    }
+  }
+
+  if (variantCandidates.length > 0) {
     // 3a. Bare variant matches
     for (const v of variantCandidates) {
       const hit = table[v]
