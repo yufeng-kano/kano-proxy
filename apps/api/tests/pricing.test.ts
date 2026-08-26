@@ -72,6 +72,15 @@ const LITELLM_JSON = {
     input_cost_per_token: 0.00000125,
     output_cost_per_token: 0.00001,
   },
+  "gemini-3.7-flash": {
+    input_cost_per_token: 0.00000075,
+    output_cost_per_token: 0.00000375,
+    cache_read_input_token_cost: 0.000000075,
+  },
+  "gemini-3-flash-preview": {
+    input_cost_per_token: 0.0000005,
+    output_cost_per_token: 0.0000025,
+  },
   "no-rates-model": { litellm_provider: "openai", mode: "chat" },
 }
 
@@ -193,6 +202,47 @@ describe("resolveModelPrice", () => {
   it("progressively strips the upstream id's own path segments", () => {
     // A custom endpoint that namespaces its models: upstream id "openai/gpt-4o-mini".
     expect(resolveModelPrice(table, "byok/openai/gpt-4o-mini")).toBeTruthy()
+  })
+
+  it("resolves effort-tiered and thinking variants to the base model rate", () => {
+    const expected = {
+      input: 0.00000075,
+      output: 0.00000375,
+      cacheRead: 0.000000075,
+      cacheCreation: null,
+    }
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-high")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-medium")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-low")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-thinking")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-tiered")).toEqual(expected)
+    expect(resolveModelPrice(table, "antigravity/gemini-3.7-flash-high[1M]")).toEqual(expected)
+  })
+
+  it("resolves preview suffix variants when the table has the preview form", () => {
+    expect(resolveModelPrice(table, "antigravity/gemini-3-flash")).toEqual({
+      input: 0.0000005,
+      output: 0.0000025,
+      cacheRead: null,
+      cacheCreation: null,
+    })
+  })
+
+  it("restricts effort suffix fallback to Antigravity and Gemini models (P1)", () => {
+    // Non-Gemini custom provider model ending in -high should NOT guess the base model rate
+    expect(resolveModelPrice(table, "custom/gpt-4o-mini-high")).toBeNull()
+    // A model that contains "gemini" as a substring but is not a Gemini model ID segment should NOT match
+    const customTable = { notagemini: { input: 1, output: 1, cacheRead: null, cacheCreation: null } }
+    expect(resolveModelPrice(customTable, "custom/notagemini-high")).toBeNull()
+  })
+
+  it("preserves bare-candidate precedence over vendor-prefixed matches (P2)", () => {
+    const customTable = {
+      "gpt-4o-mini": { input: 1, output: 1, cacheRead: null, cacheCreation: null },
+      "openai/sub/gpt-4o-mini": { input: 99, output: 99, cacheRead: null, cacheCreation: null },
+    }
+    // "custom/sub/gpt-4o-mini" should match bare "gpt-4o-mini" before checking prefixed "openai/sub/gpt-4o-mini"
+    expect(resolveModelPrice(customTable, "custom/sub/gpt-4o-mini")).toEqual(customTable["gpt-4o-mini"])
   })
 
   it("returns null on no match — never a guessed rate", () => {

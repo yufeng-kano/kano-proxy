@@ -243,24 +243,74 @@ export function resolveModelPrice(table: PriceTable, rawModel: string): ModelPri
     return hit?.source === "openrouter" ? hit : null
   }
 
-  const candidates: string[] = [upstream]
+  const baseCandidates: string[] = [upstream]
   let rest = upstream
   for (let i = rest.indexOf("/"); i !== -1; i = rest.indexOf("/")) {
     rest = rest.slice(i + 1)
-    if (rest) candidates.push(rest)
+    if (rest) baseCandidates.push(rest)
   }
 
-  for (const c of candidates) {
+  const PREFIXES = ["anthropic", "openai", "xai", "gemini", "vertex_ai", "openrouter"]
+
+  // 1. Bare exact candidate matches across all path segments first
+  for (const c of baseCandidates) {
     const hit = table[c]
     if (hit?.source !== "openrouter" && hit) return hit
   }
-  const PREFIXES = ["anthropic", "openai", "xai", "gemini", "vertex_ai", "openrouter"]
-  for (const c of candidates) {
+
+  // 2. Vendor-prefixed exact matches across all path segments
+  for (const c of baseCandidates) {
     for (const p of PREFIXES) {
       const hit = table[`${p}/${c}`]
       if (hit?.source !== "openrouter" && hit) return hit
     }
   }
+
+  // 3. Antigravity / Gemini reasoning effort & preview fallback
+  // Restrict to verified Antigravity or Gemini model ID segments (starting
+  // with "gemini-" or under the "antigravity" provider) to prevent guessing
+  // rates for arbitrary non-Gemini models (e.g. notagemini-high).
+  const isGeminiModel = (c: string): boolean =>
+    provider === "antigravity" ||
+    c.startsWith("gemini-") ||
+    c.startsWith("gemini/") ||
+    c === "gemini" ||
+    c.includes("/gemini-") ||
+    c.endsWith("/gemini")
+
+  const variantCandidates: string[] = []
+  for (const c of baseCandidates) {
+    if (!isGeminiModel(c)) continue
+    const stripped = c
+      .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
+      .replace(/-(?:thinking|thought)$/, "")
+    if (stripped !== c) {
+      variantCandidates.push(stripped)
+    }
+    if (!c.endsWith("-preview")) {
+      variantCandidates.push(`${c}-preview`)
+      if (stripped !== c) variantCandidates.push(`${stripped}-preview`)
+    } else {
+      variantCandidates.push(c.slice(0, -"-preview".length))
+    }
+  }
+
+  if (variantCandidates.length > 0) {
+    // 3a. Bare variant matches
+    for (const v of variantCandidates) {
+      const hit = table[v]
+      if (hit?.source !== "openrouter" && hit) return hit
+    }
+
+    // 3b. Prefixed variant matches
+    for (const v of variantCandidates) {
+      for (const p of PREFIXES) {
+        const hit = table[`${p}/${v}`]
+        if (hit?.source !== "openrouter" && hit) return hit
+      }
+    }
+  }
+
   return null
 }
 

@@ -32,21 +32,17 @@ function num(v: unknown): number | undefined {
  * upstreams can report cache writes in
  * `prompt_tokens_details.cache_write_tokens`; converted responses retain the
  * proxy's `cache_creation_input_tokens` extension. `prompt_tokens` is already
- * cache-inclusive, so it is stored as-is. A missing detail field means
- * unreported: NULL, never 0. `completion_tokens_details.reasoning_tokens`
- * (grok's `include_reasoning`, or any upstream that reports it) is added
- * into `completionTokens` when both it and `completion_tokens` itself are
- * present — see docs/logging.md "Token usage capture".
+ * cache-inclusive, so it is stored as-is. `completion_tokens` is likewise
+ * already total output inclusive of reasoning tokens (`completion_tokens_details.reasoning_tokens`
+ * is reported as a breakdown detail). A missing detail field means
+ * unreported: NULL, never 0. See docs/logging.md "Token usage capture".
  */
 export function fromOpenAIUsage(u: Record<string, unknown> | null | undefined): NormalizedUsage {
   if (!u) return { ...NULL_USAGE }
   const details = u.prompt_tokens_details as Record<string, unknown> | undefined
-  const completionDetails = u.completion_tokens_details as Record<string, unknown> | undefined
-  const completionBase = num(u.completion_tokens)
-  const reasoningTokens = num(completionDetails?.reasoning_tokens)
   return {
     promptTokens: num(u.prompt_tokens) ?? null,
-    completionTokens: completionBase != null ? completionBase + (reasoningTokens ?? 0) : null,
+    completionTokens: num(u.completion_tokens) ?? null,
     cacheReadInputTokens: num(details?.cached_tokens) ?? null,
     cacheCreationInputTokens:
       num(details?.cache_write_tokens) ?? num(u.cache_creation_input_tokens) ?? null,

@@ -399,10 +399,8 @@ export function openaiToAnthropicMessage(
  * reported `prompt_tokens_details.cached_tokens`, subtract it out and
  * report it as `cache_read_input_tokens` instead. Unchanged when no cache
  * details were reported (docs/api.md "Usage cache details on converted
- * responses"). `completion_tokens_details.reasoning_tokens`, when reported,
- * is added into `output_tokens` — Anthropic's own `output_tokens` already
- * includes thinking, so a converted response should match (docs/logging.md
- * "Token usage capture").
+ * responses"). `completion_tokens` is already inclusive of reasoning tokens,
+ * matching Anthropic's own `output_tokens` (docs/logging.md "Token usage capture").
  */
 function anthropicUsageFromOpenAI(usage: {
   prompt_tokens?: number
@@ -411,8 +409,7 @@ function anthropicUsageFromOpenAI(usage: {
   completion_tokens_details?: { reasoning_tokens?: number }
 }): Record<string, unknown> {
   const prompt = usage.prompt_tokens ?? 0
-  const reasoning = usage.completion_tokens_details?.reasoning_tokens
-  const output = (usage.completion_tokens ?? 0) + (typeof reasoning === "number" ? reasoning : 0)
+  const output = usage.completion_tokens ?? 0
   const cached = usage.prompt_tokens_details?.cached_tokens
   const cacheWrite = usage.prompt_tokens_details?.cache_write_tokens
   const input = prompt - (typeof cached === "number" ? cached : 0) - (typeof cacheWrite === "number" ? cacheWrite : 0)
@@ -892,13 +889,7 @@ export function openaiSseToAnthropicStream(
                   promptTokens = usage.prompt_tokens
                 }
                 if (typeof usage.completion_tokens === "number") {
-                  // Anthropic's own output_tokens already includes thinking —
-                  // fold reasoning_tokens in so a converted response matches
-                  // (docs/logging.md "Token usage capture").
-                  const reasoningTokens = usage.completion_tokens_details?.reasoning_tokens
-                  completionTokens =
-                    usage.completion_tokens +
-                    (typeof reasoningTokens === "number" ? reasoningTokens : 0)
+                  completionTokens = usage.completion_tokens
                 }
                 if (typeof usage.prompt_tokens_details?.cached_tokens === "number") {
                   cacheReadInputTokens = usage.prompt_tokens_details.cached_tokens

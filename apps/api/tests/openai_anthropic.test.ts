@@ -738,7 +738,7 @@ describe("openaiToAnthropicMessage", () => {
       expect(emptyField.content).toEqual([{ type: "text", text: "answer" }])
     })
 
-    it("adds completion_tokens_details.reasoning_tokens into output_tokens", () => {
+    it("reports completion_tokens directly as output_tokens without double-adding reasoning_tokens", () => {
       const out = openaiToAnthropicMessage(
         {
           id: "c4",
@@ -748,15 +748,15 @@ describe("openaiToAnthropicMessage", () => {
           usage: {
             prompt_tokens: 10,
             completion_tokens: 5,
-            completion_tokens_details: { reasoning_tokens: 7 },
+            completion_tokens_details: { reasoning_tokens: 3 },
           },
         },
         "grok/m",
       )
-      expect(out.usage).toEqual({ input_tokens: 10, output_tokens: 12 })
+      expect(out.usage).toEqual({ input_tokens: 10, output_tokens: 5 })
     })
 
-    it("still subtracts cached tokens from input_tokens alongside a reasoning_tokens output addition", () => {
+    it("still subtracts cached tokens from input_tokens alongside reasoning_tokens details", () => {
       const out = openaiToAnthropicMessage(
         {
           id: "c5",
@@ -770,7 +770,7 @@ describe("openaiToAnthropicMessage", () => {
         },
         "grok/m",
       )
-      expect(out.usage).toEqual({ input_tokens: 70, output_tokens: 50, cache_read_input_tokens: 30 })
+      expect(out.usage).toEqual({ input_tokens: 70, output_tokens: 40, cache_read_input_tokens: 30 })
     })
   })
 })
@@ -1380,7 +1380,7 @@ describe("openaiSseToAnthropicStream", () => {
       expect(out).toContain('"output_tokens":3')
     })
 
-    it("adds completion_tokens_details.reasoning_tokens into the reported output_tokens", async () => {
+    it("reports completion_tokens in the stream output_tokens without double-adding reasoning_tokens", async () => {
       const sse = [
         'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}',
         "",
@@ -1390,7 +1390,7 @@ describe("openaiSseToAnthropicStream", () => {
         "",
       ].join("\n")
       const out = await collect(openaiSseToAnthropicStream(chunked(sse, 31), "grok/m"))
-      expect(out).toContain('"output_tokens":25')
+      expect(out).toContain('"output_tokens":5')
     })
 
     it("omits any thinking block when no reasoning_content ever arrives", async () => {
