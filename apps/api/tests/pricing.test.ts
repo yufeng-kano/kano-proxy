@@ -228,6 +228,20 @@ describe("resolveModelPrice", () => {
     })
   })
 
+  it("restricts effort suffix fallback to Antigravity and Gemini models (P1)", () => {
+    // Non-Gemini custom provider model ending in -high should NOT guess the base model rate
+    expect(resolveModelPrice(table, "custom/gpt-4o-mini-high")).toBeNull()
+  })
+
+  it("preserves bare-candidate precedence over vendor-prefixed matches (P2)", () => {
+    const customTable = {
+      "gpt-4o-mini": { input: 1, output: 1, cacheRead: null, cacheCreation: null },
+      "openai/sub/gpt-4o-mini": { input: 99, output: 99, cacheRead: null, cacheCreation: null },
+    }
+    // "custom/sub/gpt-4o-mini" should match bare "gpt-4o-mini" before checking prefixed "openai/sub/gpt-4o-mini"
+    expect(resolveModelPrice(customTable, "custom/sub/gpt-4o-mini")).toEqual(customTable["gpt-4o-mini"])
+  })
+
   it("returns null on no match — never a guessed rate", () => {
     expect(resolveModelPrice(table, "claude-code/some-unknown-model")).toBeNull()
     expect(resolveModelPrice(table, "")).toBeNull()

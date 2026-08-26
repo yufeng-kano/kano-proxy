@@ -252,48 +252,53 @@ export function resolveModelPrice(table: PriceTable, rawModel: string): ModelPri
 
   const PREFIXES = ["anthropic", "openai", "xai", "gemini", "vertex_ai", "openrouter"]
 
-  const lookup = (c: string): ModelPrice | null => {
+  // 1. Bare exact candidate matches across all path segments first
+  for (const c of baseCandidates) {
     const hit = table[c]
     if (hit?.source !== "openrouter" && hit) return hit
+  }
+
+  // 2. Vendor-prefixed exact matches across all path segments
+  for (const c of baseCandidates) {
     for (const p of PREFIXES) {
-      const prefixed = table[`${p}/${c}`]
-      if (prefixed?.source !== "openrouter" && prefixed) return prefixed
-    }
-    return null
-  }
-
-  // 1. Exact candidate matches first
-  for (const c of baseCandidates) {
-    const hit = lookup(c)
-    if (hit) return hit
-  }
-
-  // 2. Effort / thinking tier suffix fallback (-high, -medium, -low, -thinking, -tiered, etc.)
-  for (const c of baseCandidates) {
-    const stripped = c
-      .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
-      .replace(/-(?:thinking|thought)$/, "")
-    if (stripped !== c) {
-      const hit = lookup(stripped)
-      if (hit) return hit
+      const hit = table[`${p}/${c}`]
+      if (hit?.source !== "openrouter" && hit) return hit
     }
   }
 
-  // 3. Preview suffix additions / removals
-  for (const c of baseCandidates) {
-    const stripped = c
-      .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
-      .replace(/-(?:thinking|thought)$/, "")
-    const previewVariants: string[] = []
-    if (!c.endsWith("-preview")) {
-      previewVariants.push(`${c}-preview`)
-      if (stripped !== c) previewVariants.push(`${stripped}-preview`)
-    } else {
-      previewVariants.push(c.slice(0, -"-preview".length))
+  // 3. Antigravity / Gemini reasoning effort & preview fallback
+  // Restrict to verified Antigravity or Gemini models to prevent guessing
+  // rates for arbitrary non-Gemini models that end in -high/-medium/-low/etc.
+  const isGeminiFamily = provider === "antigravity" || baseCandidates.some((c) => c.includes("gemini"))
+  if (isGeminiFamily) {
+    const variantCandidates: string[] = []
+    for (const c of baseCandidates) {
+      const stripped = c
+        .replace(/-(?:thinking-)?(?:high|medium|low|tiered)$/, "")
+        .replace(/-(?:thinking|thought)$/, "")
+      if (stripped !== c) {
+        variantCandidates.push(stripped)
+      }
+      if (!c.endsWith("-preview")) {
+        variantCandidates.push(`${c}-preview`)
+        if (stripped !== c) variantCandidates.push(`${stripped}-preview`)
+      } else {
+        variantCandidates.push(c.slice(0, -"-preview".length))
+      }
     }
-    for (const pv of previewVariants) {
-      const hit = lookup(pv)
-      if (hit) return hit
+
+    // 3a. Bare variant matches
+    for (const v of variantCandidates) {
+      const hit = table[v]
+      if (hit?.source !== "openrouter" && hit) return hit
+    }
+
+    // 3b. Prefixed variant matches
+    for (const v of variantCandidates) {
+      for (const p of PREFIXES) {
+        const hit = table[`${p}/${v}`]
+        if (hit?.source !== "openrouter" && hit) return hit
+      }
     }
   }
 
