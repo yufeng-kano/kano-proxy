@@ -24,6 +24,8 @@ defineProps<{
     | "star"
     | "arrow-up"
     | "arrow-down"
+    | "chevron-left"
+    | "chevron-right"
     | "grip"
     | "close"
 }>()
@@ -94,6 +96,15 @@ defineProps<{
     <template v-else-if="name === 'arrow-down'">
       <path d="M8 3.5v9" />
       <path d="M4.25 8.75L8 12.5l3.75-3.75" />
+    </template>
+
+    <!-- Chevron left / right: calendar and stepper navigation. -->
+    <template v-else-if="name === 'chevron-left'">
+      <path d="M10 3.5L5.5 8l4.5 4.5" />
+    </template>
+
+    <template v-else-if="name === 'chevron-right'">
+      <path d="M6 3.5L10.5 8 6 12.5" />
     </template>
 
     <!-- Grip: the drag handle's two rails. Decoration over the move buttons. -->

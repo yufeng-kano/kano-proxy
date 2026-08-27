@@ -19,7 +19,7 @@
  * degrades to "first visit" instead of crashing a page.
  */
 
-import type { UsageDays } from "@/types"
+import type { UsageDays, UsageRangeKind } from "@/types"
 
 const PREFS_KEY = "kano-proxy:prefs"
 
@@ -28,6 +28,7 @@ export type ChartView = "tokens" | "requests" | "cache" | "models"
 
 const CHART_VIEWS: ChartView[] = ["tokens", "requests", "cache", "models"]
 const USAGE_DAYS: UsageDays[] = [1, 7, 30]
+const USAGE_RANGE_KINDS: UsageRangeKind[] = ["day", "week", "month"]
 
 export type Prefs = {
   /** Router path to restore on next boot, e.g. "/overview". */
@@ -36,6 +37,7 @@ export type Prefs = {
   scroll: Record<string, number>
   overview: {
     days: UsageDays
+    rangeKind: UsageRangeKind
     chartView: ChartView
   }
   models: {
@@ -56,7 +58,7 @@ function defaults(): Prefs {
   return {
     lastPath: null,
     scroll: {},
-    overview: { days: 7, chartView: "tokens" },
+    overview: { days: 7, rangeKind: "day", chartView: "tokens" },
     models: { provider: null },
     providers: { tab: null },
     logs: { provider: null },
@@ -91,11 +93,17 @@ function parse(raw: string): Prefs {
   base.scroll = readScroll(parsed.scroll)
 
   if (isRecord(parsed.overview)) {
-    const { days, chartView } = parsed.overview
+    const { days, rangeKind, chartView } = parsed.overview
     if (USAGE_DAYS.includes(days as UsageDays)) base.overview.days = days as UsageDays
-    // The pre-2.1 "cache-rate" value (and the removed showTable flag) simply
-    // fail this check and fall back — exactly the degradation this parser
-    // promises for a stale schema.
+    if (USAGE_RANGE_KINDS.includes(rangeKind as UsageRangeKind)) {
+      base.overview.rangeKind = rangeKind as UsageRangeKind
+    } else if (days === 1) {
+      base.overview.rangeKind = "day"
+    } else if (days === 7) {
+      base.overview.rangeKind = "week"
+    } else if (days === 30) {
+      base.overview.rangeKind = "month"
+    }
     if (CHART_VIEWS.includes(chartView as ChartView)) {
       base.overview.chartView = chartView as ChartView
     }

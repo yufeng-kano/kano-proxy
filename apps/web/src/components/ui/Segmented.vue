@@ -18,7 +18,10 @@ const props = defineProps<{
   size?: "sm" | "md"
 }>()
 
-const emit = defineEmits<{ "update:modelValue": [OptionValue] }>()
+const emit = defineEmits<{
+  "update:modelValue": [OptionValue]
+  "clickOption": [OptionValue]
+}>()
 
 const root = ref<HTMLElement | null>(null)
 
@@ -30,6 +33,7 @@ const selectedIndex = computed(() =>
 )
 
 function select(value: OptionValue) {
+  emit("clickOption", value)
   if (value !== props.modelValue) emit("update:modelValue", value)
 }
 

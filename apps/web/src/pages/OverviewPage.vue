@@ -14,6 +14,7 @@
 import { computed, onMounted, ref, watch } from "vue"
 import BarChart from "@/components/overview/BarChart.vue"
 import MetricDetailModal from "@/components/overview/MetricDetailModal.vue"
+import RangeCalendarPopover from "@/components/overview/RangeCalendarPopover.vue"
 import StatCard from "@/components/overview/StatCard.vue"
 import {
   buildCacheSeries,
@@ -35,11 +36,21 @@ import { useScrollRestore } from "@/composables/useScrollRestore"
 import { useUsage } from "@/composables/useUsage"
 import { useI18n } from "@/i18n"
 import { getOverviewPrefs, setOverviewPrefs, type ChartView } from "@/services/prefs"
-import type { ModelUsageRow, UsageDays } from "@/types"
+import type { ModelUsageRow, UsageRangeKind } from "@/types"
 
 const { t, format } = useI18n()
 const { user } = useAuth()
-const { summary, loading, error, days, setDays, setUserId, refresh } = useUsage()
+const {
+  summary,
+  loading,
+  error,
+  rangeKind,
+  activeDate,
+  setRangeKind,
+  setDate,
+  setUserId,
+  refresh,
+} = useUsage()
 const { markReady } = useScrollRestore()
 
 const activityView = ref<ChartView>(getOverviewPrefs().chartView)
@@ -47,18 +58,33 @@ const activityView = ref<ChartView>(getOverviewPrefs().chartView)
 const manualRefreshing = ref(false)
 /** Which metric's detail modal is open. */
 const expanded = ref<MetricId | null>(null)
+/** Whether the calendar date popover is open. */
+const calendarOpen = ref(false)
 
 watch(activityView, (value) => setOverviewPrefs({ chartView: value }))
 
 const rangeOptions = computed(() => [
-  { value: 1, label: t("overview.range.short.24h"), title: t("overview.range.24h") },
-  { value: 7, label: t("overview.range.short.7d"), title: t("overview.range.7d") },
-  { value: 30, label: t("overview.range.short.30d"), title: t("overview.range.30d") },
+  { value: "day", label: t("overview.range.short.day"), title: t("overview.range.title.day") },
+  { value: "week", label: t("overview.range.short.week"), title: t("overview.range.title.week") },
+  { value: "month", label: t("overview.range.short.month"), title: t("overview.range.title.month") },
 ])
 
-/** Segmented models a `string | number`; the range is one of three literals. */
 function onRangeChange(value: string | number) {
-  setDays(value as UsageDays)
+  setRangeKind(value as UsageRangeKind)
+}
+
+function onSegmentClick(value: string | number) {
+  const clicked = value as UsageRangeKind
+  if (clicked === rangeKind.value) {
+    calendarOpen.value = !calendarOpen.value
+  } else {
+    calendarOpen.value = true
+  }
+}
+
+function onDateSelected(date: Date) {
+  setDate(date)
+  calendarOpen.value = false
 }
 
 onMounted(async () => {
@@ -291,12 +317,22 @@ function coverageNote(row: ModelUsageRow): string | null {
   <div>
     <PageHeader :title="t('overview.title')">
       <template #actions>
-        <Segmented
-          :model-value="days"
-          :options="rangeOptions"
-          :label="t('overview.range.label')"
-          @update:model-value="onRangeChange"
-        />
+        <div class="range-segmented-wrap">
+          <Segmented
+            :model-value="rangeKind"
+            :options="rangeOptions"
+            :label="t('overview.range.label')"
+            @update:model-value="onRangeChange"
+            @click-option="onSegmentClick"
+          />
+          <RangeCalendarPopover
+            v-if="calendarOpen"
+            :kind="rangeKind"
+            :selected-date="activeDate"
+            @select="onDateSelected"
+            @close="calendarOpen = false"
+          />
+        </div>
         <!-- Icon-only: the label is a tooltip and the accessible name. -->
         <AppButton
           icon-only
@@ -431,6 +467,11 @@ function coverageNote(row: ModelUsageRow): string | null {
 </template>
 
 <style scoped>
+.range-segmented-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
 /* No gap on the page itself: PageHeader carries its own bottom margin. */
 .page-alert {
   margin-bottom: var(--space-4);

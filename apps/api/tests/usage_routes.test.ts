@@ -618,6 +618,95 @@ describe("GET /api/usage/summary", () => {
     expect(json.totals.cost).toBeCloseTo(100 * 0.000001 + 10 * 0.000002, 12)
     expect(json.totals.cost_known_requests).toBe(1)
   })
+
+  it("supports from/to range queries with grain=hour and grain=day", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    seedLog(db, {
+      user_id: "user_1",
+      created_at: "2026-08-15T08:30:00.000Z",
+      prompt_tokens: 100,
+      completion_tokens: 20,
+    })
+    seedLog(db, {
+      user_id: "user_1",
+      created_at: "2026-08-15T14:45:00.000Z",
+      prompt_tokens: 200,
+      completion_tokens: 40,
+    })
+    seedLog(db, {
+      user_id: "user_1",
+      created_at: "2026-08-16T10:00:00.000Z",
+      prompt_tokens: 300,
+      completion_tokens: 60,
+    })
+
+    // Query single day with grain=hour
+    const resHour = await usageRoutes.request(
+      "/summary?from=2026-08-15T00:00:00.000Z&to=2026-08-15T23:59:59.999Z&grain=hour",
+      req(cookie),
+      env,
+    )
+    expect(resHour.status).toBe(200)
+    const jsonHour = (await resHour.json()) as SummaryJson & { grain: string }
+    expect(jsonHour.grain).toBe("hour")
+    expect(jsonHour.totals.requests).toBe(2)
+    expect(jsonHour.totals.prompt_tokens).toBe(300)
+    expect(jsonHour.series).toHaveLength(2)
+    expect(jsonHour.series.map((s) => s.bucket)).toEqual(["2026-08-15T08", "2026-08-15T14"])
+
+    // Query multi-day with grain=day
+    const resDay = await usageRoutes.request(
+      "/summary?from=2026-08-15T00:00:00.000Z&to=2026-08-16T23:59:59.999Z&grain=day",
+      req(cookie),
+      env,
+    )
+    expect(resDay.status).toBe(200)
+    const jsonDay = (await resDay.json()) as SummaryJson & { grain: string }
+    expect(jsonDay.grain).toBe("day")
+    expect(jsonDay.totals.requests).toBe(3)
+    expect(jsonDay.totals.prompt_tokens).toBe(600)
+    expect(jsonDay.series).toHaveLength(2)
+    expect(jsonDay.series.map((s) => s.bucket)).toEqual(["2026-08-15", "2026-08-16"])
+  })
+
+  it("validates from/to/grain parameters", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const resInvalidFrom = await usageRoutes.request("/summary?from=invalid-date", req(cookie), env)
+    expect(resInvalidFrom.status).toBe(400)
+    expect(await resInvalidFrom.json()).toEqual({ error: "invalid_from" })
+
+    const resInvalidTo = await usageRoutes.request(
+      "/summary?from=2026-08-15T00:00:00Z&to=invalid-to",
+      req(cookie),
+      env,
+    )
+    expect(resInvalidTo.status).toBe(400)
+    expect(await resInvalidTo.json()).toEqual({ error: "invalid_to" })
+
+    const resInvalidRange = await usageRoutes.request(
+      "/summary?from=2026-08-20T00:00:00Z&to=2026-08-15T00:00:00Z",
+      req(cookie),
+      env,
+    )
+    expect(resInvalidRange.status).toBe(400)
+    expect(await resInvalidRange.json()).toEqual({ error: "invalid_range" })
+
+    const resInvalidGrain = await usageRoutes.request(
+      "/summary?from=2026-08-15T00:00:00Z&to=2026-08-16T00:00:00Z&grain=minute",
+      req(cookie),
+      env,
+    )
+    expect(resInvalidGrain.status).toBe(400)
+    expect(await resInvalidGrain.json()).toEqual({ error: "invalid_grain" })
+  })
 })
 
 describe("filterToLiveProviders / fillEstimatedCosts", () => {

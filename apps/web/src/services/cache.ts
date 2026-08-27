@@ -29,7 +29,6 @@ import type {
   ModelGroup,
   ModelsResponse,
   ProviderId,
-  UsageDays,
   UsageSummary,
 } from "@/types"
 
@@ -57,9 +56,11 @@ export const CACHE_TTL_MS = 120_000
  * carries that id, which the row detail must never render. v10: model groups
  * became virtual endpoints (`slug` + per-group `models`, aliases/targets
  * gone) and the shared catalog dropped its `group` section — a v9 entry has
- * neither shape and would render empty rows on the Groups page.
+ * neither shape and would render empty rows on the Groups page. v11: usage
+ * summaries grew calendar-aligned Day/Week/Month support with rangeKey
+ * caching (`day:YYYY-MM-DD`, etc.).
  */
-const CACHE_SCHEMA_VERSION = 10
+const CACHE_SCHEMA_VERSION = 11
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
@@ -102,8 +103,8 @@ function modelGroupsKey(userId: string): string {
   return `${MODEL_GROUPS_PREFIX}${userId}`
 }
 
-function usageKey(userId: string, days: UsageDays): string {
-  return `${USAGE_PREFIX}${userId}:${days}`
+function usageKey(userId: string, rangeKey: string | number): string {
+  return `${USAGE_PREFIX}${userId}:${rangeKey}`
 }
 
 function logsKey(userId: string): string {
@@ -331,30 +332,30 @@ export function writeModelGroupsCache(
  */
 export function readUsageSummaryCache(
   userId: string | null | undefined,
-  days: UsageDays,
+  rangeKey: string | number,
 ): UsageSummary | null {
   if (!userId) return null
-  return readTimed<UsageSummary>(usageKey(userId, days))?.data ?? null
+  return readTimed<UsageSummary>(usageKey(userId, rangeKey))?.data ?? null
 }
 
 export function isUsageSummaryCacheFresh(
   userId: string | null | undefined,
-  days: UsageDays,
+  rangeKey: string | number,
   ttlMs = CACHE_TTL_MS,
 ): boolean {
   if (!userId) return false
-  const entry = readTimed<UsageSummary>(usageKey(userId, days))
+  const entry = readTimed<UsageSummary>(usageKey(userId, rangeKey))
   if (!entry) return false
   return Date.now() - entry.savedAt < ttlMs
 }
 
 export function writeUsageSummaryCache(
   userId: string | null | undefined,
-  days: UsageDays,
+  rangeKey: string | number,
   data: UsageSummary,
 ): void {
   if (!userId) return
-  writeTimed(usageKey(userId, days), data)
+  writeTimed(usageKey(userId, rangeKey), data)
 }
 
 /**
