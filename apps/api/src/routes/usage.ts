@@ -149,9 +149,24 @@ type SeriesPoint = {
   cost: number | null
 }
 
-/** Hour bucket ("YYYY-MM-DDTHH") for days=1, day bucket ("YYYY-MM-DD") otherwise. */
-function bucketKey(createdAt: string, days: number): string {
-  return days === 1 ? createdAt.slice(0, 13) : createdAt.slice(0, 10)
+/**
+ * Hour bucket ("YYYY-MM-DDTHH") for grain='hour', day bucket ("YYYY-MM-DD")
+ * otherwise, in the caller's calendar.
+ *
+ * `offsetMinutes` is the client's minutes east of UTC. The range picker selects
+ * a *local* day / week / month, so its `from`..`to` lands on local midnights —
+ * which in UTC straddle a day boundary for every browser off UTC. Slicing the
+ * raw UTC string there spreads a 7-day week over eight keys, and the chart's
+ * fixed-width grid then silently drops one end while the totals still count it.
+ * Shifting first buckets in the same calendar the user picked in. 0 = UTC,
+ * which is what the legacy `days=` window uses.
+ */
+function bucketKey(createdAt: string, grain: "hour" | "day", offsetMinutes: number): string {
+  const iso =
+    offsetMinutes === 0
+      ? createdAt
+      : new Date(Date.parse(createdAt) + offsetMinutes * 60_000).toISOString()
+  return grain === "hour" ? iso.slice(0, 13) : iso.slice(0, 10)
 }
 
 /**
@@ -161,12 +176,16 @@ function bucketKey(createdAt: string, days: number): string {
  * again as a separate field would be a second source of truth for the same
  * number.
  */
-function buildSeries(rows: UsageLogRow[], days: number): SeriesPoint[] {
+function buildSeries(
+  rows: UsageLogRow[],
+  grain: "hour" | "day",
+  offsetMinutes: number,
+): SeriesPoint[] {
   // Same grouping-identity-only key rule as modelBreakdown: never parsed apart,
   // so no separator can collide with an upstream model id.
   const groups = new Map<string, SeriesPoint>()
   for (const row of rows) {
-    const bucket = bucketKey(row.created_at, days)
+    const bucket = bucketKey(row.created_at, grain, offsetMinutes)
     const key = `${bucket} ${row.provider} ${row.model}`
     let point = groups.get(key)
     if (!point) {
@@ -244,19 +263,28 @@ export function fillEstimatedCosts<T extends CostLogRow>(rows: T[], table: Price
 
 /**
  * Pure aggregation — exported for direct unit testing without a D1 round
- * trip. `rows` must already be scoped to one user and `created_at >= from`.
+ * trip. `rows` must already be scoped to one user and `created_at >= from AND created_at <= to`.
  */
 export function summarizeUsageRows(
   rows: UsageLogRow[],
   days: number,
   from: string,
+  to?: string,
+  grain?: "hour" | "day",
+  offsetMinutes = 0,
 ): Record<string, unknown> {
+  const actualGrain: "hour" | "day" = grain ?? (days === 1 ? "hour" : "day")
   return {
     days,
     from,
+    to: to ?? new Date().toISOString(),
+    grain: actualGrain,
+    // Echoed so the client zero-fills its grid in the same calendar the rows
+    // were bucketed in; a client that sent no offset reads back 0.
+    offset: offsetMinutes,
     totals: accumulate(rows),
     models: modelBreakdown(rows),
-    series: buildSeries(rows, days),
+    series: buildSeries(rows, actualGrain, offsetMinutes),
   }
 }
 
@@ -264,21 +292,80 @@ usageRoutes.get("/summary", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
 
+  const fromParam = c.req.query("from")
+  const toParam = c.req.query("to")
+  const grainParam = c.req.query("grain")
+  const offsetParam = c.req.query("offset")
   const daysParam = c.req.query("days")
-  const days = daysParam === undefined ? 7 : Number(daysParam)
-  if (!ALLOWED_DAYS.has(days)) {
-    return c.json({ error: "invalid_days" }, 400)
+
+  // Bucket calendar, minutes east of UTC. Widest real zone is UTC+14, and
+  // half-hour/45-minute zones are why this is minutes rather than hours.
+  let offsetMinutes = 0
+  if (offsetParam !== undefined) {
+    const parsed = Number(offsetParam)
+    if (!Number.isInteger(parsed) || Math.abs(parsed) > 840) {
+      return c.json({ error: "invalid_offset" }, 400)
+    }
+    offsetMinutes = parsed
   }
 
-  const from = new Date(Date.now() - days * 86_400_000).toISOString()
+  let from: string
+  let to: string
+  let grain: "hour" | "day"
+  let days: number
+
+  if (fromParam !== undefined) {
+    const fromMs = Date.parse(fromParam)
+    if (Number.isNaN(fromMs)) {
+      return c.json({ error: "invalid_from" }, 400)
+    }
+    let toMs = Date.now()
+    if (toParam !== undefined) {
+      toMs = Date.parse(toParam)
+      if (Number.isNaN(toMs)) {
+        return c.json({ error: "invalid_to" }, 400)
+      }
+    }
+    if (fromMs > toMs) {
+      return c.json({ error: "invalid_range" }, 400)
+    }
+    const MAX_SPAN_MS = 366 * 86_400_000
+    if (toMs - fromMs > MAX_SPAN_MS) {
+      return c.json({ error: "range_too_large" }, 400)
+    }
+
+    from = new Date(fromMs).toISOString()
+    to = new Date(toMs).toISOString()
+
+    if (grainParam !== undefined) {
+      if (grainParam !== "hour" && grainParam !== "day") {
+        return c.json({ error: "invalid_grain" }, 400)
+      }
+      grain = grainParam
+    } else {
+      grain = toMs - fromMs <= 36 * 3_600_000 ? "hour" : "day"
+    }
+
+    days = Math.max(1, Math.round((toMs - fromMs) / 86_400_000))
+  } else {
+    days = daysParam === undefined ? 7 : Number(daysParam)
+    if (!ALLOWED_DAYS.has(days)) {
+      return c.json({ error: "invalid_days" }, 400)
+    }
+
+    from = new Date(Date.now() - days * 86_400_000).toISOString()
+    to = new Date().toISOString()
+    grain = days === 1 ? "hour" : "day"
+  }
+
   const res = await c.env.DB.prepare(
     `SELECT provider, model, status_code, latency_ms, prompt_tokens, completion_tokens,
             cache_read_input_tokens, cache_creation_input_tokens, cost, created_at
      FROM request_logs
-     WHERE user_id = ? AND created_at >= ?
+     WHERE user_id = ? AND created_at >= ? AND created_at <= ?
      ORDER BY created_at ASC`,
   )
-    .bind(user.id, from)
+    .bind(user.id, from, to)
     .all<UsageLogRow>()
 
   const custom = await listCustomProviders(c.env.DB, user.id)
@@ -294,5 +381,5 @@ usageRoutes.get("/summary", async (c) => {
   let table = await getPriceTable(c.env)
   if (!table || !hasSourceTaggedPriceTables()) table = await refreshPriceTable(c.env)
   const priced = fillEstimatedCosts(scoped, table)
-  return c.json(summarizeUsageRows(priced, days, from))
+  return c.json(summarizeUsageRows(priced, days, from, to, grain, offsetMinutes))
 })

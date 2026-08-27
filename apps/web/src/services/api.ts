@@ -423,9 +423,30 @@ export async function deleteModelGroup(id: string): Promise<void> {
 
 // Usage dashboard — session auth, same as the routes above. See docs/admin-ui.md.
 
-/** Aggregates over `request_logs` for the trailing `days` window. No server-side KV cache to bypass (D1 read is cheap and per-user), so there is no `refresh` param. */
-export async function getUsageSummary(days: UsageDays = 7): Promise<UsageSummary> {
-  return request<UsageSummary>(`/api/usage/summary?days=${days}`)
+/** Aggregates over `request_logs` for a date range or trailing `days` window. */
+export async function getUsageSummary(
+  params:
+    | {
+        from?: string
+        to?: string
+        grain?: "hour" | "day"
+        /** Bucket calendar, minutes east of UTC — see docs/admin-ui.md. */
+        offsetMinutes?: number
+        days?: UsageDays
+      }
+    | UsageDays = 7,
+): Promise<UsageSummary> {
+  if (typeof params === "number") {
+    return request<UsageSummary>(`/api/usage/summary?days=${params}`)
+  }
+  const q = new URLSearchParams()
+  if (params.from) q.set("from", params.from)
+  if (params.to) q.set("to", params.to)
+  if (params.grain) q.set("grain", params.grain)
+  if (params.offsetMinutes !== undefined) q.set("offset", String(params.offsetMinutes))
+  if (params.days !== undefined && !params.from) q.set("days", String(params.days))
+  const qs = q.toString()
+  return request<UsageSummary>(`/api/usage/summary${qs ? `?${qs}` : ""}`)
 }
 
 // Request logs — session auth. See docs/admin-ui.md § Logs page.

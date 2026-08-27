@@ -270,6 +270,39 @@ function makeFormatters() {
       ).format(date)
     },
     /**
+     * Calendar column header: "Mon". Abbreviated by `Intl`, never sliced off a
+     * longer name — a locale's short weekday is not always its first letters,
+     * and several write no Latin script at all.
+     */
+    weekdayShort(date: Date): string {
+      return new Intl.DateTimeFormat(tag(), { weekday: "short" }).format(date)
+    },
+    /** Calendar heading over a year grid: "2026" — a date part, not a grouped number. */
+    year(date: Date): string {
+      return new Intl.DateTimeFormat(tag(), { year: "numeric" }).format(date)
+    },
+    /** Calendar month-grid cell: "Aug". */
+    monthShort(date: Date): string {
+      return new Intl.DateTimeFormat(tag(), { month: "short" }).format(date)
+    },
+    /** Calendar heading over a month grid, and a month cell's accessible name: "August 2026". */
+    monthYear(date: Date): string {
+      return new Intl.DateTimeFormat(tag(), { month: "long", year: "numeric" }).format(date)
+    },
+    /**
+     * A calendar day button's accessible name: "Thursday, August 27, 2026".
+     * The visible cell is a bare number, which a screen reader cannot place in
+     * a month — and the padding days repeat numbers inside one grid.
+     */
+    dayFull(date: Date): string {
+      return new Intl.DateTimeFormat(tag(), {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      }).format(date)
+    },
+    /**
      * "in 3 hours" / "2 days ago". Coarsest sensible unit — a reset time five
      * hours out reads better as "in 5 hours" than "in 300 minutes".
      */

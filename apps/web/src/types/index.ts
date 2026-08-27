@@ -290,10 +290,27 @@ export type CustomProviderTestResult = {
   error?: string
 }
 
-// Usage dashboard — GET /api/usage/summary?days=1|7|30. See docs/admin-ui.md
+// Usage dashboard — GET /api/usage/summary. See docs/admin-ui.md
 // (Dashboard page) and docs/database.md (request_logs NULL token semantics).
 
-/** Range picker options: 24h / 7d / 30d. */
+/** Range picker granularity: Day (hourly) / Week (daily) / Month (daily). */
+export type UsageRangeKind = "day" | "week" | "month"
+
+export type UsageRange = {
+  kind: UsageRangeKind
+  /** Formatted anchor string for cache key, e.g. "2026-08-28" for day/week, "2026-08" for month */
+  anchor: string
+  from: string
+  to: string
+  grain: "hour" | "day"
+  /**
+   * Minutes east of UTC of the calendar this range was picked in. Sent to the
+   * API so it buckets rows in the same calendar (see docs/admin-ui.md).
+   */
+  offsetMinutes: number
+}
+
+/** Legacy range picker options: 24h / 7d / 30d. */
 export type UsageDays = 1 | 7 | 30
 
 export type UsageTotals = {
@@ -365,9 +382,15 @@ export type UsageSeriesPoint = {
 }
 
 export type UsageSummary = {
-  days: UsageDays
+  days: number
   /** ISO UTC inclusive lower bound of the queried range. */
   from: string
+  /** ISO UTC inclusive upper bound of the queried range. */
+  to?: string
+  /** Aggregation grain: "hour" for single days, "day" for multi-day ranges. */
+  grain?: "hour" | "day"
+  /** Minutes east of UTC the server bucketed in; absent or 0 means UTC keys. */
+  offset?: number
   totals: UsageTotals
   /** Sorted by total tokens desc (server-side). */
   models: ModelUsageRow[]

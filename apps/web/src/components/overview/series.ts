@@ -59,41 +59,80 @@ function metricOf(point: UsageSeriesPoint, metric: MetricId): number {
 
 export type TimeBucket = { key: string; date: Date }
 
-function bucketKeyFor(days: number, date: Date): string {
-  const yyyy = date.getUTCFullYear()
-  const mm = String(date.getUTCMonth() + 1).padStart(2, "0")
-  const dd = String(date.getUTCDate()).padStart(2, "0")
-  if (days === 1) {
-    const hh = String(date.getUTCHours()).padStart(2, "0")
+/**
+ * The grain the API actually bucketed in. `grain` is authoritative when the
+ * server sent it: a one-day range explicitly asked for with `grain=day` also
+ * reports `days: 1`, and reading `days` first would generate hourly keys that
+ * match nothing in the response and paint a chart of zeros.
+ */
+export function isSummaryHourly(summary: UsageSummary): boolean {
+  if (summary.grain) return summary.grain === "hour"
+  return summary.days === 1
+}
+
+/**
+ * The calendar the API bucketed in, as minutes east of UTC (docs/admin-ui.md).
+ * Absent on a legacy `days=` response, which is plain UTC.
+ */
+function bucketOffsetMs(summary: UsageSummary): number {
+  return (summary.offset ?? 0) * 60_000
+}
+
+/**
+ * The API's key for the bucket containing `date`. Shifting by the bucket
+ * offset before reading the UTC fields puts the key in the same calendar the
+ * server grouped by — the picker's local midnights are not UTC midnights.
+ */
+function bucketKeyFor(grain: "hour" | "day", date: Date, offsetMs: number): string {
+  const shifted = new Date(date.getTime() + offsetMs)
+  const yyyy = shifted.getUTCFullYear()
+  const mm = String(shifted.getUTCMonth() + 1).padStart(2, "0")
+  const dd = String(shifted.getUTCDate()).padStart(2, "0")
+  if (grain === "hour") {
+    const hh = String(shifted.getUTCHours()).padStart(2, "0")
     return `${yyyy}-${mm}-${dd}T${hh}`
   }
   return `${yyyy}-${mm}-${dd}`
 }
 
 /**
- * The full zero-fill grid for a summary's range (UTC bucket keys, oldest
- * first). +1 bucket: `from` is a rolling "now - N*width" boundary while keys
- * are calendar truncations, so the window straddles nominalCount+1 calendar
- * buckets — without the +1 the newest, most relevant bucket would be dropped.
+ * The full zero-fill grid for a summary's range, oldest first, keyed in the
+ * API's bucket calendar. For calendar-bounded ranges (when `summary.to` is
+ * present), builds the exact buckets covering the span. For rolling windows
+ * without `to`, applies the +1 partial-bucket rule to catch the newest bucket.
  */
 export function timeBuckets(summary: UsageSummary): TimeBucket[] {
-  const nominalCount = summary.days === 1 ? 24 : summary.days
-  const stepMs = summary.days === 1 ? 3_600_000 : 86_400_000
-  const parsed = new Date(summary.from)
-  const raw = Number.isNaN(parsed.getTime())
-    ? new Date(Date.now() - nominalCount * stepMs)
-    : parsed
-  const start =
-    summary.days === 1
-      ? new Date(
-          Date.UTC(raw.getUTCFullYear(), raw.getUTCMonth(), raw.getUTCDate(), raw.getUTCHours()),
-        )
-      : new Date(Date.UTC(raw.getUTCFullYear(), raw.getUTCMonth(), raw.getUTCDate()))
+  const hourly = isSummaryHourly(summary)
+  const stepMs = hourly ? 3_600_000 : 86_400_000
+  const offsetMs = bucketOffsetMs(summary)
+  const parsedFrom = new Date(summary.from)
+  const rawFrom = Number.isNaN(parsedFrom.getTime())
+    ? new Date(Date.now() - (hourly ? 24 : summary.days || 7) * stepMs)
+    : parsedFrom
+
+  let count: number
+  let start: Date
+
+  if (summary.to) {
+    const parsedTo = new Date(summary.to)
+    // `to` is the range's last millisecond, so a 7-day week measures 1ms short
+    // of 7 steps; rounding lands on the bucket count the calendar actually has.
+    const spanMs = Math.max(stepMs, parsedTo.getTime() - rawFrom.getTime())
+    count = Math.max(1, Math.round(spanMs / stepMs))
+    start = rawFrom
+  } else {
+    const nominalCount = hourly ? 24 : summary.days || 7
+    count = nominalCount + 1
+    // Snap the rolling window's ragged start down to a bucket boundary in the
+    // API's calendar, so the first key names a whole bucket.
+    const shifted = rawFrom.getTime() + offsetMs
+    start = new Date(Math.floor(shifted / stepMs) * stepMs - offsetMs)
+  }
 
   const out: TimeBucket[] = []
-  for (let i = 0; i < nominalCount + 1; i++) {
+  for (let i = 0; i < count; i++) {
     const date = new Date(start.getTime() + i * stepMs)
-    out.push({ key: bucketKeyFor(summary.days, date), date })
+    out.push({ key: bucketKeyFor(hourly ? "hour" : "day", date, offsetMs), date })
   }
   return out
 }
@@ -151,7 +190,7 @@ export function buildMetricSeries(
   const models = rankModels(summary, metric, otherLabel)
   const named = new Map(models.map((m) => [m.key, m]))
   const other = named.get(OTHER_KEY) ?? null
-  const hourly = summary.days === 1
+  const hourly = isSummaryHourly(summary)
 
   const byBucket = new Map<string, Map<string, number>>()
   for (const p of summary.series) {
@@ -197,7 +236,7 @@ export function buildCacheSeries(
   labels: { cached: string; uncached: string },
   format: Formatters,
 ): MetricSeries {
-  const hourly = summary.days === 1
+  const hourly = isSummaryHourly(summary)
   const byBucket = new Map<string, { cached: number; uncached: number }>()
   let cachedTotal = 0
   let uncachedTotal = 0

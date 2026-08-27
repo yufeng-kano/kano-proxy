@@ -134,7 +134,7 @@ function parseCond(cond: string, next: () => number): WhereCond {
       branches: splitTopLevel(grouped, /^\s+AND\s+/i).map((b) => parseCond(b.trim(), next)),
     }
   }
-  const cmp = cond.match(/^(\w+)\s*(=|>=|<)\s*\?$/)
+  const cmp = cond.match(/^(\w+)\s*(=|>=|<=|>|<)\s*\?$/)
   if (cmp) return { kind: "cmp", col: cmp[1]!, op: cmp[2]!, paramIndex: next() }
   const isNull = cond.match(/^(\w+)\s+IS\s+(NOT\s+)?NULL$/i)
   if (isNull) return { kind: "isNull", col: isNull[1]!, negated: !!isNull[2] }
@@ -166,6 +166,8 @@ function evalCond(c: WhereCond, row: Row, params: unknown[]): boolean {
   // read as a broken one.
   if (actual === null || actual === undefined) return false
   if (c.op === ">=") return actual >= expected
+  if (c.op === "<=") return actual <= expected
+  if (c.op === ">") return actual > expected
   if (c.op === "<") return actual < expected
   return actual === expected
 }
