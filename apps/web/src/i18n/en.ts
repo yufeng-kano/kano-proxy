@@ -95,6 +95,9 @@ export const en = {
   "overview.calendar.nextMonth": "Next month",
   "overview.calendar.prevYear": "Previous year",
   "overview.calendar.nextYear": "Next year",
+  // Accessible names for the calendar cells: the visible label is a bare
+  // number or a three-letter month, which says nothing on its own.
+  "overview.calendar.weekOf": "Week of {start} to {end}",
   "overview.empty.title": "No requests yet",
   "overview.empty.body":
     "Once your clients start calling, usage and cache savings show up here.",

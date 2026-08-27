@@ -1,5 +1,5 @@
 import { computed, reactive, ref } from "vue"
-import { buildUsageRange } from "@/components/overview/dateRange"
+import { buildUsageRange, parseAnchor } from "@/components/overview/dateRange"
 import { getUsageSummary } from "@/services/api"
 import {
   CACHE_TTL_MS,
@@ -43,8 +43,15 @@ export function useUsage() {
   const userId = ref<string | null>(null)
 
   const initialPrefs = getOverviewPrefs()
-  const rangeKind = ref<UsageRangeKind>(initialPrefs.rangeKind || (initialPrefs.days === 1 ? "day" : initialPrefs.days === 30 ? "month" : "week"))
-  const activeDate = ref<Date>(new Date())
+  const initialKind: UsageRangeKind =
+    initialPrefs.rangeKind ||
+    (initialPrefs.days === 1 ? "day" : initialPrefs.days === 30 ? "month" : "week")
+  const rangeKind = ref<UsageRangeKind>(initialKind)
+  // A reopened tab lands on the range it left, not on today (docs/admin-ui.md
+  // § View preferences). An unparseable or future anchor falls back to today.
+  const activeDate = ref<Date>(
+    (initialPrefs.anchor ? parseAnchor(initialKind, initialPrefs.anchor) : null) ?? new Date(),
+  )
 
   const range = computed<UsageRange>(() => buildUsageRange(rangeKind.value, activeDate.value))
   const rangeKey = computed(() => `${range.value.kind}:${range.value.anchor}`)
@@ -85,6 +92,7 @@ export function useUsage() {
         from: targetRange.from,
         to: targetRange.to,
         grain: targetRange.grain,
+        offsetMinutes: targetRange.offsetMinutes,
       })
       state.data = data
       state.fromCache = false
@@ -102,27 +110,30 @@ export function useUsage() {
     await loadRange(range.value, opts)
   }
 
+  /**
+   * Persists the whole selection — granularity *and* anchor — from the current
+   * range, so the two can never drift apart in storage. `days` rides along as
+   * the legacy mirror of `kind`.
+   */
+  function persistRange() {
+    const kind = range.value.kind
+    const mappedDays: UsageDays = kind === "day" ? 1 : kind === "month" ? 30 : 7
+    setOverviewPrefs({ rangeKind: kind, days: mappedDays, anchor: range.value.anchor })
+  }
+
   /** Change the range granularity (day / week / month), optionally setting a date. */
   function setRangeKind(kind: UsageRangeKind, date?: Date) {
     rangeKind.value = kind
     if (date) activeDate.value = date
-    const mappedDays: UsageDays = kind === "day" ? 1 : kind === "month" ? 30 : 7
-    setOverviewPrefs({ rangeKind: kind, days: mappedDays })
+    persistRange()
     void loadRange(range.value)
   }
 
   /** Change the active anchor date (e.g. from calendar picker). */
   function setDate(date: Date) {
     activeDate.value = date
+    persistRange()
     void loadRange(range.value)
-  }
-
-  /** Backward-compatible adapter for days (1 -> day, 7 -> week, 30 -> month). */
-  const days = computed<UsageDays>(() => (rangeKind.value === "day" ? 1 : rangeKind.value === "month" ? 30 : 7))
-
-  function setDays(next: UsageDays) {
-    const kind: UsageRangeKind = next === 1 ? "day" : next === 30 ? "month" : "week"
-    setRangeKind(kind)
   }
 
   const currentState = computed(() => getOrInitState(rangeKey.value))
@@ -142,10 +153,8 @@ export function useUsage() {
     activeDate,
     range,
     rangeKey,
-    days,
     setRangeKind,
     setDate,
-    setDays,
     setUserId,
     refresh,
     loadRange,

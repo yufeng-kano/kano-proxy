@@ -15,6 +15,7 @@ import AppButton from "@/components/ui/AppButton.vue"
 import { useI18n } from "@/i18n"
 import type { UsageRangeKind } from "@/types"
 import {
+  getEndOfWeek,
   getStartOfDay,
   getStartOfMonth,
   getStartOfWeek,
@@ -32,7 +33,7 @@ const emit = defineEmits<{
   close: []
 }>()
 
-const { t } = useI18n()
+const { t, format } = useI18n()
 
 const popoverRef = ref<HTMLElement | null>(null)
 
@@ -51,28 +52,25 @@ watch(
 
 const today = new Date()
 
+// Every name below goes through `format`, never a literal locale tag: adding a
+// language must stay a catalog change, not an edit here (docs/i18n.md).
 const WEEKDAY_NAMES = computed(() => {
   // Monday-first: Mon, Tue, Wed, Thu, Fri, Sat, Sun
-  const base = new Date(2026, 7, 24) // Monday Aug 24, 2026
-  return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date(base.getFullYear(), base.getMonth(), base.getDate() + i)
-    return new Intl.DateTimeFormat("en", { weekday: "short" }).format(d).slice(0, 2)
-  })
+  const base = getStartOfWeek(new Date())
+  return Array.from({ length: 7 }, (_, i) =>
+    format.weekdayShort(new Date(base.getFullYear(), base.getMonth(), base.getDate() + i)),
+  )
 })
 
-const MONTH_NAMES = computed(() => {
-  return Array.from({ length: 12 }, (_, i) => {
-    const d = new Date(2026, i, 1)
-    return new Intl.DateTimeFormat("en", { month: "short" }).format(d)
-  })
-})
+const MONTH_NAMES = computed(() =>
+  Array.from({ length: 12 }, (_, i) => format.monthShort(new Date(viewYear.value, i, 1))),
+)
 
 const viewTitle = computed(() => {
   if (props.kind === "month") {
-    return String(viewYear.value)
+    return format.year(new Date(viewYear.value, 0, 1))
   }
-  const d = new Date(viewYear.value, viewMonth.value, 1)
-  return new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(d)
+  return format.monthYear(new Date(viewYear.value, viewMonth.value, 1))
 })
 
 const isCurrentViewPeriod = computed(() => {
@@ -251,6 +249,25 @@ function onDayClick(cell: DayCell) {
   }
 }
 
+/**
+ * What a day button announces. The visible label is a bare number, which places
+ * nothing on its own — and the padding rows repeat numbers inside one grid, so
+ * "1" can appear twice. In Week mode the button selects a whole week, so it
+ * names the week, not the day under the pointer.
+ */
+function dayCellLabel(cell: DayCell): string {
+  if (props.kind !== "week") return format.dayFull(cell.date)
+  return t("overview.calendar.weekOf", {
+    start: format.dayFull(getStartOfWeek(cell.date)),
+    end: format.dayFull(getEndOfWeek(cell.date)),
+  })
+}
+
+/** Selection state, announced rather than left to the highlight color alone. */
+function isDayCellSelected(cell: DayCell): boolean {
+  return props.kind === "week" ? cell.isSelectedWeek : cell.isSelectedDay
+}
+
 // ---------------------------------------------------------------------------
 // Month Grid calculations
 // ---------------------------------------------------------------------------
@@ -271,6 +288,11 @@ function isMonthFuture(monthIndex: number): boolean {
   return false
 }
 
+/** "August 2026" — the visible cell is just "Aug", which omits the year the grid is on. */
+function monthCellLabel(monthIndex: number): string {
+  return format.monthYear(new Date(viewYear.value, monthIndex, 1))
+}
+
 function onMonthClick(monthIndex: number) {
   if (isMonthFuture(monthIndex)) return
   selectDate(new Date(viewYear.value, monthIndex, 1))
@@ -279,11 +301,24 @@ function onMonthClick(monthIndex: number) {
 // ---------------------------------------------------------------------------
 // Dismiss on click outside & Escape
 // ---------------------------------------------------------------------------
+/**
+ * The control focus came from, restored on close so a keyboard user is not
+ * dropped on `<body>` when the button they were on unmounts (docs/admin-ui.md
+ * § Accessibility floor).
+ */
+const opener = ref<HTMLElement | null>(null)
+/**
+ * Set when the close came from a pointer press *outside*: the browser is about
+ * to focus whatever was pressed, and restoring would snatch it straight back.
+ */
+let closedByOutsidePointer = false
+
 function onPointerDown(e: PointerEvent) {
   if (popoverRef.value && !popoverRef.value.contains(e.target as Node)) {
     // Check if clicked the toggle segmented trigger
     const segmentedParent = (e.target as HTMLElement)?.closest(".range-segmented-wrap")
     if (!segmentedParent) {
+      closedByOutsidePointer = true
       emit("close")
     }
   }
@@ -296,6 +331,8 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 onMounted(() => {
+  const active = document.activeElement
+  if (active instanceof HTMLElement && active !== document.body) opener.value = active
   document.addEventListener("pointerdown", onPointerDown, { capture: true })
   document.addEventListener("keydown", onKeydown)
 })
@@ -303,6 +340,15 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onPointerDown, { capture: true })
   document.removeEventListener("keydown", onKeydown)
+
+  // Restore only when focus is ours to give back — inside the popover (a date
+  // was activated, or Escape came from within) or nowhere at all.
+  const active = document.activeElement
+  const inside = !!popoverRef.value && active instanceof Node && popoverRef.value.contains(active)
+  const adrift = active === null || active === document.body
+  if (!closedByOutsidePointer && opener.value?.isConnected && (inside || adrift)) {
+    opener.value.focus()
+  }
 })
 </script>
 
@@ -354,7 +400,7 @@ onBeforeUnmount(() => {
     <!-- Month & Day calendar grid -->
     <div v-if="kind === 'day' || kind === 'week'" class="calendar-grid-wrap" @mouseleave="onGridMouseLeave">
       <!-- Weekday column headers -->
-      <div class="weekday-row">
+      <div class="weekday-row" aria-hidden="true">
         <span v-for="(dayName, i) in WEEKDAY_NAMES" :key="i" class="weekday-cell">
           {{ dayName }}
         </span>
@@ -378,10 +424,13 @@ onBeforeUnmount(() => {
             'disabled': cell.isFuture,
           }"
           :disabled="cell.isFuture"
+          :aria-label="dayCellLabel(cell)"
+          :aria-pressed="isDayCellSelected(cell)"
+          :aria-current="cell.isToday ? 'date' : undefined"
           @click="onDayClick(cell)"
           @mouseenter="onDayMouseEnter(cell)"
         >
-          <span class="day-number">{{ cell.dayNumber }}</span>
+          <span class="day-number" aria-hidden="true">{{ cell.dayNumber }}</span>
           <span v-if="cell.isToday && !cell.isSelectedDay" class="today-dot" />
         </button>
       </div>
@@ -400,9 +449,12 @@ onBeforeUnmount(() => {
           'disabled': isMonthFuture(idx),
         }"
         :disabled="isMonthFuture(idx)"
+        :aria-label="monthCellLabel(idx)"
+        :aria-pressed="isMonthSelected(idx)"
+        :aria-current="isMonthThisMonth(idx) ? 'date' : undefined"
         @click="onMonthClick(idx)"
       >
-        <span class="month-label">{{ monthName }}</span>
+        <span class="month-label" aria-hidden="true">{{ monthName }}</span>
         <span v-if="isMonthThisMonth(idx) && !isMonthSelected(idx)" class="today-dot" />
       </button>
     </div>
@@ -616,5 +668,25 @@ onBeforeUnmount(() => {
 
 .month-cell .today-dot {
   bottom: 4px;
+}
+
+/*
+ * Coarse pointers: the grid's 32px rows and ~36px columns are both under the
+ * 40px floor, and picking a whole week by its Monday is the kind of target a
+ * thumb misses. Widen the popover as far as the viewport allows so the seven
+ * columns clear 40px too, and keep it on-screen on the narrowest phones.
+ */
+@media (pointer: coarse) {
+  .calendar-popover {
+    width: min(336px, calc(100vw - var(--space-8)));
+  }
+
+  .day-cell {
+    height: 44px;
+  }
+
+  .month-cell {
+    height: 52px;
+  }
 }
 </style>

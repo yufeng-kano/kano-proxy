@@ -149,9 +149,24 @@ type SeriesPoint = {
   cost: number | null
 }
 
-/** Hour bucket ("YYYY-MM-DDTHH") for grain='hour', day bucket ("YYYY-MM-DD") otherwise. */
-function bucketKey(createdAt: string, grain: "hour" | "day"): string {
-  return grain === "hour" ? createdAt.slice(0, 13) : createdAt.slice(0, 10)
+/**
+ * Hour bucket ("YYYY-MM-DDTHH") for grain='hour', day bucket ("YYYY-MM-DD")
+ * otherwise, in the caller's calendar.
+ *
+ * `offsetMinutes` is the client's minutes east of UTC. The range picker selects
+ * a *local* day / week / month, so its `from`..`to` lands on local midnights —
+ * which in UTC straddle a day boundary for every browser off UTC. Slicing the
+ * raw UTC string there spreads a 7-day week over eight keys, and the chart's
+ * fixed-width grid then silently drops one end while the totals still count it.
+ * Shifting first buckets in the same calendar the user picked in. 0 = UTC,
+ * which is what the legacy `days=` window uses.
+ */
+function bucketKey(createdAt: string, grain: "hour" | "day", offsetMinutes: number): string {
+  const iso =
+    offsetMinutes === 0
+      ? createdAt
+      : new Date(Date.parse(createdAt) + offsetMinutes * 60_000).toISOString()
+  return grain === "hour" ? iso.slice(0, 13) : iso.slice(0, 10)
 }
 
 /**
@@ -161,12 +176,16 @@ function bucketKey(createdAt: string, grain: "hour" | "day"): string {
  * again as a separate field would be a second source of truth for the same
  * number.
  */
-function buildSeries(rows: UsageLogRow[], grain: "hour" | "day"): SeriesPoint[] {
+function buildSeries(
+  rows: UsageLogRow[],
+  grain: "hour" | "day",
+  offsetMinutes: number,
+): SeriesPoint[] {
   // Same grouping-identity-only key rule as modelBreakdown: never parsed apart,
   // so no separator can collide with an upstream model id.
   const groups = new Map<string, SeriesPoint>()
   for (const row of rows) {
-    const bucket = bucketKey(row.created_at, grain)
+    const bucket = bucketKey(row.created_at, grain, offsetMinutes)
     const key = `${bucket} ${row.provider} ${row.model}`
     let point = groups.get(key)
     if (!point) {
@@ -252,6 +271,7 @@ export function summarizeUsageRows(
   from: string,
   to?: string,
   grain?: "hour" | "day",
+  offsetMinutes = 0,
 ): Record<string, unknown> {
   const actualGrain: "hour" | "day" = grain ?? (days === 1 ? "hour" : "day")
   return {
@@ -259,9 +279,12 @@ export function summarizeUsageRows(
     from,
     to: to ?? new Date().toISOString(),
     grain: actualGrain,
+    // Echoed so the client zero-fills its grid in the same calendar the rows
+    // were bucketed in; a client that sent no offset reads back 0.
+    offset: offsetMinutes,
     totals: accumulate(rows),
     models: modelBreakdown(rows),
-    series: buildSeries(rows, actualGrain),
+    series: buildSeries(rows, actualGrain, offsetMinutes),
   }
 }
 
@@ -272,7 +295,19 @@ usageRoutes.get("/summary", async (c) => {
   const fromParam = c.req.query("from")
   const toParam = c.req.query("to")
   const grainParam = c.req.query("grain")
+  const offsetParam = c.req.query("offset")
   const daysParam = c.req.query("days")
+
+  // Bucket calendar, minutes east of UTC. Widest real zone is UTC+14, and
+  // half-hour/45-minute zones are why this is minutes rather than hours.
+  let offsetMinutes = 0
+  if (offsetParam !== undefined) {
+    const parsed = Number(offsetParam)
+    if (!Number.isInteger(parsed) || Math.abs(parsed) > 840) {
+      return c.json({ error: "invalid_offset" }, 400)
+    }
+    offsetMinutes = parsed
+  }
 
   let from: string
   let to: string
@@ -346,5 +381,5 @@ usageRoutes.get("/summary", async (c) => {
   let table = await getPriceTable(c.env)
   if (!table || !hasSourceTaggedPriceTables()) table = await refreshPriceTable(c.env)
   const priced = fillEstimatedCosts(scoped, table)
-  return c.json(summarizeUsageRows(priced, days, from, to, grain))
+  return c.json(summarizeUsageRows(priced, days, from, to, grain, offsetMinutes))
 })

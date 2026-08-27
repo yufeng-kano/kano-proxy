@@ -47,6 +47,15 @@ export function getEndOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999)
 }
 
+/**
+ * Minutes east of UTC at `d` — the sign convention the API takes, which is the
+ * opposite of `getTimezoneOffset()`. Read at the range's own date rather than
+ * once at boot so a range spanning a DST change carries that date's offset.
+ */
+export function offsetMinutesAt(d: Date): number {
+  return -d.getTimezoneOffset()
+}
+
 /** Builds an exact UsageRange for given kind and anchor date. */
 export function buildUsageRange(kind: UsageRangeKind, d: Date): UsageRange {
   if (kind === "day") {
@@ -58,6 +67,7 @@ export function buildUsageRange(kind: UsageRangeKind, d: Date): UsageRange {
       from: start.toISOString(),
       to: end.toISOString(),
       grain: "hour",
+      offsetMinutes: offsetMinutesAt(start),
     }
   }
   if (kind === "week") {
@@ -69,6 +79,7 @@ export function buildUsageRange(kind: UsageRangeKind, d: Date): UsageRange {
       from: start.toISOString(),
       to: end.toISOString(),
       grain: "day",
+      offsetMinutes: offsetMinutesAt(start),
     }
   }
   // month
@@ -80,7 +91,25 @@ export function buildUsageRange(kind: UsageRangeKind, d: Date): UsageRange {
     from: start.toISOString(),
     to: end.toISOString(),
     grain: "day",
+    offsetMinutes: offsetMinutesAt(start),
   }
+}
+
+/**
+ * Parses a stored anchor back into its local Date: "YYYY-MM-DD" for day/week,
+ * "YYYY-MM" for month. Returns null on anything else, including a date in the
+ * future — a persisted anchor is always a range the user already looked at, so
+ * a future one means a hand-edited blob or a clock that moved back.
+ */
+export function parseAnchor(kind: UsageRangeKind, anchor: string): Date | null {
+  const m = kind === "month" ? /^(\d{4})-(\d{2})$/.exec(anchor) : /^(\d{4})-(\d{2})-(\d{2})$/.exec(anchor)
+  if (!m) return null
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, m[3] ? Number(m[3]) : 1)
+  if (Number.isNaN(d.getTime())) return null
+  // Round-trip guard: "2026-02-31" would otherwise roll into March.
+  const roundTrip = kind === "month" ? formatLocalMonth(d) : formatLocalDate(d)
+  if (roundTrip !== anchor) return null
+  return d > new Date() ? null : d
 }
 
 /** Checks if two dates represent the same calendar day in local time. */

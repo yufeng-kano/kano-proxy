@@ -303,6 +303,11 @@ export type UsageRange = {
   from: string
   to: string
   grain: "hour" | "day"
+  /**
+   * Minutes east of UTC of the calendar this range was picked in. Sent to the
+   * API so it buckets rows in the same calendar (see docs/admin-ui.md).
+   */
+  offsetMinutes: number
 }
 
 /** Legacy range picker options: 24h / 7d / 30d. */
@@ -384,6 +389,8 @@ export type UsageSummary = {
   to?: string
   /** Aggregation grain: "hour" for single days, "day" for multi-day ranges. */
   grain?: "hour" | "day"
+  /** Minutes east of UTC the server bucketed in; absent or 0 means UTC keys. */
+  offset?: number
   totals: UsageTotals
   /** Sorted by total tokens desc (server-side). */
   models: ModelUsageRow[]

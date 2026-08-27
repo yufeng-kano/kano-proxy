@@ -430,6 +430,8 @@ export async function getUsageSummary(
         from?: string
         to?: string
         grain?: "hour" | "day"
+        /** Bucket calendar, minutes east of UTC — see docs/admin-ui.md. */
+        offsetMinutes?: number
         days?: UsageDays
       }
     | UsageDays = 7,
@@ -441,6 +443,7 @@ export async function getUsageSummary(
   if (params.from) q.set("from", params.from)
   if (params.to) q.set("to", params.to)
   if (params.grain) q.set("grain", params.grain)
+  if (params.offsetMinutes !== undefined) q.set("offset", String(params.offsetMinutes))
   if (params.days !== undefined && !params.from) q.set("days", String(params.days))
   const qs = q.toString()
   return request<UsageSummary>(`/api/usage/summary${qs ? `?${qs}` : ""}`)

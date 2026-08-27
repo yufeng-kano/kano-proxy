@@ -706,6 +706,104 @@ describe("GET /api/usage/summary", () => {
     )
     expect(resInvalidGrain.status).toBe(400)
     expect(await resInvalidGrain.json()).toEqual({ error: "invalid_grain" })
+
+    const resInvalidOffset = await usageRoutes.request(
+      "/summary?from=2026-08-15T00:00:00Z&to=2026-08-16T00:00:00Z&offset=900",
+      req(cookie),
+      env,
+    )
+    expect(resInvalidOffset.status).toBe(400)
+    expect(await resInvalidOffset.json()).toEqual({ error: "invalid_offset" })
+
+    const resFractionalOffset = await usageRoutes.request(
+      "/summary?from=2026-08-15T00:00:00Z&to=2026-08-16T00:00:00Z&offset=30.5",
+      req(cookie),
+      env,
+    )
+    expect(resFractionalOffset.status).toBe(400)
+    expect(await resFractionalOffset.json()).toEqual({ error: "invalid_offset" })
+  })
+
+  it("buckets a local week into seven day keys for a UTC+8 client", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    // Mon 2026-08-10 .. Sun 2026-08-16, local time in UTC+8 (offset 480).
+    // Local Monday 00:00 is Sunday 16:00Z, so the span touches eight UTC dates
+    // — bucketing in UTC would put traffic in a key the seven-column chart has
+    // no room for, and drop it while the totals still counted it.
+    seedLog(db, { user_id: "user_1", created_at: "2026-08-09T16:30:00.000Z" }) // Mon 00:30 local
+    seedLog(db, { user_id: "user_1", created_at: "2026-08-13T02:00:00.000Z" }) // Thu 10:00 local
+    seedLog(db, { user_id: "user_1", created_at: "2026-08-16T09:00:00.000Z" }) // Sun 17:00 local
+
+    const url =
+      "/summary?from=2026-08-09T16:00:00.000Z&to=2026-08-16T15:59:59.999Z&grain=day&offset=480"
+    const res = await usageRoutes.request(url, req(cookie), env)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SummaryJson & { grain: string; offset: number }
+
+    expect(json.offset).toBe(480)
+    expect(json.totals.requests).toBe(3)
+    expect(json.series.map((s) => s.bucket)).toEqual([
+      "2026-08-10",
+      "2026-08-13",
+      "2026-08-16",
+    ])
+  })
+
+  it("buckets hours in the client's calendar, half-hour offsets included", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    // UTC+5:30 (offset 330): local 2026-08-15 runs 2026-08-14T18:30Z .. 18:29Z.
+    seedLog(db, { user_id: "user_1", created_at: "2026-08-14T18:45:00.000Z" }) // 00:15 local
+    seedLog(db, { user_id: "user_1", created_at: "2026-08-15T15:20:00.000Z" }) // 20:50 local
+
+    const url =
+      "/summary?from=2026-08-14T18:30:00.000Z&to=2026-08-15T18:29:59.999Z&grain=hour&offset=330"
+    const res = await usageRoutes.request(url, req(cookie), env)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SummaryJson & { offset: number }
+
+    expect(json.series.map((s) => s.bucket)).toEqual(["2026-08-15T00", "2026-08-15T20"])
+  })
+
+  it("defaults offset to 0 so the legacy days= window keeps UTC keys", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const res = await usageRoutes.request("/summary?days=7", req(cookie), env)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SummaryJson & { offset: number }
+    expect(json.offset).toBe(0)
+  })
+
+  it("honors an explicit grain=day on a one-day range", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    seedLog(db, { user_id: "user_1", created_at: "2026-08-15T08:30:00.000Z" })
+    seedLog(db, { user_id: "user_1", created_at: "2026-08-15T14:45:00.000Z" })
+
+    // `days` still reads 1 here, which is why the client must prefer `grain`.
+    const res = await usageRoutes.request(
+      "/summary?from=2026-08-15T00:00:00.000Z&to=2026-08-15T23:59:59.999Z&grain=day",
+      req(cookie),
+      env,
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as SummaryJson & { grain: string }
+    expect(json.days).toBe(1)
+    expect(json.grain).toBe("day")
+    expect(json.series.map((s) => s.bucket)).toEqual(["2026-08-15"])
   })
 })
 
