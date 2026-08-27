@@ -6,7 +6,7 @@ import { listModelsForUser } from "../catalog/models"
 import { logRequest } from "../logging/request_log"
 import { isNativeAnthropicPassthrough } from "./anthropic"
 import { resolveRequestModel } from "./resolve_request"
-import { dispatchChatCompletions } from "../proxy/dispatch"
+import { dispatchAudioTranscriptions, dispatchChatCompletions } from "../proxy/dispatch"
 import { SUPPORTED_AUDIO_FORMATS, scanAudioParts } from "../utils/audio"
 import { detectOpenAIToolLoop, loopDetectedMessage } from "../utils/loop_guard"
 import { loggingProviderFromRawModel } from "../utils/model"
@@ -242,3 +242,150 @@ export async function handleChatCompletions(c: Context<HonoEnv>): Promise<Respon
 }
 
 openaiRoutes.post("/chat/completions", handleChatCompletions)
+
+export async function handleAudioTranscriptions(c: Context<HonoEnv>): Promise<Response> {
+  const started = Date.now()
+  const userId = c.get("apiKeyUserId")!
+  const apiKeyId = c.get("apiKeyId")
+
+  let formData: FormData
+  try {
+    formData = await c.req.formData()
+  } catch {
+    return c.json(
+      { error: { message: "Invalid multipart/form-data request", code: "invalid_request" } },
+      400,
+    )
+  }
+
+  const modelRaw = String(formData.get("model") ?? "").trim()
+  if (!modelRaw) {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: "unknown",
+        model: "",
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "invalid_model",
+      }),
+    )
+    return c.json(
+      {
+        error: {
+          message: "Missing required parameter: 'model'",
+          type: "invalid_request_error",
+          code: "invalid_model",
+        },
+      },
+      400,
+      { "x-should-retry": "false" },
+    )
+  }
+
+  const file = formData.get("file")
+  if (!file) {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: loggingProviderFromRawModel(modelRaw),
+        model: modelRaw.slice(0, 200),
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "invalid_request",
+      }),
+    )
+    return c.json(
+      {
+        error: {
+          message: "Missing required parameter: 'file'",
+          type: "invalid_request_error",
+          code: "invalid_request",
+        },
+      },
+      400,
+      { "x-should-retry": "false" },
+    )
+  }
+
+  const res = await resolveRequestModel(c, userId, modelRaw)
+  if (res.kind !== "ok") {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: loggingProviderFromRawModel(modelRaw),
+        model: modelRaw.slice(0, 200),
+        statusCode: res.kind === "group_not_found" ? 404 : 400,
+        latencyMs: Date.now() - started,
+        errorCode: res.kind === "group_not_found" ? "group_not_found" : "invalid_model",
+      }),
+    )
+    if (res.kind === "group_not_found") {
+      return c.json(
+        { error: { message: `unknown group endpoint "${res.slug}"`, code: "not_found" } },
+        404,
+        { "x-should-retry": "false" },
+      )
+    }
+    return c.json(
+      {
+        error: {
+          message: res.groupSlug
+            ? `model must be one of this group endpoint's configured models (see GET /g/${res.groupSlug}/openai/v1/models)`
+            : "model must be provider/model (e.g. openrouter/openai/whisper-large-v3-turbo)",
+          code: "invalid_model",
+        },
+      },
+      400,
+      { "x-should-retry": "false" },
+    )
+  }
+
+  const resolved = res.resolution
+  if (!resolved.primary.adapter.audioTranscriptions) {
+    c.executionCtx.waitUntil(
+      logRequest(c.env, {
+        userId,
+        apiKeyId,
+        provider: resolved.primary.provider,
+        model: `${resolved.primary.provider}/${resolved.primary.upstreamModel}`,
+        statusCode: 400,
+        latencyMs: Date.now() - started,
+        errorCode: "unsupported_modality",
+        groupName: resolved.groupName ?? null,
+      }),
+    )
+    return c.json(
+      {
+        error: {
+          message: `audio transcription is not supported by "${resolved.primary.provider}" — only custom OpenAI-format providers support the audio/transcriptions endpoint`,
+          type: "invalid_request_error",
+          code: "unsupported_modality",
+        },
+      },
+      400,
+      { "x-should-retry": "false" },
+    )
+  }
+
+  return dispatchAudioTranscriptions(c.env, {
+    userId,
+    apiKeyId,
+    provider: resolved.primary.provider,
+    adapter: resolved.primary.adapter,
+    formData,
+    rawModel: modelRaw,
+    upstreamModel: resolved.primary.upstreamModel,
+    waitUntil: (p) => c.executionCtx.waitUntil(p),
+    groupName: resolved.groupName,
+    candidates: resolved.candidates,
+    strategy: resolved.strategy,
+    isBuiltin: resolved.primary.isBuiltin,
+    customProvider: resolved.primary.customProvider,
+  })
+}
+
+openaiRoutes.post("/audio/transcriptions", handleAudioTranscriptions)

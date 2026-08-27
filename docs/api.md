@@ -163,6 +163,23 @@ Pure passthrough paths (`grok` and custom `format=openai` on `/openai/v1`; nativ
 
 Returns OpenAI-style `{ object: "list", data: [...] }` for providers the key owner has bound. Ids are `provider/upstream_id`. Model groups are **not** listed here (since v4 they live on their own endpoints — each group's `GET /g/<slug>/openai/v1/models` lists its model names; see "Group endpoints"). Claude Code and Grok come from live upstream `/models`; Antigravity from `v1internal:fetchAvailableModels`, ids verbatim and empty on failure (see [providers.md](./providers.md) § Antigravity). Codex comes from the ChatGPT `backend-api/codex/models` endpoint, falling back to the public catalog mirror when the edge bot-walls the Worker (see [providers.md](./providers.md)). Empty for a provider when the user has no usable account for it. The user's custom providers are appended after the builtins — manual list, or live + cache + fallback for `models_mode=auto` (see [providers.md](./providers.md)).
 
+### `POST /openai/v1/audio/transcriptions`
+
+OpenAI-compatible Speech-to-Text audio transcription endpoint.
+
+Request shape: `multipart/form-data`
+- `file`: audio file binary (required)
+- `model`: required. `provider/model` on this shared base; on a group endpoint, one of that group's model names (see "Model routing" and "Group endpoints")
+- `language`: optional ISO-639-1 code
+- `prompt`: optional text
+- `response_format`: optional (`json`, `text`, `srt`, `verbose_json`, `vtt`), default `json`
+- `temperature`: optional float
+- `timestamp_granularities[]`: optional array (`word`, `segment`)
+
+**Provider support:**
+- **Custom providers with `format=openai`:** `model` is rewritten to the bare upstream model id; `file` and all other form fields are forwarded verbatim to `{base_url}/audio/transcriptions`. Upstream responses (JSON, verbose JSON, plain text, SRT, VTT) and HTTP statuses pass through directly.
+- **Built-in subscription providers (`claude-code`, `codex`, `grok`, `antigravity`) and custom providers with `format=anthropic`:** rejected with `400 unsupported_modality` ("audio transcription is not supported by \"<provider>\" — only custom OpenAI-format providers support the audio/transcriptions endpoint").
+
 ## Anthropic surface
 
 Same providers as the OpenAI surface. Model id is always `provider/upstream` (not bare).
@@ -228,6 +245,7 @@ Every model group ([providers.md](./providers.md) § Model groups) is its own vi
 | Route | Mirrors |
 |-------|---------|
 | `POST /g/<slug>/openai/v1/chat/completions` | `POST /openai/v1/chat/completions` |
+| `POST /g/<slug>/openai/v1/audio/transcriptions` | `POST /openai/v1/audio/transcriptions` |
 | `GET /g/<slug>/openai/v1/models` | `GET /openai/v1/models` |
 | `POST /g/<slug>/anthropic/v1/messages` | `POST /anthropic/v1/messages` |
 | `POST /g/<slug>/anthropic/v1/messages/count_tokens` | `POST /anthropic/v1/messages/count_tokens` |

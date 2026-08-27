@@ -4,7 +4,7 @@ import { apiKeyAuth } from "../auth/api_key_auth"
 import type { HonoEnv } from "../auth/session"
 import { getGroupBySlug, listModelsForGroup, type ModelGroupRow } from "../db/model_groups"
 import { handleAnthropicCountTokens, handleAnthropicMessages } from "./anthropic"
-import { handleChatCompletions } from "./openai"
+import { handleAudioTranscriptions, handleChatCompletions } from "./openai"
 
 /**
  * Model-group virtual endpoints (docs/api.md § Group endpoints): each group
@@ -69,5 +69,6 @@ groupEndpointRoutes.get("/:slug/anthropic/v1/models", async (c) => {
 })
 
 groupEndpointRoutes.post("/:slug/openai/v1/chat/completions", handleChatCompletions)
+groupEndpointRoutes.post("/:slug/openai/v1/audio/transcriptions", handleAudioTranscriptions)
 groupEndpointRoutes.post("/:slug/anthropic/v1/messages", handleAnthropicMessages)
 groupEndpointRoutes.post("/:slug/anthropic/v1/messages/count_tokens", handleAnthropicCountTokens)

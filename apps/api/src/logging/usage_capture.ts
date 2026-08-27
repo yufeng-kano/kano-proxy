@@ -40,9 +40,11 @@ function num(v: unknown): number | undefined {
 export function fromOpenAIUsage(u: Record<string, unknown> | null | undefined): NormalizedUsage {
   if (!u) return { ...NULL_USAGE }
   const details = u.prompt_tokens_details as Record<string, unknown> | undefined
+  const prompt = num(u.prompt_tokens) ?? num(u.input_tokens)
+  const completion = num(u.completion_tokens) ?? num(u.output_tokens)
   return {
-    promptTokens: num(u.prompt_tokens) ?? null,
-    completionTokens: num(u.completion_tokens) ?? null,
+    promptTokens: prompt ?? null,
+    completionTokens: completion ?? null,
     cacheReadInputTokens: num(details?.cached_tokens) ?? null,
     cacheCreationInputTokens:
       num(details?.cache_write_tokens) ?? num(u.cache_creation_input_tokens) ?? null,

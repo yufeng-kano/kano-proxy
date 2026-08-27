@@ -7,7 +7,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | Doc | Summary |
 |-----|---------|
 | [product.md](./product.md) | Goals, non-goals, tenants, providers, model naming |
-| [api.md](./api.md) | Public LLM routes (`/openai/v1`, `/anthropic`), errors, reasoning, audio input, cache |
+| [api.md](./api.md) | Public LLM routes (`/openai/v1`, `/anthropic`), errors, reasoning, audio (input & transcriptions), cache |
 | [auth.md](./auth.md) | Google OIDC admin, client API keys, OAuth account binding |
 | [database.md](./database.md) | D1 schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, routing module + strategies, failover, usage windows, manual unpause, adapters |
@@ -33,7 +33,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 
 Users sign in with Google, bind their own subscription accounts (Claude Code / Codex / Grok / Antigravity) or bring their own OpenAI-/Anthropic-compatible endpoint (custom base URL + API key), issue API keys, and call **any bound provider** through either format:
 
-- `https://<your-domain>/openai/v1` — Chat Completions + Models  
+- `https://<your-domain>/openai/v1` — Chat Completions, Models, and Audio Transcriptions  
 - `https://<your-domain>/anthropic` — Messages API (`/v1/messages`)
 
 Model ids use OpenRouter style on **both** bases: `provider/model` (e.g. `claude-code/claude-opus-5`, `grok/grok-4.5`, `antigravity/gemini-3-flash`, or `<your-slug>/<upstream-model>` for a custom endpoint). Each user-defined **model group** is its own virtual endpoint — `https://<your-domain>/g/<slug>/openai/v1` and `/g/<slug>/anthropic` — on which the group's configured model names expand to ordered lists of `provider/model` targets ([providers.md](./providers.md)). Set `<your-domain>` via DNS + Worker/Pages custom domain (see [deployment.md](./deployment.md)).

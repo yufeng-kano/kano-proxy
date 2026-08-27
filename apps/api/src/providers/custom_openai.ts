@@ -75,6 +75,36 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
       return fetch(url, { ...init, body: JSON.stringify(remapped) })
     },
 
+    async audioTranscriptions(_env, account, formData, _rawModel, upstreamModel, extras) {
+      const url = `${base}/audio/transcriptions`
+      const outgoingFormData = new FormData()
+      for (const [key, value] of formData.entries()) {
+        if (key === "model") {
+          outgoingFormData.append("model", upstreamModel)
+        } else if (
+          typeof value === "object" &&
+          value !== null &&
+          "name" in value &&
+          typeof (value as { name?: unknown }).name === "string"
+        ) {
+          outgoingFormData.append(key, value as Blob, (value as { name: string }).name)
+        } else {
+          outgoingFormData.append(key, value)
+        }
+      }
+      if (!outgoingFormData.has("model")) {
+        outgoingFormData.append("model", upstreamModel)
+      }
+      return fetch(url, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${account.credential.access_token}`,
+        },
+        body: outgoingFormData,
+        signal: extras?.signal,
+      })
+    },
+
     async listModels(_env, account) {
       try {
         const res = await fetch(`${base}/models`, {

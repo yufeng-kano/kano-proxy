@@ -23,3 +23,5 @@ apps/api/.wrangler/
 # Operator production Wrangler config (real D1/KV ids + production host vars)
 # Template: apps/api/wrangler.production.example.toml
 apps/api/wrangler.production.toml
+
+.zed/

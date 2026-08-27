@@ -109,6 +109,15 @@ export type ProviderAdapter = {
     headers: Headers,
     extras?: { waitUntil?: (promise: Promise<unknown>) => void; signal?: AbortSignal },
   ): Promise<Response>
+  /** Optional OpenAI-compatible audio transcription (STT) entry (custom-openai). */
+  audioTranscriptions?(
+    env: Env,
+    account: AcquiredAccount,
+    formData: FormData,
+    rawModel: string,
+    upstreamModel: string,
+    extras?: { signal?: AbortSignal },
+  ): Promise<Response>
   /** Optional native Anthropic count_tokens (same providers as `messages`). Never streams. */
   countTokens?(
     env: Env,

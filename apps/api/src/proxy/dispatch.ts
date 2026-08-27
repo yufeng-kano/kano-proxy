@@ -1487,3 +1487,319 @@ function usageFields(usage: NormalizedUsage | null): {
     cacheCreationInputTokens: usage?.cacheCreationInputTokens ?? null,
   }
 }
+
+function streamWithUsageTap(
+  upstream: ReadableStream<Uint8Array>,
+  isJson: boolean,
+  onFinish: (usage: NormalizedUsage | null, reason: StreamCloseReason) => void,
+): ReadableStream<Uint8Array> {
+  let finished = false
+  let boundedBuf = ""
+  let boundedLen = 0
+  const MAX_TAP = 256 * 1024
+  const decoder = new TextDecoder()
+  const reader = upstream.getReader()
+
+  const finishOnce = (reason: StreamCloseReason) => {
+    if (finished) return
+    finished = true
+    let usage: NormalizedUsage | null = null
+    if (isJson && boundedBuf) {
+      try {
+        const j = JSON.parse(boundedBuf) as { usage?: Record<string, unknown> }
+        usage = fromOpenAIUsage(j.usage)
+      } catch {
+        /* malformed or truncated JSON */
+      }
+    }
+    onFinish(usage, reason)
+  }
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read()
+        if (done) {
+          controller.close()
+          finishOnce("done")
+          return
+        }
+        if (value) {
+          controller.enqueue(value)
+          if (isJson && boundedLen < MAX_TAP) {
+            try {
+              boundedBuf += decoder.decode(value, { stream: true })
+              boundedLen += value.byteLength
+            } catch {
+              /* */
+            }
+          }
+        }
+      } catch (err) {
+        controller.error(err)
+        finishOnce("error")
+      }
+    },
+    async cancel(reason) {
+      try {
+        await reader.cancel(reason)
+      } catch {
+        /* */
+      }
+      finishOnce("cancel")
+    },
+  })
+}
+
+export async function dispatchAudioTranscriptions(
+  env: Env,
+  opts: {
+    userId: string
+    apiKeyId: string | null
+    provider: string
+    adapter?: ProviderAdapter
+    formData: FormData
+    rawModel: string
+    upstreamModel: string
+    waitUntil: WaitUntil
+    idleTimeoutMs?: number
+    groupName?: string
+    pinnedAccountId?: string
+    candidates?: RoutingCandidate[]
+    strategy?: string
+    isBuiltin?: boolean
+    customProvider?: CustomProviderRow
+  },
+): Promise<Response> {
+  const started = Date.now()
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
+
+  const plan = await planCandidates(env, opts, opts.upstreamModel)
+  if (plan.kind === "no_account") {
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider: opts.provider,
+      model: canonicalModelId(opts.provider, opts.upstreamModel),
+      statusCode: 400,
+      latencyMs: Date.now() - started,
+      errorCode: "no_upstream_account",
+      groupName: opts.groupName ?? null,
+    })
+    return Response.json(
+      {
+        error: {
+          message: `No usable ${opts.provider} account for this user`,
+          type: "invalid_request_error",
+          code: "no_upstream_account",
+        },
+      },
+      { status: 400, headers: retryMarker(400, "no_upstream_account") },
+    )
+  }
+  if (plan.kind === "unavailable") {
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider: opts.provider,
+      model: canonicalModelId(opts.provider, opts.upstreamModel),
+      statusCode: 503,
+      latencyMs: Date.now() - started,
+      errorCode: "upstream_unavailable",
+      groupName: opts.groupName ?? null,
+    })
+    return upstreamUnavailableResponse(
+      { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
+      plan.untilMs,
+    )
+  }
+
+  let lastResponse: Response | null = null
+  let lastCandidate: RoutingCandidate | null = null
+  let lastUpstreamStatus: number | null = null
+  let idx = 0
+  let attempts = 0
+  let ranOutOfCandidates = false
+
+  for (; attempts < MAX_ATTEMPTS; ) {
+    const candidate = plan.ordered[idx]
+    if (!candidate) {
+      ranOutOfCandidates = true
+      break
+    }
+    idx++
+
+    if (!candidate.adapter.audioTranscriptions) {
+      continue
+    }
+
+    const acquired = await acquireCandidate(env, candidate)
+    if (!acquired) continue
+    attempts++
+
+    let fetched: TimedUpstreamResponse
+    try {
+      fetched = await retry529Once(() =>
+        fetchUpstreamResponse(env, (signal) =>
+          candidate.adapter.audioTranscriptions!(
+            env,
+            acquired,
+            opts.formData,
+            opts.rawModel,
+            candidate.upstreamModel,
+            { signal },
+          ),
+        ),
+      )
+    } catch {
+      const latencyMs = Date.now() - started
+      await logRequest(env, {
+        userId: opts.userId,
+        apiKeyId: opts.apiKeyId,
+        provider: candidate.provider,
+        model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+        accountId: candidate.account.id,
+        statusCode: 502,
+        latencyMs,
+        errorCode: "upstream_error",
+        groupName: opts.groupName ?? null,
+      })
+      return Response.json(
+        { error: { message: "upstream error", code: "upstream_error" } },
+        { status: 502 },
+      )
+    }
+    if (fetched.timedOut) continue
+    const res = fetched.response
+    lastUpstreamStatus = res.status
+    opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
+
+    if (await shouldFailOverForResponse(env, opts.userId, candidate, res)) {
+      if (lastResponse) {
+        try {
+          await lastResponse.body?.cancel()
+        } catch {
+          /* */
+        }
+      }
+      lastResponse = res
+      lastCandidate = candidate
+      continue
+    }
+
+    const latencyMs = Date.now() - started
+    const errorCode = res.ok ? null : "upstream_error"
+
+    if (res.body && isEventStream(res)) {
+      const sniffer = createOpenAISseUsageSniffer()
+      const streamBody = streamWithKeepalive(res.body, undefined, {
+        tap: (chunk) => sniffer.feed(chunk),
+        idleTimeoutMs,
+        stallFrame: OPENAI_STALL_FRAME,
+        onClose: (reason) => {
+          const usage = sniffer.finish()
+          const code = errorCode ?? streamCloseErrorCode(reason, sniffer.complete())
+          opts.waitUntil(
+            logRequest(env, {
+              userId: opts.userId,
+              apiKeyId: opts.apiKeyId,
+              provider: candidate.provider,
+              model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+              accountId: candidate.account.id,
+              statusCode: res.status,
+              latencyMs,
+              errorCode: code,
+              upstreamStatus: res.status,
+              groupName: opts.groupName ?? null,
+              ...usageFields(usage),
+            }),
+          )
+        },
+      })
+      return new Response(streamBody, {
+        status: res.status,
+        headers: passthroughStreamHeaders(res.headers),
+      })
+    }
+
+    const ct = res.headers.get("content-type") || ""
+    const isJson = ct.includes("application/json")
+
+    const onFinish = (usage: NormalizedUsage | null, reason: StreamCloseReason) => {
+      const code =
+        reason === "cancel"
+          ? "client_abort"
+          : reason === "error"
+            ? "upstream_error"
+            : errorCode
+      opts.waitUntil(
+        logRequest(env, {
+          userId: opts.userId,
+          apiKeyId: opts.apiKeyId,
+          provider: candidate.provider,
+          model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+          accountId: candidate.account.id,
+          statusCode: res.status,
+          latencyMs,
+          errorCode: code,
+          upstreamStatus: res.status,
+          groupName: opts.groupName ?? null,
+          ...usageFields(usage),
+        }),
+      )
+    }
+
+    if (!res.body) {
+      onFinish(null, "done")
+      return res
+    }
+
+    const body = streamWithUsageTap(res.body, isJson, onFinish)
+    return new Response(body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    })
+  }
+
+  if (ranOutOfCandidates && lastResponse && lastCandidate) {
+    try {
+      await lastResponse.body?.cancel()
+    } catch {
+      /* */
+    }
+    const untilMs = await recomputeUnavailableUntil(env, opts.userId, plan.ordered.slice(0, idx))
+    await logRequest(env, {
+      userId: opts.userId,
+      apiKeyId: opts.apiKeyId,
+      provider: lastCandidate.provider,
+      model: canonicalModelId(lastCandidate.provider, lastCandidate.upstreamModel),
+      accountId: lastCandidate.account.id,
+      statusCode: 503,
+      latencyMs: Date.now() - started,
+      errorCode: "upstream_unavailable",
+      upstreamStatus: lastUpstreamStatus,
+      groupName: opts.groupName ?? null,
+    })
+    return upstreamUnavailableResponse(
+      { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
+      untilMs,
+    )
+  }
+
+  await logRequest(env, {
+    userId: opts.userId,
+    apiKeyId: opts.apiKeyId,
+    provider: opts.provider,
+    model: canonicalModelId(opts.provider, opts.upstreamModel),
+    statusCode: 503,
+    latencyMs: Date.now() - started,
+    errorCode: "upstream_unavailable",
+    upstreamStatus: lastUpstreamStatus,
+    groupName: opts.groupName ?? null,
+  })
+  return upstreamUnavailableResponse(
+    { error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } },
+    null,
+  )
+}
