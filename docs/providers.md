@@ -365,7 +365,7 @@ Failover never crosses users. Custom providers participate identically (pooled u
 - The next bench-status upstream response (401/402/403/429/520/522/524) re-benches as usual. Unpause is not a permanent override and does not change priority, tokens, or labels.
 - 404 when the id is not the caller's, or (builtins) the account's `provider` does not match the path.
 
-The same facts also power the admin **current-route indicator**: `GET /api/model-groups` computes, for every model of every group, per-target usability and the target the ordered walk would pick right now from stored state only (D1 bench columns + usage snapshots — never a synchronous upstream call), so the Groups page shows exactly what the router itself would decide with the same information ([auth.md](./auth.md), [admin-ui.md](./admin-ui.md) § Groups page).
+The same facts also power the admin **status surfaces**, so neither page can disagree with the router: `GET /api/providers/:provider/accounts` derives each account's dot from them — benched, `401`-unusable, **limited** while any window is `≥100%` and its `resets_at` is still ahead, and `active` for the first account left usable (the rest `standby`) — which is the account an `ordered` walk would pick right now, not merely the first non-benched row ([admin-ui.md](./admin-ui.md) § Providers page). `GET /api/model-groups` computes, for every model of every group, per-target usability and the target the ordered walk would pick right now from stored state only (D1 bench columns + usage snapshots — never a synchronous upstream call), so the Groups page shows exactly what the router itself would decide with the same information ([auth.md](./auth.md), [admin-ui.md](./admin-ui.md) § Groups page).
 
 ## Catalog
 

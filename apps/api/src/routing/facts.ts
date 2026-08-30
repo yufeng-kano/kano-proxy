@@ -29,8 +29,18 @@ import type { CandidateFacts, RoutingCandidate } from "./types"
 export function usageWindowUnusableUntil(row: AccountRow, now = Date.now()): number | null {
   const snapshot = readUsageSnapshot(row)
   if (!snapshot) return null
+  return windowsUnusableUntil(snapshot.windows, now)
+}
+
+/**
+ * Same rule against a windows array the caller already holds — the admin
+ * accounts route derives its status dot from the snapshot it is about to
+ * return, which on a refresh is newer than the one on the loaded row
+ * (docs/admin-ui.md § Providers page).
+ */
+export function windowsUnusableUntil(windows: unknown[], now = Date.now()): number | null {
   let latest: number | null = null
-  for (const w of snapshot.windows) {
+  for (const w of windows) {
     const window = w as { utilization?: number | null; resets_at?: string | null }
     if (typeof window.utilization !== "number" || window.utilization < 100) continue
     if (!window.resets_at) continue

@@ -9,10 +9,18 @@ export type UsageWindow = {
   resets_at: string | null
 }
 
+/**
+ * How an account reads on the admin Providers page — computed at read time
+ * from priority order plus the router's own facts, never stored
+ * (docs/admin-ui.md § Providers page): `limited` is a usage window at
+ * `utilization >= 100` waiting on its reset, which is not a bench.
+ */
+export type AccountStatus = "active" | "standby" | "limited" | "benched" | "unusable"
+
 export type AccountUsageView = {
   id: string
   priority: number
-  status: "active" | "standby" | "benched" | "unusable"
+  status: AccountStatus
   label: string | null
   custom_label: string | null
   account: Record<string, unknown> | null

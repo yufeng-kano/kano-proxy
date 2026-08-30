@@ -1,6 +1,11 @@
 export type ProviderId = "claude-code" | "codex" | "grok" | "antigravity"
 
-export type AccountStatus = "active" | "standby" | "benched" | "unusable"
+/**
+ * Where a request goes right now, not which row is first: `limited` is a
+ * usage window at 100% waiting on its reset (docs/admin-ui.md § Providers
+ * page). The `Primary` badge reads priority order instead.
+ */
+export type AccountStatus = "active" | "standby" | "limited" | "benched" | "unusable"
 
 export type User = {
   id: string

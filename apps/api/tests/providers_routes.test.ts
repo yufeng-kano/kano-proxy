@@ -65,6 +65,8 @@ async function seedAccount(
     label?: string | null
     customLabel?: string | null
     provider?: string
+    priority?: number
+    email?: string
   } = {},
 ): Promise<string> {
   const id = opts.id ?? "acc_1"
@@ -77,9 +79,9 @@ async function seedAccount(
       external_account_id: null,
       label: opts.label ?? "old-upstream-label",
       custom_label: opts.customLabel ?? null,
-      priority: 7,
+      priority: opts.priority ?? 7,
       encrypted_payload: encryptedPayload,
-      account_meta_json: JSON.stringify({ email: "stored@example.com" }),
+      account_meta_json: JSON.stringify({ email: opts.email ?? "stored@example.com" }),
       created_at: NOW,
       updated_at: NOW,
     },
@@ -818,6 +820,93 @@ describe("GET /api/providers/:provider/accounts usage cache", () => {
       await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
     )
     expect(cached.accounts[0].status).toBe("unusable")
+  })
+
+  it("marks an exhausted usage window limited and routes Active to the next account", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    // Higher priority sorts first — this is the pool's primary account.
+    await seedAccount(db, "user_1", { id: "acc_first", priority: 9, email: "first@example.com" })
+    await seedAccount(db, "user_1", { id: "acc_second", priority: 1, email: "second@example.com" })
+
+    const resetsAt = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString()
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith("/api/oauth/usage")) {
+        return new Response(
+          JSON.stringify({ five_hour: { utilization: 100, resets_at: resetsAt } }),
+          { status: 200 },
+        )
+      }
+      if (url.endsWith("/api/oauth/profile")) {
+        return new Response(JSON.stringify({ account: { email: "u@example.com" } }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    const bothLimited = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    // Every account limited: nothing is Active, because nothing would serve a
+    // request until a window resets (docs/providers.md § Routing module).
+    expect(bothLimited.accounts.map((a: { status: string }) => a.status)).toEqual([
+      "limited",
+      "limited",
+    ])
+
+    // Now only the primary is exhausted: Active moves to the account the
+    // ordered walk would actually pick.
+    db.rows("upstream_accounts").forEach((row) => {
+      if (row.id !== "acc_second") return
+      row.usage_snapshot_json = JSON.stringify({
+        windows: [{ label: "5h", utilization: 41, resets_at: resetsAt }],
+        account: {},
+        error: null,
+        stale: false,
+        edgeBlocked: false,
+      })
+    })
+
+    const mixed = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(mixed.accounts.map((a: { id: string; status: string }) => [a.id, a.status])).toEqual([
+      ["acc_first", "limited"],
+      ["acc_second", "active"],
+    ])
+  })
+
+  it("keeps an already-reset window out of the limit fact", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    await seedAccount(db, "user_1")
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.endsWith("/api/oauth/usage")) {
+        // 100% but the reset is in the past: the skip self-expires even off a
+        // stale snapshot, so this account is usable again.
+        return new Response(
+          JSON.stringify({
+            five_hour: { utilization: 100, resets_at: new Date(Date.now() - 1000).toISOString() },
+          }),
+          { status: 200 },
+        )
+      }
+      if (url.endsWith("/api/oauth/profile")) {
+        return new Response(JSON.stringify({ account: { email: "u@example.com" } }), { status: 200 })
+      }
+      throw new Error(`unexpected fetch: ${url}`)
+    }) as typeof fetch
+
+    const res = await readJson(
+      await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env),
+    )
+    expect(res.accounts[0].status).toBe("active")
   })
 })
 

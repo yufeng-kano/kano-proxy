@@ -67,6 +67,7 @@ export const en = {
   // --- Status -------------------------------------------------------------
   "status.active": "Active",
   "status.standby": "Standby",
+  "status.limited": "Limit reached",
   "status.benched": "Paused",
   "status.unusable": "Needs attention",
 

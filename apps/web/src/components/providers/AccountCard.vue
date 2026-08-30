@@ -22,6 +22,14 @@ import type { ProviderAccount } from "@/types"
 
 const props = defineProps<{
   account: ProviderAccount
+  /**
+   * First in the pool's priority order — the row `Make primary` promotes to.
+   * Deliberately not `status === 'active'`: a limited or paused primary is
+   * still the primary, and that is exactly when the operator needs to see that
+   * the pool's first choice is not where traffic is going (docs/admin-ui.md
+   * § Providers page).
+   */
+  primary?: boolean
   busy?: boolean
   /** The section's gate — the row's actions render only while this is on. */
   editing?: boolean
@@ -154,10 +162,10 @@ const creditsText = computed(() => {
         <span v-if="renamed" class="upstream" :title="identity">{{ identity }}</span>
         <div class="tags">
           <StatusDot :status="account.status" />
-          <!-- `active` *is* the account requests route through first, so this
-               closes the loop on the "Make primary" button: the word the user
-               pressed is the word they get back. -->
-          <Badge v-if="account.status === 'active'" tone="accent">
+          <!-- The badge closes the loop on the "Make primary" button: the word
+               the user pressed is the word they get back. The dot beside it
+               answers the other question — where requests go right now. -->
+          <Badge v-if="primary" tone="accent">
             {{ t("providers.account.primary") }}
           </Badge>
           <Badge v-if="plan">{{ t("providers.account.plan", { plan }) }}</Badge>
@@ -184,7 +192,7 @@ const creditsText = computed(() => {
           <template #icon><ActionIcon name="play" /></template>
         </AppButton>
         <AppButton
-          v-if="account.status !== 'active'"
+          v-if="!primary"
           icon-only
           size="sm"
           variant="ghost"

@@ -25,6 +25,8 @@ const label = computed(() => {
       return t("status.active")
     case "standby":
       return t("status.standby")
+    case "limited":
+      return t("status.limited")
     case "benched":
       return t("status.benched")
     default:
@@ -70,6 +72,13 @@ const label = computed(() => {
 
 .standby .dot {
   background: var(--standby);
+}
+
+/* Limited and benched share the warn tone: both mean "usable again later,
+   nothing to fix". The label is what separates them — the dot never carries a
+   status on its own (docs/admin-ui.md § Accessibility floor). */
+.limited .dot {
+  background: var(--warn);
 }
 
 .benched .dot {

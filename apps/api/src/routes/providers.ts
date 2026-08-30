@@ -43,6 +43,8 @@ import { isProviderId, type ProviderId } from "../env"
 import { benchUntilFromRow, clearBench } from "../pool/bench"
 import type { StoredCredential } from "../pool/acquire"
 import { getAdapter } from "../providers"
+import type { AccountStatus } from "../providers/types"
+import { windowsUnusableUntil } from "../routing/facts"
 import { newId, nowIso } from "../utils/id"
 
 export const providerRoutes = new Hono<HonoEnv>()
@@ -71,15 +73,15 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   const rows = await listAccounts(c.env.DB, user.id, provider)
   const adapter = getAdapter(provider)
   const accounts = []
-  let priority = 0
+  // Parallel to `accounts`: the routing fact behind a "limited" dot, computed
+  // from the snapshot each row actually returns rather than re-read off the
+  // row (a `?refresh=true` read holds a newer one).
+  const limitedUntil: (number | null)[] = []
   for (const row of rows) {
     const benched = benchUntilFromRow(row) !== null
-    let status: "active" | "standby" | "benched" | "unusable" = benched
-      ? "benched"
-      : priority === 0
-        ? "active"
-        : "standby"
-    if (!benched) priority++
+    // Provisional only — the pass after this loop assigns active / standby /
+    // limited from the routing facts, in list order.
+    let status: AccountStatus = benched ? "benched" : "standby"
 
     let usage = null
     let accountMeta: Record<string, unknown> | null = row.account_meta_json
@@ -177,7 +179,10 @@ providerRoutes.get("/:provider/accounts", async (c) => {
     accounts.push({
       id: row.id,
       priority: row.priority,
-      status,
+      // Widened deliberately: control flow narrows `status` to whatever this
+      // row reached here, and the pass below still has to write "active" /
+      // "limited" onto it.
+      status: status as AccountStatus,
       label: displayLabel,
       custom_label: row.custom_label ?? null,
       account: accountMeta,
@@ -185,15 +190,23 @@ providerRoutes.get("/:provider/accounts", async (c) => {
       error,
       stale,
     })
+    limitedUntil.push(usage ? windowsUnusableUntil(usage.windows) : null)
   }
 
-  // fix active: first non-benched
-  let seen = false
-  for (const a of accounts) {
-    if (a.status === "benched" || a.status === "unusable") continue
-    a.status = seen ? "standby" : "active"
-    seen = true
-  }
+  // The dot says where a request goes right now, so it is the router's own
+  // walk over the same stored facts (docs/providers.md § Routing module
+  // "Facts"): an exhausted usage window is "limited", not active, and
+  // "active" lands on the first account the ordered walk would actually pick.
+  let routed = false
+  accounts.forEach((a, i) => {
+    if (a.status === "benched" || a.status === "unusable") return
+    if ((limitedUntil[i] ?? null) !== null) {
+      a.status = "limited"
+      return
+    }
+    a.status = routed ? "standby" : "active"
+    routed = true
+  })
 
   // The pool's routing strategy (docs/providers.md § Routing module) — no
   // separate read route; `PATCH /api/providers/:provider` is the only

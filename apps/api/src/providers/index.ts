@@ -16,4 +16,4 @@ export function getAdapter(provider: ProviderId): ProviderAdapter {
   return adapters[provider]
 }
 
-export type { ProviderAdapter, ChatCompletionRequest, AccountUsageView } from "./types"
+export type { ProviderAdapter, ChatCompletionRequest, AccountUsageView, AccountStatus } from "./types"

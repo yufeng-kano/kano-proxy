@@ -582,10 +582,11 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 
           <div v-else-if="byProvider[pid].data!.accounts.length" class="rows">
             <AccountCard
-              v-for="account in byProvider[pid].data!.accounts"
+              v-for="(account, i) in byProvider[pid].data!.accounts"
               :key="account.id"
               :account="account"
               :provider="pid"
+              :primary="i === 0"
               :busy="busyId === account.id"
               :editing="isEditing(pid)"
               @resume="onResume(pid, account.id)"
