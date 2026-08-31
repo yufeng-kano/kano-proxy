@@ -242,6 +242,10 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
     let access = tokens.get(false).await?;
     let created = api::create_provider(&state.base_url, &access, &slug, &format, &expose, &initial_models).await?;
 
+    // The token rotation above rewrote the state file — re-read it, or this
+    // save would resurrect the superseded refresh token and the next refresh
+    // would trip the server's reuse-as-theft revocation.
+    state = file.load()?;
     state.providers.push(ProviderState {
         id: created.id,
         slug: created.slug.clone(),
