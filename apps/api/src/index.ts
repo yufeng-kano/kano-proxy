@@ -5,9 +5,11 @@ import { loadSessionUser } from "./auth/session"
 import type { Env } from "./env"
 import { runRetentionSweep } from "./maintenance/retention"
 import { ensureFreshPriceTable } from "./pricing/litellm"
+import { agentRoutes } from "./routes/agent"
 import { anthropicRoutes } from "./routes/anthropic"
 import { authRoutes } from "./routes/auth"
 import { changelogRoutes } from "./routes/changelog"
+import { cliRoutes } from "./routes/cli"
 import { customProviderRoutes } from "./routes/custom_providers"
 import { groupEndpointRoutes } from "./routes/group_endpoints"
 import { keysRoutes } from "./routes/keys"
@@ -62,6 +64,7 @@ app.route("/api/keys", keysRoutes)
 app.route("/api/models", modelsRoutes)
 app.route("/api/providers", providerRoutes)
 app.route("/api/custom-providers", customProviderRoutes)
+app.route("/api/cli", cliRoutes)
 app.route("/api/model-groups", modelGroupRoutes)
 app.route("/api/usage", usageRoutes)
 app.route("/api/logs", logsRoutes)
@@ -69,6 +72,9 @@ app.route("/api/changelog", changelogRoutes)
 
 app.route("/openai/v1", openaiRoutes)
 app.route("/anthropic", anthropicRoutes)
+// CLI device auth + agent tunnel connect (docs/cli.md) — token-authenticated,
+// never session; its own namespace beside /api and the LLM surfaces.
+app.route("/agent/v1", agentRoutes)
 // Model-group virtual endpoints: /g/<slug>/openai/v1/* and
 // /g/<slug>/anthropic/* (docs/api.md § Group endpoints).
 app.route("/g", groupEndpointRoutes)
@@ -93,3 +99,7 @@ const handler: ExportedHandler<Env> = {
 }
 
 export default handler
+
+// Durable Object class export — the AGENT_TUNNEL binding resolves to this
+// (docs/cli.md § AgentTunnel Durable Object).
+export { AgentTunnel } from "./do/agent_tunnel"

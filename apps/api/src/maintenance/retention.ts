@@ -67,19 +67,27 @@ async function deleteExpiredOauthStates(env: Env, now: string): Promise<number> 
   return res.meta.changes ?? 0
 }
 
+async function deleteExpiredCliLoginRequests(env: Env, now: string): Promise<number> {
+  const res = await env.DB.prepare(`DELETE FROM cli_login_requests WHERE expires_at < ?`)
+    .bind(now)
+    .run()
+  return res.meta.changes ?? 0
+}
+
 export async function runRetentionSweep(
   env: Env,
-): Promise<{ requestLogs: number; sessions: number; oauthStates: number }> {
+): Promise<{ requestLogs: number; sessions: number; oauthStates: number; cliLoginRequests: number }> {
   const now = nowIso()
   const cutoff = new Date(Date.now() - retentionDays(env) * 86_400_000).toISOString()
 
   const requestLogs = await sweepRequestLogs(env, cutoff)
   const sessions = await deleteExpiredSessions(env, now)
   const oauthStates = await deleteExpiredOauthStates(env, now)
+  const cliLoginRequests = await deleteExpiredCliLoginRequests(env, now)
 
   console.log(
-    `[retention] request_logs=${requestLogs} sessions=${sessions} oauth_login_states=${oauthStates}`,
+    `[retention] request_logs=${requestLogs} sessions=${sessions} oauth_login_states=${oauthStates} cli_login_requests=${cliLoginRequests}`,
   )
 
-  return { requestLogs, sessions, oauthStates }
+  return { requestLogs, sessions, oauthStates, cliLoginRequests }
 }

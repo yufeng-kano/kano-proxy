@@ -17,6 +17,7 @@
  * `(provider, upstreamModel, account)` triples exist at all.
  */
 import { getAccount, listAccounts } from "../db/accounts"
+import { getCliProviderBySlug } from "../db/cli"
 import { getCustomProviderBySlug, type CustomProviderRow } from "../db/custom_providers"
 import {
   getGroupModelByName,
@@ -28,6 +29,7 @@ import {
 import { getProviderStrategy } from "../db/provider_settings"
 import type { Env, ProviderId } from "../env"
 import { isProviderId } from "../env"
+import { createCliAdapter } from "../providers/cli"
 import { createCustomAnthropicAdapter } from "../providers/custom_anthropic"
 import { createCustomOpenAIAdapter } from "../providers/custom_openai"
 import { getAdapter } from "../providers"
@@ -77,14 +79,26 @@ export async function resolveTargetPrefix(
     }
   }
   const row = await getCustomProviderBySlug(env.DB, userId, split.prefix)
-  if (!row) return null
+  if (row) {
+    return {
+      targetIndex,
+      provider: row.slug,
+      upstreamModel: split.upstreamModel,
+      isBuiltin: false,
+      customProvider: row,
+      adapter: adapterFor(false, row.slug, row),
+      accountId: target.account_id,
+    }
+  }
+  // Third prefix branch (docs/cli.md): builtin → custom slug → CLI slug.
+  const cliRow = await getCliProviderBySlug(env.DB, userId, split.prefix)
+  if (!cliRow) return null
   return {
     targetIndex,
-    provider: row.slug,
+    provider: cliRow.slug,
     upstreamModel: split.upstreamModel,
     isBuiltin: false,
-    customProvider: row,
-    adapter: adapterFor(false, row.slug, row),
+    adapter: createCliAdapter(env, cliRow),
     accountId: target.account_id,
   }
 }
@@ -251,20 +265,39 @@ export async function resolveCandidates(
   }
 
   const row = await getCustomProviderBySlug(env.DB, userId, split.prefix)
-  if (!row) return null
-  const adapter = adapterFor(false, row.slug, row)
-  const primary = {
-    provider: row.slug,
+  if (row) {
+    const adapter = adapterFor(false, row.slug, row)
+    const primary = {
+      provider: row.slug,
+      upstreamModel: split.upstreamModel,
+      adapter,
+      isBuiltin: false,
+      customProvider: row,
+    }
+    return {
+      raw: split.raw,
+      primary,
+      candidates: await poolCandidates(env, userId, primary),
+      strategy: await getProviderStrategy(env.DB, userId, row.slug),
+    }
+  }
+
+  // Third prefix branch (docs/cli.md): a CLI provider behaves like any
+  // provider on the routing surface — its one internal account row rides the
+  // same pool machinery, only the adapter's transport differs.
+  const cliRow = await getCliProviderBySlug(env.DB, userId, split.prefix)
+  if (!cliRow) return null
+  const cliPrimary = {
+    provider: cliRow.slug,
     upstreamModel: split.upstreamModel,
-    adapter,
+    adapter: createCliAdapter(env, cliRow),
     isBuiltin: false,
-    customProvider: row,
   }
   return {
     raw: split.raw,
-    primary,
-    candidates: await poolCandidates(env, userId, primary),
-    strategy: await getProviderStrategy(env.DB, userId, row.slug),
+    primary: cliPrimary,
+    candidates: await poolCandidates(env, userId, cliPrimary),
+    strategy: await getProviderStrategy(env.DB, userId, cliRow.slug),
   }
 }
 

@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import type { HonoEnv } from "../auth/session"
 import { loadSessionUser } from "../auth/session"
 import { getAccount } from "../db/accounts"
+import { listCliProviders } from "../db/cli"
 import { listCustomProviders } from "../db/custom_providers"
 import {
   countModelGroups,
@@ -40,10 +41,11 @@ async function requireUser(c: {
   return loaded?.user ?? null
 }
 
-/** Builtin `ProviderId`, or one of the caller's own custom provider slugs — never another user's. */
+/** Builtin `ProviderId`, or one of the caller's own custom or CLI provider slugs (docs/cli.md) — never another user's. */
 async function prefixResolver(db: D1Database, userId: string): Promise<(prefix: string) => boolean> {
   const rows = await listCustomProviders(db, userId)
-  const slugs = new Set(rows.map((r) => r.slug))
+  const cliRows = await listCliProviders(db, userId)
+  const slugs = new Set([...rows.map((r) => r.slug), ...cliRows.map((r) => r.slug)])
   return (prefix: string) => isProviderId(prefix) || slugs.has(prefix)
 }
 

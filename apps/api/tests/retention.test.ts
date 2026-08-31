@@ -206,7 +206,41 @@ describe("runRetentionSweep — sessions and oauth_login_states", () => {
     expect(db.rows("oauth_login_states").map((r) => r.id)).toEqual(["state_active"])
   })
 
-  it("returns all three counts together", async () => {
+  it("purges expired cli_login_requests and keeps live ones", async () => {
+    const db = new FakeD1()
+    const now = Date.now()
+    db.seed("cli_login_requests", [
+      {
+        id: "clireq_expired",
+        device_name: "old-box",
+        code_hash: null,
+        user_id: null,
+        expires_at: new Date(now - 1000).toISOString(),
+        approved_at: null,
+        used_at: null,
+        attempts: 0,
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "clireq_active",
+        device_name: "new-box",
+        code_hash: null,
+        user_id: null,
+        expires_at: new Date(now + 60_000).toISOString(),
+        approved_at: null,
+        used_at: null,
+        attempts: 0,
+        created_at: "2026-01-01T00:00:00.000Z",
+      },
+    ])
+
+    const result = await runRetentionSweep(buildEnv(db))
+
+    expect(result.cliLoginRequests).toBe(1)
+    expect(db.rows("cli_login_requests").map((r) => r.id)).toEqual(["clireq_active"])
+  })
+
+  it("returns all four counts together", async () => {
     const db = new FakeD1()
     const now = Date.now()
     seedLog(db, new Date(now - 91 * 86_400_000).toISOString())
@@ -227,6 +261,6 @@ describe("runRetentionSweep — sessions and oauth_login_states", () => {
 
     const result = await runRetentionSweep(buildEnv(db))
 
-    expect(result).toEqual({ requestLogs: 1, sessions: 1, oauthStates: 1 })
+    expect(result).toEqual({ requestLogs: 1, sessions: 1, oauthStates: 1, cliLoginRequests: 0 })
   })
 })

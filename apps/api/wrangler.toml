@@ -44,6 +44,14 @@ GITHUB_REPO = "yufeng-kano/kano-proxy"
 # GITHUB_TOKEN (optional — raises the GitHub rate limit from 60/hr to 5000/hr)
 # CODEX_RELAY_SA_KEY (optional — GCP SA JSON for the codex relay)
 
+# AgentTunnel Durable Object — CLI providers (docs/cli.md).
+[durable_objects]
+bindings = [{ name = "AGENT_TUNNEL", class_name = "AgentTunnel" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentTunnel"]
+
 # Daily retention sweep (request_logs / sessions / oauth_login_states) — see docs/logging.md.
 [triggers]
 crons = ["17 3 * * *"]

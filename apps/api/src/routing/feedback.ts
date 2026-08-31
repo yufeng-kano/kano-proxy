@@ -111,6 +111,28 @@ export function penaltyForOutcome(
   return null
 }
 
+/**
+ * Agent-tunnel fault classification (docs/cli.md § Failover semantics): a
+ * response carrying `x-agent-fault` never reached the local server, so it
+ * must degrade the route, never account state — every fault fails over;
+ * only `offline` benches the provider's internal account row, for 60s, so a
+ * group under traffic is not paying a DO round-trip per request while a
+ * laptop is closed. A response marked `x-agent-upstream` is a real local
+ * answer and takes the normal penalty table above.
+ */
+export const AGENT_FAULT_HEADER = "x-agent-fault"
+export const AGENT_UPSTREAM_MARKER_HEADER = "x-agent-upstream"
+export const AGENT_OFFLINE_COOLDOWN_MS = 60_000
+
+export type AgentFaultVerdict = { failover: true; benchMs: number | null; reason: string } | null
+
+export function agentFaultVerdict(headers: Headers): AgentFaultVerdict {
+  if (headers.has(AGENT_UPSTREAM_MARKER_HEADER)) return null
+  const reason = headers.get(AGENT_FAULT_HEADER)
+  if (!reason) return null
+  return { failover: true, benchMs: reason === "offline" ? AGENT_OFFLINE_COOLDOWN_MS : null, reason }
+}
+
 /** Same status set `penaltyForOutcome` benches on — kept for call sites that only need the yes/no check. */
 export function isBenchStatus(status: number): boolean {
   return AUTH_BILLING_STATUSES.has(status) || status === 429

@@ -64,6 +64,13 @@ APP_URL = "{app}"
 GOOGLE_REDIRECT_URI = "{app}/api/auth/callback"
 GITHUB_REPO = "{repo}"
 {relay_line}
+[durable_objects]
+bindings = [{{ name = "AGENT_TUNNEL", class_name = "AgentTunnel" }}]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentTunnel"]
+
 [triggers]
 crons = ["17 3 * * *"]
 
