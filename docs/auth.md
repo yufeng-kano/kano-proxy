@@ -163,6 +163,28 @@ Custom providers (BYO OpenAI-/Anthropic-compatible endpoint — see [providers.m
 
 The API key is **never** echoed back on any of these routes — `GET`/`POST`/`PUT` responses carry only `key_mask` (first 6 + `…` + last 4 of the plaintext key). Same session-cookie auth as `/api/providers/*`; same origin-locked CORS (see below).
 
+## CLI devices and providers
+
+The CLI-provider subsystem ([cli.md](./cli.md)) has two auth surfaces:
+
+- **`/agent/v1/*`** — the CLI's own namespace: token-authenticated (device access tokens minted from rotating refresh tokens, HMAC-signed with `CLI_TOKEN_SECRET`), never session-authenticated. Route table and token semantics: [cli.md](./cli.md) § Server routes / § Device auth.
+- **`/api/cli/*`** — session-authenticated management for the web UI's `/cli` page and its authorize view. Same origin-locked CORS as every `/api/*` route.
+
+### Management routes (session required)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/cli/devices` | The user's devices: `{id, name, last_seen_at, created_at, revoked_at}` |
+| POST | `/api/cli/devices/:id/revoke` | Sets `revoked_at` (idempotent). Next refresh fails; live sockets die at access-token expiry ([cli.md](./cli.md)) |
+| GET | `/api/cli/providers` | The user's CLI providers + live connection state (AgentTunnel DO read-through): `{id, slug, name, format, connected, models, model_filter, models_updated_at, device_name, …}` |
+| PATCH | `/api/cli/providers/:id` | Rename display name — body `{name}` (1–64 chars). Slug/format immutable |
+| DELETE | `/api/cli/providers/:id` | Delete the provider + its internal account row, force-close any live socket |
+| GET | `/api/cli/login-requests/:id` | Pending login for the authorize view: `{device_name, expires_at, approved}`. 404 when unknown/expired |
+| POST | `/api/cli/login-requests/:id/approve` | Binds the request to the session user, generates the one-time code, returns `{code}` — plaintext exactly once; only the hash is stored |
+| POST | `/api/cli/login-requests/:id/deny` | Deletes the pending request |
+
+The login-request read/approve routes are the one place a session route touches `cli_login_requests`; the request row is unauthenticated until approve stamps the session's `user_id` onto it, which is what scopes the resulting device.
+
 ## Model groups
 
 Virtual endpoints — a slug under `/g/`, plus per-group models each mapping a name to ordered `provider/model` targets (contract: [providers.md](./providers.md) § Model groups; UI: [admin-ui.md](./admin-ui.md) § Groups page). Same session-cookie auth and origin-locked CORS as every `/api/*` route.

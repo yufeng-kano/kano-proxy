@@ -1,6 +1,6 @@
 # CLI providers (kano-proxy CLI + reverse tunnel for local LLMs)
 
-**Status: design draft — not yet implemented.**
+**Status: implemented (v4.4.0).** This document remains the contract for the subsystem.
 
 **Scope discipline: no cut-down MVP.** Operator decision 2026-08-30: this ships as specified — device auth with rotating refresh tokens, the full TUI, multi-provider `start`, the `/cli` page, the distribution pipeline — not a reduced first pass. This document is the contract; the only sanctioned deferrals are the ones marked *future work* inline (currently: credit-based flow control). If implementation reality forces a change, this doc changes first (docs-first rule in `CLAUDE.md`), never the scope silently.
 
@@ -33,11 +33,11 @@ Two entities:
 
 ## Data model
 
-Three new tables (see [database.md](./database.md) once implemented; `custom_providers` is untouched):
+Three new tables (`0015_cli_providers.sql`; full column notes in [database.md](./database.md); `custom_providers` is untouched):
 
 | Table | Columns (essentials) |
 |---|---|
-| `cli_devices` | `id`, `user_id`, `name` (1–64 chars), `refresh_token_hash`, `last_seen_at`, `created_at`, `revoked_at` |
+| `cli_devices` | `id`, `user_id`, `name` (1–64 chars), `refresh_token_hash`, `refresh_token_prev_hash` (superseded-token theft detection — see Device auth below), `last_seen_at`, `created_at`, `revoked_at` |
 | `cli_login_requests` | `id`, `device_name`, `code_hash`, `user_id` (NULL until approved), `expires_at`, `approved_at`, `used_at`, `attempts`, `created_at` |
 | `cli_providers` | `id`, `user_id`, `device_id` (nullable — informational "registered from"), `slug`, `name`, `format` (`openai` \| `anthropic`), `models_json` (last agent report), `models_updated_at`, `model_filter_json` (nullable expose-whitelist), `sort_order`, `created_at`, `updated_at` |
 
@@ -60,7 +60,7 @@ No permanent secrets on disk. The CLI holds a **rotating refresh token**; everyt
 **Tokens:**
 
 - **Access token:** stateless, HMAC-signed with a dedicated `CLI_TOKEN_SECRET` (same signing pattern as the session cookie), claims `{user_id, device_id, exp}`, TTL **1 h**. Verified without a D1 read.
-- **Refresh token:** random 32 bytes, stored hashed on the device row, **rotates on every use**: `POST /agent/v1/token` `{refresh_token}` → new refresh + new access. Presenting a superseded refresh token is treated as theft: the device is revoked (family revocation). The CLI persists the new refresh token to its state file *before* discarding the old one, and serializes refreshes across its own processes with a lock file beside the state file.
+- **Refresh token:** random 32 bytes, stored hashed on the device row, **rotates on every use**: `POST /agent/v1/token` `{refresh_token}` → new refresh + new access. Presenting a superseded refresh token is treated as theft: the device is revoked (family revocation). Detection needs one generation of history, so the row keeps the previous token's hash too (`refresh_token_prev_hash`) — a presented token matching *that* column is the superseded one and revokes the device; a token matching neither column is a plain `401` (garbage proves nothing about this device). The rotation write is a conditional `UPDATE … WHERE refresh_token_hash = ?` so two concurrent presentations of the same token cannot both win. The CLI persists the new refresh token to its state file *before* discarding the old one, and serializes refreshes across its own processes with a lock file beside the state file.
 - **Revocation:** the web UI's CLI page revokes a device (`revoked_at`). Effect: next refresh fails (≤ 1 h), next connect fails (immediately — connect does one D1 device check), and live sockets die at access-token expiry because the DO schedules an **alarm** at `exp` and closes with code `4003 token_expired` (alarms wake a hibernated DO; a `setTimeout` would keep it awake and billing). The CLI treats `4003` as "refresh, then reconnect" — invisible when the device is healthy, terminal when it is revoked.
 
 ## AgentTunnel Durable Object
@@ -198,7 +198,7 @@ $ kano-proxy start
 | `POST /agent/v1/providers` | Bearer access | Create (slug, format, optional expose filter / initial models) |
 | `DELETE /agent/v1/providers/:id` | Bearer access | Delete + force-close socket |
 
-`/agent/v1/*` is its own namespace beside `/api/*` (session) and the LLM surfaces: token-authenticated, permissive CORS unnecessary (no browser callers), never session-authenticated.
+`/agent/v1/*` is its own namespace beside `/api/*` (session) and the LLM surfaces: token-authenticated, permissive CORS unnecessary (no browser callers), never session-authenticated. The session-side management routes the web UI uses (`/api/cli/*` — devices, revoke, providers, rename, delete, login-request read/approve/deny) are listed in [auth.md](./auth.md) § CLI devices and providers.
 
 ## Web UI — the CLI page
 
@@ -240,7 +240,7 @@ The web UI's `/cli` empty state shows the brew and script one-liners (from the m
 ## Security notes
 
 - No permanent secrets: access tokens live 1 h, refresh tokens rotate on every use with reuse-as-theft revocation, devices are individually revocable from `/cli`, and revocation reaches live sockets within the access TTL via the expiry alarm.
-- Login codes and refresh tokens are stored hashed; login endpoints are per-IP rate-limited and fail closed without touching unrelated state.
+- Login codes and refresh tokens are stored hashed; login endpoints are per-IP rate-limited (KV counter, 10 starts / 10 min / IP) and fail closed without touching unrelated state. Expired `cli_login_requests` rows are purged by the daily retention sweep ([logging.md](./logging.md)).
 - The tunnel carries prompts/completions as opaque bytes; nothing content-shaped is logged at the Worker, DO, or CLI ([logging.md](./logging.md) rules apply unchanged).
 - Cross-user isolation is inherited: every path to the stub starts from a user-scoped row lookup, and the DO name is the provider row id.
 - The CLI's target confinement (one base URL per provider + path allowlist, enforced at both ends) means a compromised proxy operator still cannot use connected agents as general SSRF proxies into home networks.

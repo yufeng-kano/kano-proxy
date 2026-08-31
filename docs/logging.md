@@ -71,6 +71,7 @@ A daily Cron Trigger (`[triggers] crons` in every Wrangler config — committed 
 - `request_logs` rows older than **90 days** (default; override with the optional `REQUEST_LOG_RETENTION_DAYS` var, a positive integer of days — invalid values fall back to 90). Deletes run in bounded batches (id-subquery `IN (SELECT … LIMIT n)` loop with a per-run batch cap) so a large backlog never produces one long-running statement; steady state is roughly one day of rows per run.
 - Expired `sessions` rows (`expires_at` in the past — `loadSessionUser` already rejects them; this just removes dead rows).
 - Expired `oauth_login_states` rows (`expires_at` in the past).
+- Expired `cli_login_requests` rows (`expires_at` in the past — [cli.md](./cli.md) § Device auth).
 
 The sweep is idempotent and safe to run any time (locally: `wrangler dev --test-scheduled`, then `GET /__scheduled?cron=...`). A sweep failure affects nothing but cleanup — it never touches live request handling.
 

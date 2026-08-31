@@ -20,7 +20,10 @@ pnpm test
 pnpm --filter api test
 pnpm --filter api test:watch
 cd apps/relay && deno task test   # egress relay (Deno — not part of pnpm test)
+cd apps/cli && cargo test         # kano-proxy CLI (Rust — not part of pnpm test)
 ```
+
+The AgentTunnel protocol ([cli.md](./cli.md)) is tested at protocol level: the DO's multiplexer core is a plain module driven with in-memory frames, and the Rust CLI's protocol/state modules carry their own `cargo test` unit tests. A local LLM is free, but the suite still never assumes one is running.
 
 ## Coding-agent smoke (manual)
 

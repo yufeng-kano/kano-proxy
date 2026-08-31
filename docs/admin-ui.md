@@ -14,6 +14,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 | `/models` | Searchable catalog of `provider/model` ids, grouped by provider |
 | `/groups` | Model groups: virtual endpoints (`/g/<slug>/…`) whose model names map to ordered `provider/model` targets |
 | `/keys` | Create / revoke API keys, plus the client connection details |
+| `/cli` | CLI devices and CLI providers ([cli.md](./cli.md)) — plus the session-gated `/cli/authorize` view the `kano-proxy init` login lands on |
 | `/changelog` | Published GitHub Releases, newest first ([changelog.md](./changelog.md)) |
 
 `/dashboard` and `/accounts` are kept as permanent redirects to `/overview` and `/providers` — a bookmark or a persisted last-route from an older build must not 404 into the catch-all.
@@ -301,6 +302,22 @@ Route `/groups`, nav item **Groups** between Models and Keys. Data: `GET /api/mo
   - Save is disabled until the group has ≥1 model and every model has ≥1 target.
 - **Empty state** explains the job (a dedicated endpoint whose model names route where you decide — map a hard-coded client model name, join the same model across accounts) with a Create group action.
 - **Models page:** the shared catalog no longer carries a `group` section (groups live on their own endpoints and their own page); provider sections stay dynamic with no group special-case left.
+
+## CLI page
+
+Route `/cli`, nav item **CLI** between Groups and Keys. Data: `GET /api/cli/devices` + `GET /api/cli/providers` ([auth.md](./auth.md) § CLI devices and providers), cache-first under `kano-proxy:cli:{userId}` with the standard 2 min TTL and logout sweep. Contract: [cli.md](./cli.md) § Web UI.
+
+- **Two datasets, two cards** (they are genuinely separate collections — the card rule in § Design restraint): **Devices** (name, last seen, created — row action behind the section edit gate: **Revoke**, danger tone, confirm-first, keeps its word) and **CLI providers** (slug as a `mono` chip, format badge, connection state — a StatusDot pair `Connected` / `Offline`, never color alone — model count with last report time, registered-from device; row actions: **Rename** as the pencil, **Remove** in the danger tone, confirm-first).
+- **No create flows on this page** — creation is the CLI's job. The empty state shows the install one-liners (brew + install script, from the message catalog) and the `kano-proxy init` command, and links the GitHub Releases page.
+- A revoked device stays listed with a `Revoked` badge (it is history the operator may want to see) — its row action column is empty.
+
+### Authorize view (`/cli/authorize?request=…`)
+
+Session-gated like any admin page (redirects through login). Reads `GET /api/cli/login-requests/:id`:
+
+- Shows the requesting **device name** and Approve / Deny.
+- On approve (`POST …/approve`) it swaps to the one-time code — a large `CopyField` with the paste-into-the-CLI instruction. The code is shown exactly once; refreshing the page after approval shows the already-approved state, not the code.
+- Deny deletes the request and says so. An expired or unknown request renders its own state with a link back to `/cli`.
 
 ## Keys page
 

@@ -48,7 +48,7 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | |
-| provider | TEXT | builtin `claude-code` \| `codex` \| `grok` \| `antigravity`, **or** a custom provider's `slug` (see `custom_providers` below) |
+| provider | TEXT | builtin `claude-code` \| `codex` \| `grok` \| `antigravity`, **or** a custom provider's `slug` (see `custom_providers` below), **or** a CLI provider's `slug` (its one internal state row — see `cli_providers` below) |
 | external_account_id | TEXT | nullable; upstream account id when known (e.g. codex's ChatGPT account id) |
 | label | TEXT | email or display, **synced from upstream** on every accounts read — not user-editable |
 | custom_label | TEXT | nullable; the operator's own name for this account. Wins over `label` for display and is **never** overwritten by the upstream sync (`0005_account_custom_label.sql`) |
@@ -97,6 +97,58 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 **Slug reservation vs. existing rows.** When a slug later becomes a builtin provider id, reserving it only blocks *new* creates — an already-stored custom provider under that slug would be shadowed by the builtin lookup and become unreachable. `0013_rename_custom_antigravity_slug.sql` is the pattern: a data migration renames the stored slug (`antigravity` → `antigravity-custom`) and rewrites everything keyed by it in the same step (`upstream_accounts.provider`, `provider_settings.provider`, `model_groups.targets_json` prefixes). A user who already owns the target slug falls through to `antigravity-custom-2`, then `-3` — static passes because the targets_json rewrite is a string replace that must know the exact replacement. Each pass first deletes an *orphaned* `provider_settings` row under its target name (deleting a custom provider leaves that row behind as inert data, and it would collide with the `(user_id, provider)` primary key on rename). `request_logs.provider` is left as history.
 
+### `cli_devices`
+
+One machine that ran `kano-proxy init` (contract: [cli.md](./cli.md)). Added in `0015_cli_providers.sql`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | |
+| user_id | TEXT FK | `ON DELETE CASCADE` |
+| name | TEXT | 1–64 chars, trimmed |
+| refresh_token_hash | TEXT | SHA-256 of the current rotating refresh token — never the plaintext |
+| refresh_token_prev_hash | TEXT | nullable; hash of the immediately superseded token. A refresh presenting a token that matches **this** column is reuse-as-theft and revokes the device ([cli.md](./cli.md) § Device auth); a token matching neither column is a plain 401 |
+| last_seen_at | TEXT | nullable; bumped on token rotation and tunnel connect |
+| created_at | TEXT | |
+| revoked_at | TEXT | nullable; set by the web UI's revoke — refresh and connect refuse once set, live sockets die at access-token expiry via the DO alarm |
+
+### `cli_login_requests`
+
+Pending `kano-proxy init` authorize-then-paste logins ([cli.md](./cli.md) § Device auth). Added in `0015_cli_providers.sql`. Expired rows are purged by the daily retention sweep ([logging.md](./logging.md)).
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | the `request_id` the CLI holds |
+| device_name | TEXT | requested at start, becomes the device row's name on complete |
+| code_hash | TEXT | nullable; SHA-256 of the normalized one-time code — written on approve, never before |
+| user_id | TEXT | NULL until approved; the approving session's user |
+| expires_at | TEXT | start + 10 minutes |
+| approved_at | TEXT | nullable |
+| used_at | TEXT | nullable; a redeemed request can never be redeemed again |
+| attempts | INTEGER | `NOT NULL DEFAULT 0`; wrong-code attempts — the request is dead after 5 |
+| created_at | TEXT | |
+
+### `cli_providers`
+
+One local endpoint registered by `kano-proxy add` (contract: [cli.md](./cli.md)). Added in `0015_cli_providers.sql`. Each row also owns one `upstream_accounts` row (`provider = slug`, placeholder credential) — internal routing state only, created and deleted with the provider, never shown as an account. The local target URL and its optional API key are **not stored here** — they are CLI state on the device.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| id | TEXT PK | also the AgentTunnel DO name (`idFromName(id)`) |
+| user_id | TEXT FK | `ON DELETE CASCADE` |
+| device_id | TEXT | nullable, informational "registered from" — no FK enforcement; a deleted device leaves the provider intact |
+| slug | TEXT | custom-provider slug rules, immutable, unique per user **across both** `custom_providers` and `cli_providers` (both create paths check the other table) |
+| name | TEXT | display name, 1–64 chars; renameable from `/cli` |
+| format | TEXT | `openai` \| `anthropic`; immutable (delete-and-recreate) |
+| models_json | TEXT | nullable; the last agent-reported model list, stored whole (JSON array of id strings) |
+| models_updated_at | TEXT | nullable; when the report was written |
+| model_filter_json | TEXT | nullable; expose-whitelist applied at read time over the stored report — clearing it never loses data |
+| sort_order | INTEGER | `NOT NULL DEFAULT 0`; display order, same convention as `custom_providers` |
+| created_at | TEXT | |
+| updated_at | TEXT | |
+
+`UNIQUE(user_id, slug)`. CLI providers count into the same 20-per-user cap as custom providers (shared across both tables); ≤ 20 devices per user.
+
 ### `model_groups`
 
 User-defined **virtual endpoints** (full contract in [providers.md](./providers.md) § Model groups): each row is one group — name, URL slug, strategy — whose callable models live in `model_group_models`. Added in `0008_model_groups.sql`; rebuilt to the endpoint shape by `0014_group_endpoints.sql` (see below).
@@ -127,7 +179,7 @@ The callable models of a group, 1–20 per group, each with its own ordered targ
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
-`UNIQUE(group_id, name)` — a name resolves to exactly one model **within its group**; different groups may reuse a name (the endpoint is the namespace, so the v3 per-user uniqueness constraint is gone). Model resolution on a group endpoint reads this table via `(group_id, name)` (indexed lookup), never a JSON scan. Targets are validated at write time (prefix must be a builtin or the caller's own custom slug; never a bare name, so groups cannot nest).
+`UNIQUE(group_id, name)` — a name resolves to exactly one model **within its group**; different groups may reuse a name (the endpoint is the namespace, so the v3 per-user uniqueness constraint is gone). Model resolution on a group endpoint reads this table via `(group_id, name)` (indexed lookup), never a JSON scan. Targets are validated at write time (prefix must be a builtin or the caller's own custom or CLI slug; never a bare name, so groups cannot nest).
 
 **Migration `0014_group_endpoints.sql` (v3 → v4).** Rebuilds `model_groups` without `targets_json` and with `slug` (backfilled deterministically from the row id — `'g-' || substr(id, 6, 13)`, valid per the slug regex and collision-free since ids are unique; operators rename it to something meaningful in the UI). Creates `model_group_models` and seeds **one model per former alias**, each copying its group's whole `targets_json` — every `(group, alias)` pair that was callable before maps to a `(slug, model name)` pair that is callable on the group's endpoint, with identical routing. Then drops `model_group_aliases`. `request_logs.group_name` values written before v4 (bare aliases) are left as history.
 
