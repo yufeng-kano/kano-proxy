@@ -54,9 +54,9 @@ export async function insertLoginRequest(db: D1Database, deviceName: string): Pr
   await db
     .prepare(
       `INSERT INTO cli_login_requests (id, device_name, expires_at, attempts, created_at)
-       VALUES (?, ?, ?, 0, ?)`,
+       VALUES (?, ?, ?, ?, ?)`,
     )
-    .bind(id, deviceName, expires, ts)
+    .bind(id, deviceName, expires, 0, ts)
     .run()
   return {
     id,
@@ -123,10 +123,10 @@ export async function insertCliDevice(
   const ts = nowIso()
   await db
     .prepare(
-      `INSERT INTO cli_devices (id, user_id, name, refresh_token_hash, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO cli_devices (id, user_id, name, refresh_token_hash, refresh_token_prev_hash, last_seen_at, created_at, revoked_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-    .bind(id, input.userId, input.name, input.refreshTokenHash, ts)
+    .bind(id, input.userId, input.name, input.refreshTokenHash, null, null, ts, null)
     .run()
   return {
     id,

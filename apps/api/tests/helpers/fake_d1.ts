@@ -310,6 +310,20 @@ function execute(
           row[nulled[1]!] = null
           continue
         }
+        // Self-increment (`attempts = attempts + 1`) — CLI login-code attempts.
+        const incr = a.match(/^(\w+)\s*=\s*(\w+)\s*\+\s*1$/i)
+        if (incr && incr[1]!.toLowerCase() === incr[2]!.toLowerCase()) {
+          row[incr[1]!] = Number(row[incr[1]!] ?? 0) + 1
+          continue
+        }
+        // Column copy (`refresh_token_prev_hash = refresh_token_hash`) — the
+        // CLI refresh rotation. Matches SQLite semantics here because the
+        // copy assignment precedes the overwrite in the statement.
+        const copy = a.match(/^(\w+)\s*=\s*(\w+)$/i)
+        if (copy) {
+          row[copy[1]!] = row[copy[2]!] ?? null
+          continue
+        }
         throw new Error(`FakeD1: unsupported SET assignment: ${a}`)
       }
       pi = 0
