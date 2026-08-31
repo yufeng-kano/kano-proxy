@@ -24,6 +24,8 @@ import type {
   AccountsResponse,
   CatalogModel,
   ChangelogResponse,
+  CliDevice,
+  CliProvider,
   CustomProvider,
   LogsResponse,
   ModelGroup,
@@ -69,6 +71,7 @@ const ACCOUNTS_PREFIX = "kano-proxy:accounts:"
 const MODELS_PREFIX = "kano-proxy:models:"
 const CUSTOM_PROVIDERS_PREFIX = "kano-proxy:custom-providers:"
 const MODEL_GROUPS_PREFIX = "kano-proxy:model-groups:"
+const CLI_PREFIX = "kano-proxy:cli:"
 const USAGE_PREFIX = "kano-proxy:usage:"
 const LOGS_PREFIX = "kano-proxy:logs:"
 /**
@@ -101,6 +104,10 @@ function customProvidersKey(userId: string): string {
 
 function modelGroupsKey(userId: string): string {
   return `${MODEL_GROUPS_PREFIX}${userId}`
+}
+
+function cliKey(userId: string): string {
+  return `${CLI_PREFIX}${userId}`
 }
 
 function usageKey(userId: string, rangeKey: string | number): string {
@@ -226,6 +233,10 @@ function sweepStore(store: Storage, userId?: string | null): void {
         if (userId && k !== modelGroupsKey(userId)) continue
         keys.push(k)
       }
+      if (k.startsWith(CLI_PREFIX)) {
+        if (userId && k !== cliKey(userId)) continue
+        keys.push(k)
+      }
       if (k.startsWith(USAGE_PREFIX)) {
         if (userId && !k.startsWith(`${USAGE_PREFIX}${userId}:`)) continue
         keys.push(k)
@@ -323,6 +334,30 @@ export function writeModelGroupsCache(
 ): void {
   if (!userId) return
   writeTimed(modelGroupsKey(userId), data)
+}
+
+/**
+ * CLI page cache — devices and providers together, since the page loads both
+ * as one paint. Names, slugs, model ids and timestamps only; tokens never
+ * reach the browser at all (docs/cli.md).
+ */
+export type CliCachePayload = { devices: CliDevice[]; providers: CliProvider[] }
+
+export function readCliCache(userId: string | null | undefined): CliCachePayload | null {
+  if (!userId) return null
+  return readTimed<CliCachePayload>(cliKey(userId))?.data ?? null
+}
+
+export function isCliCacheFresh(userId: string | null | undefined, ttlMs = CACHE_TTL_MS): boolean {
+  if (!userId) return false
+  const entry = readTimed<CliCachePayload>(cliKey(userId))
+  if (!entry) return false
+  return Date.now() - entry.savedAt < ttlMs
+}
+
+export function writeCliCache(userId: string | null | undefined, data: CliCachePayload): void {
+  if (!userId) return
+  writeTimed(cliKey(userId), data)
 }
 
 /**

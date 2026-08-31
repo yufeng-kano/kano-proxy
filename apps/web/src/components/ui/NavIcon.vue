@@ -10,7 +10,7 @@
  * Always decorative — every nav item ships a text label beside it.
  */
 defineProps<{
-  name: "overview" | "logs" | "providers" | "models" | "groups" | "keys" | "changelog"
+  name: "overview" | "logs" | "providers" | "models" | "groups" | "cli" | "keys" | "changelog"
 }>()
 </script>
 
@@ -59,6 +59,13 @@ defineProps<{
       <path d="M8 8V5.5A1.5 1.5 0 019.5 4H14" />
       <path d="M8 8h6" />
       <path d="M8 8v2.5A1.5 1.5 0 009.5 12H14" />
+    </template>
+
+    <!-- CLI: terminal prompt -->
+    <template v-else-if="name === 'cli'">
+      <rect x="1.75" y="3" width="12.5" height="10" rx="1.5" />
+      <path d="M4.5 6.25L6.75 8.25 4.5 10.25" />
+      <path d="M8.75 10.25h2.75" />
     </template>
 
     <!-- Keys -->

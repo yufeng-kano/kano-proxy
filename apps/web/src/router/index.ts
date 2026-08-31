@@ -9,7 +9,9 @@ import { readPrefs, setLastPath } from "@/services/prefs"
  * aliases are here too: restoring `/accounts` would only bounce to
  * `/providers`, so the canonical path is what gets stored.
  */
-const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts"])
+// /cli/authorize carries its request id in the query, which lastPath does not
+// keep — a restore onto the bare path could only show "request missing".
+const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli/authorize"])
 
 const router = createRouter({
   history: createWebHistory(),
@@ -52,6 +54,19 @@ const router = createRouter({
       path: "/groups",
       name: "groups",
       component: () => import("@/pages/GroupsPage.vue"),
+    },
+    {
+      path: "/cli",
+      name: "cli",
+      component: () => import("@/pages/CliPage.vue"),
+    },
+    {
+      // The authorize view a `kano-proxy init` login lands on (docs/cli.md).
+      // Session-gated like every non-public route — the guard redirects
+      // through login and back, query string intact.
+      path: "/cli/authorize",
+      name: "cli-authorize",
+      component: () => import("@/pages/CliAuthorizePage.vue"),
     },
     {
       path: "/keys",

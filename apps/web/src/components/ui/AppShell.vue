@@ -40,6 +40,7 @@ const NAV = [
   { name: "providers", to: "/providers", label: "nav.providers" },
   { name: "models", to: "/models", label: "nav.models" },
   { name: "groups", to: "/groups", label: "nav.groups" },
+  { name: "cli", to: "/cli", label: "nav.cli" },
   { name: "keys", to: "/keys", label: "nav.keys" },
 ] as const
 
