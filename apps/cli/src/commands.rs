@@ -185,8 +185,15 @@ fn parse_format(raw: &str) -> Result<String> {
 
 fn normalize_target(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
-        bail!("target must start with http:// or https:// (e.g. http://localhost:11434/v1)");
+    let rest = trimmed
+        .strip_prefix("http://")
+        .or_else(|| trimmed.strip_prefix("https://"))
+        .context("target must start with http:// or https:// (e.g. http://localhost:11434/v1)")?;
+    // A scheme with no host ("http://", "http:///v1") would register a
+    // provider whose every tunneled request fails at send time.
+    let host = rest.split('/').next().unwrap_or("");
+    if host.is_empty() {
+        bail!("target is missing a host (e.g. http://localhost:11434/v1)");
     }
     Ok(trimmed.to_string())
 }
@@ -450,5 +457,7 @@ mod tests {
         assert!(parse_format("grpc").is_err());
         assert_eq!(normalize_target("http://localhost:11434/v1/").unwrap(), "http://localhost:11434/v1");
         assert!(normalize_target("localhost:11434").is_err());
+        assert!(normalize_target("http://").is_err());
+        assert!(normalize_target("http:///v1").is_err());
     }
 }

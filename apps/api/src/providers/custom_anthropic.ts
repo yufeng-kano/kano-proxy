@@ -91,10 +91,10 @@ export function createCustomAnthropicAdapter(
 
       const text = await res.text()
       if (!res.ok) {
-        return new Response(text, {
-          status: res.status,
-          headers: { "content-type": res.headers.get("content-type") || "application/json" },
-        })
+        // Full headers, not just content-type: a CLI provider's tunnel fault
+        // marker (x-agent-fault / x-agent-upstream) must survive this rebuild
+        // or dispatch can neither fail over nor bench (docs/cli.md).
+        return new Response(text, { status: res.status, headers: res.headers })
       }
       try {
         const json = JSON.parse(text)

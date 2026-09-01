@@ -199,7 +199,9 @@ export class AgentTunnel implements DurableObject {
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     if (this.muxSocket && this.muxSocket !== ws) return
-    this.muxFor(ws).handleMessage(message)
+    // Awaited: a models frame's D1 write must complete before this event ends,
+    // or hibernation could drop it after the CLI already logged success.
+    await this.muxFor(ws).handleMessage(message)
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {

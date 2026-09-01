@@ -220,6 +220,42 @@ describe("dispatch over the DO stub", () => {
     expect(db.rows("upstream_accounts")[0]!.bench_until).toBeNull()
   })
 
+  it("a fault marker survives the anthropic adapter's OpenAI-surface error rebuild", async () => {
+    // The cli-anthropic chatCompletions error path reconstructs the Response
+    // to re-read its text — the x-agent-fault header must survive that
+    // rebuild or dispatch can neither fail over nor bench.
+    const db = new FakeD1()
+    await seedCliProvider(db, { slug: "my-box", format: "anthropic" })
+    const { namespace } = fakeTunnelNamespace(
+      () =>
+        new Response(JSON.stringify({ error: { type: "agent_fault", reason: "offline" } }), {
+          status: 502,
+          headers: { "x-agent-fault": "offline", "content-type": "application/json" },
+        }),
+    )
+    const env = buildEnv(db, namespace)
+    const resolution = (await resolveCandidates(env, "user_1", "my-box/some-model"))!
+    const res = await dispatchChatCompletions(env, {
+      userId: "user_1",
+      apiKeyId: "key_1",
+      provider: resolution.primary.provider,
+      adapter: resolution.primary.adapter,
+      candidates: resolution.candidates,
+      strategy: resolution.strategy,
+      isBuiltin: false,
+      waitUntil: noopWaitUntil,
+      req: {
+        model: "my-box/some-model",
+        rawModel: "my-box/some-model",
+        upstreamModel: "some-model",
+        messages: [{ role: "user", content: "hi" }],
+        rawBody: { model: "my-box/some-model", messages: [{ role: "user", content: "hi" }] },
+      },
+    })
+    expect(res.status).toBe(503)
+    expect(db.rows("upstream_accounts")[0]!.bench_reason).toBe("offline")
+  })
+
   it("anthropic-format CLI provider is a native /v1/messages passthrough", async () => {
     const db = new FakeD1()
     await seedCliProvider(db, { slug: "my-box", format: "anthropic" })

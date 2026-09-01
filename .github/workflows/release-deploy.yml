@@ -51,8 +51,9 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          # Expect vMAJOR.MINOR.PATCH (optional leading v)
-          if [[ ! "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          # Strict vMAJOR.MINOR.PATCH — the repo convention, and the CLI
+          # distribution renderer builds v-prefixed download URLs from it.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release tag must be SemVer like v1.2.0 (got: $TAG)"
             exit 1
           fi

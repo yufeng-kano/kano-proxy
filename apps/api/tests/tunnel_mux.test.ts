@@ -245,6 +245,32 @@ describe("TunnelMux request lifecycle", () => {
     expect(reports).toEqual([["llama3.3:70b"]])
   })
 
+  it("faults too_large when the request body passes the 32 MiB cap", async () => {
+    const rec = recordingSocket()
+    const mux = new TunnelMux(rec.socket)
+    const chunk = new Uint8Array(8 * 1024 * 1024)
+    const body = new Blob([chunk, chunk, chunk, chunk, chunk]).stream() // 40 MiB
+    const res = await mux.openRequest({ method: "POST", path: "/audio/transcriptions", headers: {}, body })
+    expect(res.headers.get("x-agent-fault")).toBe("too_large")
+    expect(rec.controls("cancel")).toMatchObject([{ t: "cancel", id: 1 }])
+    expect(mux.inflightCount()).toBe(0)
+  })
+
+  it("handleMessage returns the models hook's promise so the DO can await it", async () => {
+    const rec = recordingSocket()
+    let persisted = false
+    const mux = new TunnelMux(rec.socket, {
+      onModelsReport: async () => {
+        await new Promise((r) => setTimeout(r, 10))
+        persisted = true
+      },
+    })
+    const maybe = mux.handleMessage(frame({ t: "models", models: ["llama3"] }))
+    expect(maybe).toBeInstanceOf(Promise)
+    await maybe
+    expect(persisted).toBe(true)
+  })
+
   it("splits an oversized request body chunk into 1 MiB frames", async () => {
     const rec = recordingSocket()
     const mux = new TunnelMux(rec.socket)

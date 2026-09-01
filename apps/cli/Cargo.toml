@@ -10,7 +10,7 @@ repository = "https://github.com/yufeng-kano/kano-proxy"
 
 [dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.28"
 flate2 = "1"
 futures-util = "0.3"

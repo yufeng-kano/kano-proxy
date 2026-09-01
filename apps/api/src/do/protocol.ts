@@ -16,6 +16,8 @@ export const MAX_CHUNK_BYTES = 1024 * 1024
 export const MAX_INFLIGHT = 4
 /** DO-side per-request response buffer — an honest bound in lieu of credit-based flow control. */
 export const RESPONSE_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024
+/** Per-request request-body ceiling: `ws.send` has no drain signal, so a hard cap is the honest request-side bound until credit-based flow control exists. */
+export const REQUEST_BODY_LIMIT_BYTES = 32 * 1024 * 1024
 /** First `res` frame must arrive within this of `req_end` — generous for a cold local model. */
 export const FIRST_RES_TIMEOUT_MS = 120_000
 

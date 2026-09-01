@@ -16,6 +16,7 @@ import {
   FIRST_RES_TIMEOUT_MS,
   MAX_CHUNK_BYTES,
   MAX_INFLIGHT,
+  REQUEST_BODY_LIMIT_BYTES,
   RESPONSE_BUFFER_LIMIT_BYTES,
   decodeBinaryFrame,
   encodeBinaryFrame,
@@ -114,6 +115,7 @@ export class TunnelMux {
     try {
       if (body) {
         const reader = body.getReader()
+        let sentBytes = 0
         try {
           for (;;) {
             const { done, value } = await reader.read()
@@ -123,6 +125,15 @@ export class TunnelMux {
               return
             }
             if (value) {
+              // ws.send has no drain signal, so a body arriving faster than
+              // the socket empties would queue unboundedly in DO memory — the
+              // hard cap is the honest request-side bound (docs/cli.md).
+              sentBytes += value.byteLength
+              if (sentBytes > REQUEST_BODY_LIMIT_BYTES) {
+                await reader.cancel()
+                this.failPending(id, "too_large", true)
+                return
+              }
               for (let offset = 0; offset < value.byteLength; offset += MAX_CHUNK_BYTES) {
                 this.socket.send(
                   encodeBinaryFrame(id, BODY_KIND_REQUEST, value.subarray(offset, offset + MAX_CHUNK_BYTES)),
@@ -189,7 +200,12 @@ export class TunnelMux {
     this.trySendCancel(id)
   }
 
-  handleMessage(data: string | ArrayBuffer): void {
+  /**
+   * Returns a promise exactly when the frame started async work (a models
+   * report's D1 write): the DO awaits it so a hibernatable event cannot end
+   * before the persistence lands. Everything else is synchronous.
+   */
+  handleMessage(data: string | ArrayBuffer): Promise<void> | void {
     if (typeof data !== "string") {
       const frame = decodeBinaryFrame(data)
       if (!frame || frame.kind !== BODY_KIND_RESPONSE) return
@@ -223,7 +239,9 @@ export class TunnelMux {
       case "models": {
         const models = validateModelsReport(frame.models)
         // An out-of-bounds report is ignored whole — the last good report stays.
-        if (models && this.hooks.onModelsReport) void this.hooks.onModelsReport(models)
+        if (models && this.hooks.onModelsReport) {
+          return Promise.resolve(this.hooks.onModelsReport(models))
+        }
         return
       }
       default:

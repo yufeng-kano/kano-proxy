@@ -58,8 +58,11 @@ enum Command {
         /// Local target base URL (include /v1 for openai format)
         #[arg(long)]
         target: Option<String>,
-        /// The local server's own API key, if it needs one
-        #[arg(long)]
+        /// The local server's own API key, if it needs one. Prefer the
+        /// KANO_PROXY_TARGET_KEY environment variable — argv leaks into shell
+        /// history and the process list; the flag remains for controlled
+        /// environments.
+        #[arg(long, env = "KANO_PROXY_TARGET_KEY", hide_env_values = true)]
         target_key: Option<String>,
         /// Comma-separated expose whitelist (omitted = follow the local server)
         #[arg(long)]
