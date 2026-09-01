@@ -1,3 +1,4 @@
+import { MAX_CUSTOM_PROVIDERS_PER_USER } from "../utils/custom_provider"
 import { newId, nowIso } from "../utils/id"
 
 export type CustomProviderRow = {
@@ -100,7 +101,8 @@ export async function insertCustomProvider(
       `INSERT INTO custom_providers
        (id, user_id, slug, name, format, base_url, count_tokens_url, models_mode, manual_models_json, sort_order, created_at, updated_at)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-       WHERE NOT EXISTS (SELECT 1 FROM cli_providers WHERE user_id = ? AND slug = ?)`,
+       WHERE NOT EXISTS (SELECT 1 FROM cli_providers WHERE user_id = ? AND slug = ?)
+         AND ((SELECT COUNT(*) FROM cli_providers WHERE user_id = ?) + (SELECT COUNT(*) FROM custom_providers WHERE user_id = ?)) < ${MAX_CUSTOM_PROVIDERS_PER_USER}`,
     )
     .bind(
       id,
@@ -117,6 +119,8 @@ export async function insertCustomProvider(
       ts,
       input.userId,
       input.slug,
+      input.userId,
+      input.userId,
     )
     .run()
   if ((res.meta.changes ?? 0) === 0) return null

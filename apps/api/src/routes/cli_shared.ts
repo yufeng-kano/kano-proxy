@@ -13,7 +13,7 @@ import {
   parseCliModels,
   type CliProviderRow,
 } from "../db/cli"
-import { deleteAccountsForProvider } from "../db/accounts"
+import { deleteAccountsForProvider, listAccounts } from "../db/accounts"
 import type { Env } from "../env"
 import { clearBench } from "../pool/bench"
 
@@ -41,12 +41,17 @@ export async function cliProviderListItem(
   row: CliProviderRow,
   deviceNames: Map<string, string>,
 ): Promise<Record<string, unknown>> {
+  // The internal pool-state row's id — the handle the Groups picker pins a
+  // target to, exactly like a custom endpoint's key row (docs/admin-ui.md
+  // § Groups page). Not a user-facing account; it carries no credential.
+  const accounts = await listAccounts(env.DB, row.user_id, row.slug)
   return {
     id: row.id,
     slug: row.slug,
     name: row.name,
     format: row.format,
     connected: await tunnelConnected(env, row.id),
+    account_id: accounts[0]?.id ?? null,
     models: exposedCliModels(row),
     models_reported: parseCliModels(row.models_json).length,
     model_filter: parseCliModels(row.model_filter_json),

@@ -3,6 +3,7 @@ import type { Context } from "hono"
 import type { HonoEnv } from "../auth/session"
 import { loadSessionUser } from "../auth/session"
 import { PROVIDERS } from "../env"
+import { listCliProviders } from "../db/cli"
 import { listCustomProviders } from "../db/custom_providers"
 import type { UserRow } from "../db/users"
 import {
@@ -368,11 +369,15 @@ usageRoutes.get("/summary", async (c) => {
     .bind(user.id, from, to)
     .all<UsageLogRow>()
 
+  // Live slugs cover both user-defined kinds — a CLI provider's traffic is
+  // as real as a custom endpoint's (docs/cli.md), and the filter would
+  // otherwise silently drop it from every Overview total.
   const custom = await listCustomProviders(c.env.DB, user.id)
-  const scoped = filterToLiveProviders(
-    res.results ?? [],
-    custom.map((p) => p.slug),
-  )
+  const cli = await listCliProviders(c.env.DB, user.id)
+  const scoped = filterToLiveProviders(res.results ?? [], [
+    ...custom.map((p) => p.slug),
+    ...cli.map((p) => p.slug),
+  ])
 
   // Read-time pricing for NULL-cost rows. First call after a deploy may find
   // no table anywhere — or only a legacy untagged snapshot — so fetch it

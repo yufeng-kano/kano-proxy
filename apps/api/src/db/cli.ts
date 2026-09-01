@@ -1,5 +1,6 @@
 /** D1 access for CLI devices, login requests, and CLI providers (docs/cli.md). */
 
+import { MAX_CUSTOM_PROVIDERS_PER_USER } from "../utils/custom_provider"
 import { newId, nowIso } from "../utils/id"
 
 export type CliDeviceRow = {
@@ -296,7 +297,8 @@ export async function insertCliProvider(
       `INSERT INTO cli_providers
        (id, user_id, device_id, slug, name, format, models_json, models_updated_at, model_filter_json, sort_order, created_at, updated_at)
        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-       WHERE NOT EXISTS (SELECT 1 FROM custom_providers WHERE user_id = ? AND slug = ?)`,
+       WHERE NOT EXISTS (SELECT 1 FROM custom_providers WHERE user_id = ? AND slug = ?)
+         AND ((SELECT COUNT(*) FROM cli_providers WHERE user_id = ?) + (SELECT COUNT(*) FROM custom_providers WHERE user_id = ?)) < ${MAX_CUSTOM_PROVIDERS_PER_USER}`,
     )
     .bind(
       id,
@@ -313,6 +315,8 @@ export async function insertCliProvider(
       ts,
       input.userId,
       input.slug,
+      input.userId,
+      input.userId,
     )
     .run()
   if ((res.meta.changes ?? 0) === 0) return null

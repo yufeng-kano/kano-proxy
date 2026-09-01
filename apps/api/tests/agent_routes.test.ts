@@ -82,6 +82,16 @@ async function signInDevice(env: Env, db: FakeD1, userId = "user_1", deviceName 
 }
 
 describe("device login flow", () => {
+  it("login/start fails closed when CLI_TOKEN_SECRET is unset", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    ;(env as { CLI_TOKEN_SECRET?: string }).CLI_TOKEN_SECRET = undefined
+    const res = await agentRoutes.request("/login/start", jsonReq("POST", { device_name: "box" }), env)
+    expect(res.status).toBe(500)
+    expect(db.rows("cli_login_requests")).toHaveLength(0)
+  })
+
   it("start → approve → complete mints a device with tokens", async () => {
     const db = new FakeD1()
     seedUser(db)
@@ -328,6 +338,43 @@ describe("provider CRUD over the agent surface", () => {
     const { providers } = await readJson(res)
     expect(providers).toHaveLength(1)
     expect(providers[0]).toMatchObject({ slug: "my-mac", connected: false, device_name: "test-box" })
+  })
+
+  it("the shared cap holds inside the insert even when the pre-check was stale", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const auth = await authed(env, db)
+    // Simulate the race: rows that landed after a stale pre-check read.
+    for (let i = 0; i < 20; i++) {
+      db.seed("custom_providers", [
+        {
+          id: `cprov_${i}`,
+          user_id: "user_1",
+          slug: `raced-${i}`,
+          name: `Raced ${i}`,
+          format: "openai",
+          base_url: "https://u.example.com/v1",
+          count_tokens_url: null,
+          models_mode: "auto",
+          manual_models_json: null,
+          sort_order: i,
+          created_at: "2026-01-01T00:00:00.000Z",
+          updated_at: "2026-01-01T00:00:00.000Z",
+        },
+      ])
+    }
+    const { insertCliProvider } = await import("../src/db/cli")
+    const row = await insertCliProvider(env.DB, {
+      userId: "user_1",
+      deviceId: null,
+      slug: "one-more",
+      name: "one-more",
+      format: "openai",
+      modelsJson: null,
+      modelFilterJson: null,
+    })
+    expect(row).toBeNull()
   })
 
   it("delete removes the provider and its account rows", async () => {
