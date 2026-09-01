@@ -11,7 +11,7 @@ import { readPrefs, setLastPath } from "@/services/prefs"
  */
 // /cli/authorize carries its request id in the query, which lastPath does not
 // keep — a restore onto the bare path could only show "request missing".
-const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli/authorize"])
+const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli", "/cli/authorize"])
 
 const router = createRouter({
   history: createWebHistory(),
@@ -56,17 +56,15 @@ const router = createRouter({
       component: () => import("@/pages/GroupsPage.vue"),
     },
     {
-      path: "/cli",
-      name: "cli",
-      component: () => import("@/pages/CliPage.vue"),
-    },
-    {
       // The authorize view a `kano-proxy init` login lands on (docs/cli.md).
       // Session-gated like every non-public route — the guard redirects
-      // through login and back, query string intact.
+      // through login and back, query string intact. `bare`: rendered outside
+      // the shell — a blank page with one centered card (docs/admin-ui.md
+      // § CLI authorize view).
       path: "/cli/authorize",
       name: "cli-authorize",
       component: () => import("@/pages/CliAuthorizePage.vue"),
+      meta: { bare: true },
     },
     {
       path: "/keys",
@@ -87,6 +85,8 @@ const router = createRouter({
     // must land on the renamed page, not fall through the catch-all.
     { path: "/dashboard", redirect: "/overview" },
     { path: "/accounts", redirect: "/providers" },
+    // The CLI page merged into Providers (docs/admin-ui.md § CLI sections).
+    { path: "/cli", redirect: "/providers" },
     {
       path: "/:pathMatch(.*)*",
       redirect: "/overview",

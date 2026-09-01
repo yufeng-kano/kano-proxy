@@ -16,6 +16,7 @@ import AddAccountDialog from "@/components/AddAccountDialog.vue"
 import CustomProviderDialog from "@/components/CustomProviderDialog.vue"
 import RenameAccountDialog from "@/components/RenameAccountDialog.vue"
 import AccountCard from "@/components/providers/AccountCard.vue"
+import CliSection from "@/components/providers/CliSection.vue"
 import CustomProviderCard from "@/components/providers/CustomProviderCard.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
@@ -28,6 +29,7 @@ import SectionNav from "@/components/ui/SectionNav.vue"
 import type { SectionItem } from "@/components/ui/SectionNav.vue"
 import { useAccounts } from "@/composables/useAccounts"
 import { useAuth } from "@/composables/useAuth"
+import { useCli } from "@/composables/useCli"
 import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
@@ -54,6 +56,7 @@ const { t } = useI18n()
 const { user } = useAuth()
 const { byProvider, setUserId, loadAll, loadProvider, setStrategy, CACHE_TTL_MS } = useAccounts()
 const customProviders = useCustomProviders()
+const cli = useCli()
 
 /**
  * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
@@ -84,6 +87,8 @@ const STRATEGY_HINT_KEY: Record<RoutingStrategy, MessageKey> = {
 
 /** The custom-endpoints tab is not a `ProviderId`, so it gets its own id. */
 const CUSTOM = "custom"
+/** CLI devices and CLI providers (docs/admin-ui.md § CLI sections). */
+const CLI = "cli"
 /** The "everything" tab. Underscored so it can never collide with a wire id. */
 const ALL = "__all__"
 
@@ -126,7 +131,7 @@ const selected = ref<string>(getProvidersPrefs().tab ?? ALL)
 
 let pollTimer: number | undefined
 
-const tabIds = computed<string[]>(() => [ALL, ...PROVIDERS.map((p) => p.id), CUSTOM])
+const tabIds = computed<string[]>(() => [ALL, ...PROVIDERS.map((p) => p.id), CUSTOM, CLI])
 
 /** A stored tab that no longer exists resolves to All rather than an empty page. */
 const activeTab = computed(() => (tabIds.value.includes(selected.value) ? selected.value : ALL))
@@ -149,6 +154,11 @@ const navItems = computed<SectionItem[]>(() => [
     label: t("providers.group.custom"),
     count: customProviders.state.data?.length ?? null,
   },
+  {
+    id: CLI,
+    label: t("cli.title"),
+    count: cli.state.providers?.length ?? null,
+  },
 ])
 
 /** Sum across sections, but only once every section has actually loaded. */
@@ -161,7 +171,9 @@ const allCount = computed<number | null>(() => {
   }
   const custom = customProviders.state.data?.length
   if (custom == null) return null
-  return sum + custom
+  const cliProviders = cli.state.providers?.length
+  if (cliProviders == null) return null
+  return sum + custom + cliProviders
 })
 
 const visibleProviders = computed<ProviderId[]>(() => {
@@ -172,6 +184,8 @@ const visibleProviders = computed<ProviderId[]>(() => {
 const showCustomSection = computed(
   () => activeTab.value === ALL || activeTab.value === CUSTOM,
 )
+
+const showCliSection = computed(() => activeTab.value === ALL || activeTab.value === CLI)
 
 /** Names the panel after the tab that opened it. */
 const activeLabel = computed(
@@ -185,7 +199,7 @@ function onSelectTab(id: string) {
 
 /** Cache-first: paint localStorage, network only when stale. */
 function loadEverything() {
-  return Promise.all([loadAll(), customProviders.load()])
+  return Promise.all([loadAll(), customProviders.load(), cli.load()])
 }
 
 /** Idempotent: a stray double-start would leak an interval nothing can clear. */
@@ -218,6 +232,7 @@ onMounted(() => {
   // this has to land even when the page mounts hidden and loads nothing.
   setUserId(user.value?.id ?? null)
   customProviders.setUserId(user.value?.id ?? null)
+  cli.setUserId(user.value?.id ?? null)
   // `visibilitychange` only fires on a transition, so a tab born hidden never
   // gets one — which is exactly how Firefox restores a pinned tab at startup.
   syncToVisibility()
@@ -237,7 +252,11 @@ async function refreshAll() {
   actionError.value = null
   refreshing.value = true
   try {
-    await Promise.all([loadAll({ refresh: true }), customProviders.load({ refresh: true })])
+    await Promise.all([
+      loadAll({ refresh: true }),
+      customProviders.load({ refresh: true }),
+      cli.load({ refresh: true }),
+    ])
   } finally {
     refreshing.value = false
   }
@@ -684,6 +703,8 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           </span>
         </div>
       </AppCard>
+
+      <CliSection v-if="showCliSection" />
     </div>
 
     <AddAccountDialog

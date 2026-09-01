@@ -8,7 +8,7 @@
 import {
   deleteCliProvider,
   exposedCliModels,
-  getCliDevice,
+  listCliDevices,
   listCliProviders,
   parseCliModels,
   type CliProviderRow,
@@ -65,13 +65,13 @@ export async function cliProviderListItem(
 
 export async function listCliProviderItems(env: Env, userId: string): Promise<Record<string, unknown>[]> {
   const rows = await listCliProviders(env.DB, userId)
-  const deviceNames = new Map<string, string>()
-  for (const row of rows) {
-    if (row.device_id && !deviceNames.has(row.device_id)) {
-      const device = await getCliDevice(env.DB, row.device_id)
-      if (device) deviceNames.set(row.device_id, device.name)
-    }
-  }
+  if (rows.length === 0) return []
+  // One query for every device name rather than one per provider — a
+  // provider's device_id always belongs to the same user, so the user's
+  // device list covers them all (revoked included).
+  const deviceNames = new Map(
+    (await listCliDevices(env.DB, userId)).map((device) => [device.id, device.name]),
+  )
   return Promise.all(rows.map((row) => cliProviderListItem(env, row, deviceNames)))
 }
 

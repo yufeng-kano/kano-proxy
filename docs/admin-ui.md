@@ -10,14 +10,14 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 | `/login` | Google sign-in (split brand panel + sign-in panel) |
 | `/overview` | Usage and cache-rate dashboard over `request_logs` |
 | `/logs` | Per-request log explorer over `request_logs` — newest first, cursor-paged |
-| `/providers` | Connected subscription accounts (Claude / Codex / Grok) and custom endpoints, one section per provider |
+| `/providers` | Connected subscription accounts (Claude / Codex / Grok), custom endpoints, and CLI devices + CLI providers ([cli.md](./cli.md)), one section per provider |
 | `/models` | Searchable catalog of `provider/model` ids, grouped by provider |
 | `/groups` | Model groups: virtual endpoints (`/g/<slug>/…`) whose model names map to ordered `provider/model` targets |
 | `/keys` | Create / revoke API keys, plus the client connection details |
-| `/cli` | CLI devices and CLI providers ([cli.md](./cli.md)) — plus the session-gated `/cli/authorize` view the `kano-proxy init` login lands on |
+| `/cli/authorize` | Session-gated approve view the `kano-proxy init` login lands on — a **bare** page outside the shell (§ CLI authorize view) |
 | `/changelog` | Published GitHub Releases, newest first ([changelog.md](./changelog.md)) |
 
-`/dashboard` and `/accounts` are kept as permanent redirects to `/overview` and `/providers` — a bookmark or a persisted last-route from an older build must not 404 into the catch-all.
+`/dashboard`, `/accounts`, and `/cli` are kept as permanent redirects to `/overview`, `/providers`, and `/providers` — a bookmark or a persisted last-route from an older build must not 404 into the catch-all. There is **no `/cli` page and no CLI nav item**: CLI management lives on the Providers page, and CLI models appear on the Models page like any other provider's.
 
 ## Design restraint
 
@@ -229,7 +229,7 @@ Route `/logs`, nav item **Logs** directly below Overview. Data source: `GET /api
 
 ## Providers page
 
-Tabs in the sticky header, same pattern as Models: **All**, one tab per builtin provider, and **Custom** — each with its connected-account count. All shows every section stacked; a provider tab shows only that provider's card. One panel at a time (real tab semantics), no anchor-scrolling.
+Tabs in the sticky header, same pattern as Models: **All**, one tab per builtin provider, **Custom**, and **CLI** — each with its connected-account count (CLI counts its providers). All shows every section stacked; a provider tab shows only that provider's card. One panel at a time (real tab semantics), no anchor-scrolling.
 
 Each section's **Add** control is an icon-only ghost button (`plus`) in the card header — Add account / Add endpoint as its tooltip and accessible name. The page is read far more often than it is added to, so the create affordance sits at icon weight rather than as a bordered button on every section.
 
@@ -304,21 +304,21 @@ Route `/groups`, nav item **Groups** between Models and Keys. Data: `GET /api/mo
 - **Empty state** explains the job (a dedicated endpoint whose model names route where you decide — map a hard-coded client model name, join the same model across accounts) with a Create group action.
 - **Models page:** the shared catalog no longer carries a `group` section (groups live on their own endpoints and their own page); provider sections stay dynamic with no group special-case left.
 
-## CLI page
+## CLI sections (on the Providers page)
 
-Route `/cli`, nav item **CLI** between Groups and Keys. Data: `GET /api/cli/devices` + `GET /api/cli/providers` ([auth.md](./auth.md) § CLI devices and providers), cache-first under `kano-proxy:cli:{userId}` with the standard 2 min TTL and logout sweep. Contract: [cli.md](./cli.md) § Web UI.
+No dedicated page and no nav item — the CLI's two datasets are sections of the Providers page, shown on the **All** and **CLI** tabs. Data: `GET /api/cli/devices` + `GET /api/cli/providers` ([auth.md](./auth.md) § CLI devices and providers), cache-first under `kano-proxy:cli:{userId}` with the standard 2 min TTL and logout sweep, loaded and polled together with the page's other sections. Contract: [cli.md](./cli.md) § Web UI.
 
-- **Two datasets, two cards** (they are genuinely separate collections — the card rule in § Design restraint): **Devices** (name, last seen, created — row action behind the section edit gate: **Revoke**, danger tone, confirm-first, keeps its word) and **CLI providers** (slug as a `mono` chip, format badge, connection state — a StatusDot pair `Connected` / `Offline`, never color alone — model count with last report time, registered-from device; row actions: **Rename** as the pencil, **Remove** in the danger tone, confirm-first).
-- **No create flows on this page** — creation is the CLI's job. The empty state shows the install one-liners (brew + install script, from the message catalog) and the `kano-proxy init` command, and links the GitHub Releases page.
+- **Two datasets, two cards** (they are genuinely separate collections — the card rule in § Design restraint): **CLI devices** (name, last seen, created — row action behind the section edit gate: **Revoke**, danger tone, confirm-first, keeps its word) and **CLI providers** (slug as a `mono` chip, format badge, connection state — a StatusDot pair `Connected` / `Offline`, never color alone — model count with last report time, registered-from device; row actions: **Rename** as the pencil, **Remove** in the danger tone, confirm-first).
+- **No create flows here** — creation is the CLI's job. When both datasets are empty, one card shows the install one-liners (brew + install script, from the message catalog) and the `kano-proxy init` command, and links the GitHub Releases page.
 - A revoked device stays listed with a `Revoked` badge (it is history the operator may want to see) — its row action column is empty.
 
-### Authorize view (`/cli/authorize?request=…`)
+## CLI authorize view (`/cli/authorize?request=…`)
 
-Session-gated like any admin page (redirects through login). Reads `GET /api/cli/login-requests/:id`:
+Session-gated like any admin page (redirects through login), but rendered **outside the shell**: a bare, blank page with a single centered card — no sidebar, no page header, no nav. The person landing here came from a terminal to answer one question, and the app's chrome is noise around it. The card carries the brand mark, the question, and the actions. Reads `GET /api/cli/login-requests/:id`:
 
 - Shows the requesting **device name** and Approve / Deny.
 - On approve (`POST …/approve`) it swaps to the one-time code — a large `CopyField` with the paste-into-the-CLI instruction. The code is shown exactly once; refreshing the page after approval shows the already-approved state, not the code.
-- Deny deletes the request and says so. An expired or unknown request renders its own state with a link back to `/cli`.
+- Deny deletes the request and says so. An expired or unknown request renders its own state with a link into the app (Providers, where the CLI sections live).
 
 ## Keys page
 

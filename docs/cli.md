@@ -204,16 +204,16 @@ $ kano-proxy start
 
 `/agent/v1/*` is its own namespace beside `/api/*` (session) and the LLM surfaces: token-authenticated, permissive CORS unnecessary (no browser callers), never session-authenticated. The session-side management routes the web UI uses (`/api/cli/*` — devices, revoke, providers, rename, delete, login-request read/approve/deny) are listed in [auth.md](./auth.md) § CLI devices and providers.
 
-## Web UI — the CLI page
+## Web UI
 
-New sidebar page **`/cli`** (nav item "CLI"), plus the session-gated authorize view the login flow lands on:
+No dedicated page and no sidebar nav item — CLI surfaces live inside the existing pages, plus the session-gated authorize view the login flow lands on:
 
-| Route | Content |
+| Surface | Content |
 |---|---|
-| `/cli` | Two datasets, two cards per the house style: **Devices** (name, last seen, created — row action: revoke) and **CLI providers** (slug, format, connection state chip, model count + last report time, registered-from device — row actions: rename display name, delete). No create flows here — creation is the CLI's job; the page's empty state shows the `kano-proxy init` one-liner and a Releases link. |
-| `/cli/authorize?request=…` | Approve view for a pending login: device name + Approve/Deny; on approve, displays the one-time code. Session required (redirects through login like any admin page). |
+| Providers page (`/providers`), **All** and **CLI** tabs | Two datasets, two cards per the house style: **CLI devices** (name, last seen, created — row action: revoke) and **CLI providers** (slug, format, connection state chip, model count + last report time, registered-from device — row actions: rename display name, delete). No create flows here — creation is the CLI's job; when both are empty, one card shows the `kano-proxy init` one-liner and a Releases link. |
+| `/cli/authorize?request=…` | Approve view for a pending login, rendered as a **bare page outside the shell** — blank page, one centered card: device name + Approve/Deny; on approve, displays the one-time code. Session required (redirects through login like any admin page). |
 
-Providers page (`/providers`) does **not** list CLI providers — they live on `/cli`; the Models page and group-target pickers include them like any other provider (ids are `<slug>/<model>`). Detailed layout rules land in [admin-ui.md](./admin-ui.md) at implementation time.
+`/cli` is a permanent redirect to `/providers`. The Models page and group-target pickers include CLI providers like any other provider (ids are `<slug>/<model>`). Detailed layout rules: [admin-ui.md](./admin-ui.md) § CLI sections, § CLI authorize view.
 
 ## Distribution
 

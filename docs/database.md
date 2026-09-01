@@ -139,7 +139,7 @@ One local endpoint registered by `kano-proxy add` (contract: [cli.md](./cli.md))
 | user_id | TEXT FK | `ON DELETE CASCADE` |
 | device_id | TEXT | nullable, informational "registered from" — no FK enforcement; a deleted device leaves the provider intact |
 | slug | TEXT | custom-provider slug rules, immutable, unique per user **across both** `custom_providers` and `cli_providers` (both create paths check the other table) |
-| name | TEXT | display name, 1–64 chars; renameable from `/cli` |
+| name | TEXT | display name, 1–64 chars; renameable from the Providers page's CLI section |
 | format | TEXT | `openai` \| `anthropic`; immutable (delete-and-recreate) |
 | models_json | TEXT | nullable; the last agent-reported model list, stored whole (JSON array of id strings) |
 | models_updated_at | TEXT | nullable; when the report was written |

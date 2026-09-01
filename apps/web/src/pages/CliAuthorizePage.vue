@@ -1,9 +1,12 @@
 <script setup lang="ts">
 /**
- * Approve view for a pending `kano-proxy init` login (docs/cli.md § Web UI).
- * Session-gated by the router like every admin page. On approve the one-time
- * code renders exactly once — the server stores only its hash, so a refresh
- * lands on the already-approved state, never the code again.
+ * Approve view for a pending `kano-proxy init` login (docs/cli.md § Web UI,
+ * docs/admin-ui.md § CLI authorize view). Session-gated by the router like
+ * every admin page, but rendered bare — no shell, a blank page with one
+ * centered card: the person landing here came from a terminal to answer one
+ * question. On approve the one-time code renders exactly once — the server
+ * stores only its hash, so a refresh lands on the already-approved state,
+ * never the code again.
  */
 import { onMounted, ref } from "vue"
 import { useRoute } from "vue-router"
@@ -11,8 +14,8 @@ import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Banner from "@/components/ui/Banner.vue"
 import CopyField from "@/components/ui/CopyField.vue"
-import PageHeader from "@/components/ui/PageHeader.vue"
 import Spinner from "@/components/ui/Spinner.vue"
+import { SITE } from "@/config/site"
 import { useI18n } from "@/i18n"
 import { approveCliLoginRequest, denyCliLoginRequest, getCliLoginRequest } from "@/services/api"
 import type { CliLoginRequest } from "@/types"
@@ -73,18 +76,23 @@ async function deny() {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('cli.authorize.title')" />
-
-    <Banner v-if="error" tone="error" class="page-alert">
-      {{ error }}
-      <template #actions>
-        <AppButton size="sm" variant="ghost" @click="error = null">
-          {{ t("action.dismiss") }}
-        </AppButton>
-      </template>
-    </Banner>
-
     <AppCard class="panel">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">k</span>
+        <span class="brand-name">{{ SITE.name }}</span>
+      </div>
+
+      <h1 class="title">{{ t("cli.authorize.title") }}</h1>
+
+      <Banner v-if="error" tone="error">
+        {{ error }}
+        <template #actions>
+          <AppButton size="sm" variant="ghost" @click="error = null">
+            {{ t("action.dismiss") }}
+          </AppButton>
+        </template>
+      </Banner>
+
       <div v-if="view === 'loading'" class="state" role="status">
         <Spinner />
         <span class="sr-only">{{ t("app.loading") }}</span>
@@ -119,21 +127,58 @@ async function deny() {
                 : t("cli.authorize.missing")
           }}
         </p>
-        <AppButton variant="ghost" to="/cli">{{ t("cli.authorize.goToCli") }}</AppButton>
+        <AppButton variant="ghost" to="/providers">{{ t("cli.authorize.goToApp") }}</AppButton>
       </div>
     </AppCard>
   </div>
 </template>
 
 <style scoped>
+/* The bare surface: the shell never mounts on this route, so the page paints
+   its own full-height ground and centers the one card on it. */
 .page {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  padding: var(--space-4);
+  background: var(--bg);
 }
 
 .panel {
-  max-width: 560px;
+  width: 100%;
+  max-width: 440px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+
+.brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+}
+
+.brand-name {
+  font-size: var(--text-sm);
+}
+
+.title {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-tight);
 }
 
 .state {
@@ -141,7 +186,6 @@ async function deny() {
   flex-direction: column;
   align-items: flex-start;
   gap: var(--space-4);
-  padding: var(--space-2) 0;
 }
 
 .question {

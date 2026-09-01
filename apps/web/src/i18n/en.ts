@@ -34,7 +34,6 @@ export const en = {
   "nav.providers": "Providers",
   "nav.models": "Models",
   "nav.groups": "Groups",
-  "nav.cli": "CLI",
   "nav.keys": "API keys",
   "nav.changelog": "Changelog",
 
@@ -507,7 +506,7 @@ export const en = {
   // --- API keys -----------------------------------------------------------
   // --- CLI page (docs/cli.md, docs/admin-ui.md § CLI page) -----------------
   "cli.title": "CLI",
-  "cli.devices.title": "Devices",
+  "cli.devices.title": "CLI devices",
   "cli.devices.column.name": "Name",
   "cli.devices.column.lastSeen": "Last seen",
   "cli.devices.column.created": "Created",
@@ -555,7 +554,7 @@ export const en = {
   "cli.authorize.alreadyApproved": "This request was already approved on another page.",
   "cli.authorize.denied": "Request denied. Nothing was signed in.",
   "cli.authorize.missing": "This sign-in request is unknown or has expired. Run kano-proxy init again to get a fresh link.",
-  "cli.authorize.goToCli": "Go to the CLI page",
+  "cli.authorize.goToApp": "Go to Providers",
   "cli.authorize.error.approve": "Couldn't approve the request",
   "cli.authorize.error.deny": "Couldn't deny the request",
 

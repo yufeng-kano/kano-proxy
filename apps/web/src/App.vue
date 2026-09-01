@@ -16,9 +16,16 @@ const route = useRoute()
 const { t } = useI18n()
 const { loading, isAuthenticated } = useAuth()
 
-const showShell = computed(() => isAuthenticated.value && route.name !== "login")
+// `bare` routes (the CLI authorize view) render without the shell even when
+// signed in — a blank page with one centered card (docs/admin-ui.md § CLI
+// authorize view).
+const showShell = computed(
+  () => isAuthenticated.value && route.name !== "login" && !route.meta.bare,
+)
 /** Session unresolved and not on login: the router is still deciding where to go. */
-const showBoot = computed(() => loading.value && !showShell.value && route.name !== "login")
+const showBoot = computed(
+  () => loading.value && !isAuthenticated.value && route.name !== "login",
+)
 </script>
 
 <template>

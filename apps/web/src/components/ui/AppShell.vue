@@ -11,7 +11,7 @@
  * reset-on-navigate, and the Providers section nav all move the right thing.
  *
  * Below 1080px the sidebar becomes a drawer behind a header menu button. No
- * icon rail: with seven destinations the labels are doing the work, and no
+ * icon rail: with six destinations the labels are doing the work, and no
  * bottom tab bar — it would cost the scarcest axis on a phone.
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
@@ -40,7 +40,6 @@ const NAV = [
   { name: "providers", to: "/providers", label: "nav.providers" },
   { name: "models", to: "/models", label: "nav.models" },
   { name: "groups", to: "/groups", label: "nav.groups" },
-  { name: "cli", to: "/cli", label: "nav.cli" },
   { name: "keys", to: "/keys", label: "nav.keys" },
 ] as const
 
