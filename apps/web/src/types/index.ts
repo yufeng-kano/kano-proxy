@@ -155,6 +155,43 @@ export type CustomProviderModelsMode = "auto" | "manual"
 export type CustomProviderStatus = "active" | "benched"
 
 /** User-defined BYO OpenAI-/Anthropic-compatible upstream. `GET /api/custom-providers` item shape. */
+/** One machine signed in with `kano-proxy init` (docs/cli.md). */
+export type CliDevice = {
+  id: string
+  name: string
+  last_seen_at: string | null
+  created_at: string
+  revoked_at: string | null
+}
+
+/** One local endpoint registered by `kano-proxy add` (docs/cli.md). */
+export type CliProvider = {
+  id: string
+  slug: string
+  name: string
+  format: CustomProviderFormat
+  /** Live tunnel state, read through the AgentTunnel DO at request time. */
+  connected: boolean
+  /** The exposed model ids — the agent report with the whitelist applied. */
+  models: string[]
+  models_reported: number
+  model_filter: string[]
+  models_updated_at: string | null
+  device_id: string | null
+  device_name: string | null
+  created_at: string
+  updated_at: string
+}
+
+/** A pending `kano-proxy init` login, as the authorize view reads it. */
+export type CliLoginRequest = {
+  id: string
+  device_name: string
+  expires_at: string
+  approved: boolean
+  used: boolean
+}
+
 export type CustomProvider = {
   id: string
   slug: string

@@ -223,6 +223,46 @@ function execute(
     return { rows: [], changes: 1 }
   }
 
+  // Conditional insert, budget form: `INSERT INTO t (cols) SELECT ?,… WHERE
+  // (SELECT COUNT(*) FROM t2 WHERE a = ? AND b > ?) < N` — the CLI login
+  // per-IP rate budget rides inside the INSERT for atomicity.
+  m = sql.match(
+    /^INSERT INTO (\w+)\s*\(([^)]+)\)\s*SELECT\s+([?,\s]+)\s*WHERE \(SELECT COUNT\(\*\) FROM (\w+) WHERE (.+)\) < (\d+)$/i,
+  )
+  if (m) {
+    const cols = m[2]!.split(",").map((s) => s.trim())
+    const values = m[3]!.split(",").map((s) => s.trim())
+    if (values.some((v) => v !== "?")) throw new Error("FakeD1: conditional INSERT expects only ? values")
+    const insertParams = params.slice(0, values.length)
+    const guardParams = params.slice(values.length)
+    const matching = filterRows(db.rows(m[4]!), m[5], guardParams)
+    if (matching.length >= Number(m[6])) return { rows: [], changes: 0 }
+    const row: Row = {}
+    cols.forEach((c, i) => (row[c] = insertParams[i]))
+    db.rows(m[1]!).push(row)
+    return { rows: [], changes: 1 }
+  }
+
+  // Conditional insert, reservation form: `INSERT INTO t (cols) SELECT ?,…
+  // WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE …)` — the shared slug namespace
+  // guard between custom_providers and cli_providers.
+  m = sql.match(
+    /^INSERT INTO (\w+)\s*\(([^)]+)\)\s*SELECT\s+([?,\s]+)\s*WHERE NOT EXISTS \(SELECT 1 FROM (\w+) WHERE (.+)\)$/i,
+  )
+  if (m) {
+    const cols = m[2]!.split(",").map((s) => s.trim())
+    const values = m[3]!.split(",").map((s) => s.trim())
+    if (values.some((v) => v !== "?")) throw new Error("FakeD1: conditional INSERT expects only ? values")
+    const insertParams = params.slice(0, values.length)
+    const guardParams = params.slice(values.length)
+    const conflicting = filterRows(db.rows(m[4]!), m[5], guardParams)
+    if (conflicting.length > 0) return { rows: [], changes: 0 }
+    const row: Row = {}
+    cols.forEach((c, i) => (row[c] = insertParams[i]))
+    db.rows(m[1]!).push(row)
+    return { rows: [], changes: 1 }
+  }
+
   m = sql.match(/^SELECT COUNT\(\*\) as c FROM (\w+)(?:\s+WHERE\s+(.+))?$/i)
   if (m) {
     const rows = filterRows(db.rows(m[1]!), m[2], params)
@@ -308,6 +348,20 @@ function execute(
         const nulled = a.match(/^(\w+)\s*=\s*NULL$/i)
         if (nulled) {
           row[nulled[1]!] = null
+          continue
+        }
+        // Self-increment (`attempts = attempts + 1`) — CLI login-code attempts.
+        const incr = a.match(/^(\w+)\s*=\s*(\w+)\s*\+\s*1$/i)
+        if (incr && incr[1]!.toLowerCase() === incr[2]!.toLowerCase()) {
+          row[incr[1]!] = Number(row[incr[1]!] ?? 0) + 1
+          continue
+        }
+        // Column copy (`refresh_token_prev_hash = refresh_token_hash`) — the
+        // CLI refresh rotation. Matches SQLite semantics here because the
+        // copy assignment precedes the overwrite in the statement.
+        const copy = a.match(/^(\w+)\s*=\s*(\w+)$/i)
+        if (copy) {
+          row[copy[1]!] = row[copy[2]!] ?? null
           continue
         }
         throw new Error(`FakeD1: unsupported SET assignment: ${a}`)

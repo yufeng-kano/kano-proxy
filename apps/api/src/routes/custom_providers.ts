@@ -8,6 +8,7 @@ import {
   updateAccountPayload,
   type AccountRow,
 } from "../db/accounts"
+import { countCliProviders, getCliProviderBySlug } from "../db/cli"
 import {
   countCustomProviders,
   deleteCustomProvider,
@@ -178,16 +179,22 @@ customProviderRoutes.post("/", async (c) => {
     countTokensUrl = ctUrlRes.url
   }
 
-  const count = await countCustomProviders(c.env.DB, user.id)
+  // The 20-per-user provider budget and slug namespace are shared with CLI
+  // providers — both kinds resolve from the same `<slug>/<model>` position
+  // (docs/cli.md § Data model).
+  const count =
+    (await countCustomProviders(c.env.DB, user.id)) + (await countCliProviders(c.env.DB, user.id))
   if (count >= MAX_CUSTOM_PROVIDERS_PER_USER) {
     return c.json(
-      { error: `maximum of ${MAX_CUSTOM_PROVIDERS_PER_USER} custom providers reached` },
+      { error: `maximum of ${MAX_CUSTOM_PROVIDERS_PER_USER} providers reached (custom + CLI)` },
       400,
     )
   }
 
   const existing = await getCustomProviderBySlug(c.env.DB, user.id, slug)
   if (existing) return c.json({ error: `slug "${slug}" is already in use` }, 409)
+  const cliExisting = await getCliProviderBySlug(c.env.DB, user.id, slug)
+  if (cliExisting) return c.json({ error: `slug "${slug}" is already in use by a CLI provider` }, 409)
 
   const row = await insertCustomProvider(c.env.DB, {
     userId: user.id,
@@ -199,6 +206,8 @@ customProviderRoutes.post("/", async (c) => {
     modelsMode,
     manualModelsJson: manualRes.models.length ? JSON.stringify(manualRes.models) : null,
   })
+  // Lost an insert race against a concurrent CLI create for this slug.
+  if (!row) return c.json({ error: `slug "${slug}" is already in use by a CLI provider` }, 409)
 
   const credential: StoredCredential = { access_token: apiKey }
   const encrypted = await encryptJson(c.env.TOKEN_ENCRYPTION_KEY, credential)

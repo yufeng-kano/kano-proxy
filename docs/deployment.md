@@ -74,6 +74,8 @@ Every Wrangler config (committed `wrangler.toml`, the production example, the CI
 
 The same three configs also carry `[limits] cpu_ms = 15000` — a per-invocation CPU ceiling that bounds runaway-billing risk (an infinite-loop bug or abusive request errors out at 15s of CPU instead of billing the platform maximum). **Requires Workers Paid**: a Free-plan deploy rejects the `[limits]` block, so delete it if running this project on Free (Free enforces its own ~10ms budget, which long SSE streams exceed — see the observability note below). The value is sized from production measurements: the heaviest legitimate request observed (48s stream, ~5.4k output tokens) accrued 1.3s of CPU; an extrapolated worst case (~32k-token output) stays under ~8s; raise the ceiling if Workers Logs ever shows `exceededCpu` on legitimate traffic.
 
+Every Wrangler config also carries the **AgentTunnel Durable Object** binding (`[durable_objects]` + the `new_sqlite_classes = ["AgentTunnel"]` migration tag) for CLI providers ([cli.md](./cli.md)). If your `wrangler.production.toml` predates it, copy the two blocks from `wrangler.production.example.toml` — a deploy from a config without them breaks `/agent/v1/connect` and every CLI-provider request.
+
 The same three configs also carry `[observability] enabled = true` (Workers Logs / invocation logs). This is the only place resource-limit kills are visible: a request killed for exceeding CPU/memory (Cloudflare error 1102, tail outcome `exceededCpu`/`exceededMemory`) loses its `waitUntil` work, so its `request_logs` row is never written — D1 shows a *gap*, not an error. Workers Logs records the invocation outcome platform-side, so those kills (and any other invisible failure) can be diagnosed after the fact instead of only while a `wrangler tail` happens to be attached. Query them in Dashboard → Workers → kano-proxy → Logs. Volume guard: unauthenticated 401 floods count too — investigate any client hammering the endpoints, since log events are the billable unit past the included allotment.
 
 ### Vars vs secrets
@@ -93,6 +95,7 @@ GOOGLE_CLIENT_ID
 GOOGLE_CLIENT_SECRET
 SESSION_SECRET
 TOKEN_ENCRYPTION_KEY
+CLI_TOKEN_SECRET     # CLI device access-token HMAC key (docs/cli.md) — random 32+ bytes; unset disables /agent/v1 device auth
 CODEX_RELAY_SA_KEY   # optional — GCP SA JSON key for the codex relay (docs/codex-relay.md)
 ```
 
@@ -372,6 +375,7 @@ Notes can be corrected after the fact with `gh release edit <tag> --notes '<mark
 | `CF_D1_DATABASE_ID` | Production D1 `database_id` |
 | `CF_KV_BENCH_ID` | Production KV id for `BENCH` |
 | `CF_KV_CACHE_ID` | Production KV id for `CACHE` |
+| `TAP_PUSH_TOKEN` | Cross-repo token with push access to `yufeng-kano/homebrew-tap` and `yufeng-kano/scoop-bucket` — used by the CLI release job to bump the formula/manifest. When absent the bump steps are skipped with a warning and can be re-run after the secret is added |
 
 ### Repository variables
 
@@ -390,5 +394,15 @@ Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `T
 4. `wrangler d1 migrations apply --remote`  
 5. `wrangler deploy` (Worker)  
 6. `wrangler pages deploy` (project `kano-proxy`)
+
+### CLI release assets (same workflow, own jobs)
+
+On Release publish the workflow also cross-compiles the `kano-proxy` CLI ([cli.md](./cli.md) § Distribution) — independent of the deploy job, and re-runnable on its own if it fails after the deploy succeeded:
+
+1. Build matrix: `aarch64-apple-darwin` + `x86_64-apple-darwin` (macOS runner), `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` (Linux runner, `cross`), `x86_64-pc-windows-msvc` (Windows runner).
+2. Package `kano-proxy-<version>-<target>.tar.gz` (`.zip` for Windows), emit one `SHA256SUMS` over all archives, attach everything to the Release.
+3. Bump the Homebrew formula (`yufeng-kano/homebrew-tap`) and Scoop manifest (`yufeng-kano/scoop-bucket`) with the new version + checksums, pushed with `TAP_PUSH_TOKEN` (skipped with a warning when the secret is absent).
+
+PR CI (`ci.yml`) compile-checks all five targets plus `cargo test`, so a release cannot be published with a CLI that does not build.
 
 Manual re-deploy of a ref: Actions → **Release deploy** → Run workflow.

@@ -2,12 +2,16 @@ export type Env = {
   DB: D1Database
   BENCH: KVNamespace
   CACHE: KVNamespace
+  /** AgentTunnel DO for CLI providers (docs/cli.md). Optional so test env doubles need not bind it; the CLI adapter faults `offline` when absent. */
+  AGENT_TUNNEL?: DurableObjectNamespace
   APP_URL: string
   GOOGLE_REDIRECT_URI: string
   GOOGLE_CLIENT_ID?: string
   GOOGLE_CLIENT_SECRET?: string
   SESSION_SECRET?: string
   TOKEN_ENCRYPTION_KEY?: string
+  /** CLI device access-token HMAC key (docs/cli.md § Device auth); unset disables /agent/v1 device auth. */
+  CLI_TOKEN_SECRET?: string
   CLAUDE_CODE_OAUTH_CLIENT_ID?: string
   CODEX_OAUTH_CLIENT_ID?: string
   GROK_OAUTH_CLIENT_ID?: string

@@ -8,6 +8,7 @@
 import type { Env, ProviderId } from "../env"
 import { PROVIDERS } from "../env"
 import { listAccounts } from "../db/accounts"
+import { exposedCliModels, listCliProviders } from "../db/cli"
 import { listCustomProviders, type CustomProviderRow } from "../db/custom_providers"
 import { decryptJson } from "../crypto/token_crypto"
 import type { StoredCredential } from "../pool/acquire"
@@ -267,6 +268,28 @@ export async function listModelsForUser(
   const customRows = await listCustomProviders(env.DB, userId)
   for (const row of customRows) {
     sections.push(await fetchCustomProviderModels(env, userId, row, force))
+  }
+
+  // CLI providers (docs/cli.md § Model catalog): one section per provider,
+  // straight from the stored agent report with the expose filter applied at
+  // read time — no fetch, no KV cache, no fabrication. An offline agent keeps
+  // showing its last real report; one that never connected shows empty.
+  const cliRows = await listCliProviders(env.DB, userId)
+  for (const row of cliRows) {
+    sections.push({
+      provider: row.slug,
+      models: exposedCliModels(row).map((id) => ({
+        id: `${row.slug}/${id}`,
+        provider: row.slug,
+        upstream: id,
+        display_name: id,
+        available: true,
+        owned_by: row.slug,
+        object: "model" as const,
+      })),
+      error: null,
+      cached: false,
+    })
   }
 
   // Model groups are deliberately absent here (since v4): each group is its

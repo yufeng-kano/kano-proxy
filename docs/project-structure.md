@@ -14,6 +14,8 @@ kano-proxy/
           keys.ts
           providers.ts
           custom_providers.ts    # admin REST for user-defined BYO endpoints
+          agent.ts               # /agent/v1: CLI device auth + tunnel connect (docs/cli.md)
+          cli.ts                 # /api/cli: session-side CLI device/provider management
         auth/            # session, google, api keys
         proxy/           # stream helpers, openai↔provider
         providers/       # claude-code, codex, grok, antigravity (builtin registry) +
@@ -28,6 +30,7 @@ kano-proxy/
                           #   § Routing module)
         pool/            # bench, promote (builtin id or custom slug);
                           #   credential persistence (saveCredential)
+        do/              # AgentTunnel Durable Object + wire protocol (docs/cli.md)
         db/              # D1 access
         crypto/          # token encryption, key hash
         logging/
@@ -44,6 +47,8 @@ kano-proxy/
       relay_test.ts
       deno.json          # tasks: test / check / start
       Dockerfile
+    cli/                 # kano-proxy CLI — Rust/Cargo (docs/cli.md; the one
+                          #   Rust component; target/ is gitignored)
     web/                 # Vue + Vite → Pages
       src/
         pages/

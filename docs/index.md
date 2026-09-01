@@ -12,6 +12,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [database.md](./database.md) | D1 schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, routing module + strategies, failover, usage windows, manual unpause, adapters |
 | [pricing.md](./pricing.md) | Estimated per-request cost (LiteLLM + OpenRouter tables), per-key spend limits |
+| [cli.md](./cli.md) | CLI providers: the official `kano-proxy` CLI (device login, Rust/ratatui) + Durable Object reverse tunnel exposing local LLMs as first-class providers |
 | [codex-relay.md](./codex-relay.md) | **Approved exception to Cloudflare-only.** Codex egress relay on Cloud Run: design, IAM auth, cost, deploy |
 | [admin-ui.md](./admin-ui.md) | Web UI: design restraint (the house style), shell layout, pages, responsive rules, cache-first UX |
 | [i18n.md](./i18n.md) | Message catalog, translation runtime, copy voice |

@@ -34,6 +34,14 @@ GOOGLE_REDIRECT_URI = "https://<your-domain>/api/auth/callback"
 # Pair with: pnpm exec wrangler secret put CODEX_RELAY_SA_KEY --config wrangler.production.toml
 # CODEX_RELAY_URL = "https://<relay>.run.app"
 
+# AgentTunnel Durable Object — CLI providers (docs/cli.md).
+[durable_objects]
+bindings = [{ name = "AGENT_TUNNEL", class_name = "AgentTunnel" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentTunnel"]
+
 [triggers]
 crons = ["17 3 * * *"]
 

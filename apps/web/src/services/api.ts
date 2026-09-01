@@ -3,6 +3,9 @@ import type {
   ApiKey,
   CatalogModel,
   ChangelogResponse,
+  CliDevice,
+  CliLoginRequest,
+  CliProvider,
   CreatedKey,
   CustomProvider,
   CustomProviderFormat,
@@ -363,6 +366,60 @@ export async function testCustomProvider(
   return request<CustomProviderTestResult>("/api/custom-providers/test", {
     method: "POST",
     body: JSON.stringify(body),
+  })
+}
+
+// CLI devices and providers — the kano-proxy CLI's server-side management
+// (docs/auth.md § CLI devices and providers). Session-cookie auth.
+
+export async function listCliDevices(): Promise<CliDevice[]> {
+  const data = await request<{ devices: CliDevice[] }>("/api/cli/devices")
+  return data.devices
+}
+
+/** Idempotent. Live tunnels die at access-token expiry (docs/cli.md). */
+export async function revokeCliDevice(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/cli/devices/${encodeURIComponent(id)}/revoke`, {
+    method: "POST",
+  })
+}
+
+export async function listCliProviders(): Promise<CliProvider[]> {
+  const data = await request<{ providers: CliProvider[] }>("/api/cli/providers")
+  return data.providers
+}
+
+/** Display name only — slug and format are immutable. */
+export async function renameCliProvider(id: string, name: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/cli/providers/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  })
+}
+
+/** Removes the provider and force-closes any live tunnel socket. */
+export async function deleteCliProvider(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/cli/providers/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  })
+}
+
+export async function getCliLoginRequest(id: string): Promise<CliLoginRequest> {
+  return request<CliLoginRequest>(`/api/cli/login-requests/${encodeURIComponent(id)}`)
+}
+
+/** The returned code is shown exactly once — only its hash survives server-side. */
+export async function approveCliLoginRequest(id: string): Promise<string> {
+  const data = await request<{ ok: boolean; code: string }>(
+    `/api/cli/login-requests/${encodeURIComponent(id)}/approve`,
+    { method: "POST" },
+  )
+  return data.code
+}
+
+export async function denyCliLoginRequest(id: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/cli/login-requests/${encodeURIComponent(id)}/deny`, {
+    method: "POST",
   })
 }
 

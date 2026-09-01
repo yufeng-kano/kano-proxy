@@ -11,6 +11,7 @@ import { poolCandidates } from "../routing/candidates"
 import { candidateFactsList, earliestUnusableUntil } from "../routing/facts"
 import {
   EDGE_TIMEOUT_COOLDOWN_MS,
+  agentFaultVerdict,
   isEdgeTimeoutStatus,
   penaltyForOutcome,
 } from "../routing/feedback"
@@ -353,6 +354,24 @@ async function shouldFailOverForResponse(
   candidate: RoutingCandidate,
   response: Response,
 ): Promise<boolean> {
+  // Agent-tunnel fault (docs/cli.md § Failover semantics): infrastructure
+  // failure between the DO and the CLI — always the next candidate; only
+  // `offline` benches (60s), and reconnect clears that bench.
+  const agentFault = agentFaultVerdict(response.headers)
+  if (agentFault) {
+    if (agentFault.benchMs !== null) {
+      try {
+        await markBenched(env, userId, candidate.provider, candidate.account.id, agentFault.benchMs, agentFault.reason)
+      } catch (error) {
+        console.error("Failed to persist agent-fault bench", {
+          accountId: candidate.account.id,
+          provider: candidate.provider,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    return true
+  }
   if (isEdgeTimeoutStatus(response.status)) {
     if (await persistEdgeTimeoutStrike(env, userId, candidate)) {
       await persistBench(env, userId, candidate, EDGE_TIMEOUT_COOLDOWN_MS, response.status)

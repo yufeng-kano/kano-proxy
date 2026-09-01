@@ -23,7 +23,13 @@ const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
  * is exactly what keeps `/anthropic/v1/messages/count_tokens` returning its
  * existing `400` for this format.
  */
-export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapter {
+export function createCustomOpenAIAdapter(
+  row: CustomProviderRow,
+  // Injected transport for CLI providers (docs/cli.md): same adapter
+  // semantics, but the fetch goes to the AgentTunnel DO stub instead of the
+  // network. Defaults to the global fetch for ordinary custom endpoints.
+  fetchFn: typeof fetch = fetch,
+): ProviderAdapter {
   const base = row.base_url
 
   const adapter: ProviderAdapter = {
@@ -60,7 +66,7 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
         model: req.upstreamModel,
         stream_options: { ...clientStreamOptions, include_usage: true },
       }
-      const res = await fetch(url, { ...init, body: JSON.stringify(upstreamBody) })
+      const res = await fetchFn(url, { ...init, body: JSON.stringify(upstreamBody) })
       if (res.ok || res.status !== 400 || isEventStream(res)) return res
 
       const text = await res.text()
@@ -72,7 +78,7 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
           headers: res.headers,
         })
       }
-      return fetch(url, { ...init, body: JSON.stringify(remapped) })
+      return fetchFn(url, { ...init, body: JSON.stringify(remapped) })
     },
 
     async audioTranscriptions(_env, account, formData, _rawModel, upstreamModel, extras) {
@@ -95,7 +101,7 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
       if (!outgoingFormData.has("model")) {
         outgoingFormData.append("model", upstreamModel)
       }
-      return fetch(url, {
+      return fetchFn(url, {
         method: "POST",
         headers: {
           authorization: `Bearer ${account.credential.access_token}`,
@@ -107,7 +113,7 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
 
     async listModels(_env, account) {
       try {
-        const res = await fetch(`${base}/models`, {
+        const res = await fetchFn(`${base}/models`, {
           headers: { authorization: `Bearer ${account.credential.access_token}` },
         })
         if (!res.ok) return { models: [], error: `models ${res.status}` }
@@ -139,7 +145,7 @@ export function createCustomOpenAIAdapter(row: CustomProviderRow): ProviderAdapt
       }
       const beta = headers.get("anthropic-beta")
       if (beta) h["anthropic-beta"] = beta
-      return fetch(countTokensUrl, {
+      return fetchFn(countTokensUrl, {
         method: "POST",
         headers: h,
         body: JSON.stringify(raw),

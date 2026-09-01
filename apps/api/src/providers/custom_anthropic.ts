@@ -15,7 +15,11 @@ const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
  * converters for the `/openai/v1` surface; `reasoning_effort` is dropped
  * there on purpose (the native surface gives full `thinking` control).
  */
-export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAdapter {
+export function createCustomAnthropicAdapter(
+  row: CustomProviderRow,
+  // Injected transport for CLI providers (docs/cli.md) — see custom_openai.ts.
+  fetchFn: typeof fetch = fetch,
+): ProviderAdapter {
   const base = row.base_url
 
   async function forwardNative(
@@ -33,7 +37,7 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
     }
     const beta = headers.get("anthropic-beta")
     if (beta) h["anthropic-beta"] = beta
-    return fetch(url, { method: "POST", headers: h, body: JSON.stringify(raw), signal })
+    return fetchFn(url, { method: "POST", headers: h, body: JSON.stringify(raw), signal })
   }
 
   return {
@@ -62,7 +66,7 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
         // reasoning_effort intentionally dropped on this surface — no
         // thinking/output_config mapped from it for custom upstreams.
       })
-      const res = await fetch(`${base}/v1/messages`, {
+      const res = await fetchFn(`${base}/v1/messages`, {
         method: "POST",
         headers: {
           "x-api-key": account.credential.access_token,
@@ -87,10 +91,10 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
 
       const text = await res.text()
       if (!res.ok) {
-        return new Response(text, {
-          status: res.status,
-          headers: { "content-type": res.headers.get("content-type") || "application/json" },
-        })
+        // Full headers, not just content-type: a CLI provider's tunnel fault
+        // marker (x-agent-fault / x-agent-upstream) must survive this rebuild
+        // or dispatch can neither fail over nor bench (docs/cli.md).
+        return new Response(text, { status: res.status, headers: res.headers })
       }
       try {
         const json = JSON.parse(text)
@@ -102,7 +106,7 @@ export function createCustomAnthropicAdapter(row: CustomProviderRow): ProviderAd
 
     async listModels(_env, account) {
       try {
-        const res = await fetch(`${base}/v1/models`, {
+        const res = await fetchFn(`${base}/v1/models`, {
           headers: {
             "x-api-key": account.credential.access_token,
             "anthropic-version": DEFAULT_ANTHROPIC_VERSION,
