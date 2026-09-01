@@ -12,6 +12,7 @@
  * asset), and Google's own dark variant. Those values are Google's to set, not
  * ours to tokenize.
  */
+import { useRoute } from "vue-router"
 import { useAuth } from "@/composables/useAuth"
 import Banner from "@/components/ui/Banner.vue"
 import { SITE } from "@/config/site"
@@ -21,6 +22,13 @@ import { PROVIDERS, type ProviderId } from "@/types"
 
 const { t } = useI18n()
 const { goLogin, error } = useAuth()
+const route = useRoute()
+
+/** The guard's intended destination, carried through the OAuth round trip. */
+function signIn() {
+  const redirect = typeof route.query.redirect === "string" ? route.query.redirect : null
+  goLogin(redirect)
+}
 
 /**
  * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
@@ -78,7 +86,7 @@ const year = String(new Date().getFullYear())
         <h1>{{ t("login.signIn") }}</h1>
         <p class="login-lede">{{ t("login.lede") }}</p>
 
-        <button type="button" class="btn-google" @click="goLogin">
+        <button type="button" class="btn-google" @click="signIn">
           <svg
             class="btn-google-mark"
             viewBox="0 0 18 18"

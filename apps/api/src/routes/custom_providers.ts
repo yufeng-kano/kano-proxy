@@ -206,6 +206,8 @@ customProviderRoutes.post("/", async (c) => {
     modelsMode,
     manualModelsJson: manualRes.models.length ? JSON.stringify(manualRes.models) : null,
   })
+  // Lost an insert race against a concurrent CLI create for this slug.
+  if (!row) return c.json({ error: `slug "${slug}" is already in use by a CLI provider` }, 409)
 
   const credential: StoredCredential = { access_token: apiKey }
   const encrypted = await encryptJson(c.env.TOKEN_ENCRYPTION_KEY, credential)

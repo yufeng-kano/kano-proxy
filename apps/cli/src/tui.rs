@@ -98,6 +98,51 @@ pub fn input(title: &str, label: &str, default: &str) -> Result<String> {
     }
 }
 
+/// One-line masked input for a secret (the local API key): renders bullets,
+/// never the characters — shoulder surfers and terminal recordings see
+/// nothing. Enter with nothing typed returns an empty string ("no key").
+pub fn input_secret(title: &str, label: &str) -> Result<String> {
+    let mut screen = Screen::open()?;
+    let mut value = String::new();
+    loop {
+        screen.terminal.draw(|f| {
+            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)])
+                .split(f.area());
+            f.render_widget(
+                Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)),
+                chunks[0],
+            );
+            let line = Line::from(vec![
+                Span::styled(format!("{label}: "), Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw("\u{2022}".repeat(value.chars().count())),
+                Span::styled("\u{258f}", Style::default().add_modifier(Modifier::SLOW_BLINK)),
+            ]);
+            f.render_widget(Paragraph::new(line), chunks[1]);
+            f.render_widget(
+                Paragraph::new("Enter accepts (blank = none) \u{b7} input is hidden \u{b7} Esc cancels")
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                chunks[2],
+            );
+        })?;
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if is_cancel(key.code, key.modifiers) {
+                bail!("cancelled");
+            }
+            match key.code {
+                KeyCode::Enter => return Ok(value.trim().to_string()),
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(c) => value.push(c),
+                _ => {}
+            }
+        }
+    }
+}
+
 /// Single choice from a short fixed list (e.g. API type).
 pub fn choose(title: &str, options: &[&str]) -> Result<usize> {
     let mut screen = Screen::open()?;

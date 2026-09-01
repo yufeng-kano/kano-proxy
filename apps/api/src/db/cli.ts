@@ -43,21 +43,37 @@ export type CliProviderRow = {
 export const LOGIN_REQUEST_TTL_MS = 10 * 60 * 1000
 export const MAX_LOGIN_CODE_ATTEMPTS = 5
 export const MAX_CLI_DEVICES_PER_USER = 20
+/** Login starts allowed per IP hash inside one request-TTL window. */
+export const LOGIN_STARTS_PER_IP = 10
 
 // ---------------------------------------------------------------------------
 // Login requests
 
-export async function insertLoginRequest(db: D1Database, deviceName: string): Promise<CliLoginRequestRow> {
+/**
+ * Create a login request under the per-IP budget in one atomic statement:
+ * the INSERT lands only while fewer than LOGIN_STARTS_PER_IP rows with this
+ * ip_hash were created inside the window — a read-modify-write counter would
+ * let parallel batches from one IP bypass the limit (docs/cli.md § Security
+ * notes). Returns null when the budget is spent.
+ */
+export async function insertLoginRequest(
+  db: D1Database,
+  deviceName: string,
+  ipHash: string,
+): Promise<CliLoginRequestRow | null> {
   const id = newId("clireq")
   const ts = nowIso()
+  const windowStart = new Date(Date.now() - LOGIN_REQUEST_TTL_MS).toISOString()
   const expires = new Date(Date.now() + LOGIN_REQUEST_TTL_MS).toISOString()
-  await db
+  const res = await db
     .prepare(
-      `INSERT INTO cli_login_requests (id, device_name, expires_at, attempts, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO cli_login_requests (id, device_name, ip_hash, expires_at, attempts, created_at)
+       SELECT ?, ?, ?, ?, ?, ?
+       WHERE (SELECT COUNT(*) FROM cli_login_requests WHERE ip_hash = ? AND created_at > ?) < ${LOGIN_STARTS_PER_IP}`,
     )
-    .bind(id, deviceName, expires, 0, ts)
+    .bind(id, deviceName, ipHash, expires, 0, ts, ipHash, windowStart)
     .run()
+  if ((res.meta.changes ?? 0) === 0) return null
   return {
     id,
     device_name: deviceName,
@@ -152,9 +168,10 @@ export async function getCliDevice(db: D1Database, id: string): Promise<CliDevic
   return (await db.prepare(`SELECT * FROM cli_devices WHERE id = ?`).bind(id).first<CliDeviceRow>()) ?? null
 }
 
+/** Quota counts only live devices — a user who revoked 20 over time is not locked out forever. */
 export async function countCliDevices(db: D1Database, userId: string): Promise<number> {
   const row = await db
-    .prepare(`SELECT COUNT(*) as c FROM cli_devices WHERE user_id = ?`)
+    .prepare(`SELECT COUNT(*) as c FROM cli_devices WHERE user_id = ? AND revoked_at IS NULL`)
     .bind(userId)
     .first<{ c: number }>()
   return row?.c ?? 0
@@ -248,6 +265,13 @@ export async function countCliProviders(db: D1Database, userId: string): Promise
   return row?.c ?? 0
 }
 
+/**
+ * The slug namespace is shared with custom_providers, and a check-then-insert
+ * pair can race a concurrent custom create for the same slug — so the guard
+ * rides inside the INSERT itself (single-statement atomicity): the row lands
+ * only while no custom provider owns the slug. Returns null on that conflict;
+ * the own-table half is the UNIQUE(user_id, slug) constraint.
+ */
 export async function insertCliProvider(
   db: D1Database,
   input: {
@@ -259,7 +283,7 @@ export async function insertCliProvider(
     modelsJson: string | null
     modelFilterJson: string | null
   },
-): Promise<CliProviderRow> {
+): Promise<CliProviderRow | null> {
   const id = newId("cliprov")
   const ts = nowIso()
   const max = await db
@@ -267,11 +291,12 @@ export async function insertCliProvider(
     .bind(input.userId)
     .first<{ m: number }>()
   const sortOrder = (max?.m ?? 0) + 1
-  await db
+  const res = await db
     .prepare(
       `INSERT INTO cli_providers
        (id, user_id, device_id, slug, name, format, models_json, models_updated_at, model_filter_json, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM custom_providers WHERE user_id = ? AND slug = ?)`,
     )
     .bind(
       id,
@@ -286,8 +311,11 @@ export async function insertCliProvider(
       sortOrder,
       ts,
       ts,
+      input.userId,
+      input.slug,
     )
     .run()
+  if ((res.meta.changes ?? 0) === 0) return null
   return {
     id,
     user_id: input.userId,

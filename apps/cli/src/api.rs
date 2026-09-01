@@ -111,13 +111,24 @@ pub async fn login_complete(base_url: &str, request_id: &str, code: &str) -> Res
     .await
 }
 
+/// Bounded well under the 30s stale-lock threshold in state.rs: a refresh
+/// that outlived the lock could see a sibling break it, read the old token,
+/// and trip the server's reuse-as-theft revocation.
 async fn rotate_token(base_url: &str, refresh_token: &str) -> Result<TokenPair> {
-    post_json(
-        &format!("{base_url}/agent/v1/token"),
-        json!({ "refresh_token": refresh_token }),
-        None,
-    )
-    .await
+    let url = format!("{base_url}/agent/v1/token");
+    let res = client()
+        .post(&url)
+        .timeout(std::time::Duration::from_secs(20))
+        .json(&json!({ "refresh_token": refresh_token }))
+        .send()
+        .await
+        .with_context(|| format!("cannot reach {url}"))?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(api_error(status, &text));
+    }
+    serde_json::from_str(&text).with_context(|| format!("unexpected response from {url}"))
 }
 
 /// Rotate the refresh token and return a fresh access token.

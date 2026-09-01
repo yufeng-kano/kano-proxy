@@ -7,11 +7,23 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 
 use crate::api;
-use crate::state::{PendingLogin, ProviderState, StateFile};
+use crate::state::{PendingLogin, ProviderState, State, StateFile};
 use crate::tui;
 use crate::tunnel::{self, TokenCache};
 
 pub const EXIT_AUTH_REJECTED: i32 = 2;
+
+/// Every state write goes through here: re-read and save while holding the
+/// same lock token refreshes use, so a concurrent command (or its refresh
+/// rotation) can never be clobbered by a stale snapshot — the failure mode
+/// that resurrects a superseded refresh token and trips the server's
+/// reuse-as-theft revocation.
+fn mutate_state(file: &StateFile, f: impl FnOnce(&mut State)) -> Result<()> {
+    let _lock = file.acquire_lock()?;
+    let mut state = file.load()?;
+    f(&mut state);
+    file.save(&state)
+}
 
 fn hostname() -> String {
     std::env::var("HOSTNAME")
@@ -180,7 +192,7 @@ fn normalize_target(raw: &str) -> Result<String> {
 }
 
 pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
-    let mut state = file.load()?;
+    let state = file.load()?;
     api::require_signed_in(&state)?;
 
     let (slug, format, target, target_key, expose, initial_models) = if args.no_tui {
@@ -207,8 +219,8 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
         };
         let default_target = if format == "anthropic" { "http://localhost:11434" } else { "http://localhost:11434/v1" };
         let target = normalize_target(&tui::input(title, "Target base URL (include /v1 for openai)", default_target)?)?;
-        let key = tui::input(title, "Local API key (Enter for none)", "-")?;
-        let target_key = if key == "-" || key.is_empty() { None } else { Some(key) };
+        let key = tui::input_secret(title, "Local API key (Enter for none)")?;
+        let target_key = if key.is_empty() { None } else { Some(key) };
 
         match api::probe_local_models(&format, &target, target_key.as_deref()).await {
             Ok(models) if !models.is_empty() => {
@@ -242,19 +254,16 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
     let access = tokens.get(false).await?;
     let created = api::create_provider(&state.base_url, &access, &slug, &format, &expose, &initial_models).await?;
 
-    // The token rotation above rewrote the state file — re-read it, or this
-    // save would resurrect the superseded refresh token and the next refresh
-    // would trip the server's reuse-as-theft revocation.
-    state = file.load()?;
-    state.providers.push(ProviderState {
-        id: created.id,
-        slug: created.slug.clone(),
-        format,
-        target,
-        target_key,
-        expose,
-    });
-    file.save(&state)?;
+    mutate_state(file, |state| {
+        state.providers.push(ProviderState {
+            id: created.id,
+            slug: created.slug.clone(),
+            format,
+            target,
+            target_key,
+            expose,
+        })
+    })?;
     eprintln!("✓ registered \"{}\" — run `kano-proxy start` to bring it online", created.slug);
     Ok(())
 }
@@ -263,7 +272,7 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
 // remove / list / status
 
 pub async fn cmd_remove(file: &StateFile, slug: &str, local_only: bool) -> Result<()> {
-    let mut state = file.load()?;
+    let state = file.load()?;
     let Some(index) = state.providers.iter().position(|p| p.slug == slug) else {
         bail!("no provider \"{slug}\" in {}", file.path.display());
     };
@@ -273,10 +282,8 @@ pub async fn cmd_remove(file: &StateFile, slug: &str, local_only: bool) -> Resul
         let access = tokens.get(false).await?;
         let id = state.providers[index].id.clone();
         api::delete_provider(&state.base_url, &access, &id).await?;
-        state = file.load()?; // the rotation above rewrote the file
     }
-    state.providers.retain(|p| p.slug != slug);
-    file.save(&state)?;
+    mutate_state(file, |state| state.providers.retain(|p| p.slug != slug))?;
     eprintln!("✓ removed \"{slug}\"");
     Ok(())
 }

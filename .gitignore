@@ -25,3 +25,7 @@ apps/api/.wrangler/
 apps/api/wrangler.production.toml
 
 .zed/
+
+# Python bytecode (CI helper scripts)
+__pycache__/
+*.pyc

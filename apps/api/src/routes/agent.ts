@@ -58,27 +58,6 @@ import { agentTunnelStub, listCliProviderItems, removeCliProvider } from "./cli_
 
 export const agentRoutes = new Hono<HonoEnv>()
 
-const LOGIN_RATE_LIMIT = 10
-const LOGIN_RATE_WINDOW_S = 600
-
-/**
- * Per-IP login-start budget, failing closed (docs/cli.md § Security notes):
- * over-limit and KV-error both refuse — an abuse guard that fails open under
- * infrastructure trouble is not a guard.
- */
-async function loginStartAllowed(c: Context<HonoEnv>): Promise<boolean> {
-  const ip = c.req.header("cf-connecting-ip") || "unknown"
-  const key = `agent-login-rate:${ip}`
-  try {
-    const current = Number((await c.env.CACHE.get(key)) ?? "0")
-    if (!Number.isFinite(current) || current >= LOGIN_RATE_LIMIT) return false
-    await c.env.CACHE.put(key, String(current + 1), { expirationTtl: LOGIN_RATE_WINDOW_S })
-    return true
-  } catch {
-    return false
-  }
-}
-
 agentRoutes.post("/login/start", async (c) => {
   let body: Record<string, unknown>
   try {
@@ -89,10 +68,14 @@ agentRoutes.post("/login/start", async (c) => {
   const deviceName = typeof body.device_name === "string" ? body.device_name.trim() : ""
   const nameErr = validateName(deviceName)
   if (nameErr) return c.json({ error: `device_name: ${nameErr}` }, 400)
-  if (!(await loginStartAllowed(c))) {
+  // Per-IP budget enforced atomically inside the INSERT (docs/cli.md
+  // § Security notes) — a KV read-modify-write here was bypassable by
+  // parallel batches from one address. Only the IP's hash is stored.
+  const ipHash = await sha256Hex(c.req.header("cf-connecting-ip") || "unknown")
+  const row = await insertLoginRequest(c.env.DB, deviceName, ipHash)
+  if (!row) {
     return c.json({ error: "too many login attempts — try again later" }, 429)
   }
-  const row = await insertLoginRequest(c.env.DB, deviceName)
   const appUrl = (c.env.APP_URL || "").replace(/\/$/, "")
   return c.json({
     request_id: row.id,
@@ -276,6 +259,8 @@ agentRoutes.post("/providers", async (c) => {
     modelsJson,
     modelFilterJson,
   })
+  // Lost an insert race against a concurrent custom create for this slug.
+  if (!row) return c.json({ error: `slug "${slug}" is already in use by a custom provider` }, 409)
   // The internal pool-state row (docs/cli.md § Data model): a placeholder
   // credential that decrypts fine and authorizes nothing — the CLI injects
   // the local server's real key on its side of the tunnel.

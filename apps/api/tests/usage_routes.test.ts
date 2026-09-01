@@ -295,7 +295,10 @@ function seedLog(db: FakeD1, overrides: Partial<Row> & { user_id: string; error_
       cache_read_input_tokens: null,
       cache_creation_input_tokens: null,
       error_code: null,
-      created_at: "2026-08-02T00:00:00.000Z",
+      // Relative to now: tests using the trailing `days=` windows must keep
+      // matching forever — a fixed date rolled out of `days=30` on 2026-09-01
+      // and time-bombed the suite. Calendar-bucketing tests override this.
+      created_at: new Date(Date.now() - 86_400_000).toISOString(),
       ...overrides,
     },
   ])

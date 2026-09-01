@@ -175,8 +175,9 @@ jobs:
           set -euo pipefail
           version="${TAG#v}"
           cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/cli/Cargo.toml | head -1)
-          if [ "$version" != "$cargo_version" ]; then
-            echo "release tag $TAG does not match apps/cli/Cargo.toml version $cargo_version"
+          root_version=$(node -p "require('./package.json').version")
+          if [ "$version" != "$cargo_version" ] || [ "$version" != "$root_version" ]; then
+            echo "release tag $TAG must match both apps/cli/Cargo.toml ($cargo_version) and the root package.json ($root_version)"
             exit 1
           fi
       - uses: Swatinem/rust-cache@v2

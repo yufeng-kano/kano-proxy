@@ -128,13 +128,28 @@ def manifest(version: str, sums: dict[str, str]) -> str:
 
 
 def push(repo: str, rel_path: str, content: str, version: str, token: str) -> None:
+    # The token never enters argv (a CalledProcessError stringifies its full
+    # command into logs): git reads the auth header from GIT_CONFIG_* env vars.
+    import base64
+
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    auth_env = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+        "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+    }
     with tempfile.TemporaryDirectory() as tmp:
-        url = f"https://x-access-token:{token}@github.com/{repo}.git"
-        subprocess.run(["git", "clone", "--depth", "1", url, tmp], check=True, capture_output=True)
+        url = f"https://github.com/{repo}.git"
+        subprocess.run(
+            ["git", "clone", "--depth", "1", url, tmp],
+            check=True,
+            capture_output=True,
+            env=os.environ | auth_env,
+        )
         target = Path(tmp) / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-        env = os.environ | {
+        env = os.environ | auth_env | {
             "GIT_AUTHOR_NAME": "release-ci",
             "GIT_AUTHOR_EMAIL": "ci@users.noreply.github.com",
             "GIT_COMMITTER_NAME": "release-ci",
@@ -177,7 +192,12 @@ def main() -> None:
         try:
             push(repo, rel_path, content, version, token)
         except subprocess.CalledProcessError as e:
-            print(f"warning: could not bump {repo} ({e}) — re-run this job after fixing the repo/secret", file=sys.stderr)
+            # Sanitized on purpose: never echo the failing command (argv is
+            # token-free now, but stay conservative) or captured output.
+            print(
+                f"warning: could not bump {repo} (git exited {e.returncode}) — re-run this job after fixing the repo/secret",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":

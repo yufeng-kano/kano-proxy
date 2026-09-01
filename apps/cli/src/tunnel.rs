@@ -63,6 +63,28 @@ fn jitter_ms(cap_ms: u64) -> u64 {
     nanos % cap_ms.max(1)
 }
 
+/// The DO rejects a whole out-of-bounds report and the CLI would then cache
+/// it as "sent" and never retry — so the protocol bounds are applied locally
+/// first: drop invalid ids, cap at 100, and say what was dropped.
+fn sanitize_models_report(slug: &str, models: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = models
+        .into_iter()
+        .map(|m| m.trim().to_string())
+        .filter(|m| {
+            let ok = !m.is_empty() && m.len() <= 128 && !m.chars().any(char::is_whitespace);
+            if !ok {
+                eprintln!("[{slug}] dropping unreportable model id ({m:?})");
+            }
+            ok
+        })
+        .collect();
+    if out.len() > 100 {
+        eprintln!("[{slug}] local server lists {} models — reporting the first 100", out.len());
+        out.truncate(100);
+    }
+    out
+}
+
 enum SocketOutcome {
     /// Reconnect after backoff (network failure, unexpected close).
     Retry,
@@ -107,8 +129,16 @@ pub async fn run_provider(
                 force_refresh = true;
                 backoff = Duration::from_secs(1);
             }
-            Ok(SocketOutcome::Retry) | Err(_) => {
-                let wait = backoff + Duration::from_millis(jitter_ms(backoff.as_millis() as u64));
+            // run_socket returns Err only for terminal conditions (401 on
+            // connect, protocol-version mismatch) — retrying those forever
+            // would just hide the message the user needs to act on.
+            Err(e) => return Err(anyhow!("{}: {e}", provider.slug)),
+            Ok(SocketOutcome::Retry) => {
+                // Full jitter inside the documented 1s → 60s cap: uniform in
+                // (0, backoff], never backoff + jitter (which could double the
+                // cap during a long outage).
+                let cap_ms = backoff.as_millis() as u64;
+                let wait = Duration::from_millis(250 + jitter_ms(cap_ms.saturating_sub(250)));
                 eprintln!("[{}] disconnected — reconnecting in {:.0?}", provider.slug, wait);
                 tokio::time::sleep(wait).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -201,6 +231,7 @@ async fn run_socket(
                 models_provider.target_key.as_deref(),
             )
             .await
+            .map(|models| sanitize_models_report(&models_provider.slug, models))
             {
                 Ok(models) if last_sent.as_ref() != Some(&models) => {
                     let frame = encode_control(&ControlFrame::Models { models: models.clone() });

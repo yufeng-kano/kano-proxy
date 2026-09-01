@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from "vue-router"
-import { useAuth } from "@/composables/useAuth"
+import { takeLoginRedirect, useAuth } from "@/composables/useAuth"
 import { readPrefs, setLastPath } from "@/services/prefs"
 
 /**
@@ -125,6 +125,18 @@ router.beforeEach(async (to) => {
 
   if (!isAuthenticated.value) {
     return { name: "login", query: { redirect: to.fullPath } }
+  }
+
+  // A sign-in that started from a guarded deep link (e.g. the CLI authorize
+  // view) comes back through the OAuth callback on the bare root — finish the
+  // journey the guard started. Checked before the lastPath restore so the
+  // deliberate destination outranks the habitual one; the auth guard above
+  // already ran, so this can never skip login.
+  if (isBoot && entryPath === "/") {
+    const stashed = takeLoginRedirect()
+    if (stashed && stashed !== to.fullPath && router.resolve(stashed).matched.length > 0) {
+      return stashed
+    }
   }
 
   // Restore the last visited page — but only when the browser landed on the

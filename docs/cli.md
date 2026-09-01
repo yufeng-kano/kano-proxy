@@ -44,7 +44,7 @@ Three new tables (`0015_cli_providers.sql`; full column notes in [database.md](.
 - **Slug rules:** identical to custom providers (lowercase 2–32, `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`, same reserved list), **immutable**, and unique per user **across both** `custom_providers` and `cli_providers` — both create paths check the other table, because both kinds resolve from the same `<slug>/<model>` position.
 - **Format immutable** after creation, same as custom (delete-and-recreate).
 - **Pool internals:** each CLI provider still gets one `upstream_accounts` row (`provider = slug`, empty credential). This is an implementation detail, not a user-facing "account": it is where the existing bench/unpause/routing-facts machinery keeps its state, so `facts.ts` / `feedback.ts` / group targets need no parallel bookkeeping. The row is created and deleted with the provider and never shown as an account in the UI.
-- **Caps:** CLI providers count into the same 20-per-user provider budget as custom providers (shared cap across both tables); ≤ 20 devices per user.
+- **Caps:** CLI providers count into the same 20-per-user provider budget as custom providers (shared cap across both tables, and the cross-table slug guard rides inside each INSERT so racing creates cannot both land); ≤ 20 **active** (non-revoked) devices per user — revoked rows stay listed as history and never spend the quota.
 - **The target URL is not stored server-side.** Where the local server lives (`http://localhost:11434/v1`) and its optional local API key are CLI state on the device — the server has no business knowing them and could not use them anyway.
 
 ## Device auth — login once, rotate forever
@@ -240,7 +240,7 @@ The web UI's `/cli` empty state shows the brew and script one-liners (from the m
 ## Security notes
 
 - No permanent secrets: access tokens live 1 h, refresh tokens rotate on every use with reuse-as-theft revocation, devices are individually revocable from `/cli`, and revocation reaches live sockets within the access TTL via the expiry alarm.
-- Login codes and refresh tokens are stored hashed; login endpoints are per-IP rate-limited (KV counter, 10 starts / 10 min / IP) and fail closed without touching unrelated state. Expired `cli_login_requests` rows are purged by the daily retention sweep ([logging.md](./logging.md)).
+- Login codes and refresh tokens are stored hashed; login starts are per-IP rate-limited (10 / 10 min / IP) **atomically** — the budget check rides inside the request-row INSERT (counting recent rows by the IP's SHA-256, never the raw address), so parallel batches from one address cannot slip past a read-modify-write counter. Fails closed without touching unrelated state. Expired `cli_login_requests` rows are purged by the daily retention sweep ([logging.md](./logging.md)).
 - The tunnel carries prompts/completions as opaque bytes; nothing content-shaped is logged at the Worker, DO, or CLI ([logging.md](./logging.md) rules apply unchanged).
 - Cross-user isolation is inherited: every path to the stub starts from a user-scoped row lookup, and the DO name is the provider row id.
 - The CLI's target confinement (one base URL per provider + path allowlist, enforced at both ends) means a compromised proxy operator still cannot use connected agents as general SSRF proxies into home networks.

@@ -66,6 +66,11 @@ export async function countCustomProviders(db: D1Database, userId: string): Prom
   return row?.c ?? 0
 }
 
+/**
+ * Slug namespace shared with cli_providers (docs/cli.md § Data model): the
+ * cross-table guard rides inside the INSERT so it cannot race a concurrent
+ * CLI create for the same slug. Returns null on that conflict.
+ */
 export async function insertCustomProvider(
   db: D1Database,
   input: {
@@ -78,7 +83,7 @@ export async function insertCustomProvider(
     modelsMode: "auto" | "manual"
     manualModelsJson: string | null
   },
-): Promise<CustomProviderRow> {
+): Promise<CustomProviderRow | null> {
   const id = newId("cprov")
   const ts = nowIso()
   const count = await db
@@ -90,11 +95,12 @@ export async function insertCustomProvider(
     .bind(input.userId)
     .first<{ m: number }>()
   const sortOrder = count?.c ? Math.max(max?.m ?? 0, count.c - 1) + 1 : 0
-  await db
+  const res = await db
     .prepare(
       `INSERT INTO custom_providers
        (id, user_id, slug, name, format, base_url, count_tokens_url, models_mode, manual_models_json, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM cli_providers WHERE user_id = ? AND slug = ?)`,
     )
     .bind(
       id,
@@ -109,8 +115,11 @@ export async function insertCustomProvider(
       sortOrder,
       ts,
       ts,
+      input.userId,
+      input.slug,
     )
     .run()
+  if ((res.meta.changes ?? 0) === 0) return null
   return {
     id,
     user_id: input.userId,

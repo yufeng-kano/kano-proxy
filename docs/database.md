@@ -120,6 +120,7 @@ Pending `kano-proxy init` authorize-then-paste logins ([cli.md](./cli.md) § Dev
 |--------|------|-------|
 | id | TEXT PK | the `request_id` the CLI holds |
 | device_name | TEXT | requested at start, becomes the device row's name on complete |
+| ip_hash | TEXT | nullable; SHA-256 of the requesting IP — the per-IP start budget is an atomic conditional INSERT counting recent rows with this hash ([cli.md](./cli.md) § Security notes). The raw address is never stored |
 | code_hash | TEXT | nullable; SHA-256 of the normalized one-time code — written on approve, never before |
 | user_id | TEXT | NULL until approved; the approving session's user |
 | expires_at | TEXT | start + 10 minutes |
@@ -147,7 +148,7 @@ One local endpoint registered by `kano-proxy add` (contract: [cli.md](./cli.md))
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
-`UNIQUE(user_id, slug)`. CLI providers count into the same 20-per-user cap as custom providers (shared across both tables); ≤ 20 devices per user.
+`UNIQUE(user_id, slug)` — and the cross-table half of the shared namespace is enforced inside the INSERT itself (`… SELECT … WHERE NOT EXISTS (custom_providers row)`, mirrored on the custom create), so concurrent creates cannot race past a check-then-insert. CLI providers count into the same 20-per-user cap as custom providers (shared across both tables); ≤ 20 active devices per user (revoked rows do not count).
 
 ### `model_groups`
 

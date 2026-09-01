@@ -27,6 +27,10 @@ CREATE INDEX cli_devices_refresh_prev_hash_idx ON cli_devices(refresh_token_prev
 CREATE TABLE cli_login_requests (
   id TEXT PRIMARY KEY NOT NULL,
   device_name TEXT NOT NULL,
+  -- SHA-256 of the requesting IP: the per-IP start budget is enforced as an
+  -- atomic conditional INSERT counting recent rows with this hash — never the
+  -- raw address (docs/cli.md § Security notes).
+  ip_hash TEXT,
   code_hash TEXT,
   user_id TEXT,
   expires_at TEXT NOT NULL,
@@ -35,6 +39,8 @@ CREATE TABLE cli_login_requests (
   attempts INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+
+CREATE INDEX cli_login_requests_ip_created_idx ON cli_login_requests(ip_hash, created_at);
 
 CREATE TABLE cli_providers (
   id TEXT PRIMARY KEY NOT NULL,
