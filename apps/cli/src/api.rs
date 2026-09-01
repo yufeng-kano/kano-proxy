@@ -240,10 +240,15 @@ pub async fn probe_local_models(format: &str, target: &str, target_key: Option<&
     Ok(list.data.into_iter().filter_map(|e| e.id).filter(|id| !id.is_empty()).collect())
 }
 
-/// True for hosts where cleartext HTTP cannot cross a network.
+/// True for hosts where cleartext HTTP cannot cross a network: `localhost`
+/// or an actual loopback IP **literal** — a DNS name that merely starts with
+/// "127." (e.g. `127.proxy.example.com`) is routable and must not pass.
 fn is_loopback_host(host: &str) -> bool {
     let bare = host.trim_start_matches('[').trim_end_matches(']');
-    bare == "localhost" || bare == "::1" || bare.starts_with("127.")
+    if bare == "localhost" {
+        return true;
+    }
+    bare.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
 /// Base URL sanity for init input. Cleartext HTTP is allowed only for
@@ -282,8 +287,11 @@ mod tests {
         assert_eq!(normalize_base_url("http://localhost:8787").unwrap(), "http://localhost:8787");
         assert!(normalize_base_url("proxy.example.com").is_err());
         assert!(normalize_base_url("https://").is_err());
-        // Cleartext to a routable host would expose the whole token family.
+        // Cleartext to a routable host would expose the whole token family —
+        // including a DNS name that merely *looks* like a loopback literal.
         assert!(normalize_base_url("http://proxy.example.com").is_err());
+        assert!(normalize_base_url("http://127.proxy.example.com").is_err());
         assert!(normalize_base_url("ftp://proxy.example.com").is_err());
+        assert_eq!(normalize_base_url("http://[::1]:8787").unwrap(), "http://[::1]:8787");
     }
 }

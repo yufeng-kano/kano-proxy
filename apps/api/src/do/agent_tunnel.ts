@@ -16,6 +16,7 @@ import type { Env } from "../env"
 import {
   AGENT_PROTO,
   CLOSE_REPLACED,
+  CLOSE_RETRY,
   CLOSE_TOKEN_EXPIRED,
   isAllowedPath,
   type CliProviderFormat,
@@ -84,8 +85,10 @@ export class AgentTunnel implements DurableObject {
             // frame and will not repeat it until the list changes — closing
             // retryably makes the reconnect re-report (a fresh connection
             // starts with an empty last-sent), so a transient D1 error can't
-            // leave the catalog stale for hours.
-            this.closeAll(1011, "models_persist_failed")
+            // leave the catalog stale for hours. 4008: script close codes are
+            // limited to 1000/3000-4999, so 1011 would throw and leave the
+            // socket open.
+            this.closeAll(CLOSE_RETRY, "models_persist_failed")
           }
         },
       },

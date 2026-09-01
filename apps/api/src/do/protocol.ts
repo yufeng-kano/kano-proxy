@@ -23,6 +23,8 @@ export const FIRST_RES_TIMEOUT_MS = 120_000
 
 export const CLOSE_REPLACED = 4001
 export const CLOSE_TOKEN_EXPIRED = 4003
+/** Retryable server-side failure (e.g. a models-report D1 write) — script close codes must be 1000 or 3000-4999, so 1011 would throw. */
+export const CLOSE_RETRY = 4008
 
 /** Agent-reported catalog bounds mirror the custom manual-list rules (docs/cli.md § Model catalog). */
 export const MAX_REPORTED_MODELS = 100

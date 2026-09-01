@@ -265,8 +265,14 @@ agentRoutes.post("/providers", async (c) => {
     modelsJson,
     modelFilterJson,
   })
-  // Lost an insert race against a concurrent custom create for this slug.
-  if (!row) return c.json({ error: `slug "${slug}" is already in use by a custom provider` }, 409)
+  if (!row) {
+    // The atomic guard refused — say which condition actually failed rather
+    // than blaming a free slug for a cap that filled in the race window.
+    if (await getCustomProviderBySlug(c.env.DB, userId, slug)) {
+      return c.json({ error: `slug "${slug}" is already in use by a custom provider` }, 409)
+    }
+    return c.json({ error: `maximum of ${MAX_CUSTOM_PROVIDERS_PER_USER} providers reached (custom + CLI)` }, 400)
+  }
   // The internal pool-state row (docs/cli.md § Data model): a placeholder
   // credential that decrypts fine and authorizes nothing — the CLI injects
   // the local server's real key on its side of the tunnel. D1 has no

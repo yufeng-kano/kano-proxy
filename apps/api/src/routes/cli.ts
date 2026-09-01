@@ -8,6 +8,7 @@ import { Hono } from "hono"
 import { newPairingCode, sha256Hex } from "../auth/cli_tokens"
 import type { HonoEnv } from "../auth/session"
 import { loadSessionUser } from "../auth/session"
+import { listAccounts, updateAccountIdentity } from "../db/accounts"
 import {
   approveLoginRequest,
   deleteLoginRequest,
@@ -77,6 +78,12 @@ cliRoutes.patch("/providers/:id", async (c) => {
   const nameErr = validateName(name)
   if (nameErr) return c.json({ error: nameErr }, 400)
   await renameCliProvider(c.env.DB, user.id, row.id, name)
+  // The internal pool-state row's label is what a group pin resolves its
+  // account_label from — keep it in step or the Groups page shows the
+  // creation-time name forever.
+  for (const account of await listAccounts(c.env.DB, user.id, row.slug)) {
+    await updateAccountIdentity(c.env.DB, account.id, { label: name })
+  }
   return c.json({ ok: true, name })
 })
 

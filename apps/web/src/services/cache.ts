@@ -60,9 +60,11 @@ export const CACHE_TTL_MS = 120_000
  * gone) and the shared catalog dropped its `group` section — a v9 entry has
  * neither shape and would render empty rows on the Groups page. v11: usage
  * summaries grew calendar-aligned Day/Week/Month support with rangeKey
- * caching (`day:YYYY-MM-DD`, etc.).
+ * caching (`day:YYYY-MM-DD`, etc.). v12: CLI providers grew `account_id`
+ * (the Groups picker's pin handle) — a v11 entry has none, so the picker
+ * would render an empty rail until the TTL expired.
  */
-const CACHE_SCHEMA_VERSION = 11
+const CACHE_SCHEMA_VERSION = 12
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

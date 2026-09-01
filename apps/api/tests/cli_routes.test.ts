@@ -155,6 +155,16 @@ describe("providers", () => {
     })
   })
 
+  it("rename keeps the internal account label (the group pin's display name) in step", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    seedProvider(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env)
+    await cliRoutes.request("/providers/cliprov_1", req("PATCH", cookie, { name: "Studio box" }), env)
+    expect(db.rows("upstream_accounts")[0]!.label).toBe("Studio box")
+  })
+
   it("renames the display name only", async () => {
     const db = new FakeD1()
     seedUser(db)
