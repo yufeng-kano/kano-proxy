@@ -548,6 +548,37 @@ describe("GET /api/usage/summary", () => {
     expect(json.models.map((m) => m.provider).sort()).toEqual(["claude-code", "my-endpoint"])
   })
 
+  it("keeps live CLI-provider rows in the summary", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    db.seed("cli_providers", [
+      {
+        id: "cliprov_1",
+        user_id: "user_1",
+        device_id: null,
+        slug: "my-mac",
+        name: "My Mac",
+        format: "openai",
+        models_json: null,
+        models_updated_at: null,
+        model_filter_json: null,
+        sort_order: 0,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    ])
+    seedLog(db, { user_id: "user_1", provider: "my-mac", model: "my-mac/llama3", prompt_tokens: 7, completion_tokens: 3 })
+    // A deleted slug's rows still drop out — only live providers count.
+    seedLog(db, { user_id: "user_1", provider: "ghost", model: "ghost/x", prompt_tokens: 99, completion_tokens: 99 })
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+
+    const res = await usageRoutes.request("/summary?days=30", req(cookie), env)
+    const json = (await res.json()) as SummaryJson
+    expect(json.totals.requests).toBe(1)
+    expect(json.totals.prompt_tokens).toBe(7)
+  })
+
   it("computes cost totals from stored per-row costs", async () => {
     const db = new FakeD1()
     seedUser(db)

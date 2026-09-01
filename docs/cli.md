@@ -43,7 +43,7 @@ Three new tables (`0015_cli_providers.sql`; full column notes in [database.md](.
 
 - **Slug rules:** identical to custom providers (lowercase 2–32, `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`, same reserved list), **immutable**, and unique per user **across both** `custom_providers` and `cli_providers` — both create paths check the other table, because both kinds resolve from the same `<slug>/<model>` position.
 - **Format immutable** after creation, same as custom (delete-and-recreate).
-- **Pool internals:** each CLI provider still gets one `upstream_accounts` row (`provider = slug`, empty credential). This is an implementation detail, not a user-facing "account": it is where the existing bench/unpause/routing-facts machinery keeps its state, so `facts.ts` / `feedback.ts` / group targets need no parallel bookkeeping. The row is created and deleted with the provider and never shown as an account in the UI.
+- **Pool internals:** each CLI provider still gets one `upstream_accounts` row (`provider = slug`, empty credential). This is an implementation detail, not a user-facing "account": it is where the existing bench/unpause/routing-facts machinery keeps its state, so `facts.ts` / `feedback.ts` / group targets need no parallel bookkeeping. The row is created and deleted with the provider and never shown as an account on the CLI page; its one UI appearance is as the Groups picker's pin handle, exactly like a custom endpoint's key row ([admin-ui.md](./admin-ui.md) § Groups page).
 - **Caps:** CLI providers count into the same 20-per-user provider budget as custom providers (shared cap across both tables, and the cross-table slug guard rides inside each INSERT so racing creates cannot both land); ≤ 20 **active** (non-revoked) devices per user — revoked rows stay listed as history and never spend the quota.
 - **The target URL is not stored server-side.** Where the local server lives (`http://localhost:11434/v1`) and its optional local API key are CLI state on the device — the server has no business knowing them and could not use them anyway.
 
@@ -89,7 +89,7 @@ Control frames are JSON text; body bytes are binary frames `[u32 request id][u8 
 **Bounds (all enforced in the DO, and the byte/path bounds again in the CLI — both ends distrust the other, same doctrine as the codex relay's allowlist):**
 
 - Path allowlist by provider format — `openai`: `/chat/completions`, `/models`, `/audio/transcriptions`; `anthropic`: `/v1/messages`, `/v1/messages/count_tokens`, `/v1/models`. Anything else: protocol fault, request refused. The CLI additionally only ever joins these suffixes onto its one configured target base — it is structurally not a general proxy.
-- Binary chunk ≤ 1 MiB per frame (platform limit is 32 MiB; small frames keep memory flat and interleave fairly across multiplexed requests).
+- Binary chunk ≤ 1 MiB per frame, enforced on **receive** too — an inbound frame past the bound is a protocol fault on that request, refused before anything is enqueued (the platform frame limit is 32 MiB; small frames keep memory flat and interleave fairly across multiplexed requests).
 - Request body ≤ 32 MiB per request (`too_large` fault): `ws.send` exposes no drain signal, so a body arriving faster than the socket empties would queue unboundedly in DO memory — the hard cap is the honest request-side bound, the mirror of the response-side buffer below, until credit-based flow control (future work) covers both directions.
 - In-flight concurrency ≤ 4 per provider; excess is refused with fault `busy` so group failover can take the next target instead of queueing.
 - Per-request DO-side response buffer ≤ 8 MiB: if the end client reads slower than the CLI sends and the gap exceeds the cap, the DO cancels the request (`too_large` fault). This is an honest bound in lieu of credit-based flow control — SSE chunks are small so real streams never hit it; a credit scheme is future work if large non-stream bodies ever matter.
@@ -99,10 +99,11 @@ Control frames are JSON text; body bytes are binary frames `[u32 request id][u8 
 
 There is no `models_mode` on a CLI provider. The CLI owns the truth:
 
-- On connect (right after `hello`) the CLI fetches `GET <target>/models` locally and pushes the list as a `models` frame; while connected it re-checks every 5 minutes and pushes only on change. The DO persists the report to `cli_providers.models_json` + `models_updated_at` (D1 write from the DO) — pull a new model in Ollama and it appears on the proxy within one cycle, no re-registration.
+- On connect (right after `hello`) the CLI fetches `GET <target>/models` locally and pushes the list as a `models` frame; while connected it re-checks every 5 minutes and pushes only on change. The DO persists the report to `cli_providers.models_json` + `models_updated_at` (D1 write from the DO) — pull a new model in Ollama and it appears on the proxy within one cycle, no re-registration. A failed persistence closes the socket retryably (the CLI already marked the list as sent): the reconnect re-reports from a clean slate, so a transient D1 error cannot leave the catalog stale until the next local change.
 - Report bounds mirror the custom manual-list rules: ≤ 100 entries, each trimmed to 1–128 chars, no whitespace (`/` allowed).
 - `model_filter_json`, when set (chosen in `kano-proxy add`'s picker), is an expose-**whitelist applied at read time** over the reported list — the report itself is always stored whole, so clearing the filter never loses data. Default is no filter: expose everything, follow the local server.
 - Catalog reads (`catalog/models.ts`) append one section per CLI provider straight from the stored report — no fetch, no KV cache, no fabrication. An offline agent keeps showing its last real report with its timestamp; an agent that has never connected shows an empty section.
+- CLI slugs count as **live providers** everywhere custom slugs do: the usage summary's live-provider scoping, the Logs filter, and the Groups picker tabs.
 
 ## Failover semantics — the tri-state guard, again
 
@@ -128,7 +129,7 @@ Interactive **ratatui** screens are the default for `init` and `add`; every comm
 
 **`kano-proxy init`** — sign this device in (once per machine).
 
-- TUI: prompts base URL + device name → calls `login/start` → opens the browser (URL also printed, for SSH) → prompts for the code shown on the authorize page → completes login, persists device credentials.
+- TUI: prompts base URL + device name → calls `login/start` → opens the browser (URL also printed, for SSH) → prompts for the code shown on the authorize page → completes login, persists device credentials. The base URL must be `https://` except for loopback hosts — cleartext to a routable origin would hand the whole rotating token family to an on-path observer.
 - `--no-tui`, two phases sharing the pending request via the state file:
   ```console
   $ kano-proxy init --no-tui --base-url https://proxy.example.com --device-name box1
@@ -144,6 +145,8 @@ Interactive **ratatui** screens are the default for `init` and `add`; every comm
 - TUI screen: slug (default: sanitized hostname, uniquified), API type `openai`/`anthropic`, target base URL (e.g. `http://localhost:11434/v1` — include the `/v1`; the CLI appends only allowlisted suffixes and never guesses a prefix), optional local API key. It then probes `GET <target>/models`: on success, a searchable model list opens whose **first row is "All models (follow local server)"** — the default, which stores **no filter**, so models added locally later appear automatically; selecting a subset stores an expose-whitelist instead. On probe failure it asks for model ids by hand (stored as the initial report; the agent's first connect overwrites it with truth) — a target that is not running yet must not block registration.
 - `--no-tui`: `--slug <s> --format openai|anthropic --target <url> [--target-key <k>] [--expose m1,m2,…]` (`--expose` omitted = no filter; models probed on first `start`). Prefer passing the local key as the `KANO_PROXY_TARGET_KEY` environment variable — argv leaks into shell history and the process list; the flag stays for controlled environments. The interactive screen collects it masked.
 - Server call: `POST /agent/v1/providers` (Bearer access token) → row created, appended to local state. Multiple providers per device is the normal case.
+
+**`kano-proxy attach <slug> --target <url> [--target-key <k>]`** — serve an **existing** provider from this device: records where the local server lives here for a row another machine registered (the server already authorizes any of the user's devices; the last `start` to connect wins the socket). Flags-only on purpose — it is the replacement-device path, usually scripted.
 
 **`kano-proxy remove <slug>`** — `DELETE /agent/v1/providers/:id` (closes any live socket) + removes it from local state. `--local-only` skips the server call (e.g. already deleted in the web UI).
 

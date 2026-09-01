@@ -23,6 +23,7 @@ import {
   MAX_LOGIN_CODE_ATTEMPTS,
   countCliDevices,
   countCliProviders,
+  deleteCliProvider,
   findCliDeviceByPrevRefreshHash,
   findCliDeviceByRefreshHash,
   getCliDevice,
@@ -59,6 +60,11 @@ import { agentTunnelStub, listCliProviderItems, removeCliProvider } from "./cli_
 export const agentRoutes = new Hono<HonoEnv>()
 
 agentRoutes.post("/login/start", async (c) => {
+  // Fail closed at the *first* request when device auth is unprovisioned —
+  // otherwise the user walks the whole browser approval before
+  // /login/complete can only 500, and the disabled endpoint still
+  // accumulates request rows.
+  if (!c.env.CLI_TOKEN_SECRET) return c.json({ error: "CLI_TOKEN_SECRET not configured" }, 500)
   let body: Record<string, unknown>
   try {
     body = await c.req.json()
@@ -259,18 +265,40 @@ agentRoutes.post("/providers", async (c) => {
     modelsJson,
     modelFilterJson,
   })
-  // Lost an insert race against a concurrent custom create for this slug.
-  if (!row) return c.json({ error: `slug "${slug}" is already in use by a custom provider` }, 409)
+  if (!row) {
+    // The atomic guard refused — say which condition actually failed rather
+    // than blaming a free slug for a cap that filled in the race window.
+    if (await getCustomProviderBySlug(c.env.DB, userId, slug)) {
+      return c.json({ error: `slug "${slug}" is already in use by a custom provider` }, 409)
+    }
+    return c.json({ error: `maximum of ${MAX_CUSTOM_PROVIDERS_PER_USER} providers reached (custom + CLI)` }, 400)
+  }
   // The internal pool-state row (docs/cli.md § Data model): a placeholder
   // credential that decrypts fine and authorizes nothing — the CLI injects
-  // the local server's real key on its side of the tunnel.
-  const encrypted = await encryptJson(c.env.TOKEN_ENCRYPTION_KEY, { access_token: "" })
-  await insertAccount(c.env.DB, {
-    userId,
-    provider: slug,
-    encryptedPayload: encrypted,
-    label: name,
-  })
+  // the local server's real key on its side of the tunnel. D1 has no
+  // cross-statement transaction here, so a failed account write compensates
+  // by deleting the provider row — otherwise a slug-reserving orphan answers
+  // no_upstream_account until manually deleted.
+  try {
+    const encrypted = await encryptJson(c.env.TOKEN_ENCRYPTION_KEY, { access_token: "" })
+    await insertAccount(c.env.DB, {
+      userId,
+      provider: slug,
+      encryptedPayload: encrypted,
+      label: name,
+    })
+  } catch (error) {
+    try {
+      await deleteCliProvider(c.env.DB, userId, row.id)
+    } catch {
+      /* best-effort — the web UI's delete remains the fallback */
+    }
+    console.error("[agent] provider account insert failed", {
+      providerId: row.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return c.json({ error: "could not create the provider — try again" }, 500)
+  }
 
   return c.json(
     {

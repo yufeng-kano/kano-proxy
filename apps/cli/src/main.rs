@@ -68,6 +68,17 @@ enum Command {
         #[arg(long)]
         expose: Option<String>,
     },
+    /// Serve an existing provider from this device (registered elsewhere)
+    Attach {
+        /// The provider's slug, as shown by `kano-proxy list`
+        slug: String,
+        /// Local target base URL on this machine (include /v1 for openai format)
+        #[arg(long)]
+        target: Option<String>,
+        /// The local server's own API key, if it needs one (prefer the env var)
+        #[arg(long, env = "KANO_PROXY_TARGET_KEY", hide_env_values = true)]
+        target_key: Option<String>,
+    },
     /// Unregister a provider (server + local state)
     Remove {
         slug: String,
@@ -108,6 +119,9 @@ async fn main() {
                 commands::AddArgs { no_tui: cli.no_tui, slug, format, target, target_key, expose },
             )
             .await
+        }
+        Command::Attach { slug, target, target_key } => {
+            commands::cmd_attach(&file, &slug, target, target_key).await
         }
         Command::Remove { slug, local_only } => commands::cmd_remove(&file, &slug, local_only).await,
         Command::List => commands::cmd_list(&file).await,

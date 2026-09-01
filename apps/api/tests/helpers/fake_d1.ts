@@ -247,16 +247,24 @@ function execute(
   // WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE …)` — the shared slug namespace
   // guard between custom_providers and cli_providers.
   m = sql.match(
-    /^INSERT INTO (\w+)\s*\(([^)]+)\)\s*SELECT\s+([?,\s]+)\s*WHERE NOT EXISTS \(SELECT 1 FROM (\w+) WHERE (.+)\)$/i,
+    /^INSERT INTO (\w+)\s*\(([^)]+)\)\s*SELECT\s+([?,\s]+)\s*WHERE NOT EXISTS \(SELECT 1 FROM (\w+) WHERE (.+?)\)(?: AND \(\(SELECT COUNT\(\*\) FROM (\w+) WHERE user_id = \?\) \+ \(SELECT COUNT\(\*\) FROM (\w+) WHERE user_id = \?\)\) < (\d+))?$/i,
   )
   if (m) {
     const cols = m[2]!.split(",").map((s) => s.trim())
     const values = m[3]!.split(",").map((s) => s.trim())
     if (values.some((v) => v !== "?")) throw new Error("FakeD1: conditional INSERT expects only ? values")
     const insertParams = params.slice(0, values.length)
-    const guardParams = params.slice(values.length)
+    const notExistsParamCount = (m[5]!.match(/\?/g) || []).length
+    const guardParams = params.slice(values.length, values.length + notExistsParamCount)
     const conflicting = filterRows(db.rows(m[4]!), m[5], guardParams)
     if (conflicting.length > 0) return { rows: [], changes: 0 }
+    // Optional shared-cap predicate: sum of two per-user COUNT(*) subqueries.
+    if (m[6] && m[7] && m[8]) {
+      const capParams = params.slice(values.length + notExistsParamCount)
+      const countA = db.rows(m[6]!).filter((r) => r.user_id === capParams[0]).length
+      const countB = db.rows(m[7]!).filter((r) => r.user_id === capParams[1]).length
+      if (countA + countB >= Number(m[8])) return { rows: [], changes: 0 }
+    }
     const row: Row = {}
     cols.forEach((c, i) => (row[c] = insertParams[i]))
     db.rows(m[1]!).push(row)

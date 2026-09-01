@@ -199,6 +199,17 @@ describe("TunnelMux request lifecycle", () => {
     await expect(res.text()).rejects.toThrow()
   })
 
+  it("refuses an inbound binary frame past the 1 MiB bound", async () => {
+    const rec = recordingSocket()
+    const mux = new TunnelMux(rec.socket)
+    const promise = mux.openRequest({ method: "POST", path: "/chat/completions", headers: {}, body: null })
+    await flush()
+    mux.handleMessage(binary(1, BODY_KIND_RESPONSE, new Uint8Array(1024 * 1024 + 1)))
+    const res = await promise
+    expect(res.headers.get("x-agent-fault")).toBe("protocol")
+    expect(mux.inflightCount()).toBe(0)
+  })
+
   it("cancels a response nobody awaits (post-eviction id)", async () => {
     const rec = recordingSocket()
     const mux = new TunnelMux(rec.socket)

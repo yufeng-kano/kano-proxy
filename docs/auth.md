@@ -176,7 +176,7 @@ The CLI-provider subsystem ([cli.md](./cli.md)) has two auth surfaces:
 |--------|------|-------|
 | GET | `/api/cli/devices` | The user's devices: `{id, name, last_seen_at, created_at, revoked_at}` |
 | POST | `/api/cli/devices/:id/revoke` | Sets `revoked_at` (idempotent). Next refresh fails; live sockets die at access-token expiry ([cli.md](./cli.md)) |
-| GET | `/api/cli/providers` | The user's CLI providers + live connection state (AgentTunnel DO read-through): `{id, slug, name, format, connected, models, model_filter, models_updated_at, device_name, …}` |
+| GET | `/api/cli/providers` | The user's CLI providers + live connection state (AgentTunnel DO read-through): `{id, slug, name, format, connected, account_id, models, model_filter, models_updated_at, device_name, …}` — `account_id` is the internal pool-state row the Groups picker pins to ([admin-ui.md](./admin-ui.md) § Groups page) |
 | PATCH | `/api/cli/providers/:id` | Rename display name — body `{name}` (1–64 chars). Slug/format immutable |
 | DELETE | `/api/cli/providers/:id` | Delete the provider + its internal account row, force-close any live socket |
 | GET | `/api/cli/login-requests/:id` | Pending login for the authorize view: `{device_name, expires_at, approved}`. 404 when unknown/expired |

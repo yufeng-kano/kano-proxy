@@ -206,8 +206,13 @@ customProviderRoutes.post("/", async (c) => {
     modelsMode,
     manualModelsJson: manualRes.models.length ? JSON.stringify(manualRes.models) : null,
   })
-  // Lost an insert race against a concurrent CLI create for this slug.
-  if (!row) return c.json({ error: `slug "${slug}" is already in use by a CLI provider` }, 409)
+  if (!row) {
+    // The atomic guard refused — distinguish a raced CLI slug from a raced cap.
+    if (await getCliProviderBySlug(c.env.DB, user.id, slug)) {
+      return c.json({ error: `slug "${slug}" is already in use by a CLI provider` }, 409)
+    }
+    return c.json({ error: `maximum of ${MAX_CUSTOM_PROVIDERS_PER_USER} providers reached (custom + CLI)` }, 400)
+  }
 
   const credential: StoredCredential = { access_token: apiKey }
   const encrypted = await encryptJson(c.env.TOKEN_ENCRYPTION_KEY, credential)

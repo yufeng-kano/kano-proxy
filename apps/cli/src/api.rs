@@ -240,14 +240,30 @@ pub async fn probe_local_models(format: &str, target: &str, target_key: Option<&
     Ok(list.data.into_iter().filter_map(|e| e.id).filter(|id| !id.is_empty()).collect())
 }
 
-/// Base URL sanity for init/add input: absolute http(s), no trailing slash kept.
+/// True for hosts where cleartext HTTP cannot cross a network: `localhost`
+/// or an actual loopback IP **literal** — a DNS name that merely starts with
+/// "127." (e.g. `127.proxy.example.com`) is routable and must not pass.
+fn is_loopback_host(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare == "localhost" {
+        return true;
+    }
+    bare.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
+}
+
+/// Base URL sanity for init input. Cleartext HTTP is allowed only for
+/// loopback hosts: against a remote origin it would carry the pairing
+/// response, every rotating refresh token, and the WebSocket bearer token
+/// past an on-path observer.
 pub fn normalize_base_url(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
-        bail!("base URL must start with http:// or https://");
-    }
-    if trimmed.len() <= "https://".len() {
-        bail!("base URL is missing a host");
+    let url = reqwest::Url::parse(trimmed).map_err(|_| anyhow!("base URL must be a full http(s) origin"))?;
+    let host = url.host_str().filter(|h| !h.is_empty()).context("base URL is missing a host")?;
+    match url.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(host) => {}
+        "http" => bail!("http:// is only allowed for localhost — use https:// for {host}"),
+        other => bail!("unsupported scheme {other}:// — use https://"),
     }
     Ok(trimmed.to_string())
 }
@@ -268,7 +284,14 @@ mod tests {
     fn normalizes_base_urls() {
         assert_eq!(normalize_base_url(" https://proxy.example.com/ ").unwrap(), "https://proxy.example.com");
         assert_eq!(normalize_base_url("http://127.0.0.1:8787").unwrap(), "http://127.0.0.1:8787");
+        assert_eq!(normalize_base_url("http://localhost:8787").unwrap(), "http://localhost:8787");
         assert!(normalize_base_url("proxy.example.com").is_err());
         assert!(normalize_base_url("https://").is_err());
+        // Cleartext to a routable host would expose the whole token family —
+        // including a DNS name that merely *looks* like a loopback literal.
+        assert!(normalize_base_url("http://proxy.example.com").is_err());
+        assert!(normalize_base_url("http://127.proxy.example.com").is_err());
+        assert!(normalize_base_url("ftp://proxy.example.com").is_err());
+        assert_eq!(normalize_base_url("http://[::1]:8787").unwrap(), "http://[::1]:8787");
     }
 }

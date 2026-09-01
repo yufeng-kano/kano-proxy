@@ -185,14 +185,15 @@ fn parse_format(raw: &str) -> Result<String> {
 
 fn normalize_target(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    let rest = trimmed
-        .strip_prefix("http://")
-        .or_else(|| trimmed.strip_prefix("https://"))
-        .context("target must start with http:// or https:// (e.g. http://localhost:11434/v1)")?;
-    // A scheme with no host ("http://", "http:///v1") would register a
-    // provider whose every tunneled request fails at send time.
-    let host = rest.split('/').next().unwrap_or("");
-    if host.is_empty() {
+    // A real URL parse, not string inspection: shapes like "http://:11434/v1"
+    // or "http://user@/v1" have a non-empty authority substring but no host,
+    // and would register a provider whose every tunneled request fails.
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|_| anyhow::anyhow!("target must be a full http(s) URL (e.g. http://localhost:11434/v1)"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("target must start with http:// or https:// (e.g. http://localhost:11434/v1)");
+    }
+    if url.host_str().map_or(true, str::is_empty) {
         bail!("target is missing a host (e.g. http://localhost:11434/v1)");
     }
     Ok(trimmed.to_string())
@@ -272,6 +273,47 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
         })
     })?;
     eprintln!("✓ registered \"{}\" — run `kano-proxy start` to bring it online", created.slug);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// attach
+
+/// Serve an already-registered provider from this device: the server row
+/// exists (created by `add` on another machine), this just records where the
+/// local server lives here. Any of the user's devices may hold the socket —
+/// the last `start` to connect wins the provider (docs/cli.md).
+pub async fn cmd_attach(
+    file: &StateFile,
+    slug: &str,
+    target: Option<String>,
+    target_key: Option<String>,
+) -> Result<()> {
+    let state = file.load()?;
+    api::require_signed_in(&state)?;
+    if state.providers.iter().any(|p| p.slug == slug) {
+        bail!("\"{slug}\" is already set up on this device — edit {} or remove it first", file.path.display());
+    }
+    let target = normalize_target(&target.context("--target is required (where the local server lives here)")?)?;
+
+    let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
+    let access = tokens.get(false).await?;
+    let remote = api::list_providers(&state.base_url, &access).await?;
+    let item = remote
+        .iter()
+        .find(|r| r.slug == slug)
+        .with_context(|| format!("no provider \"{slug}\" on the server — register a new one with `kano-proxy add`"))?;
+
+    let provider = ProviderState {
+        id: item.id.clone(),
+        slug: item.slug.clone(),
+        format: item.format.clone(),
+        target,
+        target_key,
+        expose: Vec::new(),
+    };
+    mutate_state(file, |state| state.providers.push(provider))?;
+    eprintln!("✓ attached \"{slug}\" — run `kano-proxy start` to serve it from this device");
     Ok(())
 }
 
@@ -458,6 +500,11 @@ mod tests {
         assert_eq!(normalize_target("http://localhost:11434/v1/").unwrap(), "http://localhost:11434/v1");
         assert!(normalize_target("localhost:11434").is_err());
         assert!(normalize_target("http://").is_err());
-        assert!(normalize_target("http:///v1").is_err());
+        // Note http:///v1 is NOT an error: the WHATWG parser skips extra
+        // slashes before the authority, so it means host "v1" — same as a
+        // browser. Only genuinely hostless shapes are refused.
+        assert!(normalize_target("http://:11434/v1").is_err());
+        assert!(normalize_target("http://user@/v1").is_err());
+        assert!(normalize_target("http://?x").is_err());
     }
 }

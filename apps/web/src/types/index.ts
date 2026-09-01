@@ -172,6 +172,8 @@ export type CliProvider = {
   format: CustomProviderFormat
   /** Live tunnel state, read through the AgentTunnel DO at request time. */
   connected: boolean
+  /** The internal pool-state row — what a model-group target pins to (docs/admin-ui.md § Groups page). */
+  account_id: string | null
   /** The exposed model ids — the agent report with the whitelist applied. */
   models: string[]
   models_reported: number

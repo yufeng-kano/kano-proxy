@@ -34,6 +34,7 @@ import EmptyState from "@/components/ui/EmptyState.vue"
 import PageHeader from "@/components/ui/PageHeader.vue"
 import Segmented from "@/components/ui/Segmented.vue"
 import { useAuth } from "@/composables/useAuth"
+import { useCli } from "@/composables/useCli"
 import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useLogs } from "@/composables/useLogs"
 import { useI18n } from "@/i18n"
@@ -53,6 +54,7 @@ const {
   setErrorsOnly,
 } = useLogs()
 const customProviders = useCustomProviders()
+const cli = useCli()
 
 /**
  * The "no provider filter" option value. Underscored so it can never collide
@@ -93,6 +95,7 @@ const providerOptions = computed(() => {
     { value: ALL, label: t("logs.filter.allProviders") },
     ...PROVIDERS.map((p) => ({ value: p.id as string, label: t(NAME_KEY[p.id]) })),
     ...(customProviders.state.data ?? []).map((cp) => ({ value: cp.slug, label: cp.name })),
+    ...(cli.state.providers ?? []).map((cp) => ({ value: cp.slug, label: cp.name })),
   ]
   const selected = providerFilter.value
   if (selected && !options.some((o) => o.value === selected)) {
@@ -266,9 +269,11 @@ async function load() {
   const uid = user.value?.id ?? null
   setLogsUserId(uid)
   customProviders.setUserId(uid)
+  cli.setUserId(uid)
   // The filter list is a side dish: the rows must not wait on it, and a
   // failure there leaves the page working with the builtins alone.
   void customProviders.load()
+  void cli.load()
   await loadLogs()
 }
 

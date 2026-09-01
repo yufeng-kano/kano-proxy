@@ -209,6 +209,13 @@ export class TunnelMux {
     if (typeof data !== "string") {
       const frame = decodeBinaryFrame(data)
       if (!frame || frame.kind !== BODY_KIND_RESPONSE) return
+      // The 1 MiB per-frame bound is a protocol rule, not a suggestion: a
+      // platform-limit frame from a malformed agent must not reach the queue
+      // (the 8 MiB backpressure check only runs after an enqueue).
+      if (frame.chunk.byteLength > MAX_CHUNK_BYTES) {
+        this.failPending(frame.id, "protocol", true)
+        return
+      }
       this.handleResponseChunk(frame.id, frame.chunk)
       return
     }

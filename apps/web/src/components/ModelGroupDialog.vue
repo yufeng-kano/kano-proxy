@@ -24,6 +24,7 @@
 import { computed, onMounted, ref, watch } from "vue"
 import { useAccounts } from "@/composables/useAccounts"
 import { useAuth } from "@/composables/useAuth"
+import { useCli } from "@/composables/useCli"
 import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
@@ -75,6 +76,7 @@ const { t } = useI18n()
 const { user } = useAuth()
 const accounts = useAccounts()
 const customProviders = useCustomProviders()
+const cli = useCli()
 
 /**
  * Provider display copy lives in the catalog and `PROVIDERS` carries only wire
@@ -206,10 +208,11 @@ const endpointPreview = computed(() => {
 
 /* --- Providers, accounts, models (picker) --------------------------------- */
 
-/** The tab strip: the builtins in their declared order, then each custom endpoint. */
+/** The tab strip: builtins in declared order, then custom endpoints, then CLI providers — every prefix a target may carry gets a tab (docs/cli.md). */
 const tabs = computed<SectionItem[]>(() => [
   ...PROVIDERS.map((p) => ({ id: p.id, label: t(NAME_KEY[p.id]) })),
   ...(customProviders.state.data ?? []).map((cp) => ({ id: cp.slug, label: cp.name })),
+  ...(cli.state.providers ?? []).map((cp) => ({ id: cp.slug, label: cp.name })),
 ])
 
 /**
@@ -250,8 +253,16 @@ function railFor(providerKey: string): RailAccount[] {
     }))
   }
   const custom = (customProviders.state.data ?? []).find((cp) => cp.slug === providerKey)
-  if (!custom?.account_id) return []
-  return [{ id: custom.account_id, label: custom.name, hint: custom.key_mask }]
+  if (custom?.account_id) {
+    return [{ id: custom.account_id, label: custom.name, hint: custom.key_mask }]
+  }
+  // A CLI provider's rail is its one internal pool-state row, named after the
+  // provider — the same single-entry shape as a custom endpoint's key.
+  const cliProvider = (cli.state.providers ?? []).find((p) => p.slug === providerKey)
+  if (cliProvider?.account_id) {
+    return [{ id: cliProvider.account_id, label: cliProvider.name, hint: null }]
+  }
+  return []
 }
 
 const rail = computed(() => railFor(activeTab.value))
@@ -262,8 +273,13 @@ const rail = computed(() => railFor(activeTab.value))
  */
 const railPending = computed(() => {
   const builtin = asBuiltin(activeTab.value)
-  const state = builtin ? accounts.byProvider[builtin] : customProviders.state
-  return !state.data && !state.error
+  if (builtin) {
+    const state = accounts.byProvider[builtin]
+    return !state.data && !state.error
+  }
+  const custom = customProviders.state
+  const cliState = cli.state
+  return !custom.data && !custom.error && !cliState.providers && !cliState.error
 })
 
 const selectedAccount = computed(
@@ -310,6 +326,7 @@ function ensureRail(providerKey: string) {
     if (requestedCustom) return
     requestedCustom = true
     void customProviders.load()
+    void cli.load()
     return
   }
   if (requestedProviders.has(builtin)) return
@@ -321,9 +338,11 @@ onMounted(() => {
   const uid = user.value?.id ?? null
   accounts.setUserId(uid)
   customProviders.setUserId(uid)
-  // The tab strip needs the endpoint list before it can offer their tabs.
+  cli.setUserId(uid)
+  // The tab strip needs both user-defined lists before it can offer their tabs.
   requestedCustom = true
   void customProviders.load()
+  void cli.load()
   ensureRail(activeTab.value)
   // An existing target whose pin no longer resolves is re-picked in place,
   // which needs that provider's accounts even if its tab is never opened.
