@@ -7,7 +7,7 @@
  * `kano-proxy init` path instead. Row actions sit behind each card's edit
  * gate, same convention as the Providers page.
  */
-import { computed, onMounted, ref, watch } from "vue"
+import { computed, ref, watch } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
