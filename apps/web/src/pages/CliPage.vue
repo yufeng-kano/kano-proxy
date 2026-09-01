@@ -76,6 +76,8 @@ const providerColumns = computed<Column<CliProvider>[]>(() => [
     : []),
 ])
 
+// The immediate watch covers mount too — a separate onMounted load would
+// double-fetch the first paint.
 watch(
   () => user.value?.id ?? null,
   (id) => {
@@ -84,11 +86,6 @@ watch(
   },
   { immediate: true },
 )
-
-onMounted(() => {
-  setUserId(user.value?.id ?? null)
-  void load()
-})
 
 async function onRevoke(device: CliDevice) {
   if (!confirm(t("cli.devices.revokeConfirm", { name: device.name }))) return
