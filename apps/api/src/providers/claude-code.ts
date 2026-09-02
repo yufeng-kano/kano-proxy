@@ -20,7 +20,7 @@ const DEFAULT_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
  * these are only the fallback for surfaces with no client headers to relay.
  */
 export const CLAUDE_CLIENT_FINGERPRINT: Record<string, string> = {
-  "user-agent": "claude-cli/2.1.63 (external, cli)",
+  "user-agent": "claude-cli/2.1.257 (external, cli)",
   "x-stainless-package-version": "0.74.0",
   "x-stainless-runtime-version": "v24.3.0",
   "x-stainless-os": "MacOS",
