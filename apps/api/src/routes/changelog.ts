@@ -9,7 +9,7 @@ import {
   type ChangelogRelease,
 } from "../changelog/cache"
 import { sanitizeReleaseHtml } from "../changelog/sanitize"
-import { isUpdateAvailable } from "../changelog/version"
+import { isUpdateAvailable, parseSemver } from "../changelog/version"
 import type { UserRow } from "../db/users"
 import { version } from "../../../../package.json"
 
@@ -122,6 +122,11 @@ changelogRoutes.get("/", async (c) => {
         for (const r of json) {
           if (r.draft === true || r.prerelease === true) continue
           if (typeof r.tag_name !== "string" || !r.tag_name) continue
+          // Product releases only. The CLI's cli-vX.Y.Z releases share the
+          // repo (docs/deployment.md § CLI release) but say nothing about the
+          // Worker, and one of them becoming `latest` would flag a phantom
+          // update on every page.
+          if (!parseSemver(r.tag_name)) continue
           releases.push({
             tag: r.tag_name,
             name: typeof r.name === "string" ? r.name : "",

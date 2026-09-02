@@ -307,13 +307,13 @@ pnpm --filter web build
 
 ## CI / GitHub Actions (release deploy)
 
-Production updates run when a **GitHub Release is published** (workflow: `.github/workflows/release-deploy.yml`). Pushing to `main` alone does **not** deploy.
+Production updates run when a **GitHub Release is published** for a product tag `vX.Y.Z` (workflow: `.github/workflows/release-deploy.yml`). Pushing to `main` alone does **not** deploy. The CLI has its own tag prefix, `cli-vX.Y.Z`, its own workflow, and its own version line — see § CLI release below; a CLI release never deploys the Worker, and a product release never builds the CLI.
 
 ### Version tags
 
 | Policy | Rule |
 |--------|------|
-| Format | SemVer tag `vMAJOR.MINOR.PATCH` (e.g. `v1.2.0`) |
+| Format | SemVer tag `vMAJOR.MINOR.PATCH` (e.g. `v1.2.0`) — product (Worker + web) only; `cli-v…` is the CLI's, see § CLI release |
 | Canonical package version | Root `package.json` → `"version": "MAJOR.MINOR.PATCH"` (no leading `v`) |
 | **Default next release** | **Minor bump** → `x.(y+1).0` (patch resets to `0`) |
 | Major | Breaking changes only, when intentional |
@@ -325,7 +325,7 @@ Example: last release `v0.3.1` → default next tag `v0.4.0` and `"version": "0.
 
 A version bump is incomplete unless **all** of these land together:
 
-1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`), **and `apps/cli/Cargo.toml` `version` to the same value** (then refresh the `kano-proxy` entry in `apps/cli/Cargo.lock`). Release CI checks tag == `package.json` == `Cargo.toml` and fails every CLI build job when they differ; the Worker deploy still goes out, leaving a release with no CLI assets (v4.5.1 shipped that way).
+1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`). The deploy job checks tag == `package.json` before touching anything and fails the whole run when they differ — the bundled version is what the Worker reports as "running" ([changelog.md](./changelog.md)), so a mismatch is a lie on every signed-in page. `apps/cli/Cargo.toml` is **not** part of a product release (it was until v4.5.2 — that lockstep is why v4.5.1 shipped with no CLI assets and v4.5.2 exists only to realign; the CLI now has its own line).
 2. **Commit** that change with the release work (and any code/docs for the release).
 3. **Push** the commit to `origin` (`main` or the release branch).
 4. **Write the release notes** (see below) — they are a deliverable of the release, not a formality.
@@ -395,14 +395,33 @@ Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `T
 5. `wrangler deploy` (Worker)  
 6. `wrangler pages deploy` (project `kano-proxy`)
 
-### CLI release assets (same workflow, own jobs)
+### CLI release (`cli-vX.Y.Z`, workflow `cli-release.yml`)
 
-On Release publish the workflow also cross-compiles the `kano-proxy` CLI ([cli.md](./cli.md) § Distribution) — independent of the deploy job, and re-runnable on its own if it fails after the deploy succeeded:
+The `kano-proxy` CLI ([cli.md](./cli.md) § Distribution) ships to end users' machines and has nothing to do with which Worker build is live, so it carries **its own SemVer line** — reset to `1.0.0` when it was decoupled from the product's 4.x — and its own tag prefix. Wire compatibility is the protocol's `proto` number, never a version comparison, so the two lines drift freely.
 
-1. Build matrix: `aarch64-apple-darwin` + `x86_64-apple-darwin` (macOS runner), `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` (Linux runner, `cross`), `x86_64-pc-windows-msvc` (Windows runner).
-2. Package `kano-proxy-<version>-<target>.tar.gz` (`.zip` for Windows), emit one `SHA256SUMS` over all archives, attach everything to the Release.
-3. Bump the Homebrew formula (`yufeng-kano/homebrew-tap`) and Scoop manifest (`yufeng-kano/scoop-bucket`) with the new version + checksums, pushed with `TAP_PUSH_TOKEN` (skipped with a warning when the secret is absent).
+| Policy | Rule |
+|--------|------|
+| Tag | `cli-vMAJOR.MINOR.PATCH` (e.g. `cli-v1.2.0`) |
+| Canonical version | `apps/cli/Cargo.toml` `version` (refresh the `kano-proxy` entry in `Cargo.lock` with `cargo update -p kano-proxy --offline` or a build) |
+| Cadence | Only when the CLI changed. A Worker hotfix does not bump the CLI; a CLI fix does not deploy the Worker |
+| `gh release create … --latest=false` | **Required.** GitHub's `releases/latest` must keep pointing at the product release — the `/changelog` page and anyone reading `latest` expect a `v…` tag there. The CLI's own channels never read `latest` (below) |
 
-PR CI (`ci.yml`) compile-checks all five targets plus `cargo test`, so a release cannot be published with a CLI that does not build.
+Steps, mirroring the product flow: bump `Cargo.toml` (+ `Cargo.lock`), commit, push, then
+
+```sh
+gh release create cli-v1.0.1 --title cli-v1.0.1 --latest=false --notes '<what changed for CLI users>'
+```
+
+On publish, `cli-release.yml`:
+
+1. **`check`** — tag == `Cargo.toml` (fails the run before any build), then `cargo test`.
+2. **`build`** matrix, `needs: check`: `aarch64-apple-darwin` + `x86_64-apple-darwin` (macOS runner), `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` (Linux runner, `cross`), `x86_64-pc-windows-msvc` (Windows runner). Packages `kano-proxy-<version>-<target>.tar.gz` (`.zip` for Windows).
+3. **`publish`** — one `SHA256SUMS` over all archives, attached to the Release with the archives; then bumps the Homebrew formula (`yufeng-kano/homebrew-tap`) and Scoop manifest (`yufeng-kano/scoop-bucket`) to the new version + checksums with `TAP_PUSH_TOKEN` (skipped with a warning when the secret is absent; re-run the job after adding it).
+
+**The assets land minutes after the Release is published**, and a failed build leaves a `cli-v…` Release with no assets at all. The install channels are built to tolerate both: `kano-proxy update` and `scripts/install-cli.sh` list recent releases and take the **newest `cli-v` release that actually carries this platform's archive**, so during the build window (or after a failed one) they keep serving the previous release instead of erroring. Homebrew/Scoop only move when the bump step runs, which is after the assets exist.
+
+The release notes on a `cli-v` Release are for CLI users on GitHub; the `/changelog` page skips `cli-v` tags entirely ([changelog.md](./changelog.md)).
+
+PR CI (`ci.yml`) compile-checks all five targets plus `cargo test`, so a PR cannot merge a CLI that does not build.
 
 Manual re-deploy of a ref: Actions → **Release deploy** → Run workflow.

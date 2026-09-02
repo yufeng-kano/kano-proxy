@@ -32,6 +32,8 @@ This needs no CI variable and no wrangler var: the release process already requi
 
 Use the **named** import, not `import pkg from`. esbuild tree-shakes the named form to the single string; the default form inlines the entire `package.json` (scripts, devDependencies) into the Worker bundle.
 
+Only releases whose tag is a product version (`vMAJOR.MINOR.PATCH`) are listed or considered for `latest`. The CLI's `cli-v…` releases live in the same GitHub repo ([deployment.md](./deployment.md) § CLI release) and are skipped here: they say nothing about the Worker an operator is running, and letting one become `latest` would flag a phantom update on every page.
+
 `updateAvailable` is computed server-side by numeric SemVer comparison. When the local version is **ahead** of the newest published release — normal between a version bump and its release — the flag is `false`. Only strictly-behind reports an update.
 
 ## Configuration

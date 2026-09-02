@@ -1,6 +1,6 @@
-# PR verification. The five-target CLI compile check exists so a release can
-# never be published with a CLI that does not build — the release workflow
-# runs the same build steps for real (docs/deployment.md § CLI release assets).
+# PR verification. The five-target CLI compile check exists so a PR can never
+# merge a CLI that does not build — cli-release.yml runs the same build steps
+# for real on a cli-v* Release (docs/deployment.md § CLI release).
 
 name: CI
 

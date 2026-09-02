@@ -391,4 +391,21 @@ describe("GET /api/changelog", () => {
     expect(json.releases.map((r) => r.tag)).toEqual(["v1.10.0", "v1.9.0"])
     expect(json.latest).toBe("v1.10.0")
   })
+
+  it("skips cli-v releases so they never become latest", async () => {
+    const db = new FakeD1()
+    const { env, cookie } = await authed(db)
+    stubReleases(
+      release({ tag_name: "cli-v1.2.0", name: "cli-v1.2.0" }),
+      release({ tag_name: "v1.10.0" }),
+      release({ tag_name: "cli-v1.1.0", name: "cli-v1.1.0" }),
+      release({ tag_name: "v1.9.0" }),
+    )
+
+    const res = await changelogRoutes.request("/", req(cookie), env)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as ChangelogJson
+    expect(json.releases.map((r) => r.tag)).toEqual(["v1.10.0", "v1.9.0"])
+    expect(json.latest).toBe("v1.10.0")
+  })
 })

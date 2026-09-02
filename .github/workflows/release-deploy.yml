@@ -1,4 +1,6 @@
-# Deploy Worker + Pages to Cloudflare when a GitHub Release is published.
+# Deploy Worker + Pages to Cloudflare when a GitHub Release is published for
+# a product tag (vX.Y.Z). CLI releases use the cli-vX.Y.Z prefix and their own
+# workflow (cli-release.yml); this one skips them.
 # Versioning policy: see .rule (default SemVer minor bump → x.(y+1).0).
 #
 # Required repository secrets:
@@ -37,6 +39,9 @@ permissions:
 jobs:
   deploy:
     name: Verify and deploy production
+    # A cli-v* Release belongs to cli-release.yml; skip instead of failing the
+    # tag-shape check so the Actions list stays green for CLI releases.
+    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'cli-v')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -45,16 +50,22 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
 
-      - name: Check release tag shape (published releases only)
+      - name: Check release tag == root package.json (published releases only)
         if: github.event_name == 'release'
         env:
           TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          # Strict vMAJOR.MINOR.PATCH — the repo convention, and the CLI
-          # distribution renderer builds v-prefixed download URLs from it.
+          # Strict vMAJOR.MINOR.PATCH — the repo convention.
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Release tag must be SemVer like v1.2.0 (got: $TAG)"
+            exit 1
+          fi
+          # The Worker bundles this value as its running version
+          # (docs/changelog.md), so a mismatch ships a wrong version badge.
+          root_version=$(node -p "require('./package.json').version")
+          if [ "${TAG#v}" != "$root_version" ]; then
+            echo "release tag $TAG must match the root package.json version ($root_version)"
             exit 1
           fi
           echo "Deploying release tag: $TAG"
@@ -148,114 +159,3 @@ jobs:
         # Production.
         run: pnpm exec wrangler pages deploy ../web/dist --project-name=kano-proxy --branch=main --commit-dirty=true
 
-  # --- CLI release assets (docs/deployment.md § CLI release assets) ---------
-  # Independent of the deploy job: a failed asset build never blocks (or gets
-  # blocked by) the Worker/Pages deploy, and can be re-run on its own.
-
-  cli-build:
-    name: CLI build (${{ matrix.target }})
-    if: github.event_name == 'release'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-14, target: aarch64-apple-darwin }
-          - { os: macos-14, target: x86_64-apple-darwin }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
-    steps:
-      - uses: actions/checkout@v7
-      - name: Check version lockstep (tag == Cargo.toml)
-        shell: bash
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          version="${TAG#v}"
-          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/cli/Cargo.toml | head -1)
-          root_version=$(node -p "require('./package.json').version")
-          if [ "$version" != "$cargo_version" ] || [ "$version" != "$root_version" ]; then
-            echo "release tag $TAG must match both apps/cli/Cargo.toml ($cargo_version) and the root package.json ($root_version)"
-            exit 1
-          fi
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: apps/cli
-          key: ${{ matrix.target }}
-      - name: Add target
-        if: ${{ !matrix.cross }}
-        run: rustup target add ${{ matrix.target }}
-      - name: Install cross
-        if: ${{ matrix.cross }}
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-      - name: Build
-        working-directory: apps/cli
-        shell: bash
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
-          else
-            cargo build --release --target ${{ matrix.target }}
-          fi
-      - name: Package
-        shell: bash
-        env:
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          version="${TAG#v}"
-          target="${{ matrix.target }}"
-          mkdir -p dist
-          case "$target" in
-            *windows*)
-              cp "apps/cli/target/$target/release/kano-proxy.exe" dist/
-              (cd dist && 7z a "kano-proxy-$version-$target.zip" kano-proxy.exe > /dev/null && rm kano-proxy.exe)
-              ;;
-            *)
-              cp "apps/cli/target/$target/release/kano-proxy" dist/
-              (cd dist && tar -czf "kano-proxy-$version-$target.tar.gz" kano-proxy && rm kano-proxy)
-              ;;
-          esac
-          ls -l dist
-      - uses: actions/upload-artifact@v6
-        with:
-          name: cli-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-
-  cli-release:
-    name: Attach CLI assets + bump tap/scoop
-    if: github.event_name == 'release'
-    needs: cli-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v7
-        with:
-          pattern: cli-*
-          merge-multiple: true
-          path: dist
-      - name: SHA256SUMS + upload to the Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-          cd dist
-          sha256sum kano-proxy-* > SHA256SUMS
-          cat SHA256SUMS
-          gh release upload "$TAG" kano-proxy-* SHA256SUMS --clobber
-      - name: Bump Homebrew tap + Scoop bucket
-        env:
-          VERSION: ${{ github.event.release.tag_name }}
-          SUMS_PATH: dist/SHA256SUMS
-          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
-        run: python3 scripts/ci/bump-cli-distribution.py

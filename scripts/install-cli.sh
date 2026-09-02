@@ -3,9 +3,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
 #
-# Detects OS/arch, downloads the latest GitHub Release asset, verifies it
-# against SHA256SUMS, and installs to ~/.local/bin (override with --dir or
-# KANO_PROXY_INSTALL_DIR). No sudo, no package manager.
+# Detects OS/arch, downloads the newest cli-v* GitHub Release that carries this
+# platform's archive (never releases/latest — that is the product's vX.Y.Z
+# line, and a CLI release's assets land minutes after it is published),
+# verifies it against SHA256SUMS, and installs to ~/.local/bin (override with
+# --dir or KANO_PROXY_INSTALL_DIR). No sudo, no package manager.
 
 set -eu
 
@@ -48,11 +50,16 @@ case "$os" in
     ;;
 esac
 
-tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" |
-  sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
-[ -n "$tag" ] || { echo "could not resolve the latest release" >&2; exit 1; }
-version="${tag#v}"
-asset="kano-proxy-$version-$target.tar.gz"
+# GitHub lists releases newest first; the first download URL under a cli-v
+# tag that names our archive is the newest CLI release that actually has it.
+url="$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=30" |
+  grep -o "\"browser_download_url\": *\"[^\"]*/releases/download/cli-v[^/\"]*/kano-proxy-[^/\"]*-$target\.tar\.gz\"" |
+  head -1 | sed 's/.*"\(https[^"]*\)"$/\1/')"
+[ -n "$url" ] || { echo "no CLI release has an asset for $target" >&2; exit 1; }
+tag="${url#*/releases/download/}"
+tag="${tag%%/*}"
+version="${tag#cli-v}"
+asset="${url##*/}"
 base="https://github.com/$REPO/releases/download/$tag"
 
 tmp="$(mktemp -d)"

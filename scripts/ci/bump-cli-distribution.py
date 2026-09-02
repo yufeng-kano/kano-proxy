@@ -5,7 +5,7 @@
 Renders Formula/kano-proxy.rb (tap) and bucket/kano-proxy.json (scoop) from
 the release's SHA256SUMS and pushes each to its repo with TAP_PUSH_TOKEN.
 
-Env: VERSION (no leading v), SUMS_PATH, TAP_PUSH_TOKEN.
+Env: VERSION (the cli-vX.Y.Z tag or bare X.Y.Z), SUMS_PATH, TAP_PUSH_TOKEN.
 """
 
 from __future__ import annotations
@@ -45,8 +45,13 @@ def sum_for(sums: dict[str, str], version: str, target: str, ext: str) -> str:
     return sums[name]
 
 
+def release_base(version: str) -> str:
+    # CLI releases are tagged cli-vX.Y.Z (docs/deployment.md § CLI release).
+    return f"https://github.com/{REPO}/releases/download/cli-v{version}"
+
+
 def formula(version: str, sums: dict[str, str]) -> str:
-    base = f"https://github.com/{REPO}/releases/download/v{version}"
+    base = release_base(version)
 
     def block(target: str) -> tuple[str, str]:
         return (f"{base}/kano-proxy-{version}-{target}.tar.gz", sum_for(sums, version, target, "tar.gz"))
@@ -94,10 +99,13 @@ end
 
 
 def manifest(version: str, sums: dict[str, str]) -> str:
-    base = f"https://github.com/{REPO}/releases/download/v{version}"
+    base = release_base(version)
     name = f"kano-proxy-{version}-{TARGETS['win_x64']}.zip"
     import json
 
+    # No checkver/autoupdate: Scoop's github checkver follows releases/latest,
+    # which is the product's vX.Y.Z line, not the CLI's. This script is the
+    # only thing that moves the manifest.
     return (
         json.dumps(
             {
@@ -112,14 +120,6 @@ def manifest(version: str, sums: dict[str, str]) -> str:
                     }
                 },
                 "bin": "kano-proxy.exe",
-                "checkver": {"github": f"https://github.com/{REPO}"},
-                "autoupdate": {
-                    "architecture": {
-                        "64bit": {
-                            "url": f"{base.replace(version, '$version')}/kano-proxy-$version-{TARGETS['win_x64']}.zip"
-                        }
-                    }
-                },
             },
             indent=2,
         )
@@ -171,7 +171,8 @@ def push(repo: str, rel_path: str, content: str, version: str, token: str) -> No
 
 
 def main() -> None:
-    version = os.environ.get("VERSION", "").strip().lstrip("v")
+    version = os.environ.get("VERSION", "").strip()
+    version = version.removeprefix("cli-v").removeprefix("v")
     sums_path = os.environ.get("SUMS_PATH", "").strip()
     token = os.environ.get("TAP_PUSH_TOKEN", "").strip()
     if not version or not sums_path:

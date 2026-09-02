@@ -25,7 +25,7 @@ Canonical project rules (`.rule`; Cursor / AGENTS.md / CLAUDE.md symlink here). 
 - Environments: local + production only. No staging without explicit user approval and a docs update.
 - D1 schema changes only via Wrangler migrations under `apps/api/migrations/`, docs (`docs/database.md`) updated first; never edit production schema in the Dashboard.
 - Monorepo layout and module boundaries: `docs/project-structure.md`. Domains, DNS, Wrangler, release CI: `docs/deployment.md` (tracked docs keep placeholders; real DNS lives in `.local/dns.md`).
-- Releases: production deploys happen only by publishing a GitHub Release — never auto-deploy from push to `main` or PRs. SemVer: tag `vX.Y.Z` must match root `package.json` `"version"`, bumped + committed + pushed before tagging; default bump is minor. Full flow: `docs/deployment.md`.
+- Releases: production deploys happen only by publishing a GitHub Release — never auto-deploy from push to `main` or PRs. SemVer: tag `vX.Y.Z` must match root `package.json` `"version"`, bumped + committed + pushed before tagging; default bump is minor. The CLI is versioned **independently**: tag `cli-vX.Y.Z` must match `apps/cli/Cargo.toml` `version`, published with `--latest=false`, and never triggers a Worker deploy. Full flow: `docs/deployment.md`.
 - Release notes are **hand-written** and passed inline via `--notes` (no scratch file); never publish with `--generate-notes` alone. It summarizes merged PRs, this repo lands direct commits, so it emits a bare compare link — and those notes are the only thing the in-app `/changelog` page has to show. Write for the operator, not the diff.
 
 ## Proxy guardrails

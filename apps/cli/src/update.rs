@@ -1,7 +1,13 @@
-//! Self-update from the latest GitHub Release (docs/cli.md § Command
-//! surface): download this platform's asset, verify it against SHA256SUMS,
-//! atomically replace the running binary. Refuses inside a package manager's
-//! tree — two owners for one binary is how installs rot.
+//! Self-update from GitHub Releases (docs/cli.md § Command surface): pick the
+//! newest `cli-v*` release that carries this platform's archive, download it,
+//! verify it against SHA256SUMS, atomically replace the running binary.
+//! Refuses inside a package manager's tree — two owners for one binary is how
+//! installs rot.
+//!
+//! Never `releases/latest`: that is the product's `vX.Y.Z` line
+//! (docs/deployment.md § CLI release), and a CLI release's assets land minutes
+//! after it is published — a release with no archive yet is skipped in favour
+//! of the previous one.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -40,9 +46,16 @@ pub fn package_manager_owner(exe: &Path) -> Option<&'static str> {
     }
 }
 
+const TAG_PREFIX: &str = "cli-v";
+
 #[derive(Deserialize)]
 struct Release {
     tag_name: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
     assets: Vec<Asset>,
 }
 
@@ -50,6 +63,34 @@ struct Release {
 struct Asset {
     name: String,
     browser_download_url: String,
+}
+
+/// `MAJOR.MINOR.PATCH` as numbers, so `1.10.0` sorts above `1.9.0`.
+pub fn parse_version(v: &str) -> Option<[u64; 3]> {
+    let mut it = v.trim().split('.').map(|p| p.parse::<u64>().ok());
+    let out = [it.next()??, it.next()??, it.next()??];
+    it.next().is_none().then_some(out)
+}
+
+/// Archive name for one CLI version on the running platform.
+fn asset_name(version: &str) -> String {
+    let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
+    format!("kano-proxy-{version}-{}.{ext}", target_triple())
+}
+
+/// Newest `cli-v*` release (GitHub lists newest first) that is published and
+/// carries both this platform's archive and SHA256SUMS; returns its version.
+fn pick_release(releases: &[Release]) -> Option<(&Release, String)> {
+    releases.iter().find_map(|r| {
+        if r.draft || r.prerelease {
+            return None;
+        }
+        let version = r.tag_name.strip_prefix(TAG_PREFIX)?;
+        parse_version(version)?;
+        let name = asset_name(version);
+        let has = |n: &str| r.assets.iter().any(|a| a.name == n);
+        (has(&name) && has("SHA256SUMS")).then(|| (r, version.to_string()))
+    })
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -85,33 +126,27 @@ pub async fn cmd_update() -> Result<()> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("kano-proxy-cli/", env!("CARGO_PKG_VERSION")))
         .build()?;
-    let release: Release = client
-        .get(format!("https://api.github.com/repos/{REPO}/releases/latest"))
+    let releases: Vec<Release> = client
+        .get(format!("https://api.github.com/repos/{REPO}/releases?per_page=30"))
         .send()
         .await?
         .error_for_status()
-        .context("could not query the latest release")?
+        .context("could not list releases")?
         .json()
         .await?;
 
-    let version = release.tag_name.trim_start_matches('v').to_string();
-    if version == env!("CARGO_PKG_VERSION") {
-        eprintln!("already up to date (v{version})");
+    let (release, version) = pick_release(&releases)
+        .ok_or_else(|| anyhow!("no CLI release has an asset for {triple} yet"))?;
+    let current = env!("CARGO_PKG_VERSION");
+    if parse_version(&version) <= parse_version(current) {
+        eprintln!("already up to date (v{current}; newest release is v{version})");
         return Ok(());
     }
 
-    let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
-    let asset_name = format!("kano-proxy-{version}-{triple}.{ext}");
-    let asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == asset_name)
-        .ok_or_else(|| anyhow!("release {} has no asset {asset_name}", release.tag_name))?;
-    let sums_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name == "SHA256SUMS")
-        .ok_or_else(|| anyhow!("release {} has no SHA256SUMS", release.tag_name))?;
+    let asset_name = asset_name(&version);
+    // Both guaranteed present by pick_release.
+    let asset = release.assets.iter().find(|a| a.name == asset_name).unwrap();
+    let sums_asset = release.assets.iter().find(|a| a.name == "SHA256SUMS").unwrap();
 
     eprintln!("downloading {asset_name}…");
     let archive = client
@@ -136,7 +171,7 @@ pub async fn cmd_update() -> Result<()> {
         bail!("checksum mismatch for {asset_name} — refusing to install");
     }
 
-    let binary = extract_binary(&archive, ext)?;
+    let binary = extract_binary(&archive, if cfg!(windows) { "zip" } else { "tar.gz" })?;
     replace_self(&exe, &binary)?;
     eprintln!("✓ updated to v{version}");
     Ok(())
@@ -215,5 +250,55 @@ mod tests {
     #[test]
     fn target_triple_is_known() {
         assert_ne!(target_triple(), "unsupported");
+    }
+
+    #[test]
+    fn parses_versions_numerically() {
+        assert_eq!(parse_version("1.10.0"), Some([1, 10, 0]));
+        assert!(parse_version("1.10.0") > parse_version("1.9.9"));
+        assert_eq!(parse_version("v1.0.0"), None);
+        assert_eq!(parse_version("1.0"), None);
+        assert_eq!(parse_version("1.0.0.1"), None);
+    }
+
+    fn release(tag: &str, assets: &[&str]) -> Release {
+        Release {
+            tag_name: tag.to_string(),
+            draft: false,
+            prerelease: false,
+            assets: assets
+                .iter()
+                .map(|n| Asset { name: n.to_string(), browser_download_url: format!("https://x/{n}") })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn picks_newest_cli_release_with_this_platforms_assets() {
+        let ready = asset_name("1.1.0");
+        let releases = vec![
+            // Product release: wrong prefix, skipped even with assets.
+            release("v4.6.0", &[&asset_name("4.6.0"), "SHA256SUMS"]),
+            // Newer CLI release still building (or failed): no archive yet.
+            release("cli-v1.2.0", &[]),
+            // Archive present but SHA256SUMS missing: not installable.
+            release("cli-v1.1.5", &[&asset_name("1.1.5")]),
+            release("cli-v1.1.0", &[&ready, "SHA256SUMS"]),
+            release("cli-v1.0.0", &[&asset_name("1.0.0"), "SHA256SUMS"]),
+        ];
+        let (picked, version) = pick_release(&releases).unwrap();
+        assert_eq!(picked.tag_name, "cli-v1.1.0");
+        assert_eq!(version, "1.1.0");
+    }
+
+    #[test]
+    fn skips_prereleases_and_drafts() {
+        let mut pre = release("cli-v2.0.0", &[&asset_name("2.0.0"), "SHA256SUMS"]);
+        pre.prerelease = true;
+        let mut draft = release("cli-v1.9.0", &[&asset_name("1.9.0"), "SHA256SUMS"]);
+        draft.draft = true;
+        let releases = vec![pre, draft, release("cli-v1.1.0", &[&asset_name("1.1.0"), "SHA256SUMS"])];
+        assert_eq!(pick_release(&releases).unwrap().1, "1.1.0");
+        assert!(pick_release(&[release("v4.6.0", &[])]).is_none());
     }
 }

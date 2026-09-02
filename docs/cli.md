@@ -156,7 +156,7 @@ Interactive **ratatui** screens are the default for `init` and `add`; every comm
 
 **`kano-proxy status`** — device auth state (signed in as, token freshness) plus per-provider connection state from `GET /agent/v1/providers` — works from any process, and is the truth even while `start` runs elsewhere.
 
-**`kano-proxy update`** — self-update: queries the latest GitHub Release, downloads this platform's asset, verifies it against `SHA256SUMS`, atomically replaces its own binary. When the running binary lives inside a package manager's tree (Homebrew cellar, Scoop apps dir) it refuses and prints that manager's upgrade command instead — two owners for one binary is how installs rot.
+**`kano-proxy update`** — self-update: lists recent GitHub Releases, picks the newest `cli-v` one that carries this platform's archive (a release whose assets are still building, or never built, is skipped — never `releases/latest`, which is the product's), downloads it, verifies it against `SHA256SUMS`, atomically replaces its own binary. Upgrades only when that release is numerically newer than the running binary; a dev build ahead of every release is left alone. When the running binary lives inside a package manager's tree (Homebrew cellar, Scoop apps dir) it refuses and prints that manager's upgrade command instead — two owners for one binary is how installs rot.
 
 ### State file
 
@@ -217,18 +217,18 @@ No dedicated page and no sidebar nav item — CLI surfaces live inside the exist
 
 ## Distribution
 
-The CLI is versioned and released **with the product**: one SemVer, one tag, one GitHub Release ([deployment.md](./deployment.md) — production deploys already happen only on Release publish). Wire compatibility is governed by the protocol's `proto` number, never by comparing version strings. The repository is public, so Release assets are directly downloadable by end users of any kano-proxy instance — they need no relationship with the repo.
+The CLI is versioned and released **independently of the product**: its own SemVer line (`apps/cli/Cargo.toml`, restarted at `1.0.0` when it was decoupled from the product's 4.x), its own tag prefix `cli-vX.Y.Z`, its own workflow, released only when the CLI itself changed ([deployment.md](./deployment.md) § CLI release). It shipped in lockstep with the product from v4.4.0 to v4.5.2; that coupled every Worker hotfix to a five-platform rebuild and a tap/scoop bump for a binary that had not changed, and one missed `Cargo.toml` bump was enough to publish a release with no CLI assets. Wire compatibility is governed by the protocol's `proto` number, never by comparing version strings — a 1.x CLI talks to a 4.x Worker. The repository is public, so Release assets are directly downloadable by end users of any kano-proxy instance — they need no relationship with the repo.
 
-**Release CI** gains a job that, on Release publish, cross-compiles the five targets, packages `kano-proxy-<version>-<target>.tar.gz` (`.zip` for Windows), emits a `SHA256SUMS` file covering all archives, and attaches everything to the Release.
+**`cli-release.yml`** runs on a `cli-v…` Release publish: checks tag == `Cargo.toml`, runs `cargo test`, cross-compiles the five targets, packages `kano-proxy-<version>-<target>.tar.gz` (`.zip` for Windows), emits a `SHA256SUMS` file covering all archives, and attaches everything to the Release.
 
 Install channels, all fed from those assets:
 
 | Channel | Platforms | Mechanics |
 |---|---|---|
 | Homebrew tap | macOS, Linux | `brew install yufeng-kano/tap/kano-proxy` — formula in our own public `homebrew-tap` repo, version + checksums bumped automatically by release CI |
-| Install script | macOS, Linux | `curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh \| sh` — detects OS/arch, downloads the latest asset, verifies `SHA256SUMS`, installs to `~/.local/bin` (or `--dir`) |
+| Install script | macOS, Linux | `curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh \| sh` — detects OS/arch, downloads the newest `cli-v` release that has this platform's archive, verifies `SHA256SUMS`, installs to `~/.local/bin` (or `--dir`) |
 | Scoop bucket | Windows | `scoop bucket add kano https://github.com/yufeng-kano/scoop-bucket` + `scoop install kano-proxy` — manifest in our own public bucket repo, bumped by release CI |
-| `kano-proxy update` | all | self-update from the latest Release, checksum-verified (see the command above) |
+| `kano-proxy update` | all | self-update from the newest `cli-v` Release with assets, checksum-verified (see the command above) |
 
 **None of these channels involves registration or third-party review** — a Homebrew *tap* and a Scoop *bucket* are just public repos we own, live the moment they exist; review queues only guard homebrew-core and Scoop's official buckets, neither of which we use. winget (Microsoft's review queue) is deliberately not offered — Scoop covers Windows. No crates.io publish: this is a product binary, not a library, and the monorepo layout gives a Cargo publish nothing but friction.
 
@@ -256,6 +256,6 @@ The web UI's `/cli` empty state shows the brew and script one-liners (from the m
 3. `AgentTunnel` DO (+ `wrangler.toml` binding and `new_sqlite_classes` migration; mirrored in gitignored `wrangler.production.toml`), protocol module shared as types, `connect`/`providers` routes.
 4. Routing third branch in `candidates.ts`, injected-fetch reuse of the custom adapters, fault-marker handling in `feedback.ts`, catalog section — + [providers.md](./providers.md) pointer.
 5. `/cli` page + authorize view + [admin-ui.md](./admin-ui.md) update.
-6. `apps/cli` (Rust): `cargo test` wired into CI; distribution pipeline per § Distribution — release workflow (five targets + `SHA256SUMS` on the Release), `scripts/install-cli.sh`, Homebrew tap + Scoop bucket automation, `kano-proxy update`.
+6. `apps/cli` (Rust): `cargo test` wired into CI; distribution pipeline per § Distribution — `cli-release.yml` (five targets + `SHA256SUMS` on the `cli-v` Release), `scripts/install-cli.sh`, Homebrew tap + Scoop bucket automation, `kano-proxy update`.
 
 Tests are protocol-level with in-memory socket pairs and stubbed `fetch` throughout ([testing.md](./testing.md)) — a local LLM is free, but the test suite still never assumes one is running.

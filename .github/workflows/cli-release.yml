@@ -1,0 +1,149 @@
+# Build and attach the kano-proxy CLI when a GitHub Release is published for a
+# CLI tag (cli-vX.Y.Z), then bump the Homebrew tap + Scoop bucket
+# (docs/deployment.md § CLI release, docs/cli.md § Distribution).
+#
+# Independent of the product line: product tags (vX.Y.Z) deploy the Worker via
+# release-deploy.yml and never reach this workflow. Publish CLI releases with
+# `--latest=false` so GitHub's releases/latest keeps pointing at the product.
+#
+# Optional repository secret:
+#   TAP_PUSH_TOKEN — push access to yufeng-kano/homebrew-tap and
+#                    yufeng-kano/scoop-bucket; absent ⇒ bump skipped with a
+#                    warning (re-run the publish job after adding it).
+
+name: CLI release
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: cli-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Version lockstep + cargo test
+    if: startsWith(github.event.release.tag_name, 'cli-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check release tag == Cargo.toml
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^cli-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "CLI release tag must look like cli-v1.2.0 (got: $TAG)"
+            exit 1
+          fi
+          version="${TAG#cli-v}"
+          cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' apps/cli/Cargo.toml | head -1)
+          if [ "$version" != "$cargo_version" ]; then
+            echo "release tag $TAG must match apps/cli/Cargo.toml version ($cargo_version)"
+            exit 1
+          fi
+          echo "Building CLI $version"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/cli
+      - run: cargo test
+        working-directory: apps/cli
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, cross: true }
+          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl, cross: true }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/cli
+          key: ${{ matrix.target }}
+      - name: Add target
+        if: ${{ !matrix.cross }}
+        run: rustup target add ${{ matrix.target }}
+      - name: Install cross
+        if: ${{ matrix.cross }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build
+        working-directory: apps/cli
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#cli-v}"
+          target="${{ matrix.target }}"
+          mkdir -p dist
+          case "$target" in
+            *windows*)
+              cp "apps/cli/target/$target/release/kano-proxy.exe" dist/
+              (cd dist && 7z a "kano-proxy-$version-$target.zip" kano-proxy.exe > /dev/null && rm kano-proxy.exe)
+              ;;
+            *)
+              cp "apps/cli/target/$target/release/kano-proxy" dist/
+              (cd dist && tar -czf "kano-proxy-$version-$target.tar.gz" kano-proxy && rm kano-proxy)
+              ;;
+          esac
+          ls -l dist
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Attach assets + bump tap/scoop
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: cli-*
+          merge-multiple: true
+          path: dist
+      - name: SHA256SUMS + upload to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum kano-proxy-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" kano-proxy-* SHA256SUMS --clobber
+      - name: Bump Homebrew tap + Scoop bucket
+        env:
+          VERSION: ${{ github.event.release.tag_name }}
+          SUMS_PATH: dist/SHA256SUMS
+          TAP_PUSH_TOKEN: ${{ secrets.TAP_PUSH_TOKEN }}
+        run: python3 scripts/ci/bump-cli-distribution.py

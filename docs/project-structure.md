@@ -64,7 +64,7 @@ kano-proxy/
   docs/
   scripts/
     ci/                  # CI helpers (e.g. write production wrangler from env)
-  .github/workflows/     # release-deploy on GitHub Release publish
+  .github/workflows/     # ci (PRs), release-deploy (v* Release), cli-release (cli-v* Release)
   .local.example/        # committed templates for private operator data
   .local/                # gitignored: real DNS, host, deploy notes (not open-source)
   package.json           # workspace root
