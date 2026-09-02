@@ -325,7 +325,7 @@ Example: last release `v0.3.1` → default next tag `v0.4.0` and `"version": "0.
 
 A version bump is incomplete unless **all** of these land together:
 
-1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`).
+1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`), **and `apps/cli/Cargo.toml` `version` to the same value** (then refresh the `kano-proxy` entry in `apps/cli/Cargo.lock`). Release CI checks tag == `package.json` == `Cargo.toml` and fails every CLI build job when they differ; the Worker deploy still goes out, leaving a release with no CLI assets (v4.5.1 shipped that way).
 2. **Commit** that change with the release work (and any code/docs for the release).
 3. **Push** the commit to `origin` (`main` or the release branch).
 4. **Write the release notes** (see below) — they are a deliverable of the release, not a formality.
@@ -347,7 +347,7 @@ Pass the notes inline with `gh release create --notes '<markdown>'` — no scrat
 ```bash
 # example: patch 1.0.0 → 1.0.1 after work is ready on main
 # 1) set "version": "1.0.1" in package.json
-git add package.json  # + other release files
+git add package.json apps/cli/Cargo.toml apps/cli/Cargo.lock  # + other release files
 git commit -m "Release v1.0.1: <summary>."
 git push origin main
 
