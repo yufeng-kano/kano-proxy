@@ -256,6 +256,53 @@ describe("openaiToGeminiRequest", () => {
     expect(paramsFor("claude-opus-4-6-thinking")).toEqual({ description: "d" })
   })
 
+  it("gives every array an items schema, including tuples whose prefixItems were stripped", () => {
+    // Measured 2026-09-04: Claude Code 2.1.259's Artifact tool declares
+    // `query.where` as an array of `[field, operator, value]` tuples via
+    // `prefixItems`. That keyword is GOOGLE_INTERNAL on Gemini's Schema proto
+    // and is stripped — leaving `{type: "array"}`, which Gemini rejects with
+    // `…properties[query].properties[where].items.items: missing field`.
+    const parameters = {
+      type: "object",
+      properties: {
+        query: {
+          type: "object",
+          properties: {
+            where: {
+              type: "array",
+              maxItems: 10,
+              items: {
+                type: "array",
+                prefixItems: [{ type: "string" }, { type: "string", enum: ["eq", "ne"] }, {}],
+              },
+            },
+            // draft-04 spells a tuple as `items: [...]` — an array where the
+            // proto wants a single schema.
+            legacyTuple: { type: "array", items: [{ type: "string" }, { type: "integer" }] },
+            bare: { type: "array", description: "no items at all" },
+            nullableList: { type: ["array", "null"] },
+          },
+        },
+      },
+    }
+    const tools = [{ type: "function", function: { name: "f", parameters } }]
+    const paramsFor = (model: string) =>
+      (
+        (openaiToGeminiRequest(req({ model, tools })).tools![0]!.functionDeclarations as Array<
+          Record<string, unknown>
+        >)[0]!.parameters as Record<string, Record<string, Record<string, unknown>>>
+      ).properties!.query!.properties as Record<string, unknown>
+
+    const expected = {
+      where: { type: "array", maxItems: 10, items: { type: "array", items: {} } },
+      legacyTuple: { type: "array", items: {} },
+      bare: { type: "array", description: "no items at all", items: {} },
+      nullableList: { type: "array", nullable: true, items: {} },
+    }
+    expect(paramsFor("gemini-3.8-flash-high")).toEqual(expected)
+    expect(paramsFor("claude-opus-4-6-thinking")).toEqual(expected)
+  })
+
   it("strips propertyNames and any other keyword Gemini's Schema has no field for", () => {
     // The measured production failure (2026-08-22): Claude Code sends
     // `propertyNames`, the backend 400s the whole request naming it, and every

@@ -316,5 +316,14 @@ export function sanitizeJsonSchema(
   // A surviving multi-branch anyOf is a genuine union; foldNullable already
   // collapsed the `[X, null]` spelling into a single schema.
   if (!dialect.allowAnyOf && Array.isArray(folded.anyOf)) delete folded.anyOf
+  // Gemini requires `items` on every array (`400 …properties[x].items: missing
+  // field`), and the allowlist can strip an array down to that shape: a JSON
+  // Schema tuple spelled `prefixItems` (GOOGLE_INTERNAL, dropped above) or the
+  // draft-04 `items: [...]` (an array where the proto wants one schema).
+  // Measured 2026-09-04 with Claude Code's Artifact tool (`where` triples).
+  // An unconstrained element schema is valid on both model families.
+  if (folded.type === "array" && (folded.items === undefined || Array.isArray(folded.items))) {
+    folded.items = {}
+  }
   return folded
 }
