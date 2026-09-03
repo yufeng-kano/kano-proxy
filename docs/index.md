@@ -15,6 +15,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [cli.md](./cli.md) | CLI providers: the official `kano-proxy` CLI (device login, Rust/ratatui) + Durable Object reverse tunnel exposing local LLMs as first-class providers |
 | [codex-relay.md](./codex-relay.md) | **Approved exception to Cloudflare-only.** Codex egress relay on Cloud Run: design, IAM auth, cost, deploy |
 | [admin-ui.md](./admin-ui.md) | Web UI: design restraint (the house style), shell layout, pages, responsive rules, cache-first UX |
+| [docs-site.md](./docs-site.md) | Public `/docs/` site (VitePress, en + zh-TW): build, same-host serving, origin fill, agent-page rules, SEO and indexing of the whole host |
 | [i18n.md](./i18n.md) | Message catalog, translation runtime, copy voice |
 | [changelog.md](./changelog.md) | Release notes from GitHub, running version, caching + sanitization |
 | [project-structure.md](./project-structure.md) | Monorepo layout and module boundaries |

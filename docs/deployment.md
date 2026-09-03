@@ -6,7 +6,7 @@ Pick any hostname you control (example: `proxy.example.com`). Same host for UI +
 
 | Host | Role |
 |------|------|
-| `https://<your-domain>` | Pages (UI) + Worker routes for `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*` |
+| `https://<your-domain>` | Pages (UI + public docs) + Worker routes for `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*`, `/agent/*` |
 
 Public LLM bases and admin “copy base URL” use the **request / browser origin** — no domain is hard-coded in app source. After deploy, set production vars to match:
 
@@ -45,8 +45,9 @@ Suggested Worker routes (replace host):
 - `<your-domain>/anthropic/*`
 - `<your-domain>/g/*` (model-group endpoints — required since v4)
 - `<your-domain>/api/*`
+- `<your-domain>/agent/*` (CLI device auth + tunnel, [cli.md](./cli.md) — required since v4.4; without it `kano-proxy init` gets the SPA instead of the API)
 
-Pages serves remaining paths (SPA).
+Pages serves remaining paths: the public docs at `/docs/*` as static files, everything else as the SPA ([docs-site.md](./docs-site.md)).
 
 ## Production deploy
 
@@ -141,12 +142,14 @@ pnpm exec wrangler deploy --config wrangler.production.toml
 
 Local dev keeps using `wrangler.toml` + `.dev.vars` (`pnpm --filter api dev`).
 
-### Pages (admin UI)
+### Pages (admin UI + public docs)
 
 ```bash
-pnpm --filter web build
+APP_URL=https://<your-domain> pnpm build:site   # web build + docs build → apps/web/dist (docs under dist/docs/)
 npx wrangler pages deploy apps/web/dist --project-name=kano-proxy --branch=main
 ```
+
+`build:site` is the root script that builds `apps/web`, then `apps/docs`, and copies the docs output into `apps/web/dist/docs/` — one upload serves both ([docs-site.md](./docs-site.md)). `APP_URL` is optional at build time: when set, the docs emit `/docs/sitemap.xml` with absolute URLs; when unset, no sitemap and no failure. There is no `_redirects` file any more; Pages' built-in SPA fallback (no top-level `404.html`) serves `/index.html` for unknown paths, and `apps/web/public/_headers` marks admin routes `noindex`.
 
 `--branch` must equal the Pages project's **production branch** (`main`), or the upload becomes a Preview deployment and the production domain keeps serving the old build. This matters especially in CI, where a release checkout is a detached HEAD and wrangler would otherwise infer branch `HEAD`.
 
@@ -175,12 +178,13 @@ A `VITE_*` variable set in the Cloudflare Pages build environment **overrides** 
 ### DNS + routes
 
 1. Pages custom domain: `<your-domain>`
-2. Worker routes: `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*` (optional `/health`) on that host
+2. Worker routes: `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*`, `/agent/*` (optional `/health`) on that host
 3. DNS CNAME/A, Proxied
 
 | Surface | URL |
 |---------|-----|
 | Admin UI | `https://<your-domain>/` |
+| Public docs | `https://<your-domain>/docs/` |
 | OpenAI | `https://<your-domain>/openai/v1` |
 | Anthropic | `https://<your-domain>/anthropic` |
 
@@ -258,6 +262,7 @@ pnpm --filter api dev    # wrangler dev :8787
 
 # Web
 pnpm --filter web dev    # :5173
+pnpm --filter docs dev   # :5174, public docs alone at /docs/ (docs/docs-site.md)
 ```
 
 Use **`http://127.0.0.1:5173`** (not `localhost`) for the admin UI so the session cookie host matches OAuth (`127.0.0.1:8787`).  
@@ -301,7 +306,7 @@ Local backups from recovery work may live under `apps/api/.wrangler/backups/` (a
 ```bash
 pnpm test
 pnpm --filter api typecheck
-pnpm --filter web build
+pnpm build:site            # web + public docs → apps/web/dist
 # then migrate:remote + api deploy + pages deploy (see Production deploy)
 ```
 
@@ -381,7 +386,7 @@ Notes can be corrected after the fact with `gh release edit <tag> --notes '<mark
 
 | Variable | Purpose |
 |----------|---------|
-| `APP_URL` | Production origin, e.g. `https://<your-domain>` (no trailing slash). Workflow sets `GOOGLE_REDIRECT_URI` to `$APP_URL/api/auth/callback`. |
+| `APP_URL` | Production origin, e.g. `https://<your-domain>` (no trailing slash). Workflow sets `GOOGLE_REDIRECT_URI` to `$APP_URL/api/auth/callback` and passes it to the docs build for the sitemap hostname. |
 | `CODEX_RELAY_URL` | **Optional.** Codex egress relay origin (`https://….run.app`, [codex-relay.md](./codex-relay.md)). Empty/unset omits the var from the generated config (relay off). |
 
 Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`) are **not** set by CI on each release; configure once with `wrangler secret put --config wrangler.production.toml`.
@@ -389,7 +394,7 @@ Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `T
 ### What the workflow does
 
 1. Checkout release commit  
-2. `pnpm install` → test → typecheck → web build  
+2. `pnpm install` → test → typecheck → `pnpm build:site` (web + docs, `APP_URL` passed for the sitemap)  
 3. Write ephemeral `apps/api/wrangler.production.toml` from secrets/vars (not committed)  
 4. `wrangler d1 migrations apply --remote`  
 5. `wrangler deploy` (Worker)  

@@ -120,13 +120,17 @@ const year = String(new Date().getFullYear())
 
       <footer class="login-footer">
         <span>{{ t("login.copyright", { year, name: SITE.name }) }}</span>
-        <a
-          v-if="SITE.contactEmail"
-          class="login-contact"
-          :href="`mailto:${SITE.contactEmail}`"
-        >
-          {{ SITE.contactEmail }}
-        </a>
+        <span class="login-footer-links">
+          <!-- Plain anchor, not RouterLink: /docs/ is the static docs site, outside the router. -->
+          <a class="login-contact" href="/docs/">{{ t("nav.docs") }}</a>
+          <a
+            v-if="SITE.contactEmail"
+            class="login-contact"
+            :href="`mailto:${SITE.contactEmail}`"
+          >
+            {{ SITE.contactEmail }}
+          </a>
+        </span>
       </footer>
     </main>
   </div>
@@ -370,6 +374,11 @@ body:has(.login-page) {
      mode, below the WCAG AA floor for copy this small. */
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+.login-footer-links {
+  display: flex;
+  gap: var(--space-4);
 }
 
 .login-contact {

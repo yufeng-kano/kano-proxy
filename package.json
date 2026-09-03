@@ -1,6 +1,6 @@
 {
   "name": "kano-proxy",
-  "version": "4.6.0",
+  "version": "4.7.0",
   "private": true,
   "packageManager": "pnpm@9.15.0",
   "scripts": {
@@ -8,7 +8,8 @@
     "dev:web": "pnpm --filter web dev",
     "test": "pnpm --filter api test",
     "typecheck": "pnpm -r typecheck",
-    "build": "pnpm -r build"
+    "build": "pnpm -r build",
+    "build:site": "pnpm --filter web build && pnpm --filter docs build && mkdir -p apps/web/dist/docs && cp -R apps/docs/.vitepress/dist/. apps/web/dist/docs/"
   },
   "engines": {
     "node": ">=20"

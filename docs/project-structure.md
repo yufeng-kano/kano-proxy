@@ -50,6 +50,7 @@ kano-proxy/
     cli/                 # kano-proxy CLI — Rust/Cargo (docs/cli.md; the one
                           #   Rust component; target/ is gitignored)
     web/                 # Vue + Vite → Pages
+      public/            # robots.txt, _headers (noindex except /docs/* and /login) — no _redirects
       src/
         pages/
         components/
@@ -58,6 +59,15 @@ kano-proxy/
         i18n/            # message catalog + translation runtime
         services/
         types/
+      package.json
+    docs/                # Public documentation site — VitePress (docs/docs-site.md).
+                          #   Built into apps/web/dist/docs/ by root `pnpm build:site`,
+                          #   served at /docs/ from the same Pages project.
+      .vitepress/
+        config.ts        # base /docs/, locales (root en + zh-TW), sidebar, local search
+        theme/           # default theme + origin fill (<your-domain> → location.host)
+      *.md               # English pages (reference tree)
+      zh-TW/             # Traditional Chinese pages, same file names
       package.json
   packages/
     shared/              # shared types (optional)
@@ -79,3 +89,4 @@ kano-proxy/
 - `pool/*` — bench (KV) and credential persistence; provider-agnostic.
 - `apps/relay` — dumb byte pipe only: no auth logic (Cloud Run IAM fronts it), no state, no format awareness, no credentials at rest. Anything smarter belongs in the Worker.
 - Vue: thin `App.vue`; logic in composables/services.
+- `apps/docs` — content only. No calls to `/api/*`, no session awareness, no shared code with `apps/web` beyond being copied into its `dist/`. The one piece of script is the origin fill ([docs-site.md](./docs-site.md)).

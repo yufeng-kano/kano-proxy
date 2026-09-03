@@ -1,0 +1,11 @@
+# Everything on this host is the sign-in-gated admin SPA except the public docs
+# and the login page, so the default is noindex and those two surfaces detach
+# it ("!" removes a header set by an earlier rule). A catch-all rather than a
+# route list: any unknown path also serves the SPA shell and must not be
+# indexed either. See docs/docs-site.md § SEO.
+/*
+  X-Robots-Tag: noindex
+/docs/*
+  ! X-Robots-Tag
+/login
+  ! X-Robots-Tag
