@@ -1,7 +1,10 @@
 # Admin routes render an empty shell to a crawler and sit behind sign-in, so
 # they are excluded from search indexes. Mirrors the router (docs/admin-ui.md);
 # a new admin route is added here in the same change. /docs/* and /login are
-# the indexable surfaces and are deliberately absent.
+# the indexable surfaces and are deliberately absent. "/" is the SPA entry
+# (redirects to overview or login) and is listed for the same reason.
+/
+  X-Robots-Tag: noindex
 /overview
   X-Robots-Tag: noindex
 /logs

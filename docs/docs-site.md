@@ -19,9 +19,9 @@ The admin UI is a client-rendered SPA behind a login wall; search engines and li
 
 The docs are served from the **same Pages project and hostname** as the admin UI, under `/docs/`. Root `pnpm build:site` builds the web app, builds the docs, and copies the docs output into `apps/web/dist/docs/`; that single directory is what `wrangler pages deploy` uploads.
 
-**No `_redirects` file.** The old `/* /index.html 200` rule is gone: Cloudflare applies `_redirects` rules before it looks for a matching asset ("Redirects are always followed, regardless of whether or not an asset matches the incoming request"), so that rule would have swallowed every docs page. The SPA fallback now comes from Pages' built-in behavior instead: a project with no top-level `404.html` is treated as a single-page app and unknown paths serve `/index.html`. VitePress emits its own `404.html` inside `/docs/`, which Pages uses for unknown paths under `/docs/` only. Pages also serves `/docs/guide/x.html` at `/docs/guide/x`, which is what VitePress `cleanUrls` expects. Pinned versions: `vitepress@^1.6.4` (the 2.x line is still alpha as of 2026-09).
+**No `_redirects` file.** The old `/* /index.html 200` rule is gone: Cloudflare applies `_redirects` rules before it looks for a matching asset ("Redirects are always followed, regardless of whether or not an asset matches the incoming request"), so that rule would have swallowed every docs page. The SPA fallback now comes from Pages' built-in behavior instead: a project with no top-level `404.html` is treated as a single-page app and unknown paths serve `/index.html`. VitePress emits its own `404.html` inside `/docs/`. Cloudflare documents both a per-directory `404.html` lookup and the SPA fallback, but not which one wins when a project has a nested `404.html` and no root one, so an unknown `/docs/` path shows either the VitePress 404 or the SPA login page; both are acceptable, and the first deploy settles it (checklist below). A scoped `_redirects` rule cannot fix this either way, since redirects run before asset lookup and would swallow the real docs pages. Pages also serves `/docs/guide/x.html` at `/docs/guide/x`, which is what VitePress `cleanUrls` expects. Pinned versions: `vitepress@^1.6.4` (the 2.x line is still alpha as of 2026-09).
 
-After the first deploy, check once by hand: `/docs/` renders, a deep admin link such as `/keys` still lands in the SPA, and `/docs/no-such-page` shows the VitePress 404.
+After the first deploy, check once by hand: `/docs/` renders, a deep admin link such as `/keys` still lands in the SPA, and note what `/docs/no-such-page` shows; record the answer here.
 
 Local: `pnpm --filter docs dev` serves the docs alone at `http://127.0.0.1:5174/docs/`.
 
@@ -29,7 +29,7 @@ CI (`ci.yml`, `release-deploy.yml`) runs `pnpm build:site` in place of the old w
 
 ## The real hostname without hardcoding it
 
-Tracked files keep `<your-domain>` placeholders ([deployment.md](./deployment.md)). A public docs page that only ever said `<your-domain>` would be useless to the reader, so the site fills the placeholder in the browser: a theme enhancement walks the rendered page's `code` elements after each route render and replaces `https://<your-domain>` with `location.origin` and any remaining `<your-domain>` with `location.host`. The static HTML that crawlers index still contains the placeholder; a person reading the page sees their instance's real URL, and the copy button copies what is shown.
+Tracked files keep `<your-domain>` placeholders ([deployment.md](./deployment.md)). A public docs page that only ever said `<your-domain>` would be useless to the reader, so the site fills the placeholder in the browser: a theme enhancement walks the rendered page's `code` elements after each route render and replaces `https://<your-domain>` with `location.origin` and any remaining `<your-domain>` with `location.host`. The static HTML that crawlers index still contains the placeholder; a person reading the page sees their instance's real URL, and the copy button copies what is shown. The fill is skipped under `vitepress dev`, where the docs server is not the proxy and filling would point every sample at port 5174.
 
 Write every URL in the docs as `https://<your-domain>/...` exactly, so the fill matches. Do not invent other spellings of the placeholder.
 
@@ -67,7 +67,7 @@ Only `/docs/*` and `/login` are meant to be indexed. The admin routes render the
 | Piece | Where | What it does |
 |-------|-------|--------------|
 | `apps/web/public/robots.txt` | site root | Allows crawling. No `Sitemap:` line because the directive needs an absolute URL and tracked files carry no hostname; submit `/docs/sitemap.xml` in Search Console instead |
-| `apps/web/public/_headers` | site root | `X-Robots-Tag: noindex` on every admin route (`/overview`, `/logs`, `/providers`, `/groups`, `/keys`, `/models`, `/changelog`, `/cli`, `/cli/*`, and the legacy `/dashboard`, `/accounts`). The list mirrors the router; a new admin route is added here in the same change |
+| `apps/web/public/_headers` | site root | `X-Robots-Tag: noindex` on the SPA entry `/` and every admin route (`/overview`, `/logs`, `/providers`, `/groups`, `/keys`, `/models`, `/changelog`, `/cli`, `/cli/*`, and the legacy `/dashboard`, `/accounts`). The list mirrors the router; a new admin route is added here in the same change |
 | `apps/web/index.html` | SPA shell | `description`, Open Graph and Twitter card tags, so a shared link to the app gets a preview card. Copy repeats the login pitch from the message catalog; keep them in sync |
 | Router `afterEach` | SPA | Sets `document.title` to `<page> · <site name>` from the route's `titleKey` (a catalog key), so tabs and history are readable. `<html lang>` is already set by `setLocale()` ([i18n.md](./i18n.md)) |
 | VitePress config | docs | Per-page `<title>` and `description`, Open Graph tags, `sitemap.xml` under `/docs/` when `APP_URL` is set at build time |

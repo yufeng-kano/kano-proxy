@@ -6,6 +6,10 @@ import { inBrowser, type Router } from "vitepress"
  * host as the proxy, so in the browser that placeholder can be filled with the
  * page's own origin. The static HTML crawlers see keeps the placeholder.
  *
+ * Skipped in `vitepress dev`: there the docs server (port 5174) is not the
+ * proxy, so filling would point every sample at the docs server itself. The
+ * placeholder stays visible, which is also the honest rendering.
+ *
  * Runs after hydration (onAfterRouteChanged fires after the page is mounted)
  * and only touches text nodes inside code, so nothing else is affected. The
  * copy button reads the DOM at click time, so it copies the filled value.
@@ -27,7 +31,7 @@ function fill(): void {
 }
 
 export function installOriginFill(router: Router): void {
-  if (!inBrowser) return
+  if (!inBrowser || import.meta.env.DEV) return
   // requestAnimationFrame: the route hook fires before the new page's DOM is
   // fully committed on the first paint of a client-side navigation.
   const schedule = () => requestAnimationFrame(fill)

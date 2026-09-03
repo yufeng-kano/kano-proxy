@@ -85,7 +85,8 @@ export default defineConfig({
   // VitePress emits <title> and <meta name="description"> per page from the
   // frontmatter; these two mirror them for link previews.
   transformPageData(pageData) {
-    const title = pageData.title ? `${pageData.title} | ${SITE_NAME}` : SITE_NAME
+    const title =
+      pageData.title && pageData.title !== SITE_NAME ? `${pageData.title} | ${SITE_NAME}` : SITE_NAME
     const description = pageData.description || pageData.frontmatter.description || ""
     pageData.frontmatter.head ??= []
     pageData.frontmatter.head.push(
