@@ -133,6 +133,9 @@ export default defineConfig({
     },
   },
   themeConfig: {
+    // The language menu keeps the reader on the same topic (/guide/x ↔
+    // /zh-TW/guide/x). Stated explicitly because the docs promise it.
+    i18nRouting: true,
     search: {
       provider: "local",
       options: {

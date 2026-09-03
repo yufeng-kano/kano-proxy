@@ -49,6 +49,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
+          # Full history: the docs site derives each page's "last updated" from
+          # git log, and a shallow clone would stamp every page with the
+          # release commit's date (docs/docs-site.md).
+          fetch-depth: 0
 
       - name: Check release tag == root package.json (published releases only)
         if: github.event_name == 'release'

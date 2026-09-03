@@ -18,7 +18,7 @@ Vue 3 + Vite + TypeScript on Cloudflare Pages (same hostname as API via routes).
 | `/changelog` | Published GitHub Releases, newest first ([changelog.md](./changelog.md)) |
 | `/docs/` | **Not a route of this app.** Static VitePress site served by Pages from the same build ([docs-site.md](./docs-site.md)); the router never sees it. Linked from the login footer and the sidebar |
 
-Every route carries a `titleKey` (a catalog key) and the router's `afterEach` sets `document.title` to `<page> · <site name>`, so browser tabs and history are readable; the static `<title>` in `index.html` is only the pre-boot value. Admin routes are served with `X-Robots-Tag: noindex` from `apps/web/public/_headers`, and adding a route means adding it there too ([docs-site.md](./docs-site.md) § SEO).
+Every route carries a `titleKey` (a catalog key) and the router's `afterEach` sets `document.title` to `<page> · <site name>`, so browser tabs and history are readable; the static `<title>` in `index.html` is only the pre-boot value. Every path except `/docs/*` and `/login` is served with `X-Robots-Tag: noindex` from `apps/web/public/_headers` ([docs-site.md](./docs-site.md) § SEO).
 
 `/dashboard`, `/accounts`, and `/cli` are kept as permanent redirects to `/overview`, `/providers`, and `/providers` — a bookmark or a persisted last-route from an older build must not 404 into the catch-all. There is **no `/cli` page and no CLI nav item**: CLI management lives on the Providers page, and CLI models appear on the Models page like any other provider's.
 

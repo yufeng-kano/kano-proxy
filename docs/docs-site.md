@@ -25,7 +25,7 @@ After the first deploy, check once by hand: `/docs/` renders, a deep admin link 
 
 Local: `pnpm --filter docs dev` serves the docs alone at `http://127.0.0.1:5174/docs/`.
 
-CI (`ci.yml`, `release-deploy.yml`) runs `pnpm build:site` in place of the old web-only build. The release job passes `APP_URL` into the build so the sitemap carries absolute URLs; when `APP_URL` is unset (local builds, PR CI) no sitemap is emitted and the build still succeeds.
+CI (`ci.yml`, `release-deploy.yml`) runs `pnpm build:site` in place of the old web-only build. The release job passes `APP_URL` into the build so the sitemap carries absolute URLs; when `APP_URL` is unset (local builds, PR CI) no sitemap is emitted and the build still succeeds. The release job also checks out with full history (`fetch-depth: 0`): VitePress reads each page's "last updated" from `git log`, and a shallow clone would date every page to the release commit.
 
 ## The real hostname without hardcoding it
 
@@ -35,7 +35,7 @@ Write every URL in the docs as `https://<your-domain>/...` exactly, so the fill 
 
 ## Content
 
-English is the reference tree; `zh-TW/` mirrors it page for page with the same file names, so the language switcher lands on the same topic. A page added to one tree is added to the other in the same change.
+English is the reference tree; `zh-TW/` mirrors it page for page with the same file names, so the language switcher (`i18nRouting`) lands on the same topic. A page added to one tree is added to the other in the same change.
 
 | Page | Covers |
 |------|--------|
@@ -67,7 +67,7 @@ Only `/docs/*` and `/login` are meant to be indexed. The admin routes render the
 | Piece | Where | What it does |
 |-------|-------|--------------|
 | `apps/web/public/robots.txt` | site root | Allows crawling. No `Sitemap:` line because the directive needs an absolute URL and tracked files carry no hostname; submit `/docs/sitemap.xml` in Search Console instead |
-| `apps/web/public/_headers` | site root | `X-Robots-Tag: noindex` on the SPA entry `/` and every admin route (`/overview`, `/logs`, `/providers`, `/groups`, `/keys`, `/models`, `/changelog`, `/cli`, `/cli/*`, and the legacy `/dashboard`, `/accounts`). The list mirrors the router; a new admin route is added here in the same change |
+| `apps/web/public/_headers` | site root | `X-Robots-Tag: noindex` on `/*`, detached again (`! X-Robots-Tag`) for `/docs/*` and `/login`. A catch-all rather than a route list, because any unknown path also serves the SPA shell. Nothing to maintain when a route is added |
 | `apps/web/index.html` | SPA shell | `description`, Open Graph and Twitter card tags, so a shared link to the app gets a preview card. Copy repeats the login pitch from the message catalog; keep them in sync |
 | Router `afterEach` | SPA | Sets `document.title` to `<page> · <site name>` from the route's `titleKey` (a catalog key), so tabs and history are readable. `<html lang>` is already set by `setLocale()` ([i18n.md](./i18n.md)) |
 | VitePress config | docs | Per-page `<title>` and `description`, Open Graph tags, `sitemap.xml` under `/docs/` when `APP_URL` is set at build time |

@@ -50,7 +50,7 @@ kano-proxy/
     cli/                 # kano-proxy CLI — Rust/Cargo (docs/cli.md; the one
                           #   Rust component; target/ is gitignored)
     web/                 # Vue + Vite → Pages
-      public/            # robots.txt, _headers (noindex on admin routes) — no _redirects
+      public/            # robots.txt, _headers (noindex except /docs/* and /login) — no _redirects
       src/
         pages/
         components/
