@@ -181,6 +181,11 @@ async function onSignOut() {
 
       <!-- mt-auto: pinned to the bottom of the scroll area, above the user block. -->
       <div class="sidebar-secondary">
+        <!-- Plain anchor: /docs/ is the static docs site, outside the router. -->
+        <a href="/docs/" class="nav-item subtle" target="_blank" rel="noopener">
+          <NavIcon name="docs" />
+          <span class="nav-label">{{ t("nav.docs") }}</span>
+        </a>
         <RouterLink to="/changelog" class="nav-item subtle" active-class="active">
           <NavIcon name="changelog" />
           <span class="nav-label">{{ t("nav.changelog") }}</span>

@@ -4,13 +4,13 @@
  *
  * A 16px stroked set on a 16px grid, drawn to one spec (1.4 stroke, round
  * caps and joins) so they read as one family. Inline rather than an icon
- * dependency: seven glyphs do not justify a package, and a remote sprite would
+ * dependency: eight glyphs do not justify a package, and a remote sprite would
  * be a render-blocking request for chrome that must paint immediately.
  *
  * Always decorative — every nav item ships a text label beside it.
  */
 defineProps<{
-  name: "overview" | "logs" | "providers" | "models" | "groups" | "keys" | "changelog"
+  name: "overview" | "logs" | "providers" | "models" | "groups" | "keys" | "docs" | "changelog"
 }>()
 </script>
 
@@ -65,6 +65,12 @@ defineProps<{
     <template v-else-if="name === 'keys'">
       <circle cx="5.25" cy="10.75" r="2.75" />
       <path d="M7.25 8.75L13 3M11 5l1.5 1.5M9.5 6.5L11 8" />
+    </template>
+
+    <!-- Docs: open book -->
+    <template v-else-if="name === 'docs'">
+      <path d="M8 4.25C6.6 3.2 4.9 2.75 2.5 2.75v9.5c2.4 0 4.1.45 5.5 1.5 1.4-1.05 3.1-1.5 5.5-1.5v-9.5c-2.4 0-4.1.45-5.5 1.5Z" />
+      <path d="M8 4.25v9.5" />
     </template>
 
     <!-- Changelog: document with lines -->

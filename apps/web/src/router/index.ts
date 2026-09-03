@@ -1,6 +1,8 @@
 import { createRouter, createWebHistory } from "vue-router"
 import { takeLoginRedirect, useAuth } from "@/composables/useAuth"
 import { readPrefs, setLastPath } from "@/services/prefs"
+import { SITE } from "@/config/site"
+import { useI18n, type MessageKey } from "@/i18n"
 
 /**
  * Paths the app itself lands on rather than the user choosing them — a
@@ -33,27 +35,31 @@ const router = createRouter({
       path: "/login",
       name: "login",
       component: () => import("@/pages/LoginPage.vue"),
-      meta: { public: true },
+      meta: { public: true, titleKey: "login.signIn" },
     },
     {
       path: "/overview",
       name: "overview",
       component: () => import("@/pages/OverviewPage.vue"),
+      meta: { titleKey: "nav.overview" },
     },
     {
       path: "/logs",
       name: "logs",
       component: () => import("@/pages/LogsPage.vue"),
+      meta: { titleKey: "nav.logs" },
     },
     {
       path: "/providers",
       name: "providers",
       component: () => import("@/pages/ProvidersPage.vue"),
+      meta: { titleKey: "nav.providers" },
     },
     {
       path: "/groups",
       name: "groups",
       component: () => import("@/pages/GroupsPage.vue"),
+      meta: { titleKey: "nav.groups" },
     },
     {
       // The authorize view a `kano-proxy init` login lands on (docs/cli.md).
@@ -64,22 +70,25 @@ const router = createRouter({
       path: "/cli/authorize",
       name: "cli-authorize",
       component: () => import("@/pages/CliAuthorizePage.vue"),
-      meta: { bare: true },
+      meta: { bare: true, titleKey: "cli.authorize.title" },
     },
     {
       path: "/keys",
       name: "keys",
       component: () => import("@/pages/KeysPage.vue"),
+      meta: { titleKey: "nav.keys" },
     },
     {
       path: "/models",
       name: "models",
       component: () => import("@/pages/ModelsPage.vue"),
+      meta: { titleKey: "nav.models" },
     },
     {
       path: "/changelog",
       name: "changelog",
       component: () => import("@/pages/ChangelogPage.vue"),
+      meta: { titleKey: "nav.changelog" },
     },
     // Pre-2.0 paths. A bookmark or a persisted last-route from an older build
     // must land on the renamed page, not fall through the catch-all.
@@ -163,6 +172,10 @@ router.beforeEach(async (to) => {
 
 router.afterEach((to) => {
   if (!NON_RESTORABLE.has(to.path)) setLastPath(to.path)
+  // "<page> · <site>" so tabs and history are readable; the static <title> in
+  // index.html is only the pre-boot value (docs/admin-ui.md § Pages).
+  const key = to.meta.titleKey as MessageKey | undefined
+  document.title = key ? `${useI18n().t(key)} · ${SITE.name}` : SITE.name
 })
 
 export default router

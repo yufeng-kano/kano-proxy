@@ -32,7 +32,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm typecheck
-      - run: pnpm --filter web build
+      - run: pnpm build:site
 
   cli-test:
     name: CLI cargo test

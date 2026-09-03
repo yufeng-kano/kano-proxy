@@ -10,6 +10,16 @@
          before the app boots, so this cannot read from it. Keep the two in
          sync when renaming. -->
     <title>Kano Proxy</title>
+    <!-- Description and preview-card tags for a shared link to the app. The
+         copy repeats login.pitch.body from src/i18n/en.ts for the same reason
+         as the title above; keep them in sync. Per-page titles are set by the
+         router once the app boots. -->
+    <meta name="description" content="Connect the AI subscriptions you already pay for, then point any OpenAI- or Anthropic-compatible client at a single URL." />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Kano Proxy" />
+    <meta property="og:title" content="Kano Proxy" />
+    <meta property="og:description" content="Connect the AI subscriptions you already pay for, then point any OpenAI- or Anthropic-compatible client at a single URL." />
+    <meta name="twitter:card" content="summary" />
     <!-- The shell paints its own surfaces, but this covers the instant before
          the bundle runs — without it a dark-mode load flashes white. -->
     <meta name="color-scheme" content="light dark" />

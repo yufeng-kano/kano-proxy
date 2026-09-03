@@ -12,6 +12,7 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 apps/web/dist/
+apps/docs/.vitepress/cache/
 apps/api/.wrangler/
 *.log
 .turbo/

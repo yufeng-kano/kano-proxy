@@ -94,8 +94,11 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Build web
-        run: pnpm --filter web build
+      - name: Build web + docs
+        # APP_URL gives the docs sitemap its absolute hostname (docs/docs-site.md).
+        env:
+          APP_URL: ${{ vars.APP_URL }}
+        run: pnpm build:site
 
       - name: Require deploy configuration
         env:

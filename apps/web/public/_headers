@@ -1,0 +1,26 @@
+# Admin routes render an empty shell to a crawler and sit behind sign-in, so
+# they are excluded from search indexes. Mirrors the router (docs/admin-ui.md);
+# a new admin route is added here in the same change. /docs/* and /login are
+# the indexable surfaces and are deliberately absent.
+/overview
+  X-Robots-Tag: noindex
+/logs
+  X-Robots-Tag: noindex
+/providers
+  X-Robots-Tag: noindex
+/groups
+  X-Robots-Tag: noindex
+/keys
+  X-Robots-Tag: noindex
+/models
+  X-Robots-Tag: noindex
+/changelog
+  X-Robots-Tag: noindex
+/cli
+  X-Robots-Tag: noindex
+/cli/*
+  X-Robots-Tag: noindex
+/dashboard
+  X-Robots-Tag: noindex
+/accounts
+  X-Robots-Tag: noindex
