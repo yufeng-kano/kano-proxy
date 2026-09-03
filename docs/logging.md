@@ -12,7 +12,7 @@
 
 | Code | Meaning |
 |------|---------|
-| `no_upstream_account` | No account **bound** for the resolved provider (pool empty, or every account removed) — 400, retrying can never help |
+| `no_upstream_account` | No account **bound** for the resolved provider (pool empty, every account removed, or every account ineligible for the requested model — [providers.md](./providers.md) § Routing module "Candidates") — 400, retrying can never help |
 | `upstream_unavailable` | Accounts exist but none usable — every bound account benched at request start, or the failover loop exhausted its attempts (503, `Retry-After` = seconds until earliest bench expiry when known) |
 | `upstream_error` | Upstream returned a non-2xx after retries/failover, or every account got benched and there was a prior upstream response to fall back to |
 | `invalid_model` | Authenticated request; `model` did not resolve to a builtin provider or one of the caller's own custom provider slugs (400, pre-dispatch) |

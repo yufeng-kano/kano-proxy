@@ -23,6 +23,10 @@ const label = computed(() => {
   switch (props.status) {
     case "active":
       return t("status.active")
+    case "active_no_fable":
+      return t("status.activeNoFable")
+    case "active_fable":
+      return t("status.activeFable")
     case "standby":
       return t("status.standby")
     case "limited":
@@ -68,6 +72,19 @@ const label = computed(() => {
 .active .dot {
   background: var(--ok);
   box-shadow: var(--ok-ring);
+}
+
+/* The two Fable route states (docs/admin-ui.md § Providers page): blue is
+   the general route that cannot serve Fable, purple is the row Fable
+   traffic goes to instead. Both are "active" states, so both get the ring. */
+.active_no_fable .dot {
+  background: var(--route-partial);
+  box-shadow: var(--route-partial-ring);
+}
+
+.active_fable .dot {
+  background: var(--route-fable);
+  box-shadow: var(--route-fable-ring);
 }
 
 .standby .dot {

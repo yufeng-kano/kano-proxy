@@ -51,6 +51,10 @@
   --ok-bg: #f0fdf4;
   --ok-border: #bbf7d0;
   --ok-ring: 0 0 0 3px rgb(21 128 61 / 15%);
+  --route-partial: #1d4ed8;
+  --route-partial-ring: 0 0 0 3px rgb(29 78 216 / 15%);
+  --route-fable: #7e22ce;
+  --route-fable-ring: 0 0 0 3px rgb(126 34 206 / 15%);
   --standby: #52525b;
   --bar-track: #e4e4e7;
   --bar-fill: #27272a;
@@ -206,6 +210,10 @@
     --ok-bg: #0c1f14;
     --ok-border: #14532d;
     --ok-ring: 0 0 0 3px rgb(74 222 128 / 18%);
+    --route-partial: #60a5fa;
+    --route-partial-ring: 0 0 0 3px rgb(96 165 250 / 18%);
+    --route-fable: #c084fc;
+    --route-fable-ring: 0 0 0 3px rgb(192 132 252 / 18%);
     --standby: #a1a1aa;
     --bar-track: #27272a;
     --bar-fill: #d4d4d8;

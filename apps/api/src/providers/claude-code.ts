@@ -189,11 +189,27 @@ async function forwardToAnthropic(
   })
 }
 
+/** Model-id prefix of the Fable family — the only Claude Code models gated per seat (docs/providers.md § Claude Code "Fable seat eligibility"). */
+export const FABLE_MODEL_PREFIX = "claude-fable"
+
 export const claudeCodeAdapter: ProviderAdapter = {
   id: "claude-code",
 
   async refreshIfNeeded(env, account) {
     return refreshClaude(env, account)
+  },
+
+  // A standard Team seat has no Fable: Anthropic answers with a bare 429 that
+  // the pool would otherwise treat as a rate limit and bench the whole account
+  // for 300s. Team Premium reports the Max 5x tier string — the same test
+  // Claude Code CLI 2.1.259's isTeamPremiumSubscriber runs. Every other case,
+  // including a missing profile, fails open.
+  supportsModel(meta, upstreamModel) {
+    if (!upstreamModel.startsWith(FABLE_MODEL_PREFIX)) return true
+    if (meta?.plan_type !== "claude_team") return true
+    const tier = meta.rate_limit_tier
+    if (typeof tier !== "string") return true
+    return tier === "default_claude_max_5x"
   },
 
   async listModels(env, account) {
@@ -360,16 +376,15 @@ export const claudeCodeAdapter: ProviderAdapter = {
       }
     }
     const accountInfo = profile.account as Record<string, unknown> | undefined
-    return {
-      windows,
-      account: {
-        email: accountInfo?.email ?? credentialEmail(acc),
-        plan_type: (profile.organization as { organization_type?: string } | undefined)
-          ?.organization_type,
-        rate_limit_tier: (profile.organization as { rate_limit_tier?: string } | undefined)
-          ?.rate_limit_tier,
-      },
-    }
+    const org = profile.organization as { organization_type?: string; rate_limit_tier?: string } | undefined
+    // Only keys with a value: this object is spread over the stored
+    // `account_meta_json`, and an explicit `undefined` would erase a plan
+    // fact the seat rule (supportsModel) reads whenever the profile call
+    // failed or came back without an organization.
+    const profileAccount: Record<string, unknown> = { email: accountInfo?.email ?? credentialEmail(acc) }
+    if (org?.organization_type) profileAccount.plan_type = org.organization_type
+    if (org?.rate_limit_tier) profileAccount.rate_limit_tier = org.rate_limit_tier
+    return { windows, account: profileAccount }
   },
 }
 

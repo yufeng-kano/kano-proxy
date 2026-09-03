@@ -547,3 +547,34 @@ describe("claude-code client fingerprint", () => {
     expect(headers.get("user-agent")).toBe(CLAUDE_CLIENT_FINGERPRINT["user-agent"])
   })
 })
+
+describe("supportsModel — Fable seat eligibility (docs/providers.md § Claude Code)", () => {
+  const supports = claudeCodeAdapter.supportsModel!
+
+  it("a standard Team seat (claude_team + a non-Max-5x tier) cannot serve a claude-fable model", () => {
+    expect(supports({ plan_type: "claude_team", rate_limit_tier: "default_raven" }, "claude-fable-5-1")).toBe(false)
+    expect(supports({ plan_type: "claude_team", rate_limit_tier: "default_raven" }, "claude-fable-5-1[1m]")).toBe(false)
+  })
+
+  it("the same seat serves every non-Fable model", () => {
+    expect(supports({ plan_type: "claude_team", rate_limit_tier: "default_raven" }, "claude-sonnet-5")).toBe(true)
+    expect(supports({ plan_type: "claude_team", rate_limit_tier: "default_raven" }, "claude-opus-5")).toBe(true)
+  })
+
+  it("a Team Premium seat reports the Max 5x tier string and stays eligible — the CLI's own isTeamPremiumSubscriber test", () => {
+    expect(supports({ plan_type: "claude_team", rate_limit_tier: "default_claude_max_5x" }, "claude-fable-5-1")).toBe(true)
+  })
+
+  it("Max plans are eligible regardless of tier", () => {
+    expect(supports({ plan_type: "claude_max", rate_limit_tier: "default_claude_max_5x" }, "claude-fable-5-1")).toBe(true)
+    expect(supports({ plan_type: "claude_max", rate_limit_tier: "default_claude_max_20x" }, "claude-fable-5-1")).toBe(true)
+  })
+
+  it("fails open on missing facts: no meta, no plan, or a Team seat with no tier", () => {
+    expect(supports(null, "claude-fable-5-1")).toBe(true)
+    expect(supports({}, "claude-fable-5-1")).toBe(true)
+    expect(supports({ email: "x@example.com" }, "claude-fable-5-1")).toBe(true)
+    expect(supports({ plan_type: "claude_team" }, "claude-fable-5-1")).toBe(true)
+    expect(supports({ plan_type: "claude_team", rate_limit_tier: 42 }, "claude-fable-5-1")).toBe(true)
+  })
+})

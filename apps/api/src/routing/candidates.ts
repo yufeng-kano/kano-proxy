@@ -12,11 +12,14 @@
  *
  * A target whose prefix no longer resolves (e.g. a deleted custom provider)
  * contributes nothing, exactly as the old `pickGroupTarget` walk did — this
- * module owns that skip now. Usability (bench / usage-window exhaustion) is
- * NOT decided here — see facts.ts; this module only decides which
- * `(provider, upstreamModel, account)` triples exist at all.
+ * module owns that skip now. So does model eligibility: an account whose
+ * adapter says it cannot serve the requested model (`supportsModel`, read
+ * from stored profile facts — docs/providers.md § Routing module
+ * "Candidates") contributes nothing for that model. Usability (bench /
+ * usage-window exhaustion) is NOT decided here — see facts.ts; this module
+ * only decides which `(provider, upstreamModel, account)` triples exist at all.
  */
-import { getAccount, listAccounts } from "../db/accounts"
+import { accountProfileMeta, getAccount, listAccounts, type AccountRow } from "../db/accounts"
 import { getCliProviderBySlug } from "../db/cli"
 import { getCustomProviderBySlug, type CustomProviderRow } from "../db/custom_providers"
 import {
@@ -108,9 +111,13 @@ export async function resolveTargetPrefix(
  * (`listAccounts`' `ORDER BY priority DESC, created_at DESC`) — the
  * candidates an unpinned target (or a direct call) contributes.
  */
+function eligible(target: ResolvedTarget, account: AccountRow): boolean {
+  return target.adapter.supportsModel?.(accountProfileMeta(account), target.upstreamModel) ?? true
+}
+
 async function poolCandidatesFor(env: Env, userId: string, target: ResolvedTarget): Promise<RoutingCandidate[]> {
   const rows = await listAccounts(env.DB, userId, target.provider)
-  return rows.map((account) => ({
+  return rows.filter((account) => eligible(target, account)).map((account) => ({
     targetIndex: target.targetIndex,
     pinned: false,
     provider: target.provider,
@@ -138,6 +145,7 @@ async function pinnedCandidateFor(
 ): Promise<RoutingCandidate | null> {
   const account = await getAccount(env.DB, userId, target.accountId!)
   if (!account || account.provider !== target.provider) return null
+  if (!eligible(target, account)) return null
   return {
     targetIndex: target.targetIndex,
     pinned: true,

@@ -66,6 +66,8 @@ export const en = {
 
   // --- Status -------------------------------------------------------------
   "status.active": "Active",
+  "status.activeNoFable": "Active · no Fable",
+  "status.activeFable": "Active · Fable",
   "status.standby": "Standby",
   "status.limited": "Limit reached",
   "status.benched": "Paused",

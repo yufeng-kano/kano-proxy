@@ -14,8 +14,19 @@ export type UsageWindow = {
  * from priority order plus the router's own facts, never stored
  * (docs/admin-ui.md § Providers page): `limited` is a usage window at
  * `utilization >= 100` waiting on its reset, which is not a bench.
+ * `active_no_fable` / `active_fable` exist only on Claude Code pools: the
+ * first usable account when its seat cannot serve Fable, and the first
+ * usable Fable-eligible account below it (docs/providers.md § Claude Code
+ * "Fable seat eligibility").
  */
-export type AccountStatus = "active" | "standby" | "limited" | "benched" | "unusable"
+export type AccountStatus =
+  | "active"
+  | "active_no_fable"
+  | "active_fable"
+  | "standby"
+  | "limited"
+  | "benched"
+  | "unusable"
 
 export type AccountUsageView = {
   id: string
@@ -134,6 +145,15 @@ export type ProviderAdapter = {
     headers: Headers,
     extras?: { signal?: AbortSignal },
   ): Promise<Response>
+  /**
+   * Whether an account with these stored profile facts can serve
+   * `upstreamModel` at all (docs/providers.md § Routing module
+   * "Candidates"). Absent means every account is eligible. `meta` is
+   * `account_meta_json` with the usage snapshot's `account` merged over it,
+   * or `null` when neither exists. Must fail open on missing facts — a
+   * wrong `false` silences an account that would have worked.
+   */
+  supportsModel?(meta: Record<string, unknown> | null, upstreamModel: string): boolean
   /** Live model list from upstream when the provider has one. Empty if none. */
   listModels?(
     env: Env,

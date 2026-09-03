@@ -30,6 +30,7 @@ import {
 import { getProviderStrategy, setProviderStrategy } from "../db/provider_settings"
 import { DEFAULT_STRATEGY } from "../routing/strategy"
 import { bootstrapAntigravityProject } from "../providers/antigravity"
+import { FABLE_MODEL_PREFIX } from "../providers/claude-code"
 import {
   fetchAntigravityIdentity,
   fetchClaudeIdentity,
@@ -77,6 +78,10 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   // from the snapshot each row actually returns rather than re-read off the
   // row (a `?refresh=true` read holds a newer one).
   const limitedUntil: (number | null)[] = []
+  // Parallel too: whether the row's seat can serve Fable at all, from the
+  // same merged profile facts the router reads (docs/providers.md § Claude
+  // Code "Fable seat eligibility"). Always true for adapters without a rule.
+  const fableEligible: boolean[] = []
   for (const row of rows) {
     const benched = benchUntilFromRow(row) !== null
     // Provisional only — the pass after this loop assigns active / standby /
@@ -191,21 +196,38 @@ providerRoutes.get("/:provider/accounts", async (c) => {
       stale,
     })
     limitedUntil.push(usage ? windowsUnusableUntil(usage.windows) : null)
+    fableEligible.push(adapter.supportsModel ? adapter.supportsModel(accountMeta, FABLE_MODEL_PREFIX) : true)
   }
 
   // The dot says where a request goes right now, so it is the router's own
   // walk over the same stored facts (docs/providers.md § Routing module
   // "Facts"): an exhausted usage window is "limited", not active, and
   // "active" lands on the first account the ordered walk would actually pick.
+  // A Claude Code pool carries the Fable route on the same dot: a first
+  // usable account without Fable reads active_no_fable, and the first usable
+  // Fable-eligible account below it reads active_fable — where a
+  // claude-fable-* request actually lands (docs/admin-ui.md § Providers page).
   let routed = false
+  let fableRouted = false
   accounts.forEach((a, i) => {
     if (a.status === "benched" || a.status === "unusable") return
     if ((limitedUntil[i] ?? null) !== null) {
       a.status = "limited"
       return
     }
-    a.status = routed ? "standby" : "active"
-    routed = true
+    const fable = fableEligible[i] ?? true
+    if (!routed) {
+      routed = true
+      fableRouted = fable
+      a.status = fable ? "active" : "active_no_fable"
+      return
+    }
+    if (fable && !fableRouted) {
+      fableRouted = true
+      a.status = "active_fable"
+      return
+    }
+    a.status = "standby"
   })
 
   // The pool's routing strategy (docs/providers.md § Routing module) — no

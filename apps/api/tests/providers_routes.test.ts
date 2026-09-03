@@ -67,6 +67,8 @@ async function seedAccount(
     provider?: string
     priority?: number
     email?: string
+    /** Extra stored profile facts (plan_type / rate_limit_tier) beside the email. */
+    meta?: Record<string, unknown>
   } = {},
 ): Promise<string> {
   const id = opts.id ?? "acc_1"
@@ -81,7 +83,7 @@ async function seedAccount(
       custom_label: opts.customLabel ?? null,
       priority: opts.priority ?? 7,
       encrypted_payload: encryptedPayload,
-      account_meta_json: JSON.stringify({ email: opts.email ?? "stored@example.com" }),
+      account_meta_json: JSON.stringify({ email: opts.email ?? "stored@example.com", ...opts.meta }),
       created_at: NOW,
       updated_at: NOW,
     },
@@ -1104,5 +1106,80 @@ describe("POST /api/providers/:provider/accounts/:id/unpause", () => {
     )
     expect(res.status).toBe(200)
     expect(await readJson(res)).toEqual({ ok: true })
+  })
+})
+
+describe("GET /api/providers/claude-code/accounts — Fable route on the status dot (docs/admin-ui.md § Providers page)", () => {
+  const TEAM_STANDARD = { plan_type: "claude_team", rate_limit_tier: "default_raven" }
+  const TEAM_PREMIUM = { plan_type: "claude_team", rate_limit_tier: "default_claude_max_5x" }
+  const MAX = { plan_type: "claude_max", rate_limit_tier: "default_claude_max_5x" }
+
+  async function statuses(db: FakeD1): Promise<Array<[string, string]>> {
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    // The profile stub carries no organization, so the seeded plan facts are
+    // what the route reads — the shape of a cached snapshot in production.
+    stubClaudeUsage("upstream@example.com")
+    const res = await providerRoutes.request("/claude-code/accounts", req("GET", cookie), env)
+    expect(res.status).toBe(200)
+    const json = await readJson(res)
+    return json.accounts.map((a: { id: string; status: string }) => [a.id, a.status])
+  }
+
+  it("a first account without Fable reads active_no_fable and the first Fable-eligible account below it reads active_fable", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    await seedAccount(db, "user_1", { id: "acc_team", priority: 15, meta: TEAM_STANDARD })
+    await seedAccount(db, "user_1", { id: "acc_max_a", priority: 14, meta: MAX })
+    await seedAccount(db, "user_1", { id: "acc_max_b", priority: 11, meta: MAX })
+    expect(await statuses(db)).toEqual([
+      ["acc_team", "active_no_fable"],
+      ["acc_max_a", "active_fable"],
+      ["acc_max_b", "standby"],
+    ])
+  })
+
+  it("a first account with Fable is plain active and nothing below it is active_fable", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    await seedAccount(db, "user_1", { id: "acc_premium", priority: 15, meta: TEAM_PREMIUM })
+    await seedAccount(db, "user_1", { id: "acc_max", priority: 14, meta: MAX })
+    expect(await statuses(db)).toEqual([
+      ["acc_premium", "active"],
+      ["acc_max", "standby"],
+    ])
+  })
+
+  it("a paused Fable-eligible account never takes active_fable — the next eligible one does", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    await seedAccount(db, "user_1", { id: "acc_team", priority: 15, meta: TEAM_STANDARD })
+    await seedAccount(db, "user_1", { id: "acc_max_a", priority: 14, meta: MAX })
+    await seedAccount(db, "user_1", { id: "acc_max_b", priority: 11, meta: MAX })
+    await markBenched(env, "user_1", "claude-code", "acc_max_a", 60_000, "429")
+    expect(await statuses(db)).toEqual([
+      ["acc_team", "active_no_fable"],
+      ["acc_max_a", "benched"],
+      ["acc_max_b", "active_fable"],
+    ])
+  })
+
+  it("a pool with no Fable-eligible account shows active_no_fable and no purple row", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    await seedAccount(db, "user_1", { id: "acc_team_a", priority: 15, meta: TEAM_STANDARD })
+    await seedAccount(db, "user_1", { id: "acc_team_b", priority: 14, meta: TEAM_STANDARD })
+    expect(await statuses(db)).toEqual([
+      ["acc_team_a", "active_no_fable"],
+      ["acc_team_b", "standby"],
+    ])
+  })
+
+  it("an account with no stored plan facts fails open to plain active", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    await seedAccount(db, "user_1", { id: "acc_fresh", priority: 15 })
+    expect(await statuses(db)).toEqual([["acc_fresh", "active"]])
   })
 })

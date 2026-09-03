@@ -15,6 +15,7 @@ import {
   resolveGroupModelCandidates,
 } from "../src/routing/candidates"
 import type { ModelGroupModelRow, ModelGroupRow } from "../src/db/model_groups"
+import { getAdapter } from "../src/providers"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
 
 function envWith(db: FakeD1): Env {
@@ -320,5 +321,113 @@ describe("resolveCandidates — top-level combinator used by routes", () => {
     const resolved = await resolveGroupModelCandidates(envWith(db), "user_1", group, "opus")
     expect(resolved!.primary.provider).toBe("claude-code")
     expect(resolved!.candidates.map((c) => c.account.id)).toEqual([grok])
+  })
+})
+
+describe("model eligibility — Claude Code Fable seat rule (docs/providers.md § Routing module \"Candidates\")", () => {
+  function seedClaude(
+    db: FakeD1,
+    id: string,
+    priority: number,
+    meta: Record<string, unknown> | null,
+    snapshotAccount?: Record<string, unknown>,
+  ): string {
+    db.seed("upstream_accounts", [
+      {
+        id,
+        user_id: "user_1",
+        provider: "claude-code",
+        external_account_id: null,
+        label: id,
+        priority,
+        encrypted_payload: "encrypted",
+        account_meta_json: meta ? JSON.stringify(meta) : null,
+        usage_snapshot_json: snapshotAccount
+          ? JSON.stringify({ windows: [], account: snapshotAccount, error: null, stale: false })
+          : null,
+        usage_fetched_at: null,
+        usage_fetching_at: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    ])
+    return id
+  }
+  const TEAM_STANDARD = { plan_type: "claude_team", rate_limit_tier: "default_raven" }
+  const TEAM_PREMIUM = { plan_type: "claude_team", rate_limit_tier: "default_claude_max_5x" }
+  const MAX = { plan_type: "claude_max", rate_limit_tier: "default_claude_max_5x" }
+
+  it("a standard Team seat contributes nothing for a claude-fable model — the Max account below it is the only candidate", async () => {
+    const db = new FakeD1()
+    seedClaude(db, "acc_team", 15, TEAM_STANDARD)
+    seedClaude(db, "acc_max", 14, MAX)
+    const fable = await resolveCandidates(envWith(db), "user_1", "claude-code/claude-fable-5-1")
+    expect(fable!.candidates.map((c) => c.account.id)).toEqual(["acc_max"])
+  })
+
+  it("the same pool serves a non-Fable model in full priority order", async () => {
+    const db = new FakeD1()
+    seedClaude(db, "acc_team", 15, TEAM_STANDARD)
+    seedClaude(db, "acc_max", 14, MAX)
+    const sonnet = await resolveCandidates(envWith(db), "user_1", "claude-code/claude-sonnet-5")
+    expect(sonnet!.candidates.map((c) => c.account.id)).toEqual(["acc_team", "acc_max"])
+  })
+
+  it("a Team Premium seat stays a Fable candidate", async () => {
+    const db = new FakeD1()
+    seedClaude(db, "acc_premium", 15, TEAM_PREMIUM)
+    const fable = await resolveCandidates(envWith(db), "user_1", "claude-code/claude-fable-5-1")
+    expect(fable!.candidates.map((c) => c.account.id)).toEqual(["acc_premium"])
+  })
+
+  it("fails open: an account with no stored profile is a Fable candidate", async () => {
+    const db = new FakeD1()
+    seedClaude(db, "acc_fresh", 15, null)
+    const fable = await resolveCandidates(envWith(db), "user_1", "claude-code/claude-fable-5-1")
+    expect(fable!.candidates.map((c) => c.account.id)).toEqual(["acc_fresh"])
+  })
+
+  it("the usage snapshot's account facts win over account_meta_json (a seat upgraded since login)", async () => {
+    const db = new FakeD1()
+    seedClaude(db, "acc_upgraded", 15, TEAM_STANDARD, TEAM_PREMIUM)
+    const fable = await resolveCandidates(envWith(db), "user_1", "claude-code/claude-fable-5-1")
+    expect(fable!.candidates.map((c) => c.account.id)).toEqual(["acc_upgraded"])
+  })
+
+  it("every account ineligible ⇒ an empty candidate list (dispatch's no_upstream_account), never a bench", async () => {
+    const db = new FakeD1()
+    seedClaude(db, "acc_team", 15, TEAM_STANDARD)
+    const fable = await resolveCandidates(envWith(db), "user_1", "claude-code/claude-fable-5-1")
+    expect(fable).not.toBeNull()
+    expect(fable!.candidates).toEqual([])
+  })
+
+  it("a group target pinned to an ineligible account contributes nothing for Fable, and the next target carries on", async () => {
+    const db = new FakeD1()
+    seedClaude(db, "acc_team", 15, TEAM_STANDARD)
+    seedClaude(db, "acc_max", 14, MAX)
+    const pinnedFable = await poolCandidates(envWith(db), "user_1", {
+      provider: "claude-code",
+      upstreamModel: "claude-fable-5-1",
+      isBuiltin: true,
+      adapter: getAdapter("claude-code"),
+      accountId: "acc_team",
+    })
+    expect(pinnedFable).toEqual([])
+    const pinnedSonnet = await poolCandidates(envWith(db), "user_1", {
+      provider: "claude-code",
+      upstreamModel: "claude-sonnet-5",
+      isBuiltin: true,
+      adapter: getAdapter("claude-code"),
+      accountId: "acc_team",
+    })
+    expect(pinnedSonnet.map((c) => c.account.id)).toEqual(["acc_team"])
+  })
+
+  it("providers without a rule are untouched — every grok account is a candidate for any model", async () => {
+    const db = new FakeD1()
+    const acc = seedAccount(db, "grok")
+    const resolved = await resolveCandidates(envWith(db), "user_1", "grok/claude-fable-5-1")
+    expect(resolved!.candidates.map((c) => c.account.id)).toEqual([acc])
   })
 })

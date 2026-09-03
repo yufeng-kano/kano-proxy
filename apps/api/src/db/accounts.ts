@@ -249,6 +249,26 @@ export function readUsageSnapshot(row: AccountRow): UsageSnapshot | null {
 }
 
 /**
+ * Stored profile facts for routing rules (docs/providers.md § Routing module
+ * "Candidates"): `account_meta_json` with the usage snapshot's fresher
+ * `account` merged over it — the same merge the Providers page shows. Never
+ * an upstream call; `null` when neither source exists.
+ */
+export function accountProfileMeta(row: AccountRow): Record<string, unknown> | null {
+  let meta: Record<string, unknown> | null = null
+  if (row.account_meta_json) {
+    try {
+      meta = JSON.parse(row.account_meta_json) as Record<string, unknown>
+    } catch {
+      meta = null
+    }
+  }
+  const snapshotAccount = readUsageSnapshot(row)?.account
+  if (!meta && !snapshotAccount) return null
+  return { ...meta, ...snapshotAccount }
+}
+
+/**
  * Single-flight lock acquire, as a compare-and-swap.
  *
  * D1 has no cross-request transactions, so this leans on SQLite's

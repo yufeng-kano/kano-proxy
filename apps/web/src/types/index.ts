@@ -4,8 +4,18 @@ export type ProviderId = "claude-code" | "codex" | "grok" | "antigravity"
  * Where a request goes right now, not which row is first: `limited` is a
  * usage window at 100% waiting on its reset (docs/admin-ui.md § Providers
  * page). The `Primary` badge reads priority order instead.
+ * `active_no_fable` / `active_fable` exist only on Claude Code pools: the
+ * first usable account when its seat cannot serve Fable, and the first
+ * usable Fable-eligible account below it — where Fable traffic goes.
  */
-export type AccountStatus = "active" | "standby" | "limited" | "benched" | "unusable"
+export type AccountStatus =
+  | "active"
+  | "active_no_fable"
+  | "active_fable"
+  | "standby"
+  | "limited"
+  | "benched"
+  | "unusable"
 
 export type User = {
   id: string
