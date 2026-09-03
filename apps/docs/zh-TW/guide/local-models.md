@@ -49,7 +49,7 @@ $ kano-proxy add
 
 - **Slug** 會成為供應商前綴，模型以 `my-mac/<model>` 呼叫。
 - **Type** 是本機伺服器講的 API，`openai` 或 `anthropic`。
-- **Target** 是本機的 base URL，要包含 `/v1`。
+- **Target** 是本機的 base URL。`openai` 要包含 `/v1`（`http://localhost:11434/v1`）；`anthropic` 只填 origin（`http://localhost:11434`），因為 CLI 會自己接上 `/v1/messages`。
 
 CLI 會向伺服器要模型清單。保留預設的「All models」，之後新拉的模型會自動出現。也可以只挑一部分公開。
 

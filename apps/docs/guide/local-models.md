@@ -49,7 +49,7 @@ $ kano-proxy add
 
 - **Slug** becomes the provider prefix: models are called as `my-mac/<model>`.
 - **Type** is the API your local server speaks, `openai` or `anthropic`.
-- **Target** is the local base URL, including its `/v1`.
+- **Target** is the local base URL. For `openai` include the `/v1` (`http://localhost:11434/v1`); for `anthropic` give the origin only (`http://localhost:11434`), because the CLI appends `/v1/messages` itself.
 
 The CLI asks the server for its model list. Keep the default, "All models", and any model you pull later appears automatically. Or pick a subset to expose.
 
