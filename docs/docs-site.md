@@ -66,7 +66,7 @@ Only `/docs/*` and `/login` are meant to be indexed. The admin routes render the
 
 | Piece | Where | What it does |
 |-------|-------|--------------|
-| `apps/web/public/robots.txt` | site root | Allows crawling. No `Sitemap:` line because the directive needs an absolute URL and tracked files carry no hostname; submit `/docs/sitemap.xml` in Search Console instead |
+| `apps/web/public/robots.txt` | site root | Allows crawling, except the Worker-routed API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/agent/`): those never reach Pages, so `_headers` cannot mark them, and an API surface is what `Disallow` is for. No `Sitemap:` line because the directive needs an absolute URL and tracked files carry no hostname; submit `/docs/sitemap.xml` in Search Console instead |
 | `apps/web/public/_headers` | site root | `X-Robots-Tag: noindex` on `/*`, detached again (`! X-Robots-Tag`) for `/docs/*` and `/login`. A catch-all rather than a route list, because any unknown path also serves the SPA shell. Nothing to maintain when a route is added |
 | `apps/web/index.html` | SPA shell | `description`, Open Graph and Twitter card tags, so a shared link to the app gets a preview card. Copy repeats the login pitch from the message catalog; keep them in sync |
 | Router `afterEach` | SPA | Sets `document.title` to `<page> · <site name>` from the route's `titleKey` (a catalog key), so tabs and history are readable. `<html lang>` is already set by `setLocale()` ([i18n.md](./i18n.md)) |
