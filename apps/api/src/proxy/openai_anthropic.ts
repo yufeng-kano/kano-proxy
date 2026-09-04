@@ -29,6 +29,45 @@ export function stripCacheControl(value: unknown): unknown {
  * mirrors Anthropic's own metadata.user_id limit (≤ 256 chars); anything
  * else yields undefined — a client-supplied id is translated, never invented.
  */
+/**
+ * The client's structured-output request, from either Anthropic spelling:
+ * `output_config.format` (current) wins over the retired top-level
+ * `output_format`, which Anthropic itself now rejects but older SDKs and
+ * proxies still emit. Shared by every Anthropic-ingress converter.
+ */
+export function anthropicOutputFormat(
+  body: Record<string, unknown>,
+): { type?: string; schema?: unknown } | undefined {
+  const config = body.output_config
+  if (config && typeof config === "object" && !Array.isArray(config)) {
+    const format = (config as { format?: unknown }).format
+    if (format && typeof format === "object") return format as { type?: string; schema?: unknown }
+  }
+  if (body.output_format && typeof body.output_format === "object") {
+    return body.output_format as { type?: string; schema?: unknown }
+  }
+  return undefined
+}
+
+/**
+ * Native-passthrough normalization: a retired top-level `output_format`
+ * moves to `output_config.format` when the body has no current-spelling
+ * format of its own. Anthropic `400`s the old field ("This field is
+ * deprecated. Use 'output_config.format' instead"), and clients on older
+ * SDKs / proxies still send it. Returns the same object when nothing moves.
+ */
+export function moveRetiredOutputFormat(body: Record<string, unknown>): Record<string, unknown> {
+  const legacy = body.output_format
+  if (!legacy || typeof legacy !== "object") return body
+  const config =
+    body.output_config && typeof body.output_config === "object" && !Array.isArray(body.output_config)
+      ? (body.output_config as Record<string, unknown>)
+      : {}
+  const { output_format: _dropped, ...rest } = body
+  if (config.format && typeof config.format === "object") return rest
+  return { ...rest, output_config: { ...config, format: legacy } }
+}
+
 export function promptCacheKeyFromAnthropicMetadata(
   body: Record<string, unknown>,
 ): string | undefined {
@@ -213,8 +252,9 @@ export function anthropicToOpenAIChatRequest(body: Record<string, unknown>): {
   if (cleaned.tool_choice) {
     out.tool_choice = mapAnthropicToolChoice(cleaned.tool_choice)
   }
-  if (cleaned.output_format && typeof cleaned.output_format === "object") {
-    const of = cleaned.output_format as { type?: string; schema?: unknown }
+  const outputFormat = anthropicOutputFormat(cleaned)
+  if (outputFormat) {
+    const of = outputFormat
     if (of.type === "json_schema" && of.schema) {
       out.response_format = {
         type: "json_schema",
@@ -1092,9 +1132,11 @@ export function openaiToAnthropicMessages(input: {
   if (input.response_format) {
     const rf = input.response_format as { type?: string; json_schema?: { schema?: unknown } }
     if (rf.type === "json_schema" && rf.json_schema?.schema) {
-      body.output_format = {
-        type: "json_schema",
-        schema: rf.json_schema.schema,
+      // `output_config.format` is the current Anthropic field; the retired
+      // top-level `output_format` is a hard 400 ("This field is deprecated").
+      body.output_config = {
+        ...((body.output_config as Record<string, unknown> | undefined) ?? {}),
+        format: { type: "json_schema", schema: rf.json_schema.schema },
       }
     } else if (rf.type === "json_object") {
       // best-effort: not always supported; leave as instruction-free skip

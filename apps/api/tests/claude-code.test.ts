@@ -578,3 +578,47 @@ describe("supportsModel — Fable seat eligibility (docs/providers.md § Claude 
     expect(supports({ plan_type: "claude_team", rate_limit_tier: 42 }, "claude-fable-5-1")).toBe(true)
   })
 })
+
+describe("claudeCodeAdapter.messages — retired output_format", () => {
+  const fakeAccount = {
+    row: {
+      id: "acc_1",
+      user_id: "user_1",
+      provider: "claude-code",
+      external_account_id: null,
+      label: null,
+      custom_label: null,
+      priority: 1,
+      encrypted_payload: "",
+      account_meta_json: null,
+      usage_snapshot_json: null,
+      usage_fetched_at: null,
+      usage_fetching_at: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    },
+    credential: { access_token: "tok_test" },
+  }
+  const originalFetch = globalThis.fetch
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it("moves a client's top-level output_format to output_config.format on the native passthrough", async () => {
+    let sent: Record<string, unknown> | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      sent = JSON.parse(String(init?.body))
+      return Response.json({ id: "msg_1", type: "message", role: "assistant", content: [], stop_reason: "end_turn", usage: {} })
+    }) as typeof fetch
+
+    await claudeCodeAdapter.messages!({} as unknown as Env, fakeAccount, {
+      model: "claude-opus-5",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "hi" }],
+      output_format: { type: "json_schema", schema: { type: "object" } },
+    }, new Headers())
+
+    expect(sent).not.toHaveProperty("output_format")
+    expect(sent!.output_config).toEqual({ format: { type: "json_schema", schema: { type: "object" } } })
+  })
+})

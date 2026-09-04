@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  moveRetiredOutputFormat,
   anthropicSseToOpenAIStream,
   anthropicToOpenAIChatRequest,
   anthropicToOpenAIResponse,
@@ -2008,5 +2009,56 @@ describe("anthropicToOpenAIChatRequest: thinking → reasoning_content round-tri
       messages: [{ role: "assistant", content: [{ type: "text", text: "hi" }] }],
     })
     expect(out.messages[0]).toEqual({ role: "assistant", content: "hi" })
+  })
+})
+
+describe("structured output field naming (Anthropic output_config.format)", () => {
+  it("openaiToAnthropicMessages sends output_config.format, never the retired output_format", () => {
+    const body = openaiToAnthropicMessages({
+      model: "m",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "x" }],
+      output_config: { effort: "high" },
+      response_format: {
+        type: "json_schema",
+        json_schema: { name: "verdict", schema: { type: "object", properties: { ok: { type: "boolean" } } } },
+      },
+    })
+    expect(body).not.toHaveProperty("output_format")
+    expect(body.output_config).toEqual({
+      effort: "high",
+      format: { type: "json_schema", schema: { type: "object", properties: { ok: { type: "boolean" } } } },
+    })
+  })
+
+  it("anthropicToOpenAIChatRequest reads output_config.format, and prefers it over output_format", () => {
+    const current = anthropicToOpenAIChatRequest({
+      model: "grok/m",
+      messages: [{ role: "user", content: "hi" }],
+      output_config: { format: { type: "json_schema", schema: { type: "object", properties: { a: {} } } } },
+      output_format: { type: "json_schema", schema: { type: "object", properties: { legacy: {} } } },
+    })
+    expect(current.response_format).toEqual({
+      type: "json_schema",
+      json_schema: { name: "response", schema: { type: "object", properties: { a: {} } } },
+    })
+  })
+
+  it("moveRetiredOutputFormat relocates output_format only when no current-spelling format exists", () => {
+    expect(
+      moveRetiredOutputFormat({
+        model: "m",
+        output_format: { type: "json_schema", schema: { type: "object" } },
+        output_config: { effort: "low" },
+      }),
+    ).toEqual({ model: "m", output_config: { effort: "low", format: { type: "json_schema", schema: { type: "object" } } } })
+    expect(
+      moveRetiredOutputFormat({
+        output_format: { type: "json_schema", schema: { type: "object", properties: { old: {} } } },
+        output_config: { format: { type: "json_schema", schema: { type: "object" } } },
+      }),
+    ).toEqual({ output_config: { format: { type: "json_schema", schema: { type: "object" } } } })
+    const untouched = { model: "m", messages: [] }
+    expect(moveRetiredOutputFormat(untouched)).toBe(untouched)
   })
 })

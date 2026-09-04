@@ -526,3 +526,18 @@ describe("collectGrokResponsesSseToAnthropic", () => {
     })
   })
 })
+
+describe("anthropicToGrokResponses: output_config.format", () => {
+  it("maps the current Anthropic structured-output spelling to Responses text.format", () => {
+    const { body } = anthropicToGrokResponses(
+      {
+        messages: [{ role: "user", content: "hi" }],
+        output_config: { format: { type: "json_schema", schema: { type: "object", properties: { b: {} } } } },
+      },
+      { upstreamModel: "grok-4.5" },
+    )
+    expect(body.text).toEqual({
+      format: { type: "json_schema", name: "response", schema: { type: "object", properties: { b: {} } }, strict: false },
+    })
+  })
+})

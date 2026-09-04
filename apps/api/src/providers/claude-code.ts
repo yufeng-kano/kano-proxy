@@ -3,7 +3,7 @@ import type { AcquiredAccount } from "../pool/acquire"
 import { mapReasoning } from "../utils/reasoning"
 import { refreshOAuthCredential } from "./refresh"
 import type { ChatCompletionRequest, ProviderAdapter, UsageWindow } from "./types"
-import { openaiToAnthropicMessages, anthropicToOpenAIResponse } from "../proxy/openai_anthropic"
+import { anthropicToOpenAIResponse, moveRetiredOutputFormat, openaiToAnthropicMessages } from "../proxy/openai_anthropic"
 
 const ANTHROPIC_API = "https://api.anthropic.com"
 const OAUTH_TOKEN = "https://console.anthropic.com/v1/oauth/token"
@@ -172,7 +172,7 @@ async function forwardToAnthropic(
 ): Promise<Response> {
   const acc = await refreshClaude(env, account)
   const raw = typeof body === "object" && body ? { ...(body as object) } : {}
-  const patched = prependRequiredSystem(raw as Record<string, unknown>)
+  const patched = moveRetiredOutputFormat(prependRequiredSystem(raw as Record<string, unknown>))
   const clientBeta = headers.get("anthropic-beta")
   const hasOutputConfig = "output_config" in patched
   return fetch(url, {

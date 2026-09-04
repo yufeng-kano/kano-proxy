@@ -7,7 +7,7 @@
 
 import { isValidGrokEncryptedContent } from "../providers/grok_encrypted_content"
 import { mapReasoning, parseReasoningEffort, type ReasoningEffort } from "../utils/reasoning"
-import { stripCacheControl } from "./openai_anthropic"
+import { anthropicOutputFormat, stripCacheControl } from "./openai_anthropic"
 
 export type GrokThinkingMode = "disabled" | "enabled" | "default"
 
@@ -119,8 +119,9 @@ export function anthropicToGrokResponses(
 
   // stop_sequences: Responses has no Chat Completions `stop` equivalent —
   // dropped (same as codex). See docs/api.md grok Anthropic row.
-  if (cleaned.output_format && typeof cleaned.output_format === "object") {
-    const of = cleaned.output_format as { type?: string; schema?: unknown }
+  const outputFormat = anthropicOutputFormat(cleaned)
+  if (outputFormat) {
+    const of = outputFormat
     if (of.type === "json_schema" && of.schema) {
       out.text = {
         format: {
