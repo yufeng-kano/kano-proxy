@@ -9,12 +9,14 @@ description: Base URLs, authentication headers, provider/model ids, model groups
 
 | Protocol | Base URL | The client appends |
 |----------|----------|--------------------|
-| OpenAI-compatible | `https://<your-domain>/openai/v1` | `/chat/completions`, `/models`, `/audio/transcriptions` |
+| OpenAI-compatible | `https://<your-domain>/openai/v1` | `/chat/completions`, `/responses`, `/models`, `/audio/transcriptions` |
 | Anthropic Messages | `https://<your-domain>/anthropic` | `/v1/messages`, `/v1/models` |
 
 Some Anthropic SDKs and tools append `/messages` directly instead of `/v1/messages`. For those, set the base to `https://<your-domain>/anthropic/v1`. Each agent page says which form its tool expects.
 
-Not available: the OpenAI Responses API (`/responses`), embeddings, image generation, and audio output.
+`/responses` is the OpenAI Responses API, the wire the Codex CLI uses. It works for every model id: Codex models pass through natively, other providers are converted. Stateful features (`previous_response_id`, `conversation`, fetching a stored response) are not available, and hosted tools such as web search only reach Codex models. See the [Codex CLI](/agents/codex-cli) page.
+
+Not available: embeddings, image generation, and audio output.
 
 ## Authentication
 

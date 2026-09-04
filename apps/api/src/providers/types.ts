@@ -72,6 +72,14 @@ export type ChatCompletionRequest = {
   prompt_cache_key?: string
   affinity?: AffinityIds
   /**
+   * Set only by `POST /openai/v1/responses` when every resolved candidate is
+   * codex (docs/api.md § `POST /openai/v1/responses`): the client's own
+   * Responses body. The codex adapter forwards it upstream after its usual
+   * fix-ups and returns the upstream Responses SSE unconverted; no other
+   * adapter ever sees it, because the route never sets it for them.
+   */
+  responsesBody?: Record<string, unknown>
+  /**
    * The OpenAI Chat Completions-shaped body this request came from — the raw
    * client JSON on `/openai/v1`, or its Anthropic→OpenAI conversion on
    * `/anthropic`. Built-in adapters build their upstream body from the named

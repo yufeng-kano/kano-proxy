@@ -6,6 +6,7 @@ import { listModelsForUser } from "../catalog/models"
 import { logRequest } from "../logging/request_log"
 import { isNativeAnthropicPassthrough } from "./anthropic"
 import { resolveRequestModel } from "./resolve_request"
+import { handleResponses } from "./responses"
 import { dispatchAudioTranscriptions, dispatchChatCompletions } from "../proxy/dispatch"
 import { SUPPORTED_AUDIO_FORMATS, scanAudioParts } from "../utils/audio"
 import { detectOpenAIToolLoop, loopDetectedMessage } from "../utils/loop_guard"
@@ -242,6 +243,7 @@ export async function handleChatCompletions(c: Context<HonoEnv>): Promise<Respon
 }
 
 openaiRoutes.post("/chat/completions", handleChatCompletions)
+openaiRoutes.post("/responses", handleResponses)
 
 export async function handleAudioTranscriptions(c: Context<HonoEnv>): Promise<Response> {
   const started = Date.now()

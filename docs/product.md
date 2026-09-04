@@ -2,7 +2,7 @@
 
 ## Goals
 
-1. **OpenAI-compatible surface** (`/openai/v1`) for coding agents (CC Switch, Codex-style clients, OpenAI SDKs).
+1. **OpenAI-compatible surface** (`/openai/v1`) for coding agents (CC Switch, OpenAI SDKs) — Chat Completions plus the **Responses API** (`/responses`), which is what the Codex CLI speaks, so Codex can drive any bound provider through the proxy.
 2. **Anthropic Messages surface** (`/anthropic`) for Claude Code and Anthropic-shaped clients.
 3. **Every bound subscription provider** (`claude-code`, `codex`, `grok`) is available on **both** surfaces via format adapters — not “one API format per provider.”
 4. **Per-user subscription account pools** (not shared Platform API keys as the product).
@@ -21,6 +21,7 @@
 - Content logging or prompt audit storage
 - Inventing Anthropic `cache_control` on OpenAI→Claude conversion
 - Inventing Grok sticky headers (`x-grok-conv-id` etc.)
+- Stateful Responses API features: `previous_response_id`, `conversation`, `background`, `GET /responses/{id}`, and hosted tools executed by the proxy (web search, code interpreter, …). The proxy keeps no upstream state (`store: false` everywhere); hosted tools pass through to codex only (see [api.md](./api.md) § `POST /openai/v1/responses`)
 
 ## Tenants
 

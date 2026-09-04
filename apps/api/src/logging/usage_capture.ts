@@ -40,12 +40,15 @@ function num(v: unknown): number | undefined {
 export function fromOpenAIUsage(u: Record<string, unknown> | null | undefined): NormalizedUsage {
   if (!u) return { ...NULL_USAGE }
   const details = u.prompt_tokens_details as Record<string, unknown> | undefined
+  // Responses API shape (native `/openai/v1/responses` path): the cached
+  // count sits under `input_tokens_details` instead.
+  const inputDetails = u.input_tokens_details as Record<string, unknown> | undefined
   const prompt = num(u.prompt_tokens) ?? num(u.input_tokens)
   const completion = num(u.completion_tokens) ?? num(u.output_tokens)
   return {
     promptTokens: prompt ?? null,
     completionTokens: completion ?? null,
-    cacheReadInputTokens: num(details?.cached_tokens) ?? null,
+    cacheReadInputTokens: num(details?.cached_tokens) ?? num(inputDetails?.cached_tokens) ?? null,
     cacheCreationInputTokens:
       num(details?.cache_write_tokens) ?? num(u.cache_creation_input_tokens) ?? null,
   }
@@ -113,13 +116,31 @@ export function createOpenAISseUsageSniffer(): UsageSniffer {
     }
     // Cheap pre-filter before JSON.parse — every other SSE line (a plain
     // content/tool_calls delta) is skipped without ever being parsed.
-    if (!data.includes('"usage"') && !data.includes('"finish_reason"')) return
+    if (
+      !data.includes('"usage"') &&
+      !data.includes('"finish_reason"') &&
+      !data.includes('"response.completed"') &&
+      !data.includes('"response.incomplete"')
+    ) {
+      return
+    }
     try {
       const json = JSON.parse(data) as {
+        type?: unknown
         usage?: unknown
+        response?: { usage?: unknown }
         choices?: Array<{ finish_reason?: unknown }>
       }
       if (!json || typeof json !== "object") return
+      // Responses SSE relayed by the native `/openai/v1/responses` path: the
+      // terminal event carries the usage and is the completion signal.
+      if (json.type === "response.completed" || json.type === "response.incomplete") {
+        seenCompletion = true
+        if (json.response?.usage && typeof json.response.usage === "object") {
+          usage = json.response.usage as Record<string, unknown>
+        }
+        return
+      }
       if (json.usage && typeof json.usage === "object") {
         usage = json.usage as Record<string, unknown>
       }

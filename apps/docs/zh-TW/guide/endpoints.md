@@ -9,12 +9,14 @@ description: Kano Proxy 的 base URL、驗證標頭、provider/model id、模型
 
 | 協定 | Base URL | 客戶端自己會接上 |
 |------|----------|------------------|
-| OpenAI 相容 | `https://<your-domain>/openai/v1` | `/chat/completions`、`/models`、`/audio/transcriptions` |
+| OpenAI 相容 | `https://<your-domain>/openai/v1` | `/chat/completions`、`/responses`、`/models`、`/audio/transcriptions` |
 | Anthropic Messages | `https://<your-domain>/anthropic` | `/v1/messages`、`/v1/models` |
 
 有些 Anthropic SDK 與工具會直接接 `/messages` 而不是 `/v1/messages`。這類工具要把 base 設成 `https://<your-domain>/anthropic/v1`。各 agent 頁面都會註明該工具要哪一種。
 
-不支援：OpenAI Responses API（`/responses`）、embeddings、圖片生成、音訊輸出。
+`/responses` 是 OpenAI Responses API，也就是 Codex CLI 使用的協定。所有模型 id 都能用：Codex 模型原樣透傳，其他供應商由 proxy 轉換。有狀態的功能（`previous_response_id`、`conversation`、讀取已儲存的回應）不支援；網頁搜尋等託管工具只有 Codex 模型能用。詳見 [Codex CLI](/zh-TW/agents/codex-cli) 頁面。
+
+不支援：embeddings、圖片生成、音訊輸出。
 
 ## 驗證
 

@@ -9,6 +9,7 @@ kano-proxy/
         env.ts
         routes/
           openai.ts
+          responses.ts           # POST /openai/v1/responses (docs/api.md): native codex passthrough or Responses↔Chat conversion
           anthropic.ts
           auth.ts
           keys.ts
@@ -17,7 +18,7 @@ kano-proxy/
           agent.ts               # /agent/v1: CLI device auth + tunnel connect (docs/cli.md)
           cli.ts                 # /api/cli: session-side CLI device/provider management
         auth/            # session, google, api keys
-        proxy/           # stream helpers, openai↔provider
+        proxy/           # stream helpers, openai↔provider; responses_openai.ts = Responses API ↔ Chat Completions
         providers/       # claude-code, codex, grok, antigravity (builtin registry) +
                           #   custom_openai.ts / custom_anthropic.ts (per-request
                           #   adapters for user-defined endpoints, not in the

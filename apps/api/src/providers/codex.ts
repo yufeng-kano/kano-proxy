@@ -154,6 +154,10 @@ export const codexAdapter: ProviderAdapter = {
     const chatgptAccountId =
       acc.credential.account_id || accountIdFromJwt(acc.credential.access_token) || ""
 
+    if (req.responsesBody) {
+      return codexNativeResponses(env, acc, chatgptAccountId, req, extras, mapped.reasoning)
+    }
+
     const {
       codexReasoningReplaySessionKey,
       readCodexReasoningReplay,
@@ -613,4 +617,180 @@ function mapTools(tools: unknown): unknown[] {
     }
     return t
   })
+}
+
+// ---------------------------------------------------------------------------
+// Native Responses ingress (`POST /openai/v1/responses`, docs/api.md)
+// ---------------------------------------------------------------------------
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v)
+}
+
+function responsesItemText(content: unknown): string {
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  const out: string[] = []
+  for (const part of content) {
+    if (typeof part === "string") out.push(part)
+    else if (isRecord(part) && typeof part.text === "string") out.push(part.text)
+  }
+  return out.join("\n\n")
+}
+
+const CALL_ID_ITEM_TYPES = new Set([
+  "function_call",
+  "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+])
+
+/**
+ * The client's own Responses body, fitted for `/codex/responses` with the
+ * same fix-ups the Chat path applies (docs/api.md "Native path"): system
+ * items hoisted into `instructions`, `store: false` / `stream: true`
+ * forced, `include` guaranteed, effort clamped, call_ids shortened,
+ * `prompt_cache_key` fitted, tool_choice dropped without tools, rejected
+ * fields stripped. Everything else — client-echoed reasoning items, hosted
+ * tools, namespace groups, `text`, `client_metadata` — rides through
+ * untouched. Pure: no network, unit-testable directly.
+ */
+export async function buildCodexNativeRequestBody(
+  client: Record<string, unknown>,
+  opts: {
+    upstreamModel: string
+    /** Already mapped/clamped by the adapter; undefined when the client sent no effort, or `none`. */
+    reasoning?: { effort: string; summary: "auto" }
+  },
+): Promise<Record<string, unknown>> {
+  const body: Record<string, unknown> = { ...client, model: opts.upstreamModel, stream: true, store: false }
+
+  const rawInput = body.input
+  const items: unknown[] =
+    typeof rawInput === "string"
+      ? [{ type: "message", role: "user", content: rawInput }]
+      : Array.isArray(rawInput)
+        ? rawInput
+        : []
+  const system: string[] = []
+  const input: unknown[] = []
+  for (const item of items) {
+    if (!isRecord(item)) continue
+    if (item.role === "system" && (item.type === "message" || item.type === undefined)) {
+      const text = responsesItemText(item.content)
+      if (text) system.push(text)
+      continue
+    }
+    if (typeof item.type === "string" && CALL_ID_ITEM_TYPES.has(item.type) && typeof item.call_id === "string") {
+      input.push({ ...item, call_id: await shortenCodexCallId(item.call_id) })
+      continue
+    }
+    input.push(item)
+  }
+  const instructions = [typeof body.instructions === "string" ? body.instructions : "", ...system]
+    .filter(Boolean)
+    .join("\n\n")
+  if (instructions) body.instructions = instructions
+  else delete body.instructions
+  body.input = input
+
+  const include = Array.isArray(body.include)
+    ? body.include.filter((s): s is string => typeof s === "string")
+    : []
+  if (!include.includes("reasoning.encrypted_content")) include.push("reasoning.encrypted_content")
+  body.include = include
+
+  const clientReasoning = isRecord(body.reasoning) ? { ...body.reasoning } : undefined
+  if (opts.reasoning) {
+    body.reasoning = {
+      ...(clientReasoning ?? {}),
+      effort: opts.reasoning.effort,
+      summary: clientReasoning?.summary ?? opts.reasoning.summary,
+    }
+  } else if (clientReasoning && clientReasoning.effort !== undefined) {
+    // Effort `none` (or unmapped): drop the effort but keep the client's
+    // other reasoning settings, e.g. the summary mode the CLI asked for.
+    delete clientReasoning.effort
+    if (Object.keys(clientReasoning).length) body.reasoning = clientReasoning
+    else delete body.reasoning
+  }
+
+  const hasTools = Array.isArray(body.tools) && body.tools.length > 0
+  if (!hasTools) {
+    delete body.tools
+    delete body.tool_choice
+    delete body.parallel_tool_calls
+  }
+
+  if (typeof body.prompt_cache_key === "string" && body.prompt_cache_key) {
+    body.prompt_cache_key = await fitCodexPromptCacheKey(body.prompt_cache_key)
+  } else {
+    delete body.prompt_cache_key
+  }
+
+  return stripRejectedCodexFields(body)
+}
+
+/**
+ * Native path transport: same identity headers, relay, and error handling
+ * as `chatCompletions`, but the upstream Responses SSE is returned as-is
+ * (stream) or collected into its terminal `response` object (non-stream).
+ * The reasoning replay cache is deliberately not involved — a Responses
+ * client echoes its own reasoning items (docs/providers.md § Codex).
+ */
+async function codexNativeResponses(
+  env: Env,
+  acc: AcquiredAccount,
+  chatgptAccountId: string,
+  req: ChatCompletionRequest,
+  extras: Parameters<ProviderAdapter["chatCompletions"]>[3],
+  reasoning: { effort: string; summary: "auto" } | undefined,
+): Promise<Response> {
+  const body = await buildCodexNativeRequestBody(req.responsesBody!, {
+    upstreamModel: req.upstreamModel,
+    reasoning,
+  })
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${acc.credential.access_token}`,
+    "user-agent": CODEX_USER_AGENT,
+    originator: CODEX_ORIGINATOR,
+    connection: "Keep-Alive",
+    session_id: await codexSessionIdHeader(req),
+    "content-type": "application/json",
+    accept: "text/event-stream",
+  }
+  if (chatgptAccountId) headers["chatgpt-account-id"] = chatgptAccountId
+
+  const { codexUpstream, relayFetch } = await import("./codex_relay")
+  const upstream = codexUpstream(env)
+  const res = await relayFetch(upstream, `${upstream.base}/codex/responses`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: extras?.signal,
+  })
+
+  if (!res.ok) {
+    const t = await res.text()
+    return new Response(t, {
+      status: res.status,
+      headers: { "content-type": res.headers.get("content-type") || "application/json" },
+    })
+  }
+  if (!res.body) return res
+
+  if (req.stream) {
+    return new Response(res.body, {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    })
+  }
+
+  const { collectResponsesSse } = await import("../proxy/responses_openai")
+  const collected = await collectResponsesSse(res.body)
+  if ("error" in collected) return Response.json(collected, { status: 502 })
+  return Response.json(collected.response)
 }
