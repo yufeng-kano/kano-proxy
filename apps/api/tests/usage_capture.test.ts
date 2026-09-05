@@ -242,19 +242,105 @@ describe("createOpenAISseUsageSniffer", () => {
     })
   })
 
-  it("abandons capture on carry overflow without throwing — further feeds become no-ops", () => {
+  it("skips an over-long non-terminal line and keeps capturing from the next one", () => {
     const sniffer = createOpenAISseUsageSniffer()
     const huge = "data: " + "x".repeat(300 * 1024) // one line, no newline — well past the 256 KiB cap
     expect(() => sniffer.feed(new TextEncoder().encode(huge))).not.toThrow()
-    expect(
-      () =>
-        sniffer.feed(
-          new TextEncoder().encode(
-            "\n" + d({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 9 } }) + "\n",
-          ),
-        ),
-    ).not.toThrow()
     expect(sniffer.finish()).toBeNull()
+    sniffer.feed(
+      new TextEncoder().encode(
+        "\n" + d({ choices: [], usage: { prompt_tokens: 9, completion_tokens: 9 } }) + "\n",
+      ),
+    )
+    expect(sniffer.finish()).toMatchObject({ promptTokens: 9, completionTokens: 9 })
+  })
+})
+
+describe("createOpenAISseUsageSniffer — over-long Responses terminal event (docs/logging.md, native codex path)", () => {
+  const usage = {
+    input_tokens: 82665,
+    input_tokens_details: { cached_tokens: 82432 },
+    output_tokens: 14,
+    output_tokens_details: { reasoning_tokens: 0 },
+    total_tokens: 82679,
+  }
+  /** A `response.completed` event the size of a real Codex turn: the request is echoed back ahead of `usage`. */
+  const terminal = (type: string, filler: number, extra: Record<string, unknown> = {}) =>
+    `event: ${type}\n` +
+    d({
+      type,
+      sequence_number: 42,
+      response: {
+        id: "resp_1",
+        object: "response",
+        status: type === "response.completed" ? "completed" : "incomplete",
+        instructions: "i".repeat(filler),
+        tools: [{ type: "function", name: "shell", parameters: { properties: { usage: { type: "string" } } } }],
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "hi" }] }],
+        ...extra,
+        usage,
+        user: null,
+        metadata: {},
+      },
+    }) +
+    "\n\n"
+
+  it("captures usage and completion from a response.completed line far past the carry cap, fed in 16 KiB chunks", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    for (const chunk of byteChunks(terminal("response.completed", 600 * 1024), 16 * 1024)) sniffer.feed(chunk)
+    expect(sniffer.finish()).toEqual({
+      promptTokens: 82665,
+      completionTokens: 14,
+      cacheReadInputTokens: 82432,
+      cacheCreationInputTokens: null,
+    })
+    expect(sniffer.complete()).toBe(true)
+  })
+
+  it("still works when the usage marker and object straddle chunk boundaries (7-byte chunks)", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    for (const chunk of byteChunks(terminal("response.incomplete", 300 * 1024), 7)) sniffer.feed(chunk)
+    expect(sniffer.finish()).toMatchObject({ promptTokens: 82665, completionTokens: 14, cacheReadInputTokens: 82432 })
+    expect(sniffer.complete()).toBe(true)
+  })
+
+  it("identifies the terminal event by its leading \"type\" when no event: line precedes it", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    const line = terminal("response.completed", 300 * 1024).replace(/^event: [^\n]*\n/, "")
+    for (const chunk of byteChunks(line, 32 * 1024)) sniffer.feed(chunk)
+    expect(sniffer.finish()).toMatchObject({ promptTokens: 82665 })
+    expect(sniffer.complete()).toBe(true)
+  })
+
+  it("identifies it by the event: line when the JSON's type key is not first", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    const line =
+      "event: response.completed\n" +
+      d({ sequence_number: 1, response: { instructions: "i".repeat(300 * 1024), usage }, type: "response.completed" }) +
+      "\n\n"
+    for (const chunk of byteChunks(line, 32 * 1024)) sniffer.feed(chunk)
+    expect(sniffer.finish()).toMatchObject({ promptTokens: 82665, cacheReadInputTokens: 82432 })
+    expect(sniffer.complete()).toBe(true)
+  })
+
+  it("ignores a tool schema's usage property and a null usage — only an object with numeric token counts counts", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    // An over-long response.created with "usage":null is skipped as a non-terminal line …
+    const created = terminal("response.created", 300 * 1024, { usage: null }).replace(/"usage":\{[^}]*\{[^}]*\}[^}]*\}[^}]*\}/, '"usage":null')
+    for (const chunk of byteChunks(created, 32 * 1024)) sniffer.feed(chunk)
+    expect(sniffer.finish()).toBeNull()
+    expect(sniffer.complete()).toBe(false)
+    // … then the terminal line, whose tool schema mentions `usage` before the real object, is captured.
+    for (const chunk of byteChunks(terminal("response.completed", 300 * 1024), 32 * 1024)) sniffer.feed(chunk)
+    expect(sniffer.finish()).toMatchObject({ promptTokens: 82665, completionTokens: 14 })
+    expect(sniffer.complete()).toBe(true)
+  })
+
+  it("a short response.completed still goes through the ordinary line parser", () => {
+    const sniffer = createOpenAISseUsageSniffer()
+    sniffer.feed(new TextEncoder().encode(terminal("response.completed", 10)))
+    expect(sniffer.finish()).toMatchObject({ promptTokens: 82665, cacheReadInputTokens: 82432 })
+    expect(sniffer.complete()).toBe(true)
   })
 })
 
@@ -359,11 +445,18 @@ describe("createAnthropicSseUsageSniffer", () => {
     })
   })
 
-  it("abandons capture on carry overflow without throwing", () => {
+  it("skips an over-long line without throwing and keeps listening for the next event", () => {
     const sniffer = createAnthropicSseUsageSniffer()
-    const huge = "data: " + "y".repeat(300 * 1024)
+    const huge = "event: content_block_delta\ndata: " + "y".repeat(300 * 1024)
     expect(() => sniffer.feed(new TextEncoder().encode(huge))).not.toThrow()
     expect(sniffer.finish()).toBeNull()
+    sniffer.feed(
+      new TextEncoder().encode(
+        "\nevent: message_delta\ndata: " + JSON.stringify({ usage: { output_tokens: 4 } }) + "\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+      ),
+    )
+    expect(sniffer.finish()).toMatchObject({ completionTokens: 4 })
+    expect(sniffer.complete()).toBe(true)
   })
 })
 
@@ -404,13 +497,15 @@ describe("createOpenAISseUsageSniffer — complete()", () => {
     expect(sniffer.complete()).toBe(false)
   })
 
-  it("an abandoned sniffer (carry overflow) reports incomplete even after seeing [DONE] first", () => {
+  it("an over-long non-terminal line neither completes the stream nor undoes a completion already seen", () => {
     const sniffer = createOpenAISseUsageSniffer()
+    const huge = "data: " + "x".repeat(300 * 1024)
+    sniffer.feed(new TextEncoder().encode(huge + "\n"))
+    expect(sniffer.complete()).toBe(false)
     sniffer.feed(new TextEncoder().encode("data: [DONE]\n\n"))
     expect(sniffer.complete()).toBe(true)
-    const huge = "data: " + "x".repeat(300 * 1024)
     sniffer.feed(new TextEncoder().encode(huge))
-    expect(sniffer.complete()).toBe(false)
+    expect(sniffer.complete()).toBe(true)
   })
 })
 
@@ -443,14 +538,14 @@ describe("createAnthropicSseUsageSniffer — complete()", () => {
     expect(sniffer.complete()).toBe(false)
   })
 
-  it("an abandoned sniffer (carry overflow) reports incomplete even after seeing message_stop first", () => {
+  it("an over-long line neither completes the stream nor undoes a message_stop already seen", () => {
     const sniffer = createAnthropicSseUsageSniffer()
-    sniffer.feed(
-      new TextEncoder().encode("event: message_stop\n" + d({ type: "message_stop" }) + "\n"),
-    )
-    expect(sniffer.complete()).toBe(true)
     const huge = "data: " + "z".repeat(300 * 1024)
-    sniffer.feed(new TextEncoder().encode(huge))
+    sniffer.feed(new TextEncoder().encode(huge + "\n"))
     expect(sniffer.complete()).toBe(false)
+    sniffer.feed(new TextEncoder().encode("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+    expect(sniffer.complete()).toBe(true)
+    sniffer.feed(new TextEncoder().encode(huge))
+    expect(sniffer.complete()).toBe(true)
   })
 })
