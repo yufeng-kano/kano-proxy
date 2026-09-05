@@ -1544,15 +1544,36 @@ export function anthropicSseToOpenAIStream(
                   else if (d?.stop_reason === "max_tokens") finishReason = "length"
                   else if (d?.stop_reason) finishReason = "stop"
                   const u = json.usage as
-                    | { input_tokens?: number; output_tokens?: number }
+                    | {
+                        input_tokens?: number
+                        output_tokens?: number
+                        cache_read_input_tokens?: number
+                        cache_creation_input_tokens?: number
+                      }
                     | undefined
                   if (u) {
                     if (typeof u.output_tokens === "number") {
                       completionTokens = u.output_tokens
                       sawUsage = true
                     }
+                    // Newer API revisions repeat the input-side fields here.
+                    // `input_tokens` is the *uncached* count, so it must be
+                    // merged field-wise and re-summed with the cache fields —
+                    // never assigned straight into the cache-inclusive
+                    // prompt total (that turned a 20K-cached Codex turn into
+                    // "2 input tokens" in the logs). Mirrors
+                    // createAnthropicSseUsageSniffer's merge.
+                    if (typeof u.cache_read_input_tokens === "number") {
+                      cacheReadInputTokens = u.cache_read_input_tokens
+                    }
+                    if (typeof u.cache_creation_input_tokens === "number") {
+                      cacheCreationInputTokens = u.cache_creation_input_tokens
+                    }
                     if (typeof u.input_tokens === "number") {
-                      promptTokens = u.input_tokens
+                      promptTokens =
+                        u.input_tokens +
+                        (cacheReadInputTokens ?? 0) +
+                        (cacheCreationInputTokens ?? 0)
                       sawUsage = true
                     }
                   }

@@ -1510,6 +1510,46 @@ describe("anthropicSseToOpenAIStream usage + error", () => {
     expect(out).toContain('"cache_creation_input_tokens":3')
   })
 
+  it("keeps the cache-inclusive prompt total when message_delta repeats the uncached input_tokens", async () => {
+    // Newer Anthropic API revisions repeat input-side fields on message_delta;
+    // `input_tokens` there is the uncached count (2), not the total. It used
+    // to overwrite the summed total and log Codex turns as "2 input tokens".
+    const sse = [
+      "event: message_start",
+      'data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":2,"cache_read_input_tokens":20000,"cache_creation_input_tokens":1800,"output_tokens":1}}}',
+      "",
+      "event: message_delta",
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"cache_read_input_tokens":20000,"cache_creation_input_tokens":1800,"output_tokens":759}}',
+      "",
+      "event: message_stop",
+      'data: {"type":"message_stop"}',
+      "",
+    ].join("\n")
+    const out = await collect(anthropicSseToOpenAIStream(chunked(sse, 23), "claude-code/m"))
+    expect(out).toContain('"prompt_tokens":21802')
+    expect(out).toContain('"completion_tokens":759')
+    expect(out).toContain('"total_tokens":22561')
+    expect(out).toContain('"prompt_tokens_details":{"cached_tokens":20000}')
+    expect(out).toContain('"cache_creation_input_tokens":1800')
+  })
+
+  it("re-sums from message_delta when only it carries the input-side fields", async () => {
+    const sse = [
+      "event: message_start",
+      'data: {"type":"message_start","message":{"id":"msg_1"}}',
+      "",
+      "event: message_delta",
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"cache_read_input_tokens":100,"output_tokens":7}}',
+      "",
+      "event: message_stop",
+      'data: {"type":"message_stop"}',
+      "",
+    ].join("\n")
+    const out = await collect(anthropicSseToOpenAIStream(chunked(sse, 19), "claude-code/m"))
+    expect(out).toContain('"prompt_tokens":105')
+    expect(out).toContain('"prompt_tokens_details":{"cached_tokens":100}')
+  })
+
   it("attaches cache fields as 0 (not omitted) when message_start's usage carried no cache fields", async () => {
     const sse = [
       "event: message_start",
