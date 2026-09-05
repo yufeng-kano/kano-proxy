@@ -23,9 +23,11 @@ const DAILY = "https://daily-cloudcode-pa.googleapis.com"
 /** Stand-in for a real clip; the converter only moves the bytes. */
 const WAV = "UklGRiQAAABXQVZF"
 
+/** Background work scheduled via waitUntil (usage refresh after a dispatched request), drained per test. */
+const background: Promise<unknown>[] = []
 const execCtx = {
   waitUntil: (p: Promise<unknown>) => {
-    p.catch(() => {})
+    background.push(p.catch(() => {}))
   },
   passThroughOnException: () => {},
 } as unknown as ExecutionContext
@@ -112,7 +114,11 @@ function authHeaders(): Record<string, string> {
 }
 
 const originalFetch = globalThis.fetch
-afterEach(() => {
+afterEach(async () => {
+  // Drain the previous request's background fetches before the next test
+  // installs its own upstream stub — otherwise a slow runner lets them land
+  // in the next test's call list (seen on the v4.9.0 release deploy).
+  await Promise.allSettled(background.splice(0))
   globalThis.fetch = originalFetch
 })
 
