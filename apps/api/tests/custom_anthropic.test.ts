@@ -208,6 +208,31 @@ describe("createCustomAnthropicAdapter", () => {
   })
 
   describe("chatCompletions() — /openai/v1 surface via the shared converters", () => {
+    it("places the proxy cache breakpoints with no system prepend — 5m message tails without a prompt_cache_key", async () => {
+      let sentBody: Record<string, unknown> | undefined
+      globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+        sentBody = JSON.parse(String(init?.body))
+        return new Response(JSON.stringify({ content: [], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200 })
+      }) as typeof fetch
+
+      const adapter = createCustomAnthropicAdapter(row)
+      await adapter.chatCompletions({} as Env, account, {
+        model: "my-claude/claude-3",
+        rawModel: "my-claude/claude-3",
+        upstreamModel: "claude-3",
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: "hi" },
+        ],
+        rawBody: {},
+      })
+
+      expect(sentBody?.system).toEqual([{ type: "text", text: "sys", cache_control: { type: "ephemeral", ttl: "1h" } }])
+      const messages = sentBody?.messages as Array<{ content: unknown }>
+      expect(messages[0]!.content).toEqual([{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }])
+      expect((JSON.stringify(sentBody).match(/"cache_control"/g) ?? []).length).toBe(2)
+    })
+
     it("converts the OpenAI request into an Anthropic Messages body", async () => {
       let sentBody: Record<string, unknown> | undefined
       globalThis.fetch = (async (_url: string, init?: RequestInit) => {

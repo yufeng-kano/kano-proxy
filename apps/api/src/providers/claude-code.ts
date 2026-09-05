@@ -3,7 +3,12 @@ import type { AcquiredAccount } from "../pool/acquire"
 import { mapReasoning } from "../utils/reasoning"
 import { refreshOAuthCredential } from "./refresh"
 import type { ChatCompletionRequest, ProviderAdapter, UsageWindow } from "./types"
-import { anthropicToOpenAIResponse, moveRetiredOutputFormat, openaiToAnthropicMessages } from "../proxy/openai_anthropic"
+import {
+  addConversionCacheControl,
+  anthropicToOpenAIResponse,
+  moveRetiredOutputFormat,
+  openaiToAnthropicMessages,
+} from "../proxy/openai_anthropic"
 
 const ANTHROPIC_API = "https://api.anthropic.com"
 const OAUTH_TOKEN = "https://console.anthropic.com/v1/oauth/token"
@@ -276,8 +281,11 @@ export const claudeCodeAdapter: ProviderAdapter = {
       temperature: req.temperature,
       top_p: req.top_p,
     })
-    // OpenAI→Claude: do NOT add cache_control
-    const withSystem = prependRequiredSystem(anthropicBody)
+    // Proxy-placed cache breakpoints (docs/api.md § Prompt cache), applied
+    // after the fixed prepend so the system marker lands on the last block.
+    const withSystem = addConversionCacheControl(prependRequiredSystem(anthropicBody), {
+      conversation: !!req.prompt_cache_key,
+    })
     const res = await fetch(`${ANTHROPIC_API}/v1/messages`, {
       method: "POST",
       headers: {

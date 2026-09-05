@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  addConversionCacheControl,
   moveRetiredOutputFormat,
   anthropicSseToOpenAIStream,
   anthropicToOpenAIChatRequest,
@@ -36,7 +37,7 @@ describe("promptCacheKeyFromAnthropicMetadata", () => {
 })
 
 describe("openaiToAnthropicMessages", () => {
-  it("does not invent cache_control", () => {
+  it("adds no cache_control itself — placement is addConversionCacheControl's job", () => {
     const body = openaiToAnthropicMessages({
       model: "claude-opus-5",
       max_tokens: 100,
@@ -2060,5 +2061,122 @@ describe("structured output field naming (Anthropic output_config.format)", () =
     ).toEqual({ output_config: { format: { type: "json_schema", schema: { type: "object" } } } })
     const untouched = { model: "m", messages: [] }
     expect(moveRetiredOutputFormat(untouched)).toBe(untouched)
+  })
+})
+
+describe("addConversionCacheControl — proxy-placed breakpoints on the OpenAI → Anthropic path (docs/api.md § Prompt cache)", () => {
+  const oneHour = { type: "ephemeral", ttl: "1h" }
+  const fiveMin = { type: "ephemeral" }
+  const markers = (body: unknown): unknown[] => {
+    const found: unknown[] = []
+    const walk = (v: unknown) => {
+      if (Array.isArray(v)) return v.forEach(walk)
+      if (!v || typeof v !== "object") return
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        if (k === "cache_control") found.push(val)
+        else walk(val)
+      }
+    }
+    walk(body)
+    return found
+  }
+
+  it("spends all four markers on an agent turn: last tool, last system block, previous user tail, last message tail", () => {
+    const out = addConversionCacheControl(
+      {
+        system: [
+          { type: "text", text: "prepend" },
+          { type: "text", text: "instructions" },
+        ],
+        tools: [
+          { name: "a", input_schema: {} },
+          { name: "b", input_schema: {} },
+        ],
+        messages: [
+          { role: "user", content: "first" },
+          { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "a", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "r1" }] },
+          { role: "assistant", content: [{ type: "tool_use", id: "t2", name: "b", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "t2", content: "r2" }] },
+        ],
+      },
+      { conversation: true },
+    )
+    const tools = out.tools as Array<Record<string, unknown>>
+    expect(tools[0]).not.toHaveProperty("cache_control")
+    expect(tools[1]!.cache_control).toEqual(oneHour)
+    const system = out.system as Array<Record<string, unknown>>
+    expect(system[0]).not.toHaveProperty("cache_control")
+    expect(system[1]!.cache_control).toEqual(oneHour)
+    const messages = out.messages as Array<{ role: string; content: Array<Record<string, unknown>> | string }>
+    // Last message tail and the previous user turn's tail; assistant turns untouched.
+    expect((messages[4]!.content as Array<Record<string, unknown>>)[0]!.cache_control).toEqual(oneHour)
+    expect((messages[2]!.content as Array<Record<string, unknown>>)[0]!.cache_control).toEqual(oneHour)
+    expect(JSON.stringify(messages[3])).not.toContain("cache_control")
+    expect(JSON.stringify(messages[1])).not.toContain("cache_control")
+    expect(messages[0]!.content).toBe("first")
+    expect(markers(out)).toHaveLength(4)
+  })
+
+  it("without a client prompt_cache_key the static prefix stays 1h and the message tails fall back to 5m", () => {
+    const out = addConversionCacheControl(
+      {
+        system: "sys",
+        tools: [{ name: "a", input_schema: {} }],
+        messages: [
+          { role: "user", content: "q1" },
+          { role: "assistant", content: "a1" },
+          { role: "user", content: "q2" },
+        ],
+      },
+      { conversation: false },
+    )
+    expect((out.tools as Array<Record<string, unknown>>)[0]!.cache_control).toEqual(oneHour)
+    // A string system is promoted to a single marked text block.
+    expect(out.system).toEqual([{ type: "text", text: "sys", cache_control: oneHour }])
+    const messages = out.messages as Array<Record<string, unknown>>
+    expect(messages[2]!.content).toEqual([{ type: "text", text: "q2", cache_control: fiveMin }])
+    expect(messages[0]!.content).toEqual([{ type: "text", text: "q1", cache_control: fiveMin }])
+    expect(messages[1]!.content).toBe("a1")
+    expect(markers(out)).toHaveLength(4)
+  })
+
+  it("walks back past thinking blocks to the last cacheable block of the message", () => {
+    const out = addConversionCacheControl(
+      {
+        messages: [
+          { role: "user", content: "q" },
+          {
+            role: "assistant",
+            content: [
+              { type: "text", text: "t" },
+              { type: "thinking", thinking: "", signature: "sig" },
+            ],
+          },
+        ],
+      },
+      { conversation: true },
+    )
+    const last = (out.messages as Array<{ content: Array<Record<string, unknown>> }>)[1]!.content
+    expect(last[0]!.cache_control).toEqual(oneHour)
+    expect(last[1]).not.toHaveProperty("cache_control")
+  })
+
+  it("a single user message gets one marker, not two, and no tools/system means no static markers", () => {
+    const out = addConversionCacheControl({ messages: [{ role: "user", content: "only" }] }, { conversation: true })
+    expect(out).not.toHaveProperty("system")
+    expect(out).not.toHaveProperty("tools")
+    expect(markers(out)).toHaveLength(1)
+  })
+
+  it("does not mutate the input body", () => {
+    const input = {
+      system: "sys",
+      tools: [{ name: "a", input_schema: {} }],
+      messages: [{ role: "user", content: [{ type: "text", text: "q" }] }],
+    }
+    const snapshot = JSON.stringify(input)
+    addConversionCacheControl(input, { conversation: true })
+    expect(JSON.stringify(input)).toBe(snapshot)
   })
 })

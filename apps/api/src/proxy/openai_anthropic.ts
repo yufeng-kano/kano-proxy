@@ -1,6 +1,7 @@
 /**
  * OpenAI Chat Completions ↔ Anthropic Messages conversion.
- * OpenAI→Claude: never invent cache_control.
+ * OpenAI→Claude: the converter itself adds no cache_control; the proxy-placed
+ * breakpoints live in `addConversionCacheControl` (docs/api.md § Prompt cache).
  * Anthropic→OpenAI (non-Claude providers): strip all cache_control (no equivalent).
  */
 
@@ -1142,8 +1143,99 @@ export function openaiToAnthropicMessages(input: {
       // best-effort: not always supported; leave as instruction-free skip
     }
   }
-  // Explicitly no cache_control
+  // No cache_control here — see addConversionCacheControl.
   return body
+}
+
+/** Content block types Anthropic accepts a `cache_control` marker on. */
+const CACHEABLE_BLOCK_TYPES = new Set(["text", "image", "document", "tool_use", "tool_result"])
+
+type CacheMarker = { type: "ephemeral"; ttl?: "1h" }
+
+/** Copy of `message` with `marker` on its last cacheable block; null when it has none. */
+function markLastCacheableBlock(
+  message: Record<string, unknown>,
+  marker: CacheMarker,
+): Record<string, unknown> | null {
+  const content = message.content
+  if (typeof content === "string") {
+    if (!content) return null
+    return { ...message, content: [{ type: "text", text: content, cache_control: marker }] }
+  }
+  if (!Array.isArray(content)) return null
+  const blocks = [...(content as unknown[])]
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const b = blocks[i] as Record<string, unknown> | null
+    if (!b || typeof b !== "object" || !CACHEABLE_BLOCK_TYPES.has(String(b.type ?? ""))) continue
+    blocks[i] = { ...b, cache_control: marker }
+    return { ...message, content: blocks }
+  }
+  return null
+}
+
+/**
+ * Proxy-placed prompt-cache breakpoints for the OpenAI → Anthropic conversion
+ * path (docs/api.md § Prompt cache). The OpenAI wire cannot express
+ * `cache_control`, and agent clients on this surface (the Codex CLI on
+ * /openai/v1/responses) resend the whole conversation every tool round, so
+ * the proxy spends Anthropic's four markers itself: the last tool and the
+ * last `system` block at the 1h TTL (the static prefix should survive a
+ * human pause), then the tails of the last two user turns — the standard
+ * multi-turn placement, each turn's breakpoint being the next turn's read
+ * point, the previous turn kept as a fallback for an over-long or edited
+ * last turn. Message markers get the 1h TTL only when the client declared a
+ * multi-request conversation via `prompt_cache_key`; a one-shot caller pays
+ * the 1.25× write on its unique tail and nothing more. Explicit block
+ * markers only, never the top-level automatic field. Longer-TTL entries
+ * always precede shorter ones, as Anthropic requires. Call it after any
+ * system prepend so the system marker lands on the final block. Pure: the
+ * input body is not mutated.
+ */
+export function addConversionCacheControl(
+  body: Record<string, unknown>,
+  opts: { conversation: boolean },
+): Record<string, unknown> {
+  const staticMarker: CacheMarker = { type: "ephemeral", ttl: "1h" }
+  const turnMarker: CacheMarker = opts.conversation ? staticMarker : { type: "ephemeral" }
+  const out: Record<string, unknown> = { ...body }
+
+  if (Array.isArray(out.tools) && out.tools.length) {
+    const tools = [...(out.tools as unknown[])]
+    const last = tools[tools.length - 1]
+    if (last && typeof last === "object") {
+      tools[tools.length - 1] = { ...(last as Record<string, unknown>), cache_control: staticMarker }
+      out.tools = tools
+    }
+  }
+
+  if (typeof out.system === "string") {
+    if (out.system) out.system = [{ type: "text", text: out.system, cache_control: staticMarker }]
+  } else if (Array.isArray(out.system) && out.system.length) {
+    const blocks = [...(out.system as unknown[])]
+    const last = blocks[blocks.length - 1]
+    if (last && typeof last === "object") {
+      blocks[blocks.length - 1] = { ...(last as Record<string, unknown>), cache_control: staticMarker }
+      out.system = blocks
+    }
+  }
+
+  if (Array.isArray(out.messages)) {
+    const messages = [...(out.messages as unknown[])]
+    let marked = 0
+    for (let i = messages.length - 1; i >= 0 && marked < 2; i--) {
+      const m = messages[i] as Record<string, unknown> | null
+      if (!m || typeof m !== "object") continue
+      // First marker: the last message, whatever its role. Second: the
+      // previous user turn's tail — the last request's own breakpoint.
+      if (marked === 1 && m.role !== "user") continue
+      const next = markLastCacheableBlock(m, turnMarker)
+      if (!next) continue
+      messages[i] = next
+      marked++
+    }
+    if (marked) out.messages = messages
+  }
+  return out
 }
 
 function contentToText(content: unknown): string {

@@ -1,6 +1,10 @@
 import type { AcquiredAccount } from "../pool/acquire"
 import type { CustomProviderRow } from "../db/custom_providers"
-import { anthropicToOpenAIResponse, openaiToAnthropicMessages } from "../proxy/openai_anthropic"
+import {
+  addConversionCacheControl,
+  anthropicToOpenAIResponse,
+  openaiToAnthropicMessages,
+} from "../proxy/openai_anthropic"
 import type { ProviderAdapter } from "./types"
 
 const DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
@@ -73,7 +77,10 @@ export function createCustomAnthropicAdapter(
           "content-type": "application/json",
           "anthropic-version": DEFAULT_ANTHROPIC_VERSION,
         },
-        body: JSON.stringify(anthropicBody),
+        // Proxy-placed cache breakpoints (docs/api.md § Prompt cache).
+        body: JSON.stringify(
+          addConversionCacheControl(anthropicBody, { conversation: !!req.prompt_cache_key }),
+        ),
         signal: extras?.signal,
       })
 

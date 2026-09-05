@@ -126,6 +126,52 @@ describe("resolveBetaHeader (native /anthropic passthrough)", () => {
 })
 
 describe("claudeCodeAdapter.chatCompletions (/openai/v1 conversion path)", () => {
+  it("places the proxy cache breakpoints after the fixed system prepend — last system block, last tool, and the user-turn tails (docs/api.md § Prompt cache)", async () => {
+    let sentBody: Record<string, unknown> | undefined
+    globalThis.fetch = (async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body))
+      return new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "text", text: "hi" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )
+    }) as typeof fetch
+
+    await claudeCodeAdapter.chatCompletions({} as unknown as Env, fakeAccount, {
+      model: "claude-code/claude-opus-5",
+      rawModel: "claude-code/claude-opus-5",
+      upstreamModel: "claude-opus-5",
+      messages: [
+        { role: "system", content: "instructions" },
+        { role: "user", content: "q1" },
+        { role: "assistant", content: "a1" },
+        { role: "user", content: "q2" },
+      ],
+      tools: [{ type: "function", function: { name: "f", parameters: { type: "object", properties: {} } } }],
+      prompt_cache_key: "thread-1",
+      rawBody: {},
+    })
+
+    const system = sentBody?.system as Array<Record<string, unknown>>
+    expect(system).toHaveLength(2)
+    // The prepend is block 0 and carries no marker; the client's own system text is the marked last block.
+    expect(system[0]).not.toHaveProperty("cache_control")
+    expect(system[1]).toMatchObject({ text: "instructions", cache_control: { type: "ephemeral", ttl: "1h" } })
+    const tools = sentBody?.tools as Array<Record<string, unknown>>
+    expect(tools[0]!.cache_control).toEqual({ type: "ephemeral", ttl: "1h" })
+    const messages = sentBody?.messages as Array<{ role: string; content: unknown }>
+    expect(messages[2]!.content).toEqual([{ type: "text", text: "q2", cache_control: { type: "ephemeral", ttl: "1h" } }])
+    expect(messages[0]!.content).toEqual([{ type: "text", text: "q1", cache_control: { type: "ephemeral", ttl: "1h" } }])
+    expect(JSON.stringify(messages[1])).not.toContain("cache_control")
+    expect((JSON.stringify(sentBody).match(/"cache_control"/g) ?? []).length).toBe(4)
+  })
+
   const fakeAccount: AcquiredAccount = {
     row: {
       id: "acc_1",
