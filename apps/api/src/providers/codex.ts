@@ -1,3 +1,4 @@
+import { CODEX_CLIENT_VERSION } from "./codex_models"
 import type { Env } from "../env"
 import type { AcquiredAccount } from "../pool/acquire"
 import { mapReasoning } from "../utils/reasoning"
@@ -8,8 +9,7 @@ import type { ChatCompletionRequest, ProviderAdapter, UsageWindow } from "./type
 const TOKEN_URL = "https://auth.openai.com/oauth/token"
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
-export const CODEX_USER_AGENT =
-  "codex-tui/0.146.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.146.0)"
+export const CODEX_USER_AGENT = `codex-tui/${CODEX_CLIENT_VERSION} (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; ${CODEX_CLIENT_VERSION})`
 export const CODEX_ORIGINATOR = "codex-tui"
 
 function clientId(env: Env): string {

@@ -4,9 +4,15 @@ import type { UpstreamModel } from "./types"
 
 const DIRECT_UPSTREAM_BASE = "https://chatgpt.com/backend-api"
 export const CODEX_MODELS_ENDPOINT = `${DIRECT_UPSTREAM_BASE}/codex/models`
-export const CODEX_CLIENT_VERSION = "0.144.1"
-export const CODEX_USER_AGENT =
-  "codex_cli_rs/0.144.1 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9"
+/**
+ * The one Codex CLI version every chatgpt.com call advertises. `/codex/models`
+ * filters its catalog by `client_version` — an old pin silently hides models
+ * the account can already use (gpt-6-astra was missing at 0.144.1, present at
+ * 0.153.4), so bump this when a new model fails to appear. Track npm
+ * `@openai/codex` latest.
+ */
+export const CODEX_CLIENT_VERSION = "0.153.4"
+export const CODEX_USER_AGENT = `codex_cli_rs/${CODEX_CLIENT_VERSION} (Mac OS 26.3.1; arm64) iTerm.app/3.6.9`
 /** Public catalog mirrors, tried in order when the live endpoint is bot-walled. */
 export const CODEX_MODEL_MIRROR_URLS = [
   "https://models.router-for.me/codex_client_models.json",

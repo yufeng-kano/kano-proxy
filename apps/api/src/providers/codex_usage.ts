@@ -12,10 +12,11 @@
  * last line was wrong as well). Full evidence table in docs/providers.md.
  */
 
+import { CODEX_CLIENT_VERSION } from "./codex_models"
 import type { CodexUpstream } from "./codex_relay"
 import { relayFetch } from "./codex_relay"
 
-export const CODEX_CLI_UA = "codex_cli_rs/0.144.3"
+export const CODEX_CLI_UA = `codex_cli_rs/${CODEX_CLIENT_VERSION}`
 const CODEX_BASE = "https://chatgpt.com/backend-api"
 
 export type CodexUsagePayload = {
