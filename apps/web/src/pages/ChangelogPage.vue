@@ -181,14 +181,18 @@ function onRefresh() {
 
 <style scoped>
 /*
- * A capped list, not the page width. 960px is what the rail plus a wide
- * reading measure need (docs/admin-ui.md § Changelog page); the cap sits on
- * the list so the banners above it and every release line up on both edges.
+ * A capped list, centered in the content column, not the page width. 960px
+ * is what the rail plus a wide reading measure need (docs/admin-ui.md
+ * § Changelog page); the cap sits on the list so the banners above it and
+ * every release line up on both edges. Centered rather than left-aligned:
+ * a reading column parked at the left edge of a wide display leaves the
+ * empty space all on one side, which reads as unfinished, not as margin.
  */
 .releases {
   display: grid;
   gap: var(--space-4);
   max-width: 960px;
+  margin: 0 auto;
 }
 
 .list {
