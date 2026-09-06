@@ -5,9 +5,10 @@
  * Everywhere else the anti-scroll rule puts long data in a bounded region with
  * a sticky header (docs/admin-ui.md § Anti-scroll rules). Release notes are the
  * exception: they are prose, read top to bottom, and paginating or
- * inner-scrolling them would fight the reading. So the column is capped at a
- * comfortable measure instead of the full content width, and the page header
- * stays sticky above it.
+ * inner-scrolling them would fight the reading. Each release is one row of a
+ * two-column timeline — a sticky version rail beside the notes — capped at
+ * 960px rather than the full content width (docs/admin-ui.md § Changelog
+ * page), and the page header stays sticky above it.
  *
  * `body_html` is sanitized twice server-side — GitHub's renderer, then the
  * Worker's escape-then-allowlist pass (docs/changelog.md § HTML sanitization) —
@@ -92,9 +93,9 @@ function onRefresh() {
       </template>
     </PageHeader>
 
-    <!-- Capped measure, not full width: this is long-form reading, and a
+    <!-- Capped list, not full width: this is long-form reading, and a
          release note running the width of a 1440px display is unreadable. -->
-    <div class="column">
+    <div class="releases">
       <Banner v-if="error" tone="error">
         {{ t("changelog.error.load") }}
         <template #actions>
@@ -108,12 +109,18 @@ function onRefresh() {
         {{ t("changelog.updateAvailable", { version: data.latest }) }}
       </Banner>
 
-      <div v-if="showSkeleton" class="skeletons">
+      <div v-if="showSkeleton" class="list">
         <span class="sr-only" role="status">{{ t("app.loading") }}</span>
-        <div v-for="i in 3" :key="i" class="skeleton-card" aria-hidden="true">
-          <span class="skeleton skeleton-tag" />
-          <span class="skeleton skeleton-line" />
-          <span class="skeleton skeleton-line short" />
+        <div v-for="i in 3" :key="i" class="release" aria-hidden="true">
+          <div class="rail">
+            <span class="skeleton skeleton-tag" />
+            <span class="skeleton skeleton-date" />
+          </div>
+          <div class="notes">
+            <span class="skeleton skeleton-line" />
+            <span class="skeleton skeleton-line" />
+            <span class="skeleton skeleton-line short" />
+          </div>
         </div>
       </div>
 
@@ -128,33 +135,34 @@ function onRefresh() {
         <EmptyState :title="t('changelog.empty.title')" :body="t('changelog.empty.body')" />
       </AppCard>
 
-      <!-- `v-else` on a wrapper, not on the card: `v-if` and `v-for` on one
-           element is ambiguous in Vue 3 and the compiler warns about it. -->
-      <template v-else>
-        <AppCard v-for="release in releases" :key="release.tag">
-          <article>
-            <header class="release-head">
-              <div class="release-identity">
-                <a
-                  class="release-tag"
-                  :href="release.url"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {{ release.tag }}
-                </a>
-                <!-- "Current" is enough beside the tag it sits on; read out of
-                     context it is not, hence the spelled-out twin. -->
-                <Badge v-if="isCurrent(release.tag)" tone="accent">
-                  <span aria-hidden="true">{{ t("changelog.currentShort") }}</span>
-                  <span class="sr-only">{{ t("changelog.current") }}</span>
-                </Badge>
-              </div>
-              <time class="release-date" :datetime="release.published_at">
-                {{ format.date(release.published_at) }}
-              </time>
-            </header>
+      <!-- A timeline: version rail on the left, notes on the right, a hairline
+           between releases. No card per release — every release is the same
+           dataset, so a border around each restated the one before it. -->
+      <div v-else class="list">
+        <article v-for="release in releases" :key="release.tag" class="release">
+          <header class="rail">
+            <div class="release-identity">
+              <a
+                class="release-tag"
+                :href="release.url"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {{ release.tag }}
+              </a>
+              <!-- "Current" is enough beside the tag it sits on; read out of
+                   context it is not, hence the spelled-out twin. -->
+              <Badge v-if="isCurrent(release.tag)" tone="accent">
+                <span aria-hidden="true">{{ t("changelog.currentShort") }}</span>
+                <span class="sr-only">{{ t("changelog.current") }}</span>
+              </Badge>
+            </div>
+            <time class="release-date" :datetime="release.published_at">
+              {{ format.date(release.published_at) }}
+            </time>
+          </header>
 
+          <div class="notes">
             <p v-if="releaseTitle(release)" class="release-name">
               {{ releaseTitle(release) }}
             </p>
@@ -164,32 +172,71 @@ function onRefresh() {
             <!-- eslint-disable-next-line vue/no-v-html -->
             <div v-if="release.body_html" class="release-body" v-html="release.body_html" />
             <p v-else class="release-empty">{{ t("changelog.noNotes") }}</p>
-          </article>
-        </AppCard>
-      </template>
+          </div>
+        </article>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
 /*
- * A reading column, not the page width. 72ch is the measure the *prose* wants;
- * the card's own padding is added on top so the cap describes the text rather
- * than the box around it. The cap sits on the column so every card lines up on
- * both edges.
+ * A capped list, not the page width. 960px is what the rail plus a wide
+ * reading measure need (docs/admin-ui.md § Changelog page); the cap sits on
+ * the list so the banners above it and every release line up on both edges.
  */
-.column {
+.releases {
   display: grid;
   gap: var(--space-4);
-  max-width: calc(72ch + var(--space-5) * 2);
+  max-width: 960px;
 }
 
-.release-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2) var(--space-3);
-  flex-wrap: wrap;
+.list {
+  display: grid;
+}
+
+/*
+ * One release, one row: a fixed rail and the notes taking the rest. The
+ * `minmax(0, 1fr)` matters — a bare `1fr` has a min-content floor, so one
+ * unbroken token in the notes would widen the row past the cap.
+ */
+.release {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: var(--space-2) var(--space-8);
+  padding: var(--space-6) 0;
+  border-top: 1px solid var(--border);
+}
+
+/* The page header already draws the rule the first release would sit under.
+   `first-of-type`, not `first-child`: the skeleton list leads with an sr-only
+   status span. */
+.release:first-of-type {
+  border-top: 0;
+  padding-top: var(--space-2);
+}
+
+/*
+ * Sticky within its own release, under the sticky page header — so a long
+ * release keeps its version in view while the notes scroll past. Grid
+ * children stretch by default, and a stretched item has nowhere to stick
+ * within; `align-self: start` is what makes the sticky work.
+ *
+ * The offset is the page header's stuck height: its top padding (the shell's
+ * `--page-top`, inherited the same way PageHeader does), the 34px row floor
+ * plus the row's bottom padding, and the hairline — then a breath.
+ */
+.rail {
+  position: sticky;
+  top: calc(var(--page-top, var(--space-6)) + 34px + var(--space-3) + 1px + var(--space-4));
+  align-self: start;
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.notes {
+  min-width: 0;
 }
 
 .release-identity {
@@ -212,20 +259,23 @@ function onRefresh() {
 }
 
 .release-date {
-  flex-shrink: 0;
   color: var(--faint);
   font-size: var(--text-xs);
   white-space: nowrap;
 }
 
+/* The release's one-line summary: the lead, so it reads in the text tone at
+   the prose size rather than as a muted subtitle. */
 .release-name {
-  margin: var(--space-1) 0 0;
-  color: var(--muted);
-  font-size: var(--text-sm);
+  margin: 0 0 var(--space-3);
+  color: var(--text);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  line-height: 1.5;
 }
 
 .release-empty {
-  margin: var(--space-3) 0 0;
+  margin: 0;
   color: var(--faint);
   font-size: var(--text-xs);
 }
@@ -237,16 +287,15 @@ function onRefresh() {
  * release they belong to.
  */
 .release-body {
-  margin-top: var(--space-3);
   color: var(--text-secondary);
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
 
 .release-body :deep(h2) {
   margin: var(--space-5) 0 var(--space-2);
-  font-size: var(--text-base);
+  font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
   color: var(--text);
@@ -254,7 +303,7 @@ function onRefresh() {
 
 .release-body :deep(h3) {
   margin: var(--space-4) 0 var(--space-1);
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
   font-weight: var(--weight-semibold);
   color: var(--text);
 }
@@ -302,7 +351,7 @@ function onRefresh() {
   background: var(--surface-2);
   border: 1px solid var(--border);
   font-family: var(--mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 
 .release-body :deep(a) {
@@ -319,22 +368,9 @@ function onRefresh() {
 
 /* --- First paint -------------------------------------------------------- */
 
-/* Shaped like a release card — a tag line over two prose lines — so the column
-   does not jump when the notes land. Static, not pulsing. */
-.skeletons {
-  display: grid;
-  gap: var(--space-4);
-}
-
-.skeleton-card {
-  display: grid;
-  gap: var(--space-3);
-  padding: var(--space-5);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-
+/* Shaped like a release row — a tag and date in the rail, three prose lines
+   beside them — so the list does not jump when the notes land. Static, not
+   pulsing. */
 .skeleton {
   display: block;
   border-radius: var(--radius-full);
@@ -342,16 +378,49 @@ function onRefresh() {
 }
 
 .skeleton-tag {
-  width: 30%;
+  width: 40%;
   height: var(--text-md);
+}
+
+.skeleton-date {
+  width: 55%;
+  height: var(--text-xs);
 }
 
 .skeleton-line {
   width: 100%;
   height: var(--text-sm);
+  margin-bottom: var(--space-3);
 }
 
 .skeleton-line.short {
   width: 65%;
+  margin-bottom: 0;
+}
+
+/* --- Responsive --------------------------------------------------------- */
+
+/* One column: the rail becomes a row above the notes and stops sticking — a
+   stuck block at the top of a phone viewport would cover the notes it names. */
+@media (max-width: 720px) {
+  .release {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-3);
+  }
+
+  .rail {
+    position: static;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: var(--space-3);
+  }
+
+  .skeleton-tag {
+    width: 96px;
+  }
+
+  .skeleton-date {
+    width: 72px;
+  }
 }
 </style>

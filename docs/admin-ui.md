@@ -66,7 +66,7 @@ The signed-in app is a **fixed frame, not a scrolling document**. `AppShell.vue`
 - That region reserves its scrollbar track permanently (`scrollbar-gutter: stable`). Pages differ in height — Providers' and Models' section stacks scroll, Keys' bounded card does not — and without a reserved gutter the content column shifts sideways by the scrollbar width on every such navigation, which reads as the layout jumping rather than as a scrollbar appearing.
 - `AppShell` publishes its own metrics as inherited custom properties — `--page-top`, `--page-bottom`, `--page-gutter`, and `--page-chrome` (the shell chrome above the region: 0 on desktop, the mobile bar below the shell breakpoint). A page that sizes itself to the viewport, or a header that cancels the top gutter to bleed its blur upward, **reads those** rather than restating the values. A second copy drifts the first time only one of them changes at a breakpoint.
 - **The shell fills the whole screen; the scroll region clears the safe area from the inside.** `viewport-fit=cover` extends the page under the home indicator, so a `100dvh` frame that stops short of it leaves a permanent strip of bare `body` below the app — visible on every page, scrollable to nowhere. The frame therefore keeps its full height and the *content region* adds `env(safe-area-inset-bottom)` to its own bottom padding: the background reaches the bottom edge, while content still scrolls clear of the indicator and passes behind it rather than stopping above it. `--page-bottom` stays the design value; the inset is added on top of it, so a page sizing itself to the viewport subtracts the same number it always did.
-- `--content-max` caps the content column so a table does not stretch across an ultrawide display. It is sized to *use* a normal laptop/desktop width rather than to a comfortable reading measure — long-form pages cap themselves separately (Changelog at 72ch), so this value only has to keep dense tables usable.
+- `--content-max` caps the content column so a table does not stretch across an ultrawide display. It is sized to *use* a normal laptop/desktop width rather than to a comfortable reading measure — long-form pages cap themselves separately (Changelog caps its release list at 960px — § Changelog page), so this value only has to keep dense tables usable.
 
 ### Anti-scroll rules
 
@@ -346,6 +346,16 @@ Anthropic-compatible:  https://<your-domain>/anthropic
 ```
 
 …plus how to send the key and the `provider/model` id form. Each value is a copy field.
+
+## Changelog page
+
+The one page allowed to scroll the content region: release notes are prose, read top to bottom, and inner-scrolling or paginating them would fight the reading. The page header stays sticky above the list.
+
+- **A timeline, not a stack of cards.** Each release is one row of a two-column grid — a **version rail** on the left (tag as a link to the GitHub Release, the **Current** badge on the running version, the date beneath) and the **notes** on the right — with a hairline between releases. Cards were the previous layout and were the wrong container (§ Design restraint: a card bounds a scroll region or a separate dataset, never the page's skeleton): every release is the same dataset, so each border restated the one before it, and a 72ch card column hugging the left edge left three quarters of a desktop display blank, which read as a broken layout rather than a reading measure (rejected 2026-09-06).
+- **The rail is sticky** within its own release while the notes scroll past, offset below the sticky page header, so a long release keeps its version in view. It is `align-self: start` on the grid child, which is what makes `position: sticky` work inside a grid row.
+- **Width.** The list caps at **960px** and shares the content column's left edge with the title; the rail is a fixed 176px and the notes take the rest (`minmax(0, 1fr)`, so an unbroken token wraps instead of widening the row). That puts the notes at up to ~760px of 14px prose — wider than a novel's measure, on purpose: release notes are headed bullet lists scanned for the item that matters, not paragraphs read in sequence, and the width is what GitHub's own release page gives them. The cap is on the list, not the shell's `--content-max`, so ultrawide displays do not stretch it further.
+- **Below 720px** the grid collapses to one column: the rail becomes a row above the notes (tag, badge, date on one line) and stops being sticky, since a sticky block at the top of a phone viewport would cover the notes it names.
+- **First paint** draws three skeleton rows in the same rail-plus-lines shape, static, so the column does not jump when the notes land. Cache-first with a 1 hour TTL — § Data freshness.
 
 ## Login page
 

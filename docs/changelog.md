@@ -11,7 +11,7 @@ Which makes those notes a **user-facing surface with no fallback**: whatever the
 | Surface | Content |
 |---------|---------|
 | `GET /api/changelog` | Session-auth JSON: running version, latest published version, update flag, sanitized release list |
-| `/changelog` (web) | One card per release, newest first; the running version is marked |
+| `/changelog` (web) | One entry per release, newest first, as a two-column timeline (version rail + notes — [admin-ui.md](./admin-ui.md) § Changelog page); the running version is marked |
 | Sidebar badge | Running version on every signed-in page; a dot appears when a newer release exists |
 
 ## Data flow
