@@ -73,12 +73,15 @@ function onRangeChange(value: string | number) {
   setRangeKind(value as UsageRangeKind)
 }
 
+/**
+ * Pressing an inactive segment only switches granularity (`onRangeChange`);
+ * the popover opens only when the already-active segment is pressed again.
+ */
 function onSegmentClick(value: string | number) {
-  const clicked = value as UsageRangeKind
-  if (clicked === rangeKind.value) {
+  if ((value as UsageRangeKind) === rangeKind.value) {
     calendarOpen.value = !calendarOpen.value
   } else {
-    calendarOpen.value = true
+    calendarOpen.value = false
   }
 }
 

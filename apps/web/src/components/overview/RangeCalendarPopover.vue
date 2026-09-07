@@ -4,8 +4,9 @@
  *
  * - Day mode: 30/31-day monthly grid, today marked with a dot, selected day circled,
  *   click any date to view that day's 24-hour hourly curve.
- * - Week mode: 30/31-day monthly grid, this week marked, continuous 7-day strip hover &
- *   selection (Mon–Sun), click any week to view that 7-day daily curve.
+ * - Week mode: 30/31-day monthly grid, this week marked, continuous 7-day selection
+ *   strip (Mon–Sun), click any week to view that 7-day daily curve.
+ * Cells have no hover styling (docs/admin-ui.md § Overview page).
  * - Month mode: 12-month annual grid (3×4), this month marked, selected month highlighted,
  *   future months disabled, click any month to view that month's daily curve.
  */
@@ -145,8 +146,6 @@ type DayCell = {
   isWeekEnd: boolean
 }
 
-const hoveredWeekDate = ref<Date | null>(null)
-
 const calendarDays = computed<DayCell[]>(() => {
   const year = viewYear.value
   const month = viewMonth.value
@@ -219,21 +218,6 @@ const calendarDays = computed<DayCell[]>(() => {
 
   return cells
 })
-
-function onDayMouseEnter(cell: DayCell) {
-  if (props.kind === "week" && !cell.isFuture) {
-    hoveredWeekDate.value = cell.date
-  }
-}
-
-function onGridMouseLeave() {
-  hoveredWeekDate.value = null
-}
-
-function isCellHoveredWeek(cell: DayCell): boolean {
-  if (props.kind !== "week" || !hoveredWeekDate.value) return false
-  return isSameWeek(cell.date, hoveredWeekDate.value)
-}
 
 function selectDate(date: Date) {
   emit("select", date)
@@ -398,7 +382,7 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Month & Day calendar grid -->
-    <div v-if="kind === 'day' || kind === 'week'" class="calendar-grid-wrap" @mouseleave="onGridMouseLeave">
+    <div v-if="kind === 'day' || kind === 'week'" class="calendar-grid-wrap">
       <!-- Weekday column headers -->
       <div class="weekday-row" aria-hidden="true">
         <span v-for="(dayName, i) in WEEKDAY_NAMES" :key="i" class="weekday-cell">
@@ -418,7 +402,6 @@ onBeforeUnmount(() => {
             'is-today': cell.isToday,
             'selected-day': kind === 'day' && cell.isSelectedDay,
             'selected-week': kind === 'week' && cell.isSelectedWeek,
-            'hovered-week': kind === 'week' && isCellHoveredWeek(cell),
             'week-start': cell.isWeekStart,
             'week-end': cell.isWeekEnd,
             'disabled': cell.isFuture,
@@ -428,7 +411,6 @@ onBeforeUnmount(() => {
           :aria-pressed="isDayCellSelected(cell)"
           :aria-current="cell.isToday ? 'date' : undefined"
           @click="onDayClick(cell)"
-          @mouseenter="onDayMouseEnter(cell)"
         >
           <span class="day-number" aria-hidden="true">{{ cell.dayNumber }}</span>
           <span v-if="cell.isToday && !cell.isSelectedDay" class="today-dot" />
@@ -581,12 +563,7 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 
-/* Day mode hover and select */
-:not(.week-mode) .day-cell:not(.disabled):not(.selected-day):hover {
-  background: var(--hover);
-  border-radius: var(--radius-full);
-}
-
+/* Day mode select */
 .day-cell.selected-day {
   background: var(--accent);
   color: var(--accent-fg);
@@ -603,10 +580,6 @@ onBeforeUnmount(() => {
 .week-mode .day-cell.week-end {
   border-top-right-radius: var(--radius-sm);
   border-bottom-right-radius: var(--radius-sm);
-}
-
-.week-mode .day-cell.hovered-week:not(.selected-week):not(.disabled) {
-  background: var(--hover);
 }
 
 .week-mode .day-cell.selected-week {
@@ -647,11 +620,6 @@ onBeforeUnmount(() => {
   font-weight: var(--weight-medium);
   color: var(--text);
   transition: background var(--duration-fast), border-color var(--duration-fast), color var(--duration-fast);
-}
-
-.month-cell:not(.disabled):not(.selected-month):hover {
-  background: var(--hover);
-  border-color: var(--border-strong);
 }
 
 .month-cell.selected-month {
