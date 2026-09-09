@@ -35,6 +35,7 @@ export const openaiWire: Wire = {
   }),
   unavailableBody: () => ({ error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } }),
   upstreamErrorBody: () => ({ error: { message: "upstream error", code: "upstream_error" } }),
+  nonStreamResponse: "content_type_only",
   createUsageSniffer: createOpenAISseUsageSniffer,
   parseUsage: fromOpenAIUsage,
 }

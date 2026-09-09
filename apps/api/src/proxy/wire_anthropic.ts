@@ -34,6 +34,7 @@ export const anthropicWire: Wire = {
   }),
   unavailableBody: () => ({ type: "error", error: { type: "api_error", message: "upstream_unavailable" } }),
   upstreamErrorBody: () => ({ type: "error", error: { type: "api_error", message: "upstream error" } }),
+  nonStreamResponse: "as_received",
   createUsageSniffer: createAnthropicSseUsageSniffer,
   parseUsage: fromAnthropicUsage,
 }

@@ -322,8 +322,9 @@ export async function dispatchNonStream(
 /**
  * Default non-stream delivery. An event-stream body under a non-stream
  * request ("legacy attach", docs/logging.md) gets keepalive + idle timeout
- * and the upstream status; anything else is returned as received — the
- * usage peek reads a clone so every upstream header still passes through.
+ * and the upstream status; anything else is delivered the way the wire
+ * says — rebuilt with only `content-type`, or returned as received with a
+ * clone peeked for usage so every upstream header passes through.
  */
 async function deliverNonStream(
   env: Env,
@@ -364,16 +365,25 @@ async function deliverNonStream(
     return new Response(streamBody, { status: res.status, headers: passthroughStreamHeaders(res.headers) })
   }
 
-  let usage: NormalizedUsage | null = null
-  if (t.captureUsage) {
+  const parseUsage = (text: string): NormalizedUsage | null => {
+    if (!t.captureUsage) return null
     try {
-      const json = (await res.clone().json()) as { usage?: Record<string, unknown> }
-      usage = t.wire.parseUsage(json.usage)
+      const json = JSON.parse(text) as { usage?: Record<string, unknown> }
+      return t.wire.parseUsage(json.usage)
     } catch {
-      /* not JSON, or no body — keep NULL usage */
+      return null /* not JSON, or no body */
     }
   }
-  await log({ usage })
+
+  if (t.wire.nonStreamResponse === "content_type_only") {
+    const text = await res.text()
+    await log({ usage: parseUsage(text) })
+    return new Response(text, {
+      status: res.status,
+      headers: { "content-type": res.headers.get("content-type") || "application/json" },
+    })
+  }
+  await log({ usage: parseUsage(await safeResponseText(res.clone())) })
   return res
 }
 

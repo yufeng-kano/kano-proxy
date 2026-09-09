@@ -19,6 +19,14 @@ export type Wire = {
   noAccountBody: (provider: string) => Record<string, unknown>
   unavailableBody: () => Record<string, unknown>
   upstreamErrorBody: () => Record<string, unknown>
+  /**
+   * How a non-stream upstream response reaches the client. `content_type_only`
+   * (OpenAI surface) reads the body and rebuilds the response with just
+   * `content-type`, as the Chat Completions path always has; `as_received`
+   * (Anthropic surface) returns the upstream Response untouched, every
+   * header included (docs/api.md "Eager streaming commit").
+   */
+  nonStreamResponse: "content_type_only" | "as_received"
   /** Token usage from a piped SSE body / a non-stream JSON body's `usage` (docs/logging.md "Token usage capture"). */
   createUsageSniffer: () => UsageSniffer
   parseUsage: (usage: Record<string, unknown> | null | undefined) => NormalizedUsage
