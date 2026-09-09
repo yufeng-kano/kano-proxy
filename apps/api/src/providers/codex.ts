@@ -162,30 +162,22 @@ export const codexAdapter: ProviderAdapter = {
       codexReasoningReplaySessionKey,
       readCodexReasoningReplay,
       writeCodexReasoningReplay,
-      deleteCodexReasoningReplay,
-      hashAssistantText,
+      appendCodexReplayTurn,
     } = await import("./codex_reasoning_cache")
     const apiKeyId = extras?.apiKeyId ?? ""
-    const sessionKey = codexReasoningReplaySessionKey(req.affinity, req.prompt_cache_key)
+    const clientSession = codexReasoningReplaySessionKey(req.affinity, req.prompt_cache_key)
+    // Opaque reasoning belongs to the upstream account as well as the conversation.
+    const sessionKey = clientSession ? `${clientSession}\0${account.row.id}` : null
     const replayScoped = !!apiKeyId && !!sessionKey
-
     const body = await buildCodexRequestBody(req, mapped.reasoning)
-
-    // Re-inject the previous turn's reasoning items. `store: false` means the
-    // upstream keeps nothing, and neither wire format the client speaks can
-    // carry an opaque Responses reasoning item — so without this the model
-    // re-reasons from scratch every tool round. Only replay when the previous
-    // assistant text still matches what produced them; a mismatch means the
-    // client edited history and the items no longer belong to this turn.
-    if (replayScoped) {
-      const cached = await readCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey!)
-      if (cached) {
-        const priorText = lastAssistantText(req.messages)
-        if (priorText && (await hashAssistantText(priorText)) === cached.assistant_text_hash) {
-          body.input = mergeCodexReplayItems(body.input, cached.items)
-        }
-      }
-    }
+    const { codexInputHashes, codexReplayTurn, replayCodexHistory } = await import("./codex_replay_history")
+    const hashes = replayScoped ? await codexInputHashes(body) : []
+    const replay = replayCodexHistory(
+      body.input as Array<Record<string, unknown>>,
+      hashes,
+      replayScoped ? await readCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey) : null,
+    )
+    body.input = replay.input
     const headers: Record<string, string> = {
       authorization: `Bearer ${acc.credential.access_token}`,
       "user-agent": CODEX_USER_AGENT,
@@ -214,27 +206,20 @@ export const codexAdapter: ProviderAdapter = {
       })
     }
 
-    // Persist this turn's reasoning for the next one. A completed turn with
-    // nothing replayable clears the entry rather than leaving a stale one that
-    // would be re-injected against a conversation that has moved on.
+    // Retain all matched earlier turns, including after a no-reasoning completion.
     const schedule = (p: Promise<unknown>) => {
       if (extras?.waitUntil) extras.waitUntil(p)
       else void p
     }
     const onReplayItems = replayScoped
       ? (items: CodexReasoningReplayItem[], assistantText: string) => {
-          if (items.length === 0) {
-            schedule(deleteCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey!))
-            return
-          }
-          schedule(
-            hashAssistantText(assistantText).then((assistant_text_hash) =>
-              writeCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey!, {
-                items,
-                assistant_text_hash,
-              }),
-            ),
-          )
+          schedule((async () => {
+            const turn = await codexReplayTurn(hashes[hashes.length - 1]!, items, assistantText, shortenCodexCallId)
+            const history = appendCodexReplayTurn(replay.history, turn)
+            if (history.turns.length) {
+              await writeCodexReasoningReplay(env, apiKeyId, req.upstreamModel, sessionKey, history)
+            }
+          })().catch(() => { /* Optional replay must not fail response delivery. */ }))
         }
       : undefined
 
@@ -492,74 +477,6 @@ async function openaiMessagesToCodexInput(messages: unknown[]): Promise<unknown[
     }
   }
   return input
-}
-
-/**
- * Text of the most recent assistant message, used to confirm cached reasoning
- * items still belong to this conversation before replaying them. Scans past
- * whatever trails it (the new user turn, tool results), matching the grok
- * cache's `lastAssistantTextFromAnthropicMessages`. An empty result — a
- * tool-only turn — refuses the match rather than sharing one hash across
- * every such turn.
- */
-export function lastAssistantText(messages: unknown[]): string {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i] as Record<string, unknown> | null
-    if (!m || typeof m !== "object") continue
-    if (String(m.role ?? "") !== "assistant") continue
-    return contentText(m.content)
-  }
-  return ""
-}
-
-/**
- * Splice cached reasoning items into the Responses `input` ahead of the turn
- * they belong to, skipping anything the client already replayed itself.
- * Blind prepending would double up `function_call` items whenever the client
- * echoes its own tool history (Claude Code does), which upstream rejects.
- */
-export function mergeCodexReplayItems(input: unknown, cachedItems: unknown[]): unknown[] {
-  const items = Array.isArray(input) ? (input as Array<Record<string, unknown>>) : []
-  if (!Array.isArray(cachedItems) || cachedItems.length === 0) return items
-
-  const existingCallIds = new Set<string>()
-  let hasReasoning = false
-  for (const item of items) {
-    if (!item || typeof item !== "object") continue
-    const type = String(item.type ?? "")
-    if (type === "reasoning") hasReasoning = true
-    if (type === "function_call" || type === "custom_tool_call") {
-      const id = typeof item.call_id === "string" ? item.call_id : ""
-      if (id) existingCallIds.add(id)
-    }
-  }
-
-  const replay: unknown[] = []
-  for (const raw of cachedItems) {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue
-    const item = raw as Record<string, unknown>
-    const type = String(item.type ?? "")
-    // The client already carries its own reasoning — ours would conflict.
-    if (type === "reasoning" && hasReasoning) continue
-    if (type === "function_call" || type === "custom_tool_call") {
-      const id = typeof item.call_id === "string" ? item.call_id : ""
-      if (id && existingCallIds.has(id)) continue
-    }
-    replay.push(item)
-  }
-  if (replay.length === 0) return items
-
-  // Anchor before the first tool result: that is where the prior assistant
-  // turn ended, so its reasoning must sit ahead of the results it produced.
-  const anchor = items.findIndex(
-    (i) =>
-      i &&
-      typeof i === "object" &&
-      (String(i.type ?? "") === "function_call_output" ||
-        String(i.type ?? "") === "custom_tool_call_output"),
-  )
-  if (anchor < 0) return [...items, ...replay]
-  return [...items.slice(0, anchor), ...replay, ...items.slice(anchor)]
 }
 
 /** Join every `role: "system"` message's text, in order, with a blank line. */

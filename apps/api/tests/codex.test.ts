@@ -5,7 +5,6 @@ import {
   CODEX_USER_AGENT,
   codexAdapter,
   codexSessionId,
-  mergeCodexReplayItems,
 } from "../src/providers/codex"
 import type { Env } from "../src/env"
 import type { AcquiredAccount } from "../src/pool/acquire"
@@ -884,9 +883,11 @@ describe("codex reasoning replay wiring", () => {
   }
 
   /** Drive one non-stream turn whose upstream SSE reports `output`. */
-  async function runTurn(env: Env, req: Record<string, unknown>, output: unknown[]) {
+  async function runTurn(env: Env, req: Record<string, unknown>, output: unknown[],
+    options: { text?: string; account?: AcquiredAccount } = {},
+  ) {
     const sse =
-      `data: ${JSON.stringify({ type: "response.output_text.delta", delta: "answer" })}\n\n` +
+      `data: ${JSON.stringify({ type: "response.output_text.delta", delta: options.text ?? "answer" })}\n\n` +
       `data: ${JSON.stringify({ type: "response.completed", response: { output } })}\n\n`
     let sent: Record<string, unknown> | undefined
     globalThis.fetch = (async (_u: string, init?: RequestInit) => {
@@ -894,12 +895,13 @@ describe("codex reasoning replay wiring", () => {
       return new Response(sse, { status: 200 })
     }) as typeof fetch
     const waits: Promise<unknown>[] = []
-    await codexAdapter.chatCompletions(env, codexAccount, req as never, {
+    const response = await codexAdapter.chatCompletions(env, options.account ?? codexAccount, req as never, {
       apiKeyId: "key_1",
       waitUntil: (p) => void waits.push(p),
     })
+    await response.text()
     await Promise.all(waits)
-    return sent!
+    return sent! as Record<string, unknown> & { input: Array<Record<string, unknown>> }
   }
 
   const reasoningItem = { type: "reasoning", encrypted_content: "gpt_abc" }
@@ -976,13 +978,65 @@ describe("codex reasoning replay wiring", () => {
     expect(sent.input).toContainEqual(reasoningItem)
   })
 
-  it("clears a stale entry when a completed turn has nothing replayable", async () => {
+  it.each([false, true])("keeps prior prefixes across tool-only and no-reasoning turns (stream=%s)", async (stream) => {
+    const env = kvEnv(new Map())
+    const call = (id: string) => ({ type: "function_call", call_id: id, name: "read", arguments: '{"a":1,"b":2}' })
+    const assistant = (id: string) => ({ role: "assistant", content: "", tool_calls: [
+      { id, type: "function", function: { name: "read", arguments: '{ "b": 2, "a": 1 }' } },
+    ] })
+    const result = (id: string) => ({ role: "tool", tool_call_id: id, content: "result" })
+    const firstReasoning = { type: "reasoning", encrypted_content: "first-opaque" }
+    const secondReasoning = { type: "reasoning", encrypted_content: "second-opaque" }
+    const initial = [
+      { role: "system", content: "stable instructions" },
+      { role: "user", content: "old task" }, assistant("old"), result("old"),
+      { role: "user", content: "new task" },
+    ]
+    const req = { ...baseReq, stream, messages: initial }
+    const first = await runTurn(env, req, [firstReasoning, call("one")], { text: "" })
+    const secondMessages = [...initial, assistant("one"), result("one")]
+    const second = await runTurn(env, { ...req, messages: secondMessages },
+      [secondReasoning, call("two")], { text: "" })
+    expect(second.input.slice(0, first.input.length)).toEqual(first.input)
+    expect(second.input[first.input.length]).toEqual(firstReasoning)
+    expect(second.input[first.input.length + 1]).toEqual(call("one"))
+    const thirdMessages = [...secondMessages, assistant("two"), result("two")]
+    const third = await runTurn(env, { ...req, messages: thirdMessages }, [], { text: "done" })
+    expect(third.input.slice(0, second.input.length)).toEqual(second.input)
+    expect(third.input[second.input.length]).toEqual(secondReasoning)
+    const fourth = await runTurn(env, { ...req, messages: [...thirdMessages,
+      { role: "assistant", content: "done" }, { role: "user", content: "continue" },
+    ] }, [])
+    expect(fourth.input.slice(0, third.input.length)).toEqual(third.input)
+    expect(fourth.input.filter((item: { type?: string }) => item.type === "reasoning")).toEqual([firstReasoning, secondReasoning])
+    expect(fourth.input.filter((item: { type?: string }) => item.type === "function_call")).toHaveLength(3)
+  })
+
+  it("rejects replay for edited earlier history even when assistant text matches", async () => {
+    const env = kvEnv(new Map())
+    await runTurn(env, baseReq, [reasoningItem])
+    const sent = await runTurn(env, { ...baseReq, messages: [
+      { role: "user", content: "changed task" }, { role: "assistant", content: "answer" },
+    ] }, [])
+    expect(sent.input).not.toContainEqual(reasoningItem)
+  })
+
+  it("does not replay reasoning across upstream accounts", async () => {
+    const env = kvEnv(new Map())
+    await runTurn(env, baseReq, [reasoningItem])
+    const sent = await runTurn(env, { ...baseReq, messages: [
+      ...baseReq.messages, { role: "assistant", content: "answer" },
+    ] }, [], { account: { ...codexAccount, row: { ...codexAccount.row, id: "other-account" } } })
+    expect(sent.input).not.toContainEqual(reasoningItem)
+  })
+
+  it("does not overwrite history with an unrelated no-reasoning completion", async () => {
     const store = new Map<string, string>()
     const env = kvEnv(store)
     await runTurn(env, baseReq, [reasoningItem])
     expect(store.size).toBe(1)
     await runTurn(env, baseReq, [{ type: "message", content: [] }])
-    expect(store.size).toBe(0)
+    expect(store.size).toBe(1)
   })
 })
 
@@ -997,41 +1051,5 @@ describe("codexSessionId", () => {
     expect(codexSessionId("ends_session_notauuid")).toBe("ends_session_notauuid")
     expect(codexSessionId("  ")).toBeNull()
     expect(codexSessionId(undefined)).toBeNull()
-  })
-})
-
-describe("mergeCodexReplayItems", () => {
-  const reasoning = { type: "reasoning", encrypted_content: "gpt_x" }
-
-  it("inserts reasoning ahead of the tool results it produced", async () => {
-    const input = [
-      { role: "user", content: [] },
-      { type: "function_call_output", call_id: "c1", output: "ok" },
-    ]
-    expect(mergeCodexReplayItems(input, [reasoning, { type: "function_call", call_id: "c1" }])).toEqual([
-      input[0],
-      reasoning,
-      { type: "function_call", call_id: "c1" },
-      input[1],
-    ])
-  })
-
-  it("drops a function_call the client already replayed, avoiding a duplicate", async () => {
-    const input = [
-      { type: "function_call", call_id: "c1" },
-      { type: "function_call_output", call_id: "c1", output: "ok" },
-    ]
-    const merged = mergeCodexReplayItems(input, [{ type: "function_call", call_id: "c1" }])
-    expect(merged.filter((i) => (i as { type?: string }).type === "function_call")).toHaveLength(1)
-  })
-
-  it("skips cached reasoning when the input already carries its own", async () => {
-    const input = [{ type: "reasoning", encrypted_content: "gpt_client" }]
-    expect(mergeCodexReplayItems(input, [reasoning])).toEqual(input)
-  })
-
-  it("appends when there is no tool result to anchor against", async () => {
-    const input = [{ role: "user", content: [] }]
-    expect(mergeCodexReplayItems(input, [reasoning])).toEqual([input[0], reasoning])
   })
 })

@@ -117,8 +117,8 @@ describe("codex reasoning replay KV helpers", () => {
     const store = new Map<string, string>()
     const env = mockEnv(store)
     const entry = {
-      items: [reasoning, functionCall, customToolCall],
-      assistant_text_hash: await hashAssistantText("answer"),
+      turns: [{ items: [reasoning, functionCall, customToolCall],
+        start_hash: "before", end_hash: await hashAssistantText("answer"), visible_count: 2 }],
     }
     await writeCodexReasoningReplay(env, "key1", "gpt-5.2", "sessA", entry)
     expect(await readCodexReasoningReplay(env, "key1", "gpt-5.2", "sessA")).toEqual(entry)
@@ -127,7 +127,7 @@ describe("codex reasoning replay KV helpers", () => {
   it("isolates by api key, model, and session", async () => {
     const store = new Map<string, string>()
     const env = mockEnv(store)
-    const entry = { items: [reasoning], assistant_text_hash: await hashAssistantText("a") }
+    const entry = { turns: [{ items: [reasoning], start_hash: "before", end_hash: "after", visible_count: 1 }] }
     await writeCodexReasoningReplay(env, "key1", "gpt-5.2", "sessA", entry)
     expect(await readCodexReasoningReplay(env, "key2", "gpt-5.2", "sessA")).toBeNull()
     expect(await readCodexReasoningReplay(env, "key1", "gpt-5.1", "sessA")).toBeNull()
@@ -135,13 +135,13 @@ describe("codex reasoning replay KV helpers", () => {
     const a = await codexReasoningReplayCacheKeyForTest("key1", "gpt-5.2", "sessA")
     const b = await codexReasoningReplayCacheKeyForTest("key2", "gpt-5.2", "sessA")
     expect(a).not.toBe(b)
-    expect(a.startsWith("codex-reasoning-replay:v1:")).toBe(true)
+    expect(a.startsWith("codex-reasoning-replay:v2:")).toBe(true)
   })
 
   it("treats a null session key as a no-op", async () => {
     const store = new Map<string, string>()
     const env = mockEnv(store)
-    const entry = { items: [reasoning], assistant_text_hash: await hashAssistantText("a") }
+    const entry = { turns: [{ items: [reasoning], start_hash: "before", end_hash: "after", visible_count: 1 }] }
     await writeCodexReasoningReplay(env, "key", "model", null, entry)
     expect(store.size).toBe(0)
     expect(await readCodexReasoningReplay(env, "key", "model", null)).toBeNull()
@@ -162,8 +162,7 @@ describe("codex reasoning replay KV helpers", () => {
     const env = mockEnv(store)
     const item = { type: "reasoning", encrypted_content: "x".repeat(300_000) }
     await writeCodexReasoningReplay(env, "key", "model", "sess", {
-      items: [item],
-      assistant_text_hash: "hash",
+      turns: [{ items: [item], start_hash: "before", end_hash: "after", visible_count: 1 }],
     })
     expect(store.size).toBe(0)
   })
@@ -171,7 +170,7 @@ describe("codex reasoning replay KV helpers", () => {
   it("deletes an entry", async () => {
     const store = new Map<string, string>()
     const env = mockEnv(store)
-    const entry = { items: [reasoning], assistant_text_hash: "hash" }
+    const entry = { turns: [{ items: [reasoning], start_hash: "before", end_hash: "after", visible_count: 1 }] }
     await writeCodexReasoningReplay(env, "key", "model", "sess", entry)
     await deleteCodexReasoningReplay(env, "key", "model", "sess")
     expect(await readCodexReasoningReplay(env, "key", "model", "sess")).toBeNull()

@@ -10,11 +10,16 @@ export type CodexReasoningReplayItem = {
   type: string
 }
 
-export type CodexReasoningReplayEntry = {
-  /** Ordered opaque Responses output items to prepend on the next turn. */
+export type CodexReasoningReplayTurn = {
+  /** Hashes of the visible input before and after this assistant turn. */
+  start_hash: string
+  end_hash: string
+  visible_count: number
   items: CodexReasoningReplayItem[]
-  /** SHA-256 hex of trailing assistant plaintext — match before reinject. */
-  assistant_text_hash: string
+}
+
+export type CodexReasoningReplayEntry = {
+  turns: CodexReasoningReplayTurn[]
 }
 
 
@@ -54,7 +59,7 @@ async function scopedCacheKey(
     "SHA-256",
     new TextEncoder().encode(material),
   )
-  return `codex-reasoning-replay:v1:${hex(new Uint8Array(digest))}`
+  return `codex-reasoning-replay:v2:${hex(new Uint8Array(digest))}`
 }
 
 function hex(buf: Uint8Array): string {
@@ -76,15 +81,13 @@ function isReplayItem(value: unknown): value is CodexReasoningReplayItem {
 
 function isReplayEntry(value: unknown): value is CodexReasoningReplayEntry {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false
-  const entry = value as {
-    items?: unknown
-    assistant_text_hash?: unknown
-  }
-  return (
-    Array.isArray(entry.items) &&
-    entry.items.every(isReplayItem) &&
-    typeof entry.assistant_text_hash === "string" &&
-    entry.assistant_text_hash.length > 0
+  const turns = (value as { turns?: unknown }).turns
+  return Array.isArray(turns) && turns.every((turn) =>
+    turn && typeof turn === "object" &&
+    typeof turn.start_hash === "string" && turn.start_hash.length > 0 &&
+    typeof turn.end_hash === "string" && turn.end_hash.length > 0 &&
+    Number.isInteger(turn.visible_count) && turn.visible_count > 0 &&
+    Array.isArray(turn.items) && turn.items.every(isReplayItem),
   )
 }
 
@@ -150,4 +153,18 @@ export async function codexReasoningReplayCacheKeyForTest(
   sessionKey: string,
 ): Promise<string> {
   return scopedCacheKey(apiKeyId, model, sessionKey)
+}
+
+/** Preserve older replayed prefixes when the history reaches its byte budget. */
+export function appendCodexReplayTurn(
+  history: CodexReasoningReplayEntry,
+  turn: CodexReasoningReplayTurn | null,
+): CodexReasoningReplayEntry {
+  if (!turn || history.turns.some((old) =>
+    old.start_hash === turn.start_hash && old.end_hash === turn.end_hash,
+  )) return history
+  const next = { turns: [...history.turns, turn] }
+  return new TextEncoder().encode(JSON.stringify(next)).byteLength <= CODEX_REASONING_REPLAY_MAX_BYTES
+    ? next
+    : history
 }
