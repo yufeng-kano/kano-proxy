@@ -19,6 +19,13 @@ kano-proxy/
           cli.ts                 # /api/cli: session-side CLI device/provider management
         auth/            # session, google, api keys
         proxy/           # stream helpers, openai↔provider; responses_openai.ts = Responses API ↔ Chat Completions
+                          #   dispatch.ts (Chat Completions + Anthropic Messages entry
+                          #   points: one eager and one non-stream transport, both
+                          #   generic over a `Wire`), dispatch_walk.ts (the single
+                          #   candidate walk: plan → acquire → fetch → fail-over →
+                          #   `WalkOutcome`), wire.ts + wire_openai.ts / wire_anthropic.ts
+                          #   (protocol-specific frames, error bodies, usage parsing),
+                          #   dispatch_audio.ts, dispatch_anthropic_via_openai.ts
         providers/       # claude-code, codex, grok, antigravity (builtin registry) +
                           #   custom_openai.ts / custom_anthropic.ts (per-request
                           #   adapters for user-defined endpoints, not in the
@@ -85,7 +92,7 @@ kano-proxy/
 
 - `routes/*` — HTTP only, thin.
 - `providers/*` — upstream transport + usage + OAuth specifics. The two custom-endpoint adapters are factories (`createCustomOpenAIAdapter(row)` / `createCustomAnthropicAdapter(row)`), built fresh per request from a `custom_providers` D1 row — never added to the static builtin registry in `providers/index.ts`.
-- `proxy/*` — format conversion and streaming; `dispatch.ts` walks the candidate list `routing/*` hands it and reports each attempt's outcome back (bench penalty), but never decides who to try.
+- `proxy/*` — format conversion and streaming. `dispatch_walk.ts` is the **only** candidate loop: it plans, acquires, fetches (first-byte timeout, one 529 retry), asks `routing/feedback` whether to fail over, cancels superseded upstream bodies, and returns a `WalkOutcome` (`no_account` / `unavailable` / `exhausted` / `fetch_error` / `cancelled` / `response`) — it never decides who to try and never touches the client response. `dispatch.ts` holds the two transports that turn an outcome into a client response: eager (walk runs inside the already-committed SSE stream, failures become terminal frames, one log row on close) and non-stream (walk runs first, HTTP status mirrors the outcome, `Retry-After` recomputed on exhaustion). Everything protocol-specific — SSE error/stall frames, JSON error envelopes, error-type extraction, usage sniffer/parser — lives behind the `Wire` interface (`wire_openai.ts`, `wire_anthropic.ts`); transports never branch on protocol. Audio transcriptions and the Anthropic→OpenAI conversion path are separate files that reuse the walk, not copies of it.
 - `routing/*` — the single owner of account/target selection (docs/providers.md § Routing module): expand → flat candidate list, usability facts, ordering strategy, outcome penalties. Used identically by a group alias and a direct `provider/model` call.
 - `pool/*` — bench (KV) and credential persistence; provider-agnostic.
 - `apps/relay` — dumb byte pipe only: no auth logic (Cloud Run IAM fronts it), no state, no format awareness, no credentials at rest. Anything smarter belongs in the Worker.

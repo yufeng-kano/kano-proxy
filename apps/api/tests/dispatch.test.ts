@@ -10,11 +10,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { encryptJson } from "../src/crypto/token_crypto"
 import { recordEdgeTimeoutStrike } from "../src/db/accounts"
 import type { Env } from "../src/env"
-import {
-  dispatchAnthropicMessages,
-  dispatchAnthropicViaOpenAI,
-  dispatchChatCompletions,
-} from "../src/proxy/dispatch"
+import { dispatchAnthropicMessages, dispatchChatCompletions } from "../src/proxy/dispatch"
+import { dispatchAnthropicViaOpenAI } from "../src/proxy/dispatch_anthropic_via_openai"
 import { isBenched } from "../src/pool/bench"
 import { getAdapter } from "../src/providers"
 import type { ProviderAdapter } from "../src/providers/types"
