@@ -9,7 +9,7 @@ Public releases retain verification and independent CLI distribution. The public
 ## Module boundaries
 
 - Public API exports an application factory and Worker handler factory, environment/context types and explicit extension contracts. The existing entry point remains the standalone Worker and exports AgentTunnel under its existing name.
-- Public web exports a bootstrap/router factory and explicit route, navigation and provider presentation extension contracts. The existing entry point remains the standalone web app.
+- Public web exports a bootstrap/router factory and explicit route and navigation extension contracts. The existing entry point remains the standalone web app.
 - Extensions are passed at composition time; no global mutable plugin registry. Constructing two apps must not leak routes, middleware, or policies between them.
 - Authentication establishes the caller. Subscription policy runs after authentication without replacing the caller identity. Credentials are never returned to clients.
 - Personal pools remain isolated. Teams and shared resources are out of scope; unrestricted cross-tenant lookup is forbidden.
@@ -21,9 +21,9 @@ Subscription entitlement belongs to the signed-in user. A subscription provides 
 
 Count one client model request once, regardless of upstream retries. Rejects, catalog reads and failures before useful output do not count. Streaming output followed by disconnect counts. Quotas require atomic reservation before dispatch and idempotent completion; crashes cannot silently restore already consumed credit.
 
-Teams, model sharing, member roles and USD budgets are explicitly deferred by the operator. Subscription cancellation preserves access until the paid-through date. Expiry stops new hosted model requests, but account management and export/revocation remain accessible. Configuration and personal resources are retained.
+Teams, model sharing, member roles and USD budgets are explicitly deferred by the operator. Subscription cancellation preserves paid access until the paid-through date. Expiry falls back to Free without resetting earlier Free usage. Account management and export/revocation remain accessible. Configuration and personal resources are retained.
 
-Payment setup must use the operator's real merchant account and configured price identifiers. Never invent production products, prices, customers or entitlements. Use verified webhooks, deduplication and out-of-order reconciliation. Payment credentials stay in secrets. Adding an external payment service requires an explicit documented exception to the Cloudflare stack once the provider is selected.
+Payment setup must use the operator's real merchant account and configured price identifiers. Never invent production products, prices, customers or entitlements. Use verified webhooks, deduplication and out-of-order reconciliation. Payment credentials stay in secrets. Paddle Billing is the operator-selected external payment exception because Cloudflare has no native merchant subscription checkout. Application compute and storage remain on Cloudflare.
 
 ## Verification and cutover gates
 
@@ -37,3 +37,7 @@ Payment setup must use the operator's real merchant account and configured price
 ## Implementation status
 
 Design accepted from the operator's request; implementation and verification are in progress. None of the above gates is implied complete by the presence of this document.
+
+## Launch policy (operator update)
+
+Teams is excluded. Every user, including existing users, starts with Free: 10,000 successful model requests per UTC calendar month. Paddle is selected for optional paid subscriptions; payment keys remain unset for the initial launch. Paid checkout is unavailable until real Paddle credentials and configured price IDs exist. Missing or expired paid access falls back to the user's existing Free period without resetting earlier Free usage.
