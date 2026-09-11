@@ -41,7 +41,7 @@ jobs:
     name: Verify and deploy production
     # A cli-v* Release belongs to cli-release.yml; skip instead of failing the
     # tag-shape check so the Actions list stays green for CLI releases.
-    if: github.event_name != 'release' || !startsWith(github.event.release.tag_name, 'cli-v')
+    if: ${{ false }} # Official hosting moves to kano-proxy-cloud; verification stays in ci.yml.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

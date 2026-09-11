@@ -1,5 +1,10 @@
 # Deployment
 
+## Cloud split transition
+
+The public production workflow is disabled while the operator migrates official hosting to the private `kano-proxy-cloud` repository. Public CI and independent CLI release remain enabled. The production instructions below describe the existing infrastructure and migration baseline; publishing a public product Release no longer authorizes or executes a production deployment after the disabled workflow lands. Cloud cutover gates are in [cloud-edition.md](./cloud-edition.md). Self-hosted deployment remains supported.
+
+
 ## Domains
 
 Pick any hostname you control (example: `proxy.example.com`). Same host for UI + API is recommended.

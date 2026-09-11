@@ -6,6 +6,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 
 | Doc | Summary |
 |-----|---------|
+| [cloud-edition.md](./cloud-edition.md) | Public core/private kano-proxy-cloud boundaries, subscription contracts, verification and cutover gates |
 | [product.md](./product.md) | Goals, non-goals, tenants, providers, model naming |
 | [api.md](./api.md) | Public LLM routes (`/openai/v1` Chat Completions + Responses API, `/anthropic`), errors, reasoning, audio (input & transcriptions), cache |
 | [auth.md](./auth.md) | Google OIDC admin, client API keys, OAuth account binding |
