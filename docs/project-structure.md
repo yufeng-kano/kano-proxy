@@ -5,7 +5,9 @@ kano-proxy/
   apps/
     api/                 # Cloudflare Worker
       src/
-        index.ts         # route wiring
+        index.ts         # standalone Worker assembly
+        application.ts   # application/Worker factories, route wiring, edition hooks
+        core.ts          # supported API exports for composing editions
         env.ts
         routes/
           openai.ts
@@ -60,6 +62,11 @@ kano-proxy/
     web/                 # Vue + Vite → Pages
       public/            # robots.txt, _headers (noindex except /docs/* and /login) — no _redirects
       src/
+        main.ts          # standalone web assembly
+        bootstrap.ts     # createWebApp: app, router and extension composition
+        core.ts          # supported web exports for composing editions
+        extensions.ts    # route/navigation contracts and injection
+        router/          # createAppRouter; per-app bootstrap state
         pages/
         components/
           ui/            # shared primitives (shell, header, table, modal…)
@@ -82,7 +89,11 @@ kano-proxy/
   docs/
   scripts/
     ci/                  # CI helpers (e.g. write production wrangler from env)
-  .github/workflows/     # ci (PRs), release-deploy (v* Release), cli-release (cli-v* Release)
+  .github/workflows/     # ci (push/PR), retired release-deploy, cli-release (cli-v* Release)
+  .rule                 # canonical repository guardrails
+  AGENTS.md             # symlink to .rule
+  CLAUDE.md             # symlink to .rule
+  .cursor/rules/kano-proxy.mdc # symlink to ../../.rule
   .local.example/        # committed templates for private operator data
   .local/                # gitignored: real DNS, host, deploy notes (not open-source)
   package.json           # workspace root
@@ -100,6 +111,8 @@ kano-proxy/
 - `apps/docs` — content only. No calls to `/api/*`, no session awareness, no shared code with `apps/web` beyond being copied into its `dist/`. The one piece of script is the origin fill ([docs-site.md](./docs-site.md)).
 
 ## Edition composition
+
+The dependency direction is private edition → public core. This repository must not import cloud code or enforce the hosted Free/Paddle policy in its standalone entry. Keep provider/protocol fixes here; billing and cloud-only pages belong in the private repository. Rules for the two repositories are maintained independently; each repository's instruction links point to its own `.rule`.
 
 `apps/api/src/core.ts` exports `createApplication`, `createWorker`, `AgentTunnel`, and public environment types. `src/index.ts` is the standalone entry. The application factory accepts instance-local route registration and an authenticated API-key request policy. The policy wraps all API-key routes, including group mounts; editions decide which operations to meter.
 

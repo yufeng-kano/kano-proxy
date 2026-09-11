@@ -315,9 +315,9 @@ pnpm build:site            # web + public docs → apps/web/dist
 # then migrate:remote + api deploy + pages deploy (see Production deploy)
 ```
 
-## CI / GitHub Actions (release deploy)
+## CI / GitHub Actions
 
-Production updates run when a **GitHub Release is published** for a product tag `vX.Y.Z` (workflow: `.github/workflows/release-deploy.yml`). Pushing to `main` alone does **not** deploy. The CLI has its own tag prefix, `cli-vX.Y.Z`, its own workflow, and its own version line — see § CLI release below; a CLI release never deploys the Worker, and a product release never builds the CLI.
+Public product Releases do not deploy the website. `.github/workflows/release-deploy.yml` is retired: no Release trigger, and its manual job is always skipped. Official hosting is deployed by the private repository’s `release.yml` after a matching published Release and configured secrets. Public pushes/PRs retain verification. The CLI has its own tag prefix, `cli-vX.Y.Z`, its own workflow, and its own version line — see § CLI release below; a CLI release never deploys the Worker, and a product release never builds the CLI.
 
 ### Version tags
 
@@ -335,11 +335,11 @@ Example: last release `v0.3.1` → default next tag `v0.4.0` and `"version": "0.
 
 A version bump is incomplete unless **all** of these land together:
 
-1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`). The deploy job checks tag == `package.json` before touching anything and fails the whole run when they differ — the bundled version is what the Worker reports as "running" ([changelog.md](./changelog.md)), so a mismatch is a lie on every signed-in page. `apps/cli/Cargo.toml` is **not** part of a product release (it was until v4.5.2 — that lockstep is why v4.5.1 shipped with no CLI assets and v4.5.2 exists only to realign; the CLI now has its own line).
+1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`). Keep the tag equal to `package.json`; the bundled version is reported by self-hosted Workers ([changelog.md](./changelog.md)). The retired public deploy job no longer enforces this. `apps/cli/Cargo.toml` is **not** part of a product release (it was until v4.5.2 — that lockstep is why v4.5.1 shipped with no CLI assets and v4.5.2 exists only to realign; the CLI now has its own line).
 2. **Commit** that change with the release work (and any code/docs for the release).
 3. **Push** the commit to `origin` (`main` or the release branch).
 4. **Write the release notes** (see below) — they are a deliverable of the release, not a formality.
-5. **Tag** `vMAJOR.MINOR.PATCH` on that commit and **publish a GitHub Release** (tag alone without a Release does not run deploy CI).
+5. **Tag** `vMAJOR.MINOR.PATCH` on that commit and **publish a GitHub Release** (this publishes source and release notes, not a website deployment).
 
 Do **not** create a GitHub Release / tag without updating and pushing `package.json` first. Keep tag and `package.json` version in lockstep (`v1.0.1` ↔ `"1.0.1"`).
 
@@ -357,7 +357,7 @@ Pass the notes inline with `gh release create --notes '<markdown>'` — no scrat
 ```bash
 # example: patch 1.0.0 → 1.0.1 after work is ready on main
 # 1) set "version": "1.0.1" in package.json
-git add package.json apps/cli/Cargo.toml apps/cli/Cargo.lock  # + other release files
+git add package.json  # + other product release files; CLI version is independent
 git commit -m "Release v1.0.1: <summary>."
 git push origin main
 
@@ -374,9 +374,13 @@ A one-line summary of the release.
 '
 ```
 
-Notes can be corrected after the fact with `gh release edit <tag> --notes '<markdown>'`; editing a release does **not** re-run the deploy workflow (it triggers on `published`, not `edited`). The `/changelog` page refetches within an hour, or immediately via its Refresh.
+Notes can be corrected after the fact with `gh release edit <tag> --notes '<markdown>'`; neither publishing nor editing a public product Release deploys the official website. The `/changelog` page refetches within an hour, or immediately via its Refresh.
 
-### Repository secrets (Settings → Secrets and variables → Actions)
+### Legacy deployment configuration reference
+
+The Cloudflare settings and steps below document the retired public pipeline for infrastructure reference. They do not enable public deployment. Configure official hosting in the private repository using its own deployment guide; `TAP_PUSH_TOKEN` still belongs here for active public CLI releases.
+
+#### Repository secrets (Settings → Secrets and variables → Actions)
 
 | Secret | Purpose |
 |--------|---------|
@@ -387,7 +391,7 @@ Notes can be corrected after the fact with `gh release edit <tag> --notes '<mark
 | `CF_KV_CACHE_ID` | Production KV id for `CACHE` |
 | `TAP_PUSH_TOKEN` | Cross-repo token with push access to `yufeng-kano/homebrew-tap` and `yufeng-kano/scoop-bucket` — used by the CLI release job to bump the formula/manifest. When absent the bump steps are skipped with a warning and can be re-run after the secret is added |
 
-### Repository variables
+#### Repository variables
 
 | Variable | Purpose |
 |----------|---------|
@@ -396,7 +400,7 @@ Notes can be corrected after the fact with `gh release edit <tag> --notes '<mark
 
 Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`) are **not** set by CI on each release; configure once with `wrangler secret put --config wrangler.production.toml`.
 
-### What the workflow does
+#### What the retired workflow used to do
 
 1. Checkout release commit  
 2. `pnpm install` → test → typecheck → `pnpm build:site` (web + docs, `APP_URL` passed for the sitemap)  
@@ -434,4 +438,4 @@ The release notes on a `cli-v` Release are for CLI users on GitHub; the `/change
 
 PR CI (`ci.yml`) compile-checks all five targets plus `cargo test`, so a PR cannot merge a CLI that does not build.
 
-Manual re-deploy of a ref: Actions → **Release deploy** → Run workflow.
+The retired public workflow cannot redeploy a ref. Use the private repository’s documented Release process for official hosting.

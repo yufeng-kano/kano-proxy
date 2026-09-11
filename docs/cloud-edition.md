@@ -36,7 +36,7 @@ Payment setup must use the operator's real merchant account and configured price
 
 ## Implementation status
 
-Design accepted from the operator's request; implementation and verification are in progress. None of the above gates is implied complete by the presence of this document.
+The reusable API/web entry points are implemented and merged. The standalone application remains supported. The public production workflow is retired: it has no Release trigger and its remaining manual job is skipped. Public CI and independent CLI releases remain enabled. Private implementation, launch checks and deployment status are maintained in the private repository; a public Release does not deploy the official website.
 
 ## Launch policy (operator update)
 
