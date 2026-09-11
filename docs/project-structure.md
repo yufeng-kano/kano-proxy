@@ -104,3 +104,5 @@ kano-proxy/
 `apps/api/src/core.ts` exports `createApplication`, `createWorker`, `AgentTunnel`, and public environment types. `src/index.ts` is the standalone entry. The application factory accepts instance-local route registration and an authenticated API-key request policy. The policy wraps all API-key routes, including group mounts; editions decide which operations to meter.
 
 `apps/web/src/core.ts` exports `createWebApp`, `createAppRouter`, the authenticated API client, and extension types. Routes and sidebar items are passed when constructing the app. Extension route titles use `meta.title`; core routes retain catalog-backed `meta.titleKey`. The web source currently requires its documented `@` alias to point to the core web `src` directory in the composing Vite/TypeScript config.
+
+The web composition entry also exports `useAuth`, `PageHeader`, and `AppButton` so edition pages can reuse the session state and standard page chrome without importing internal files.
