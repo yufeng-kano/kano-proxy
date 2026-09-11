@@ -106,3 +106,5 @@ kano-proxy/
 `apps/web/src/core.ts` exports `createWebApp`, `createAppRouter`, the authenticated API client, and extension types. Routes and sidebar items are passed when constructing the app. Extension route titles use `meta.title`; core routes retain catalog-backed `meta.titleKey`. The web source currently requires its documented `@` alias to point to the core web `src` directory in the composing Vite/TypeScript config.
 
 The web composition entry also exports `useAuth`, `PageHeader`, and `AppButton` so edition pages can reuse the session state and standard page chrome without importing internal files.
+
+Extension navigation icons are Vue components supplied by the composing edition. New edition navigation does not require adding private feature names to the public icon registry.

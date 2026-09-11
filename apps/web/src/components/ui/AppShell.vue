@@ -180,7 +180,7 @@ async function onSignOut() {
           <span class="nav-label">{{ t(item.label) }}</span>
         </RouterLink>
         <RouterLink v-for="item in navigation" :key="item.name" :to="item.to" class="nav-item" active-class="active">
-          <NavIcon :name="item.icon" />
+          <component :is="item.icon" />
           <span class="nav-label">{{ item.label }}</span>
         </RouterLink>
       </nav>

@@ -1,11 +1,11 @@
-import { inject, type InjectionKey } from "vue"
+import { inject, type Component, type InjectionKey } from "vue"
 import type { RouteRecordRaw } from "vue-router"
 
 export interface NavigationItem {
   name: string
   to: string
   label: string
-  icon: "overview" | "logs" | "providers" | "models" | "groups" | "keys" | "docs" | "changelog"
+  icon: Component
 }
 
 export interface WebExtensions {
