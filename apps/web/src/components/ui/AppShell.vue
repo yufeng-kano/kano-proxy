@@ -21,8 +21,10 @@ import { useChangelog } from "@/composables/useChangelog"
 import { SITE } from "@/config/site"
 import { useI18n } from "@/i18n"
 import { resetScroll, setScrollRegion } from "@/services/scrollRegion"
+import { useWebExtensions } from "@/extensions"
 import NavIcon from "./NavIcon.vue"
 
+const { navigation = [] } = useWebExtensions()
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
@@ -176,6 +178,10 @@ async function onSignOut() {
         >
           <NavIcon :name="item.name" />
           <span class="nav-label">{{ t(item.label) }}</span>
+        </RouterLink>
+        <RouterLink v-for="item in navigation" :key="item.name" :to="item.to" class="nav-item" active-class="active">
+          <component :is="item.icon" />
+          <span class="nav-label">{{ item.label }}</span>
         </RouterLink>
       </nav>
 

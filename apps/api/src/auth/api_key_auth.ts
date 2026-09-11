@@ -59,5 +59,7 @@ export const apiKeyAuth: MiddlewareHandler<HonoEnv> = async (c, next) => {
   c.set("apiKeyUserId", row.user_id)
   c.set("apiKeyId", row.id)
   c.executionCtx.waitUntil(touchKey(c.env.DB, row.id))
+  const policy = c.get("requestPolicy")
+  if (policy) return policy(c, next)
   await next()
 }
