@@ -588,6 +588,17 @@ onBeforeUnmount(() => {
   font-weight: var(--weight-semibold);
 }
 
+/*
+ * A padding-month day inside the selection is still selected: the strip for
+ * a week that straddles a month boundary (Jul 27 - Aug 2) must read as one
+ * solid block, not a dimmed half and a solid half.
+ */
+.day-cell.selected-day.other-month,
+.week-mode .day-cell.selected-week.other-month {
+  opacity: 1;
+  color: var(--accent-fg);
+}
+
 /* Indicators */
 .today-dot {
   position: absolute;
