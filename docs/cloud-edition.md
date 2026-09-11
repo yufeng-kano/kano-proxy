@@ -9,7 +9,7 @@ Public releases retain verification and independent CLI distribution. The public
 ## Module boundaries
 
 - Public API exports an application factory and Worker handler factory, environment/context types and explicit extension contracts. The existing entry point remains the standalone Worker and exports AgentTunnel under its existing name.
-- Public web exports a bootstrap/router factory and explicit route and navigation extension contracts. The existing entry point remains the standalone web app.
+- Public web exports a bootstrap/router factory and explicit route, navigation and account-menu extension contracts. The existing entry point remains the standalone web app.
 - Extensions are passed at composition time; no global mutable plugin registry. Constructing two apps must not leak routes, middleware, or policies between them.
 - Authentication establishes the caller. Subscription policy runs after authentication without replacing the caller identity. Credentials are never returned to clients.
 - Personal pools remain isolated. Teams and shared resources are out of scope; unrestricted cross-tenant lookup is forbidden.

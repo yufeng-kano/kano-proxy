@@ -24,7 +24,7 @@ import { resetScroll, setScrollRegion } from "@/services/scrollRegion"
 import { useWebExtensions } from "@/extensions"
 import NavIcon from "./NavIcon.vue"
 
-const { navigation = [] } = useWebExtensions()
+const { navigation = [], accountMenu = [] } = useWebExtensions()
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
@@ -35,6 +35,10 @@ const region = ref<HTMLElement | null>(null)
 const sidebar = ref<HTMLElement | null>(null)
 const drawerOpen = ref(false)
 const menuButton = ref<HTMLElement | null>(null)
+const accountRoot = ref<HTMLElement | null>(null)
+const accountButton = ref<HTMLElement | null>(null)
+const accountMenuEl = ref<HTMLElement | null>(null)
+const accountOpen = ref(false)
 
 const NAV = [
   { name: "overview", to: "/overview", label: "nav.overview" },
@@ -71,6 +75,7 @@ watch(
   () => {
     resetScroll()
     drawerOpen.value = false
+    accountOpen.value = false
   },
 )
 
@@ -91,6 +96,57 @@ watch(drawerOpen, async (open) => {
 })
 
 const FOCUSABLE = 'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+/**
+ * The account menu, opened from the user block.
+ *
+ * It owes the same three things the drawer does — Escape closes it, a click
+ * outside closes it, focus returns to the trigger — plus the arrow keys a
+ * `menu` owes its keyboard users. It is not modal: the page behind stays
+ * usable, so there is no scrim and no focus trap.
+ */
+watch(accountOpen, async (open) => {
+  if (!open) return
+  await nextTick()
+  accountMenuEl.value?.querySelector<HTMLElement>(FOCUSABLE)?.focus()
+})
+
+function closeAccount() {
+  if (!accountOpen.value) return
+  accountOpen.value = false
+  accountButton.value?.focus()
+}
+
+/** Bound to the user block's own subtree, so it only runs with focus inside. */
+function onAccountKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    closeAccount()
+    return
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return
+  event.preventDefault()
+  // Closed, an arrow opens it; the watcher above lands focus on the first item.
+  if (!accountOpen.value) {
+    accountOpen.value = true
+    return
+  }
+  const items = [...(accountMenuEl.value?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? [])]
+  if (!items.length) return
+  const step = event.key === "ArrowDown" ? 1 : -1
+  const current = items.indexOf(document.activeElement as HTMLElement)
+  const next = current < 0 ? (step === 1 ? 0 : items.length - 1) : (current + step + items.length) % items.length
+  items[next]!.focus()
+}
+
+/**
+ * Pointer down rather than click: a menu that survives until mouseup reads as
+ * lagging behind the press that dismissed it. Focus is not pulled back to the
+ * trigger here — the user is already pressing something else.
+ */
+function onPointerDown(event: PointerEvent) {
+  if (!accountOpen.value) return
+  if (!accountRoot.value?.contains(event.target as Node)) accountOpen.value = false
+}
 
 /** Matches the 1080px breakpoint in this component's own stylesheet. */
 function isDrawerLayout(): boolean {
@@ -130,11 +186,13 @@ function onKeydown(event: KeyboardEvent) {
 onMounted(() => {
   setScrollRegion(region.value)
   window.addEventListener("keydown", onKeydown)
+  document.addEventListener("pointerdown", onPointerDown)
 })
 
 onBeforeUnmount(() => {
   setScrollRegion(null)
   window.removeEventListener("keydown", onKeydown)
+  document.removeEventListener("pointerdown", onPointerDown)
 })
 
 async function onSignOut() {
@@ -203,8 +261,16 @@ async function onSignOut() {
         </RouterLink>
       </div>
 
-      <div class="sidebar-foot">
-        <div class="user">
+      <div ref="accountRoot" class="sidebar-foot" @keydown="onAccountKeydown">
+        <button
+          ref="accountButton"
+          type="button"
+          class="user"
+          aria-haspopup="menu"
+          :aria-expanded="accountOpen"
+          :aria-label="userLabel || t('app.account')"
+          @click="accountOpen = !accountOpen"
+        >
           <img
             v-if="user?.picture_url"
             :src="user.picture_url"
@@ -216,13 +282,32 @@ async function onSignOut() {
             {{ (userLabel[0] ?? "?").toUpperCase() }}
           </span>
           <span class="user-label" :title="userLabel">{{ userLabel }}</span>
-          <button
-            type="button"
-            class="sign-out"
-            :aria-label="t('app.signOut')"
-            :title="t('app.signOut')"
-            @click="onSignOut"
+          <svg class="chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path d="M5 10l3-3 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+
+        <div
+          v-if="accountOpen"
+          ref="accountMenuEl"
+          class="account-menu"
+          role="menu"
+          :aria-label="t('app.account')"
+        >
+          <p v-if="user?.email" class="account-email" :title="user.email">{{ user.email }}</p>
+          <RouterLink
+            v-for="item in accountMenu"
+            :key="item.name"
+            :to="item.to"
+            role="menuitem"
+            class="menu-item"
+            @click="accountOpen = false"
           >
+            <component :is="item.icon" />
+            <span class="menu-label">{{ item.label }}</span>
+          </RouterLink>
+          <div v-if="accountMenu.length" class="menu-rule" role="separator" />
+          <button type="button" role="menuitem" class="menu-item" @click="onSignOut">
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path
                 d="M6 14H3.5A1.5 1.5 0 012 12.5v-9A1.5 1.5 0 013.5 2H6M10.5 11L14 8l-3.5-3M14 8H6"
@@ -232,6 +317,7 @@ async function onSignOut() {
                 stroke-linejoin="round"
               />
             </svg>
+            <span class="menu-label">{{ t("app.signOut") }}</span>
           </button>
         </div>
       </div>
@@ -435,6 +521,7 @@ async function onSignOut() {
 }
 
 .sidebar-foot {
+  position: relative;
   padding-top: var(--space-2);
   margin-top: var(--space-1);
   border-top: 1px solid var(--border);
@@ -444,8 +531,32 @@ async function onSignOut() {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   padding: var(--space-2);
+  border: none;
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.user:hover,
+.user[aria-expanded="true"] {
+  background: var(--hover);
+}
+
+.chevron {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform var(--duration-fast) var(--ease);
+}
+
+.user[aria-expanded="true"] .chevron {
+  transform: rotate(180deg);
 }
 
 .avatar {
@@ -476,30 +587,80 @@ async function onSignOut() {
   font-size: var(--text-xs);
 }
 
-.sign-out {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  flex-shrink: 0;
+/* Rises from the user block and spans the sidebar's column: the menu is that
+   block's own surface, not a panel that happens to start near it. */
+.account-menu {
+  position: absolute;
+  bottom: calc(100% - var(--space-1));
+  left: 0;
+  right: 0;
+  z-index: 60;
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  animation: menu-in var(--duration) var(--ease-enter);
+}
+
+.account-email {
+  margin: 0;
+  padding: var(--space-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-2);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
-  color: var(--muted);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-align: left;
   cursor: pointer;
   transition:
     background var(--duration-fast) var(--ease),
     color var(--duration-fast) var(--ease);
 }
 
-.sign-out:hover {
+.menu-item:hover {
   background: var(--hover);
   color: var(--text);
 }
 
-.sign-out svg {
-  width: 15px;
-  height: 15px;
+.menu-item :deep(svg) {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  pointer-events: none;
+}
+
+.menu-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-rule {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--border);
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
 }
 
 /* --- Content ----------------------------------------------------------- */

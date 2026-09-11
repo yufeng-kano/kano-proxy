@@ -26,6 +26,7 @@ export const en = {
   "app.openMenu": "Open menu",
   "app.primaryNav": "Main",
   "app.signOut": "Sign out",
+  "app.account": "Account",
   "app.updateAvailable": "Update available",
 
   // --- Navigation ---------------------------------------------------------

@@ -121,3 +121,5 @@ The dependency direction is private edition → public core. This repository mus
 The web composition entry also exports `useAuth`, `PageHeader`, and `AppButton` so edition pages can reuse the session state and standard page chrome without importing internal files.
 
 Extension navigation icons are Vue components supplied by the composing edition. New edition navigation does not require adding private feature names to the public icon registry.
+
+`WebExtensions.accountMenu` places edition destinations in the shell's account menu instead of the primary sidebar nav, using the same `{ name, to, label, icon }` shape as navigation items. The core ships none; the menu renders the signed-in address and sign-out on its own.
