@@ -54,3 +54,37 @@ export async function settleLease(
     })
   }
 }
+
+/**
+ * A borrowed row's upstream response headers, minus everything that describes
+ * the **owner's** account rather than this request (docs/cloud-edition.md
+ * § "Pool extension"): rate-limit budgets and reset times, `retry-after`, and
+ * any organization/account identifier the upstream echoes back. Those are
+ * another user's quota state — a borrower that honors them throttles itself
+ * on limits it does not have, and they name the sharer.
+ *
+ * Only ever called for a candidate carrying `share`; own rows and standalone
+ * installs keep the byte-identical passthrough they always had.
+ */
+export function borrowerSafeHeaders(headers: Headers): Headers {
+  const out = new Headers()
+  for (const [name, value] of headers.entries()) {
+    const key = name.toLowerCase()
+    if (
+      // `anthropic-ratelimit-*`, `x-ratelimit-*`, `ratelimit-*`, and the
+      // proxy-internal `x-kano-ratelimit-reset` hint (docs/providers.md § Penalties).
+      key.includes("ratelimit") ||
+      key.includes("rate-limit") ||
+      key === "retry-after" ||
+      // Owner identity: `anthropic-organization-id`, `openai-organization`,
+      // `x-org-id`, `anthropic-account-id`, …
+      key.includes("organization") ||
+      key.includes("-org-id") ||
+      key.includes("account-id")
+    ) {
+      continue
+    }
+    out.set(name, value)
+  }
+  return out
+}

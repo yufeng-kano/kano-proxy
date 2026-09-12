@@ -67,5 +67,6 @@ Core obligations:
 - `dispatch_walk` calls `reserveAttempt` immediately before each attempt's acquire; a `skip` is not counted toward `MAX_ATTEMPTS`. A lease is settled exactly once, at the point the core already decides that attempt's `request_logs` row: `released` when the attempt was benched/retried, when a non-stream upstream error status is passed through, or when the row carries an `error_code` with no completion output; `consumed` otherwise. For streams that is the stream-close write, so a lease may outlive the returned `Response`.
 - Promote/unpause/delete/patch on a shared row from a non-owner return 403, except promote, which delegates to `setSharedPriority`.
 - Credentials of shared accounts are decrypted only inside dispatch, as for own accounts, and never returned by any route.
+- A borrowed row's upstream response headers are stripped of everything that states the **owner's** account rather than this request — rate-limit budgets and resets (`anthropic-ratelimit-*`, `x-ratelimit-*`, the internal `x-kano-ratelimit-reset`), `retry-after`, and any organization/account identifier — on every delivery path (non-stream passthrough, streamed passthrough, audio). Own rows and standalone installs are byte-identical to before.
 
 Teams themselves (membership, limits, ledgers, UI) stay in the private edition.

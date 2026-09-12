@@ -7,7 +7,7 @@
  */
 import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env } from "../env"
-import { settleLease, type PoolExtension } from "../pool/extension"
+import { borrowerSafeHeaders, settleLease, type PoolExtension } from "../pool/extension"
 import type { ProviderAdapter } from "../providers/types"
 import type { RoutingCandidate } from "../routing/types"
 import { logRequest } from "../logging/request_log"
@@ -71,11 +71,14 @@ export async function dispatchAudioTranscriptions(
     },
     async (candidate, res, latencyMs, lease) => {
       const errorCode = res.ok ? null : "upstream_error"
-      // A transcription is one shot: any error code on the row means the
-      // attempt produced nothing usable, so the lease releases with it.
+      /** Whether any response byte reached the client — the same rule the other transports use. */
+      let sawOutput = false
+      // An upstream error status passed through carries no useful output
+      // whatever its body says; otherwise transcription text that already
+      // reached the client is consumed, even if the connection then broke.
       const log = (usage: NormalizedUsage | null, code: string | null) =>
         opts.waitUntil(
-          settleLease(lease, leaseOutcome(code, false)).then(() =>
+          settleLease(lease, res.status >= 400 ? "released" : leaseOutcome(code, sawOutput)).then(() =>
             logRequest(env, {
               userId: opts.userId,
               apiKeyId: opts.apiKeyId,
@@ -95,27 +98,37 @@ export async function dispatchAudioTranscriptions(
       if (res.body && isEventStream(res)) {
         const sniffer = openaiWire.createUsageSniffer()
         const streamBody = streamWithKeepalive(res.body, undefined, {
-          tap: (chunk) => sniffer.feed(chunk),
+          tap: (chunk) => {
+            sawOutput = true
+            sniffer.feed(chunk)
+          },
           idleTimeoutMs,
           stallFrame: openaiWire.stallFrame,
           onClose: (reason) => log(sniffer.finish(), errorCode ?? streamCloseErrorCode(reason, sniffer.complete())),
         })
-        return new Response(streamBody, { status: res.status, headers: passthroughStreamHeaders(res.headers) })
+        return new Response(streamBody, {
+          status: res.status,
+          headers: passthroughStreamHeaders(res.headers, !!candidate.share),
+        })
       }
 
       const isJson = (res.headers.get("content-type") || "").includes("application/json")
       const onFinish = (usage: NormalizedUsage | null, reason: StreamCloseReason) =>
         log(usage, reason === "cancel" ? "client_abort" : reason === "error" ? "upstream_error" : errorCode)
 
+      // Audio passes every upstream header through; a borrowed row drops the
+      // owner's rate-limit/identity ones first (docs/cloud-edition.md § "Pool extension").
+      const headers = candidate.share ? borrowerSafeHeaders(res.headers) : res.headers
       if (!res.body) {
         onFinish(null, "done")
-        return res
+        return candidate.share ? new Response(null, { status: res.status, statusText: res.statusText, headers }) : res
       }
-      return new Response(streamWithUsageTap(res.body, isJson, onFinish), {
-        status: res.status,
-        statusText: res.statusText,
-        headers: res.headers,
-      })
+      return new Response(
+        streamWithUsageTap(res.body, isJson, onFinish, () => {
+          sawOutput = true
+        }),
+        { status: res.status, statusText: res.statusText, headers },
+      )
     },
   )
 }
@@ -125,6 +138,8 @@ function streamWithUsageTap(
   upstream: ReadableStream<Uint8Array>,
   isJson: boolean,
   onFinish: (usage: NormalizedUsage | null, reason: StreamCloseReason) => void,
+  /** Called after each chunk is enqueued — the first one means output reached the client. */
+  onChunk: () => void,
 ): ReadableStream<Uint8Array> {
   let finished = false
   let boundedBuf = ""
@@ -159,6 +174,7 @@ function streamWithUsageTap(
         }
         if (value) {
           controller.enqueue(value)
+          onChunk()
           if (isJson && boundedLen < MAX_TAP) {
             try {
               boundedBuf += decoder.decode(value, { stream: true })

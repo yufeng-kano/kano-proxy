@@ -15,7 +15,8 @@ import { encryptJson } from "../src/crypto/token_crypto"
 import type { AccountRow } from "../src/db/accounts"
 import type { Env } from "../src/env"
 import type { AttemptLease, PoolExtension, SharedAccount } from "../src/pool/extension"
-import { dispatchChatCompletions } from "../src/proxy/dispatch"
+import { dispatchAnthropicMessages, dispatchChatCompletions } from "../src/proxy/dispatch"
+import { dispatchAudioTranscriptions } from "../src/proxy/dispatch_audio"
 import type { ProviderAdapter } from "../src/providers/types"
 import { poolCandidates } from "../src/routing/candidates"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
@@ -460,6 +461,143 @@ describe("dispatch — the attempt lease settles exactly once, with the log row"
     expect(db.rows("request_logs")).toHaveLength(1)
   })
 
+  it("audio consumes the lease once transcription output has reached the client", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { id: "acc_1", userId: "user_1" })
+    const { lease, settled } = recordingLease()
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchAudioTranscriptions(
+      buildEnv(db),
+      audioOpts({
+        adapter: audioAdapter(['{"text":"hel', 'lo"}']),
+        waitUntil,
+        poolExtension: fakeExtension({ reserveAttempt: vi.fn(async () => lease) }),
+      }),
+    )
+    const reader = res.body!.getReader()
+    // One chunk of transcription really reached the client; the client then
+    // disconnects, which is `client_abort` on the row but not a free attempt.
+    expect((await reader.read()).done).toBe(false)
+    await reader.cancel()
+    await drain()
+
+    expect(settled).toEqual(["consumed"])
+    expect(db.rows("request_logs")[0]).toMatchObject({ error_code: "client_abort" })
+  })
+
+  it("audio still releases the lease when the client leaves before any output", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { id: "acc_1", userId: "user_1" })
+    const { lease, settled } = recordingLease()
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchAudioTranscriptions(
+      buildEnv(db),
+      audioOpts({
+        adapter: audioAdapter([]),
+        waitUntil,
+        poolExtension: fakeExtension({ reserveAttempt: vi.fn(async () => lease) }),
+      }),
+    )
+    await res.body!.cancel()
+    await drain()
+
+    expect(settled).toEqual(["released"])
+  })
+
+  it("releases the lease and still logs when reading the non-stream body throws", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { id: "acc_1", userId: "user_1" })
+    const { lease, settled } = recordingLease()
+    const { adapter } = scriptedAdapter(
+      () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.error(new Error("connection reset"))
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+    )
+    const { waitUntil, drain } = collectWaitUntil()
+
+    await expect(
+      dispatchChatCompletions(
+        buildEnv(db),
+        chatOpts({
+          adapter,
+          waitUntil,
+          poolExtension: fakeExtension({ reserveAttempt: vi.fn(async () => lease) }),
+        }),
+      ),
+    ).rejects.toThrow()
+    await drain()
+
+    expect(settled).toEqual(["released"])
+    expect(db.rows("request_logs")[0]).toMatchObject({ error_code: "upstream_error" })
+  })
+
+  it("settles exactly once, released, when the client cancels the instant the walk commits", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { id: "acc_1", userId: "user_1" })
+    const { lease, settled } = recordingLease()
+    let openUpstream: (() => void) | null = null
+    const gate = new Promise<void>((resolve) => {
+      openUpstream = resolve
+    })
+    const adapter: ProviderAdapter = {
+      id: "grok",
+      async chatCompletions() {
+        await gate
+        return new Response('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        })
+      },
+    }
+
+    const pending: Promise<unknown>[] = []
+    let cancelNow: (() => void) | null = null
+    // The walk's first `waitUntil` is the background usage refresh, fired
+    // after its last cancel check and before it returns the response. A
+    // microtask queued there lands in exactly the window where the stream can
+    // close before the transport has been handed the lease.
+    const waitUntil = (promise: Promise<unknown>) => {
+      pending.push(promise)
+      const cancel = cancelNow
+      cancelNow = null
+      if (cancel) void Promise.resolve().then(cancel)
+    }
+
+    const res = await dispatchChatCompletions(
+      buildEnv(db),
+      chatOpts({
+        adapter,
+        waitUntil,
+        poolExtension: fakeExtension({ reserveAttempt: vi.fn(async () => lease) }),
+        req: {
+          model: "grok/grok-4.5",
+          rawModel: "grok/grok-4.5",
+          upstreamModel: "grok-4.5",
+          messages: [{ role: "user", content: "hi" }],
+          stream: true,
+          rawBody: {},
+        },
+      }),
+    )
+    cancelNow = () => void res.body!.cancel()
+    openUpstream!()
+    // Let the detached producer run to completion before draining its work.
+    for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0))
+    await Promise.all(pending)
+
+    // No output ever reached the client, and the late lease is settled once.
+    expect(settled).toEqual(["released"])
+    expect(db.rows("request_logs")[0]).toMatchObject({ error_code: "client_abort" })
+  })
+
   it("shared rows log the shared account id against the calling user", async () => {
     const db = new FakeD1()
     const borrowed = await accountRow({ id: "shared_1", userId: "user_2" })
@@ -485,6 +623,204 @@ describe("dispatch — the attempt lease settles exactly once, with the log row"
       account_id: "shared_1",
       provider: "grok",
     })
+  })
+})
+
+/**
+ * Owner-only response headers (docs/cloud-edition.md § "Pool extension"):
+ * the upstream states the **sharer's** rate-limit budget and identity, and a
+ * borrower must never see either — a client that honors `retry-after` /
+ * `anthropic-ratelimit-*` would throttle itself on someone else's quota.
+ */
+const OWNER_HEADERS = {
+  "anthropic-ratelimit-requests-remaining": "42",
+  "anthropic-ratelimit-unified-reset": "1767225600",
+  "x-ratelimit-limit-requests": "100",
+  "retry-after": "30",
+  "anthropic-organization-id": "org_owner",
+}
+
+function headerNames(res: Response): string[] {
+  return [...res.headers.keys()]
+}
+
+/** An Anthropic-surface adapter whose one reply carries every owner-only header plus a benign one. */
+function anthropicHeaderAdapter(extra: Record<string, string> = {}): ProviderAdapter {
+  return {
+    id: "claude-code",
+    async chatCompletions() {
+      throw new Error("unused")
+    },
+    async messages() {
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "x-request-id": "req_owner",
+          ...OWNER_HEADERS,
+          ...extra,
+        },
+      })
+    },
+  }
+}
+
+function messagesOpts(extra: Record<string, unknown>) {
+  return {
+    userId: "user_1",
+    apiKeyId: "key_1",
+    provider: "claude-code",
+    model: "claude-code/claude-sonnet-4-5",
+    body: { model: "claude-sonnet-4-5", messages: [{ role: "user", content: "hi" }] },
+    headers: new Headers(),
+    ...extra,
+  } as Parameters<typeof dispatchAnthropicMessages>[1]
+}
+
+/** An audio adapter whose reply streams `chunks`, then ends or stays open for the client to cancel. */
+function audioAdapter(chunks: string[], close = false): ProviderAdapter {
+  return {
+    id: "grok",
+    async chatCompletions() {
+      throw new Error("unused")
+    },
+    async audioTranscriptions() {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk))
+          if (close) controller.close()
+        },
+      })
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json", ...OWNER_HEADERS },
+      })
+    },
+  }
+}
+
+function audioOpts(extra: Record<string, unknown>) {
+  return {
+    userId: "user_1",
+    apiKeyId: "key_1",
+    provider: "grok",
+    formData: new FormData(),
+    rawModel: "grok/whisper-1",
+    upstreamModel: "whisper-1",
+    ...extra,
+  } as Parameters<typeof dispatchAudioTranscriptions>[1]
+}
+
+describe("borrowed rows never leak the owner's rate-limit or identity headers", () => {
+  it("strips them from an as-received non-stream passthrough", async () => {
+    const db = new FakeD1()
+    const borrowed = await accountRow({ id: "shared_1", userId: "user_2", provider: "claude-code" })
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchAnthropicMessages(
+      buildEnv(db),
+      messagesOpts({
+        adapter: anthropicHeaderAdapter(),
+        waitUntil,
+        poolExtension: fakeExtension({
+          listShared: vi.fn(async () => [{ account: borrowed, priority: 1, share: share() }]),
+        }),
+      }),
+    )
+    await drain()
+
+    expect(res.status).toBe(200)
+    for (const name of Object.keys(OWNER_HEADERS)) expect(res.headers.get(name)).toBeNull()
+    expect(headerNames(res).some((n) => n.includes("ratelimit"))).toBe(false)
+    // Everything that is not the owner's quota or identity still passes through.
+    expect(res.headers.get("x-request-id")).toBe("req_owner")
+    expect(res.headers.get("content-type")).toBe("application/json")
+    expect(await res.json()).toEqual({ ok: true })
+  })
+
+  it("leaves an own account's non-stream passthrough byte-identical", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { id: "own_1", userId: "user_1", provider: "claude-code" })
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchAnthropicMessages(
+      buildEnv(db),
+      messagesOpts({ adapter: anthropicHeaderAdapter(), waitUntil, poolExtension: fakeExtension() }),
+    )
+    await drain()
+
+    expect(res.status).toBe(200)
+    for (const [name, value] of Object.entries(OWNER_HEADERS)) expect(res.headers.get(name)).toBe(value)
+    expect(res.headers.get("x-request-id")).toBe("req_owner")
+  })
+
+  it("strips them from the audio passthrough, which forwards every upstream header", async () => {
+    const db = new FakeD1()
+    const borrowed = await accountRow({ id: "shared_1", userId: "user_2" })
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchAudioTranscriptions(
+      buildEnv(db),
+      audioOpts({
+        adapter: audioAdapter(['{"text":"hello"}'], true),
+        waitUntil,
+        poolExtension: fakeExtension({
+          listShared: vi.fn(async () => [{ account: borrowed, priority: 1, share: share() }]),
+        }),
+      }),
+    )
+    await drainBody(res.body)
+    await drain()
+
+    expect(res.status).toBe(200)
+    for (const name of Object.keys(OWNER_HEADERS)) expect(res.headers.get(name)).toBeNull()
+    expect(res.headers.get("content-type")).toBe("application/json")
+  })
+
+  it("strips them from a streamed passthrough, and keeps them for an own account", async () => {
+    const streamAdapter = (): ProviderAdapter => ({
+      id: "grok",
+      async chatCompletions() {
+        return new Response('data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream", ...OWNER_HEADERS },
+        })
+      },
+    })
+
+    const sharedDb = new FakeD1()
+    const borrowed = await accountRow({ id: "shared_1", userId: "user_2" })
+    const sharedRun = collectWaitUntil()
+    const sharedRes = await dispatchChatCompletions(
+      buildEnv(sharedDb),
+      chatOpts({
+        adapter: streamAdapter(),
+        waitUntil: sharedRun.waitUntil,
+        poolExtension: fakeExtension({
+          listShared: vi.fn(async () => [{ account: borrowed, priority: 1, share: share() }]),
+        }),
+      }),
+    )
+    await drainBody(sharedRes.body)
+    await sharedRun.drain()
+
+    const ownDb = new FakeD1()
+    await seedAccount(ownDb, { id: "own_1", userId: "user_1" })
+    const ownRun = collectWaitUntil()
+    const ownRes = await dispatchChatCompletions(
+      buildEnv(ownDb),
+      chatOpts({ adapter: streamAdapter(), waitUntil: ownRun.waitUntil, poolExtension: fakeExtension() }),
+    )
+    await drainBody(ownRes.body)
+    await ownRun.drain()
+
+    expect(headerNames(sharedRes).some((n) => n.includes("ratelimit"))).toBe(false)
+    expect(sharedRes.headers.get("retry-after")).toBeNull()
+    expect(sharedRes.headers.get("anthropic-organization-id")).toBeNull()
+    // The stream wrapper only ever re-emitted `anthropic-ratelimit-*`; an own
+    // account still gets exactly that, unchanged.
+    expect(ownRes.headers.get("anthropic-ratelimit-requests-remaining")).toBe("42")
+    expect(ownRes.headers.get("anthropic-ratelimit-unified-reset")).toBe("1767225600")
   })
 })
 

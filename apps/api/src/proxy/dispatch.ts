@@ -6,7 +6,7 @@
  */
 import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env, ProviderId } from "../env"
-import { settleLease, type AttemptLease, type PoolExtension } from "../pool/extension"
+import { borrowerSafeHeaders, settleLease, type AttemptLease, type PoolExtension } from "../pool/extension"
 import { getAdapter } from "../providers"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import type { RoutingCandidate } from "../routing/types"
@@ -127,11 +127,17 @@ export function isEventStream(res: Response): boolean {
   return ct.includes("text/event-stream")
 }
 
-export function passthroughStreamHeaders(h: Headers): Headers {
+/**
+ * `shared` = the candidate is a borrowed row (`candidate.share`): the owner's
+ * rate-limit and identity headers are dropped first (docs/cloud-edition.md
+ * § "Pool extension"). Own rows pass the default and are unchanged.
+ */
+export function passthroughStreamHeaders(h: Headers, shared = false): Headers {
+  const src = shared ? borrowerSafeHeaders(h) : h
   const out = new Headers()
-  out.set("content-type", h.get("content-type") || "text/event-stream; charset=utf-8")
+  out.set("content-type", src.get("content-type") || "text/event-stream; charset=utf-8")
   out.set("cache-control", "no-cache")
-  const rl = [...h.entries()].filter(([k]) => k.startsWith("anthropic-ratelimit-"))
+  const rl = [...src.entries()].filter(([k]) => k.startsWith("anthropic-ratelimit-"))
   for (const [k, v] of rl) out.set(k, v)
   return out
 }
@@ -203,6 +209,21 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
   let headersLatencyMs: number | null = null
   /** This attempt's pool-extension lease, settled once on the same close that writes the log row. */
   let lease: AttemptLease | null = null
+  /** The walk has finished, so `lease` is final — `null` included (no candidate was admitted, or the walk settled its own). */
+  let leaseReady = false
+  let leaseSettled = false
+  /** The stream closed before the walk handed its lease over; settled the moment it arrives. */
+  let pendingOutcome: "consumed" | "released" | null = null
+  /**
+   * Settle at most once, whichever side is last: the stream's single
+   * `onClose` can fire while the walk is still between its last cancel check
+   * and returning, so neither side alone can be the settle point.
+   */
+  const settleOnce = (outcome: "consumed" | "released") => {
+    if (leaseSettled) return
+    leaseSettled = true
+    t.waitUntil(settleLease(lease, outcome))
+  }
   /** Whether any upstream byte reached the client — a stream that produced output and then broke still counts. */
   let sawOutput = false
 
@@ -214,6 +235,11 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
         ctl.fail(frame)
       }
       const outcome = await walkCandidates(env, { ...t, cancelled: ctl.cancelled, progress })
+      // Take the lease before anything else can await: every other outcome
+      // already settled its own leases, so `null` is final for them too.
+      lease = outcome.kind === "response" ? outcome.lease : null
+      leaseReady = true
+      if (pendingOutcome) settleOnce(pendingOutcome)
       switch (outcome.kind) {
         case "cancelled":
           return
@@ -228,7 +254,6 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
           break
       }
 
-      lease = outcome.lease
       const res = outcome.response
       if (res.body && res.ok && isEventStream(res)) {
         headersLatencyMs = Date.now() - started
@@ -260,7 +285,9 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
       onClose: (reason) => {
         const usage = sniffer.finish()
         const errorCode = forcedErrorCode ?? streamCloseErrorCode(reason, sniffer.complete())
-        t.waitUntil(settleLease(lease, leaseOutcome(errorCode, sawOutput)))
+        const outcome = leaseOutcome(errorCode, sawOutput)
+        if (leaseReady) settleOnce(outcome)
+        else pendingOutcome = outcome
         t.waitUntil(
           logRequest(env, {
             userId: t.userId,
@@ -403,7 +430,10 @@ async function deliverNonStream(
         )
       },
     })
-    return new Response(streamBody, { status: res.status, headers: passthroughStreamHeaders(res.headers) })
+    return new Response(streamBody, {
+      status: res.status,
+      headers: passthroughStreamHeaders(res.headers, !!candidate.share),
+    })
   }
 
   const parseUsage = (text: string): NormalizedUsage | null => {
@@ -417,7 +447,16 @@ async function deliverNonStream(
   }
 
   if (t.wire.nonStreamResponse === "content_type_only") {
-    const text = await res.text()
+    let text: string
+    try {
+      text = await res.text()
+    } catch (error) {
+      // A body that fails mid-read still owes this attempt a settled lease and
+      // a row: nothing usable reached the client, so it releases like any other
+      // output-less error before the throw goes back to the caller.
+      await log({ usage: null, errorCode: "upstream_error", sawOutput: false })
+      throw error
+    }
     await log({ usage: parseUsage(text) })
     return new Response(text, {
       status: res.status,
@@ -425,7 +464,14 @@ async function deliverNonStream(
     })
   }
   await log({ usage: parseUsage(await safeResponseText(res.clone())) })
-  return res
+  if (!candidate.share) return res
+  // Borrowed row: same status, body and statusText as received, minus the
+  // owner's rate-limit/identity headers (docs/cloud-edition.md § "Pool extension").
+  return new Response(res.body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: borrowerSafeHeaders(res.headers),
+  })
 }
 
 export async function dispatchChatCompletions(
