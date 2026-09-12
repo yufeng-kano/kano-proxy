@@ -63,7 +63,7 @@ export interface PoolExtension {
 
 Core obligations:
 
-- `routing/candidates.ts` appends `listShared` rows to unpinned builtin-pool candidates and to `GET /api/providers/:provider/accounts` (with the `share` descriptor, usage windows omitted for non-owners) and to the catalog's bound-provider set. Pinned group targets never resolve to a shared account.
+- `routing/candidates.ts` merges `listShared` rows into unpinned builtin-pool candidates and into `GET /api/providers/:provider/accounts` in the same `(priority DESC, created_at DESC)` order (with the `share` descriptor, usage windows omitted for non-owners) and to the catalog's bound-provider set. Pinned group targets never resolve to a shared account.
 - `dispatch_walk` calls `reserveAttempt` immediately before each attempt's acquire; a `skip` is not counted toward `MAX_ATTEMPTS`. A lease is settled exactly once, at the point the core already decides that attempt's `request_logs` row: `released` when the attempt was benched/retried, when a non-stream upstream error status is passed through, or when the row carries an `error_code` with no completion output; `consumed` otherwise. For streams that is the stream-close write, so a lease may outlive the returned `Response`.
 - Promote/unpause/delete/patch on a shared row from a non-owner return 403, except promote, which delegates to `setSharedPriority`.
 - Credentials of shared accounts are decrypted only inside dispatch, as for own accounts, and never returned by any route.

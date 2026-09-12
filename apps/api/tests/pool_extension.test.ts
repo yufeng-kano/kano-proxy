@@ -539,7 +539,7 @@ const executionCtx = {
 } as ExecutionContext
 
 describe("GET /api/providers/:provider/accounts — the borrower's view", () => {
-  it("appends the shared row with its share descriptor and no usage surface", async () => {
+  it("returns the shared row with its share descriptor and no usage surface", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)
@@ -573,7 +573,7 @@ describe("GET /api/providers/:provider/accounts — the borrower's view", () => 
     expect(JSON.stringify(json)).not.toContain("token-shared_1")
   })
 
-  it("assigns the Active dot in the router's merged order, even though shared rows are listed last", async () => {
+  it("lists rows in the router's merged order, a promoted shared row first and Active", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)
@@ -597,8 +597,8 @@ describe("GET /api/providers/:provider/accounts — the borrower's view", () => 
     const res = await app.request("/api/providers/grok/accounts", sessionRequest("GET", cookie), env, executionCtx)
     const json = (await res.json()) as { accounts: { id: string; status: string }[] }
 
-    expect(json.accounts.map((a) => a.id)).toEqual(["own_1", "shared_1"])
-    expect(json.accounts.map((a) => a.status)).toEqual(["standby", "active"])
+    expect(json.accounts.map((a) => a.id)).toEqual(["shared_1", "own_1"])
+    expect(json.accounts.map((a) => a.status)).toEqual(["active", "standby"])
   })
 })
 

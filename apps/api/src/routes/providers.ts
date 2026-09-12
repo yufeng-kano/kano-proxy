@@ -245,7 +245,7 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   }
 
   // Rows shared with the viewer (docs/cloud-edition.md § "Pool extension"),
-  // appended after the viewer's own pool. **No usage surface**: windows,
+  // collected after the viewer's own pool and merged into routing order below. **No usage surface**: windows,
   // probe errors and the upstream identity blob belong to the owner's page,
   // not the borrower's, and nothing here ever triggers an upstream usage
   // call for someone else's account. Status/bench/label stay, because they
@@ -317,7 +317,9 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   // writer (docs/auth.md § Management routes).
   const strategy = await getProviderStrategy(c.env.DB, user.id, provider)
 
-  return c.json({ available: true, accounts, models: [], error: null, strategy })
+  // The list is returned in that same merged order, so the page's
+  // list-position assumptions (first row is Primary) match where traffic goes.
+  return c.json({ available: true, accounts: routeOrder.map((i) => accounts[i]!), models: [], error: null, strategy })
 })
 
 /**
