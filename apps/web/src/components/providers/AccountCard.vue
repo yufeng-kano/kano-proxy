@@ -86,6 +86,20 @@ const displayName = computed(() => props.account.custom_label || identity.value)
 const renamed = computed(() => !!props.account.custom_label)
 
 /**
+ * A row the viewer borrows from another user rather than owns
+ * (docs/admin-ui.md § Providers page). It arrives with no usage surface at
+ * all — no windows, no probe error, no upstream identity blob — and the only
+ * mutation a borrower may make on it is Primary, which reorders it inside
+ * their own pool; Rename, Resume and Remove are the owner's alone and answer
+ * 403, so they are not rendered here.
+ */
+const share = computed(() => props.account.share ?? null)
+
+const sharedBy = computed(() =>
+  share.value ? t("providers.account.shared", { owner: share.value.ownerLabel }) : null,
+)
+
+/**
  * Prettify raw upstream plan ids for display:
  * "claude_pro" → "Pro", "default_claude_max_20x" → "Max 20x", "plus" → "Plus".
  */
@@ -159,7 +173,7 @@ const creditsText = computed(() => {
       <div class="identity">
         <span class="name" :title="displayName">{{ displayName }}</span>
         <!-- A renamed row still has to answer "which account is this?". -->
-        <span v-if="renamed" class="upstream" :title="identity">{{ identity }}</span>
+        <span v-if="renamed && !share" class="upstream" :title="identity">{{ identity }}</span>
         <div class="tags">
           <StatusDot :status="account.status" />
           <!-- The badge closes the loop on the "Make primary" button: the word
@@ -169,6 +183,12 @@ const creditsText = computed(() => {
             {{ t("providers.account.primary") }}
           </Badge>
           <Badge v-if="plan">{{ t("providers.account.plan", { plan }) }}</Badge>
+          <!-- The one fact on this row the viewer does not own: who lends it. The
+               name can be long, so the pill caps its width and keeps the whole
+               string in its title rather than clipping mid-word. -->
+          <Badge v-if="sharedBy" class="share" :title="sharedBy">
+            <span class="share-owner">{{ sharedBy }}</span>
+          </Badge>
         </div>
       </div>
 
@@ -181,7 +201,7 @@ const creditsText = computed(() => {
            whole OAuth flow again, so it is never a glyph to hover over. -->
       <div v-if="editing" class="actions">
         <AppButton
-          v-if="account.status === 'benched'"
+          v-if="account.status === 'benched' && !share"
           icon-only
           size="sm"
           variant="ghost"
@@ -203,6 +223,7 @@ const creditsText = computed(() => {
           <template #icon><ActionIcon name="star" /></template>
         </AppButton>
         <AppButton
+          v-if="!share"
           icon-only
           size="sm"
           variant="ghost"
@@ -213,6 +234,7 @@ const creditsText = computed(() => {
           <template #icon><ActionIcon name="edit" /></template>
         </AppButton>
         <AppButton
+          v-if="!share"
           size="sm"
           variant="danger"
           :label="t('providers.account.remove', { name: displayName })"
@@ -224,21 +246,26 @@ const creditsText = computed(() => {
       </div>
     </div>
 
-    <div v-if="windows.length" class="windows">
-      <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
-    </div>
-    <!-- The balance sits under the bars when both exist, and stands in for
-         them when the quota read came back empty. -->
-    <p v-if="creditsText" class="no-usage">
-      {{ creditsText }}
-    </p>
-    <p v-else-if="!windows.length && !hideUsageError" class="no-usage">
-      {{ t("providers.account.noUsage") }}
-    </p>
+    <!-- A shared row has no usage surface at all: its windows and its probe
+         errors are the owner's, shown on the owner's own page, and nothing
+         here ever asks upstream about someone else's account. -->
+    <template v-if="!share">
+      <div v-if="windows.length" class="windows">
+        <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
+      </div>
+      <!-- The balance sits under the bars when both exist, and stands in for
+           them when the quota read came back empty. -->
+      <p v-if="creditsText" class="no-usage">
+        {{ creditsText }}
+      </p>
+      <p v-else-if="!windows.length && !hideUsageError" class="no-usage">
+        {{ t("providers.account.noUsage") }}
+      </p>
 
-    <Banner v-if="account.error && !hideUsageError" tone="warn">
-      {{ account.error }}
-    </Banner>
+      <Banner v-if="account.error && !hideUsageError" tone="warn">
+        {{ account.error }}
+      </Banner>
+    </template>
   </div>
 </template>
 
@@ -297,6 +324,22 @@ const creditsText = computed(() => {
   align-items: center;
   gap: var(--space-2);
   flex-wrap: wrap;
+}
+
+/* An owner name is open-ended text in a track that can get narrow, and a pill
+   cannot wrap: cap it and ellipsize inside, with the full string in the title. */
+.share {
+  max-width: min(100%, 16rem);
+  overflow: hidden;
+}
+
+/* min-width: 0 so the flex item may shrink below its text — without it the
+   name pushes past the cap instead of ellipsizing. */
+.share-owner {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Stays on the identity row at every width, right-aligned — the pencil sits

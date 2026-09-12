@@ -42,6 +42,14 @@ export type ProviderAccount = {
   usage: { windows: UsageWindow[] } | null
   error: string | null
   stale: boolean
+  /**
+   * Present only on a row the viewer borrows from another user, on editions
+   * that installed a pool extension (docs/admin-ui.md § Providers page). Such
+   * a row carries no usage surface at all — `usage`, `error` and `account` are
+   * null — and only Primary may be pressed on it; Rename, Resume and Remove
+   * are the owner's alone and answer 403.
+   */
+  share?: { teamId: string; teamName: string; ownerLabel: string }
 }
 
 /**

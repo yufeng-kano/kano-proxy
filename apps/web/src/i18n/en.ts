@@ -225,6 +225,9 @@ export const en = {
   // total, so it is a line and not a bar — docs/providers.md § Antigravity.
   "providers.account.credits": "{credits} credits left",
   "providers.account.plan": "{plan} plan",
+  // A row another user shares with this one: it names who lends it, because
+  // that is the only thing on the row the viewer does not own.
+  "providers.account.shared": "Shared by {owner}",
   "providers.rename.title": "Rename account",
   "providers.rename.label": "Name",
   "providers.rename.placeholder": "Work account",
