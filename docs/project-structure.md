@@ -39,7 +39,9 @@ kano-proxy/
                           #   account/target selection (docs/providers.md
                           #   § Routing module)
         pool/            # bench, promote (builtin id or custom slug);
-                          #   credential persistence (saveCredential)
+                          #   credential persistence (saveCredential);
+                          #   extension.ts (optional cross-user pool contract —
+                          #   docs/cloud-edition.md § Pool extension)
         do/              # AgentTunnel Durable Object + wire protocol (docs/cli.md)
         db/              # D1 access
         crypto/          # token encryption, key hash
@@ -105,7 +107,7 @@ kano-proxy/
 - `providers/*` — upstream transport + usage + OAuth specifics. The two custom-endpoint adapters are factories (`createCustomOpenAIAdapter(row)` / `createCustomAnthropicAdapter(row)`), built fresh per request from a `custom_providers` D1 row — never added to the static builtin registry in `providers/index.ts`.
 - `proxy/*` — format conversion and streaming. `dispatch_walk.ts` is the **only** candidate loop: it plans, acquires, fetches (first-byte timeout, one 529 retry), asks `routing/feedback` whether to fail over, cancels superseded upstream bodies, and returns a `WalkOutcome` (`no_account` / `unavailable` / `exhausted` / `fetch_error` / `cancelled` / `response`) — it never decides who to try and never touches the client response. `dispatch.ts` holds the two transports that turn an outcome into a client response: eager (walk runs inside the already-committed SSE stream, failures become terminal frames, one log row on close) and non-stream (walk runs first, HTTP status mirrors the outcome, `Retry-After` recomputed on exhaustion). Everything protocol-specific — SSE error/stall frames, JSON error envelopes, error-type extraction, usage sniffer/parser — lives behind the `Wire` interface (`wire_openai.ts`, `wire_anthropic.ts`); transports never branch on protocol. Audio transcriptions and the Anthropic→OpenAI conversion path are separate files that reuse the walk, not copies of it.
 - `routing/*` — the single owner of account/target selection (docs/providers.md § Routing module): expand → flat candidate list, usability facts, ordering strategy, outcome penalties. Used identically by a group alias and a direct `provider/model` call.
-- `pool/*` — bench (KV) and credential persistence; provider-agnostic.
+- `pool/*` — bench (KV) and credential persistence; provider-agnostic. `extension.ts` holds the **optional** `PoolExtension` contract an edition may pass to `createApplication` ([cloud-edition.md](./cloud-edition.md) § Pool extension) — types plus the settle helper, no behavior; the core imports it only as a parameter threaded from the request context, never as a module-level registry.
 - `apps/relay` — dumb byte pipe only: no auth logic (Cloud Run IAM fronts it), no state, no format awareness, no credentials at rest. Anything smarter belongs in the Worker.
 - Vue: thin `App.vue`; logic in composables/services.
 - `apps/docs` — content only. No calls to `/api/*`, no session awareness, no shared code with `apps/web` beyond being copied into its `dist/`. The one piece of script is the origin fill ([docs-site.md](./docs-site.md)).
@@ -114,7 +116,7 @@ kano-proxy/
 
 The dependency direction is private edition → public core. This repository must not import cloud code or enforce the hosted Free/Paddle policy in its standalone entry. Keep provider/protocol fixes here; billing and cloud-only pages belong in the private repository. Rules for the two repositories are maintained independently; each repository's instruction links point to its own `.rule`.
 
-`apps/api/src/core.ts` exports `createApplication`, `createWorker`, `AgentTunnel`, and public environment types. `src/index.ts` is the standalone entry. The application factory accepts instance-local route registration and an authenticated API-key request policy. The policy wraps all API-key routes, including group mounts; editions decide which operations to meter.
+`apps/api/src/core.ts` exports `createApplication`, `createWorker`, `AgentTunnel`, public environment types, and the pool-extension contract (`PoolExtension`, `SharedAccount`, `AttemptLease`, plus the `AccountRow` / `RoutingCandidate` / `ProviderId` types its signatures name). `src/index.ts` is the standalone entry. The application factory accepts instance-local route registration, an authenticated API-key request policy, and an optional `poolExtension`. All three are stored per request on the Hono context, so two applications built from the same source never see each other's. The policy wraps all API-key routes, including group mounts; editions decide which operations to meter.
 
 `apps/web/src/core.ts` exports `createWebApp`, `createAppRouter`, the authenticated API client, and extension types. Routes and sidebar items are passed when constructing the app. Extension route titles use `meta.title`; core routes retain catalog-backed `meta.titleKey`. The web source currently requires its documented `@` alias to point to the core web `src` directory in the composing Vite/TypeScript config.
 

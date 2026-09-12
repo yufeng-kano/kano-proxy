@@ -4,6 +4,7 @@ import type { HonoEnv } from "./auth/session"
 import { loadSessionUser } from "./auth/session"
 import type { Env } from "./env"
 import { runRetentionSweep } from "./maintenance/retention"
+import type { PoolExtension } from "./pool/extension"
 import { ensureFreshPriceTable } from "./pricing/litellm"
 import { agentRoutes } from "./routes/agent"
 import { anthropicRoutes } from "./routes/anthropic"
@@ -24,6 +25,8 @@ import { usageRoutes } from "./routes/usage"
 export interface ApplicationOptions {
   requestPolicy?: MiddlewareHandler<HonoEnv>
   registerRoutes?: (app: Hono<HonoEnv>) => void
+  /** Cross-user pool sharing (docs/cloud-edition.md § "Pool extension"). Absent → the core never looks outside the caller's own rows. */
+  poolExtension?: PoolExtension
 }
 
 export function createApplication(options: ApplicationOptions = {}): Hono<HonoEnv> {
@@ -54,6 +57,7 @@ export function createApplication(options: ApplicationOptions = {}): Hono<HonoEn
 
   app.use("*", async (c, next) => {
     c.set("requestPolicy", options.requestPolicy)
+    c.set("poolExtension", options.poolExtension)
     c.set("user", null)
     c.set("apiKeyUserId", null)
     c.set("apiKeyId", null)

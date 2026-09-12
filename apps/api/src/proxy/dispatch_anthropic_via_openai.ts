@@ -8,6 +8,7 @@ import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env } from "../env"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import type { RoutingCandidate } from "../routing/types"
+import type { PoolExtension } from "../pool/extension"
 import { dispatchChatCompletions, isEventStream, passthroughStreamHeaders } from "./dispatch"
 import type { WaitUntil } from "./dispatch_walk"
 import { streamWithKeepalive } from "./sse"
@@ -35,6 +36,8 @@ export async function dispatchAnthropicViaOpenAI(
     strategy?: string
     isBuiltin?: boolean
     customProvider?: CustomProviderRow
+    /** Composition-time cross-user pool sharing (docs/cloud-edition.md § "Pool extension"); absent for standalone. */
+    poolExtension?: PoolExtension
   },
 ): Promise<Response> {
   const {
@@ -72,6 +75,7 @@ export async function dispatchAnthropicViaOpenAI(
     strategy: opts.strategy,
     isBuiltin: opts.isBuiltin,
     customProvider: opts.customProvider,
+    poolExtension: opts.poolExtension,
     req: {
       model: opts.rawModel,
       rawModel: opts.rawModel,

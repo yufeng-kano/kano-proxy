@@ -6,6 +6,7 @@
  */
 import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env, ProviderId } from "../env"
+import { settleLease, type AttemptLease, type PoolExtension } from "../pool/extension"
 import { getAdapter } from "../providers"
 import type { ChatCompletionRequest, ProviderAdapter } from "../providers/types"
 import type { RoutingCandidate } from "../routing/types"
@@ -57,6 +58,16 @@ export function streamCloseErrorCode(reason: StreamCloseReason, complete: boolea
   if (complete) return null
   if (reason === "cancel") return "client_abort"
   return "incomplete_stream"
+}
+
+/**
+ * How one attempt's pool-extension lease settles, read off the very row the
+ * core is about to log (docs/cloud-edition.md § "Pool extension"): an error
+ * row that produced no output is `released`; anything else — including a
+ * stream that produced output and then broke — is `consumed`.
+ */
+export function leaseOutcome(errorCode: string | null | undefined, sawOutput: boolean): "consumed" | "released" {
+  return errorCode && !sawOutput ? "released" : "consumed"
 }
 
 function retryAfterSeconds(untilMs: number): number {
@@ -190,6 +201,10 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
   let forcedErrorCode: string | null = null
   /** TTFB into the pipe, or time until terminal fail/cancel if earlier. */
   let headersLatencyMs: number | null = null
+  /** This attempt's pool-extension lease, settled once on the same close that writes the log row. */
+  let lease: AttemptLease | null = null
+  /** Whether any upstream byte reached the client — a stream that produced output and then broke still counts. */
+  let sawOutput = false
 
   const body = streamWithEagerProducer(
     async (ctl) => {
@@ -213,11 +228,15 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
           break
       }
 
+      lease = outcome.lease
       const res = outcome.response
       if (res.body && res.ok && isEventStream(res)) {
         headersLatencyMs = Date.now() - started
         await ctl.pipeUpstream(res.body, {
-          tap: (chunk) => sniffer.feed(chunk),
+          tap: (chunk) => {
+            sawOutput = true
+            sniffer.feed(chunk)
+          },
           idleTimeoutMs,
           stallFrame: t.wire.stallFrame,
         })
@@ -241,6 +260,7 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
       onClose: (reason) => {
         const usage = sniffer.finish()
         const errorCode = forcedErrorCode ?? streamCloseErrorCode(reason, sniffer.complete())
+        t.waitUntil(settleLease(lease, leaseOutcome(errorCode, sawOutput)))
         t.waitUntil(
           logRequest(env, {
             userId: t.userId,
@@ -272,8 +292,13 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
 export async function dispatchNonStream(
   env: Env,
   t: TransportOpts,
-  deliver: (candidate: RoutingCandidate, res: Response, latencyMs: number) => Promise<Response> = (c, res, ms) =>
-    deliverNonStream(env, t, c, res, ms),
+  deliver: (
+    candidate: RoutingCandidate,
+    res: Response,
+    latencyMs: number,
+    /** This attempt's pool-extension lease — settle it where this delivery decides the log row. */
+    lease: AttemptLease | null,
+  ) => Promise<Response> = (c, res, ms, lease) => deliverNonStream(env, t, c, res, ms, lease),
 ): Promise<Response> {
   const started = Date.now()
   const progress: WalkProgress = { candidate: null, upstreamStatus: null }
@@ -315,7 +340,7 @@ export async function dispatchNonStream(
       })
       return Response.json(t.wire.upstreamErrorBody(), { status: 502 })
     case "response":
-      return deliver(outcome.candidate, outcome.response, Date.now() - started)
+      return deliver(outcome.candidate, outcome.response, Date.now() - started, outcome.lease)
   }
 }
 
@@ -332,25 +357,35 @@ async function deliverNonStream(
   candidate: RoutingCandidate,
   res: Response,
   latencyMs: number,
+  lease: AttemptLease | null,
 ): Promise<Response> {
   const row = candidateRow(candidate)
-  const log = (fields: { errorCode?: string | null; usage: NormalizedUsage | null }) =>
-    logRequest(env, {
-      userId: t.userId,
-      apiKeyId: t.apiKeyId,
-      groupName: t.groupName ?? null,
-      ...row,
-      statusCode: res.status,
-      latencyMs,
-      errorCode: fields.errorCode,
-      upstreamStatus: res.status,
-      ...usageFields(fields.usage),
-    })
+  const log = (fields: { errorCode?: string | null; usage: NormalizedUsage | null; sawOutput?: boolean }) =>
+    // The lease settles on the very decision that writes this row.
+    settleLease(lease, leaseOutcome(fields.errorCode, fields.sawOutput ?? true)).then(() =>
+      logRequest(env, {
+        userId: t.userId,
+        apiKeyId: t.apiKeyId,
+        groupName: t.groupName ?? null,
+        ...row,
+        statusCode: res.status,
+        latencyMs,
+        errorCode: fields.errorCode,
+        upstreamStatus: res.status,
+        ...usageFields(fields.usage),
+      }),
+    )
 
   if (res.body && isEventStream(res)) {
     const sniffer = t.wire.createUsageSniffer()
+    // "Legacy attach": an event-stream body under a non-stream request. The
+    // log row — and with it the lease — lands on the stream's close.
+    let sawOutput = false
     const streamBody = streamWithKeepalive(res.body, undefined, {
-      tap: (chunk) => sniffer.feed(chunk),
+      tap: (chunk) => {
+        sawOutput = true
+        sniffer.feed(chunk)
+      },
       idleTimeoutMs: t.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       stallFrame: t.wire.stallFrame,
       onClose: (reason) => {
@@ -358,6 +393,7 @@ async function deliverNonStream(
           log({
             usage: t.captureUsage ? sniffer.finish() : null,
             errorCode: t.captureUsage ? streamCloseErrorCode(reason, sniffer.complete()) : null,
+            sawOutput,
           }),
         )
       },
@@ -409,6 +445,8 @@ export async function dispatchChatCompletions(
     strategy?: string
     isBuiltin?: boolean
     customProvider?: CustomProviderRow
+    /** Composition-time cross-user pool sharing (docs/cloud-edition.md § "Pool extension"); absent for standalone. */
+    poolExtension?: PoolExtension
   },
 ): Promise<Response> {
   const transport: TransportOpts = {
@@ -472,6 +510,8 @@ export async function dispatchAnthropicMessages(
     strategy?: string
     isBuiltin?: boolean
     customProvider?: CustomProviderRow
+    /** Composition-time cross-user pool sharing (docs/cloud-edition.md § "Pool extension"); absent for standalone. */
+    poolExtension?: PoolExtension
   },
 ): Promise<Response> {
   const provider = opts.provider ?? "claude-code"

@@ -15,6 +15,7 @@ import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env, ProviderId } from "../env"
 import { markBenched } from "../pool/bench"
 import type { AcquiredAccount, StoredCredential } from "../pool/acquire"
+import { settleLease, type AttemptLease, type PoolExtension } from "../pool/extension"
 import { getAdapter } from "../providers"
 import { refreshAccountUsageInBackground } from "../providers/usage_refresh"
 import type { ProviderAdapter } from "../providers/types"
@@ -55,6 +56,8 @@ export type CandidateSource = {
   strategy?: string
   isBuiltin?: boolean
   customProvider?: CustomProviderRow
+  /** Composition-time cross-user pool sharing (docs/cloud-edition.md § "Pool extension"); absent for standalone. */
+  poolExtension?: PoolExtension
 }
 
 type Plan =
@@ -65,14 +68,19 @@ type Plan =
 async function planCandidates(env: Env, src: CandidateSource, upstreamModel: string): Promise<Plan> {
   const candidates =
     src.candidates ??
-    (await poolCandidates(env, src.userId, {
-      provider: src.provider,
-      upstreamModel,
-      isBuiltin: src.isBuiltin ?? true,
-      customProvider: src.customProvider,
-      adapter: src.adapter ?? getAdapter(src.provider as ProviderId),
-      accountId: src.pinnedAccountId ?? null,
-    }))
+    (await poolCandidates(
+      env,
+      src.userId,
+      {
+        provider: src.provider,
+        upstreamModel,
+        isBuiltin: src.isBuiltin ?? true,
+        customProvider: src.customProvider,
+        adapter: src.adapter ?? getAdapter(src.provider as ProviderId),
+        accountId: src.pinnedAccountId ?? null,
+      },
+      src.poolExtension,
+    ))
   if (candidates.length === 0) return { kind: "no_account" }
   const facts = await candidateFactsList(env, src.userId, candidates)
   const ordered = orderCandidates(candidates, facts, {
@@ -151,16 +159,28 @@ async function cancelBody(res: Response | null): Promise<void> {
   }
 }
 
-/** Bench persistence is feedback, never a reason to abort an in-flight failover walk. */
+/**
+ * Bench persistence is feedback, never a reason to abort an in-flight
+ * failover walk. Bench writes are scoped to the row's **owner**
+ * (`account.user_id`), which is the caller for every own row and the sharer
+ * for a borrowed one (docs/cloud-edition.md § "Pool extension") — a shared
+ * account that just failed must really get benched, not silently no-op.
+ */
 async function persistBench(
   env: Env,
-  userId: string,
   candidate: RoutingCandidate,
   cooldownMs: number,
   upstreamStatus: number,
 ): Promise<void> {
   try {
-    await markBenched(env, userId, candidate.provider, candidate.account.id, cooldownMs, String(upstreamStatus))
+    await markBenched(
+      env,
+      candidate.account.user_id,
+      candidate.provider,
+      candidate.account.id,
+      cooldownMs,
+      String(upstreamStatus),
+    )
   } catch (error) {
     console.error("Failed to persist account bench", {
       accountId: candidate.account.id,
@@ -175,9 +195,9 @@ async function persistBench(
  * status remains excluded from this walk; only the atomic third strike earns a
  * bench. Returning false therefore covers strikes 1–2 and a failed write.
  */
-async function persistEdgeTimeoutStrike(env: Env, userId: string, candidate: RoutingCandidate): Promise<boolean> {
+async function persistEdgeTimeoutStrike(env: Env, candidate: RoutingCandidate): Promise<boolean> {
   try {
-    return await recordEdgeTimeoutStrike(env.DB, userId, candidate.provider, candidate.account.id)
+    return await recordEdgeTimeoutStrike(env.DB, candidate.account.user_id, candidate.provider, candidate.account.id)
   } catch (error) {
     console.error("Failed to persist edge-timeout strike", {
       accountId: candidate.account.id,
@@ -191,7 +211,6 @@ async function persistEdgeTimeoutStrike(env: Env, userId: string, candidate: Rou
 /** Apply feedback and decide whether this pre-stream response must fail over. */
 async function shouldFailOverForResponse(
   env: Env,
-  userId: string,
   candidate: RoutingCandidate,
   response: Response,
 ): Promise<boolean> {
@@ -202,7 +221,14 @@ async function shouldFailOverForResponse(
   if (agentFault) {
     if (agentFault.benchMs !== null) {
       try {
-        await markBenched(env, userId, candidate.provider, candidate.account.id, agentFault.benchMs, agentFault.reason)
+        await markBenched(
+          env,
+          candidate.account.user_id,
+          candidate.provider,
+          candidate.account.id,
+          agentFault.benchMs,
+          agentFault.reason,
+        )
       } catch (error) {
         console.error("Failed to persist agent-fault bench", {
           accountId: candidate.account.id,
@@ -214,14 +240,14 @@ async function shouldFailOverForResponse(
     return true
   }
   if (isEdgeTimeoutStatus(response.status)) {
-    if (await persistEdgeTimeoutStrike(env, userId, candidate)) {
-      await persistBench(env, userId, candidate, EDGE_TIMEOUT_COOLDOWN_MS, response.status)
+    if (await persistEdgeTimeoutStrike(env, candidate)) {
+      await persistBench(env, candidate, EDGE_TIMEOUT_COOLDOWN_MS, response.status)
     }
     return true
   }
   const penalty = penaltyForOutcome(response.status, response.headers, candidate.account)
   if (!penalty) return false
-  await persistBench(env, userId, candidate, penalty.cooldownMs, response.status)
+  await persistBench(env, candidate, penalty.cooldownMs, response.status)
   return true
 }
 
@@ -283,11 +309,18 @@ export type WalkOutcome =
    * synthesized 503 either way; `tried` is the exclude set for `Retry-After`.
    */
   | { kind: "exhausted"; tried: RoutingCandidate[]; lastBenched: RoutingCandidate | null }
-  /** A non-bench response — success or a terminal upstream error — for the transport to deliver. */
-  | { kind: "response"; candidate: RoutingCandidate; response: Response }
+  /**
+   * A non-bench response — success or a terminal upstream error — for the
+   * transport to deliver. `lease` is this attempt's still-open pool-extension
+   * lease (docs/cloud-edition.md § "Pool extension"): the transport settles
+   * it exactly once, where it decides the attempt's `request_logs` row. Every
+   * other outcome above has already settled its own leases `released`.
+   */
+  | { kind: "response"; candidate: RoutingCandidate; response: Response; lease: AttemptLease | null }
 
 export async function walkCandidates(env: Env, opts: WalkOpts): Promise<WalkOutcome> {
   const cancelled = opts.cancelled ?? (() => false)
+  const ext = opts.source.poolExtension
   const plan = await planCandidates(env, opts.source, opts.upstreamModel)
   if (cancelled()) return { kind: "cancelled" }
   if (plan.kind === "no_account") return { kind: "no_account" }
@@ -312,12 +345,31 @@ export async function walkCandidates(env: Env, opts: WalkOpts): Promise<WalkOutc
     const call = opts.callFor(candidate)
     if (!call) continue
 
+    // Pool extension (docs/cloud-edition.md § "Pool extension"): every
+    // attempt, own row or shared, is offered for admission immediately
+    // before the acquire. A `skip` is exhaustion of that row's governed
+    // budget — move on without spending one of MAX_ATTEMPTS on it.
+    let lease: AttemptLease | null = null
+    if (ext) {
+      const reserved = await ext.reserveAttempt(
+        env,
+        { userId: opts.source.userId, apiKeyId: opts.source.apiKeyId, upstreamModel: candidate.upstreamModel },
+        candidate,
+      )
+      if (reserved && "skip" in reserved) continue
+      lease = reserved
+    }
+
     const acquired = await acquireCandidate(env, candidate)
     if (cancelled()) {
+      await settleLease(lease, "released")
       await cancelBody(lastResponse)
       return { kind: "cancelled" }
     }
-    if (!acquired) continue
+    if (!acquired) {
+      await settleLease(lease, "released")
+      continue
+    }
     attempts++
     opts.progress.candidate = candidate
 
@@ -325,20 +377,29 @@ export async function walkCandidates(env: Env, opts: WalkOpts): Promise<WalkOutc
     try {
       fetched = await retry529Once(() => fetchUpstreamResponse(env, (signal) => call(acquired, signal)))
     } catch {
+      // Terminal for this request and logged as `upstream_error` with no
+      // output, so the attempt is released, not consumed.
+      await settleLease(lease, "released")
       await cancelBody(lastResponse)
       return { kind: "fetch_error", candidate }
     }
-    if (fetched.timedOut) continue
+    if (fetched.timedOut) {
+      await settleLease(lease, "released")
+      continue
+    }
     const res = fetched.response
     opts.progress.upstreamStatus = res.status
     opts.waitUntil(refreshAccountUsageInBackground(env, candidate.account, candidate.adapter))
     if (cancelled()) {
+      await settleLease(lease, "released")
       await cancelBody(lastResponse)
       await cancelBody(res)
       return { kind: "cancelled" }
     }
 
-    if (await shouldFailOverForResponse(env, opts.source.userId, candidate, res)) {
+    if (await shouldFailOverForResponse(env, candidate, res)) {
+      // Benched / edge-timed-out / retried: this attempt produced nothing.
+      await settleLease(lease, "released")
       await cancelBody(lastResponse)
       lastResponse = res
       lastCandidate = candidate
@@ -346,7 +407,7 @@ export async function walkCandidates(env: Env, opts: WalkOpts): Promise<WalkOutc
     }
 
     await cancelBody(lastResponse)
-    return { kind: "response", candidate, response: res }
+    return { kind: "response", candidate, response: res, lease }
   }
 
   await cancelBody(lastResponse)

@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import type { Context } from "hono"
 import type { HonoEnv } from "../auth/session"
 import { loadSessionUser } from "../auth/session"
 import {
@@ -43,9 +44,10 @@ import { encryptJson } from "../crypto/token_crypto"
 import { isProviderId, type ProviderId } from "../env"
 import { benchUntilFromRow, clearBench } from "../pool/bench"
 import type { StoredCredential } from "../pool/acquire"
+import type { SharedAccount } from "../pool/extension"
 import { getAdapter } from "../providers"
 import type { AccountStatus } from "../providers/types"
-import { windowsUnusableUntil } from "../routing/facts"
+import { usageWindowUnusableUntil, windowsUnusableUntil } from "../routing/facts"
 import { newId, nowIso } from "../utils/id"
 
 export const providerRoutes = new Hono<HonoEnv>()
@@ -62,6 +64,45 @@ function parseProvider(p: string): ProviderId | null {
   return isProviderId(p) ? p : null
 }
 
+/**
+ * The rows other users share with this viewer for one builtin provider
+ * (docs/cloud-edition.md § "Pool extension"). Always `[]` on a standalone
+ * install — no extension, no cross-user lookup anywhere in the core.
+ */
+async function sharedAccounts(
+  c: Context<HonoEnv>,
+  userId: string,
+  provider: ProviderId | null,
+): Promise<SharedAccount[]> {
+  const ext = c.get("poolExtension")
+  if (!ext || !provider) return []
+  return ext.listShared(c.env, userId, provider)
+}
+
+/** One row the viewer borrows rather than owns — mutating it is the owner's right alone (403), except promote. */
+async function findShared(
+  c: Context<HonoEnv>,
+  userId: string,
+  provider: ProviderId | null,
+  accountId: string,
+): Promise<SharedAccount | null> {
+  return (await sharedAccounts(c, userId, provider)).find((s) => s.account.id === accountId) ?? null
+}
+
+/** One row of `GET /:provider/accounts`. Shared rows carry `share` and no usage surface. */
+type AccountView = {
+  id: string
+  priority: number
+  status: AccountStatus
+  label: string
+  custom_label: string | null
+  account: Record<string, unknown> | null
+  usage: { windows: unknown[] } | null
+  error: string | null
+  stale: boolean
+  share?: SharedAccount["share"]
+}
+
 providerRoutes.get("/:provider/accounts", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
@@ -73,11 +114,14 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   const force = c.req.query("refresh") === "true"
   const rows = await listAccounts(c.env.DB, user.id, provider)
   const adapter = getAdapter(provider)
-  const accounts = []
+  const accounts: AccountView[] = []
   // Parallel to `accounts`: the routing fact behind a "limited" dot, computed
   // from the snapshot each row actually returns rather than re-read off the
   // row (a `?refresh=true` read holds a newer one).
   const limitedUntil: (number | null)[] = []
+  // Parallel too: the row's `created_at`, needed only to walk the rows in the
+  // router's merged order below when shared rows are in play.
+  const createdAt: string[] = []
   // Parallel too: whether the row's seat can serve Fable at all, from the
   // same merged profile facts the router reads (docs/providers.md § Claude
   // Code "Fable seat eligibility"). Always true for adapters without a rule.
@@ -196,7 +240,34 @@ providerRoutes.get("/:provider/accounts", async (c) => {
       stale,
     })
     limitedUntil.push(usage ? windowsUnusableUntil(usage.windows) : null)
+    createdAt.push(row.created_at)
     fableEligible.push(adapter.supportsModel ? adapter.supportsModel(accountMeta, FABLE_MODEL_PREFIX) : true)
+  }
+
+  // Rows shared with the viewer (docs/cloud-edition.md § "Pool extension"),
+  // appended after the viewer's own pool. **No usage surface**: windows,
+  // probe errors and the upstream identity blob belong to the owner's page,
+  // not the borrower's, and nothing here ever triggers an upstream usage
+  // call for someone else's account. Status/bench/label stay, because they
+  // are what says where a request goes; the routing facts behind the dot are
+  // still read from the row's stored snapshot.
+  for (const shared of await sharedAccounts(c, user.id, provider)) {
+    const row = shared.account
+    accounts.push({
+      id: row.id,
+      priority: shared.priority,
+      status: (benchUntilFromRow(row) !== null ? "benched" : "standby") as AccountStatus,
+      label: row.custom_label || row.label || row.id,
+      custom_label: row.custom_label ?? null,
+      account: null,
+      usage: null,
+      error: null,
+      stale: false,
+      share: shared.share,
+    })
+    limitedUntil.push(usageWindowUnusableUntil(row))
+    createdAt.push(row.created_at)
+    fableEligible.push(adapter.supportsModel ? adapter.supportsModel(null, FABLE_MODEL_PREFIX) : true)
   }
 
   // The dot says where a request goes right now, so it is the router's own
@@ -207,9 +278,20 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   // usable account without Fable reads active_no_fable, and the first usable
   // Fable-eligible account below it reads active_fable — where a
   // claude-fable-* request actually lands (docs/admin-ui.md § Providers page).
+  // Shared rows are appended to the list, but the router merges them into the
+  // pool by `(priority DESC, created_at DESC)` (docs/cloud-edition.md § "Pool
+  // extension"), so the dot has to be assigned in that order — otherwise a
+  // promoted shared row would route the traffic while an own row above it
+  // read Active. With no shared rows this is the list order itself: the own
+  // rows already arrived in exactly that sort.
+  const routeOrder = accounts.map((_, i) => i)
+  routeOrder.sort(
+    (x, y) => accounts[y]!.priority - accounts[x]!.priority || createdAt[y]!.localeCompare(createdAt[x]!),
+  )
   let routed = false
   let fableRouted = false
-  accounts.forEach((a, i) => {
+  routeOrder.forEach((i) => {
+    const a = accounts[i]!
     if (a.status === "benched" || a.status === "unusable") return
     if ((limitedUntil[i] ?? null) !== null) {
       a.status = "limited"
@@ -293,14 +375,34 @@ providerRoutes.patch("/:provider/accounts/:id", async (c) => {
   }
 
   const ok = await setAccountCustomLabel(c.env.DB, user.id, c.req.param("id"), customLabel)
-  if (!ok) return c.json({ error: "not found" }, 404)
+  if (!ok) {
+    // A row the viewer borrows exists, but renaming it is the owner's right.
+    if (await findShared(c, user.id, parseProvider(c.req.param("provider")), c.req.param("id"))) {
+      return c.json({ error: "forbidden" }, 403)
+    }
+    return c.json({ error: "not found" }, 404)
+  }
   return c.json({ ok: true, custom_label: customLabel })
 })
 
+/**
+ * Promote is the one mutation a borrower may make on a shared row: it
+ * reorders that row inside **the viewer's own** merged pool, never the
+ * owner's (docs/cloud-edition.md § "Pool extension"), so it delegates to
+ * `setSharedPriority` with one above the current maximum across both kinds.
+ */
 providerRoutes.post("/:provider/accounts/:id/promote", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
-  const ok = await promoteAccount(c.env.DB, user.id, c.req.param("id"))
+  const accountId = c.req.param("id")
+  if (await promoteAccount(c.env.DB, user.id, accountId)) return c.json({ ok: true })
+
+  const provider = parseProvider(c.req.param("provider"))
+  const shared = await sharedAccounts(c, user.id, provider)
+  if (!shared.some((s) => s.account.id === accountId)) return c.json({ error: "not found" }, 404)
+  const own = await listAccounts(c.env.DB, user.id, provider!)
+  const max = Math.max(0, ...own.map((a) => a.priority), ...shared.map((s) => s.priority))
+  const ok = await c.get("poolExtension")!.setSharedPriority(c.env, user.id, accountId, max + 1)
   if (!ok) return c.json({ error: "not found" }, 404)
   return c.json({ ok: true })
 })
@@ -311,7 +413,13 @@ providerRoutes.post("/:provider/accounts/:id/unpause", async (c) => {
   const provider = parseProvider(c.req.param("provider"))
   if (!provider) return c.json({ error: "invalid provider" }, 400)
   const row = await getAccount(c.env.DB, user.id, c.req.param("id"))
-  if (!row || row.provider !== provider) return c.json({ error: "not found" }, 404)
+  if (!row || row.provider !== provider) {
+    // Unpausing someone else's account is the owner's call, not a borrower's.
+    if (await findShared(c, user.id, provider, c.req.param("id"))) {
+      return c.json({ error: "forbidden" }, 403)
+    }
+    return c.json({ error: "not found" }, 404)
+  }
   await clearBench(c.env, user.id, provider, row.id)
   return c.json({ ok: true })
 })
@@ -320,7 +428,13 @@ providerRoutes.delete("/:provider/accounts/:id", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
   const ok = await removeAccount(c.env.DB, user.id, c.req.param("id"))
-  if (!ok) return c.json({ error: "not found" }, 404)
+  if (!ok) {
+    // Only the owner can unbind an account the viewer merely borrows.
+    if (await findShared(c, user.id, parseProvider(c.req.param("provider")), c.req.param("id"))) {
+      return c.json({ error: "forbidden" }, 403)
+    }
+    return c.json({ error: "not found" }, 404)
+  }
   return c.json({ ok: true })
 })
 

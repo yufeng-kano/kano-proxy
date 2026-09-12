@@ -35,7 +35,7 @@ anthropicRoutes.use("*", apiKeyAuth)
 
 anthropicRoutes.get("/v1/models", async (c) => {
   const userId = c.get("apiKeyUserId")!
-  const { models } = await listModelsForUser(c.env, userId, { availableOnly: true })
+  const { models } = await listModelsForUser(c.env, userId, { availableOnly: true, poolExtension: c.get("poolExtension") })
   // Same catalog as OpenAI surface; ids are always provider/upstream
   return c.json({
     data: models.map((m) => ({
@@ -161,6 +161,7 @@ export async function handleAnthropicMessages(c: Context<HonoEnv>): Promise<Resp
       strategy: resolved.strategy,
       isBuiltin: resolved.primary.isBuiltin,
       customProvider: resolved.primary.customProvider,
+      poolExtension: c.get("poolExtension"),
     })
   }
 
@@ -225,6 +226,7 @@ export async function handleAnthropicMessages(c: Context<HonoEnv>): Promise<Resp
       strategy: resolved.strategy,
       isBuiltin: resolved.primary.isBuiltin,
       customProvider: resolved.primary.customProvider,
+      poolExtension: c.get("poolExtension"),
     })
   }
 
@@ -243,6 +245,7 @@ export async function handleAnthropicMessages(c: Context<HonoEnv>): Promise<Resp
     strategy: resolved.strategy,
     isBuiltin: resolved.primary.isBuiltin,
     customProvider: resolved.primary.customProvider,
+    poolExtension: c.get("poolExtension"),
   })
 }
 
@@ -319,6 +322,7 @@ export async function handleAnthropicCountTokens(c: Context<HonoEnv>): Promise<R
     strategy: resolved.strategy,
     isBuiltin: resolved.primary.isBuiltin,
     customProvider: resolved.primary.customProvider,
+    poolExtension: c.get("poolExtension"),
   })
 }
 

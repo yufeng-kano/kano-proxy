@@ -7,6 +7,7 @@
  */
 import type { CustomProviderRow } from "../db/custom_providers"
 import type { Env } from "../env"
+import { settleLease, type PoolExtension } from "../pool/extension"
 import type { ProviderAdapter } from "../providers/types"
 import type { RoutingCandidate } from "../routing/types"
 import { logRequest } from "../logging/request_log"
@@ -16,6 +17,7 @@ import {
   canonicalModelId,
   dispatchNonStream,
   isEventStream,
+  leaseOutcome,
   passthroughStreamHeaders,
   streamCloseErrorCode,
   usageFields,
@@ -42,6 +44,8 @@ export async function dispatchAudioTranscriptions(
     strategy?: string
     isBuiltin?: boolean
     customProvider?: CustomProviderRow
+    /** Composition-time cross-user pool sharing (docs/cloud-edition.md § "Pool extension"); absent for standalone. */
+    poolExtension?: PoolExtension
   },
 ): Promise<Response> {
   const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS
@@ -65,23 +69,27 @@ export async function dispatchAudioTranscriptions(
       wire: openaiWire,
       captureUsage: true,
     },
-    async (candidate, res, latencyMs) => {
+    async (candidate, res, latencyMs, lease) => {
       const errorCode = res.ok ? null : "upstream_error"
+      // A transcription is one shot: any error code on the row means the
+      // attempt produced nothing usable, so the lease releases with it.
       const log = (usage: NormalizedUsage | null, code: string | null) =>
         opts.waitUntil(
-          logRequest(env, {
-            userId: opts.userId,
-            apiKeyId: opts.apiKeyId,
-            provider: candidate.provider,
-            model: canonicalModelId(candidate.provider, candidate.upstreamModel),
-            accountId: candidate.account.id,
-            statusCode: res.status,
-            latencyMs,
-            errorCode: code,
-            upstreamStatus: res.status,
-            groupName: opts.groupName ?? null,
-            ...usageFields(usage),
-          }),
+          settleLease(lease, leaseOutcome(code, false)).then(() =>
+            logRequest(env, {
+              userId: opts.userId,
+              apiKeyId: opts.apiKeyId,
+              provider: candidate.provider,
+              model: canonicalModelId(candidate.provider, candidate.upstreamModel),
+              accountId: candidate.account.id,
+              statusCode: res.status,
+              latencyMs,
+              errorCode: code,
+              upstreamStatus: res.status,
+              groupName: opts.groupName ?? null,
+              ...usageFields(usage),
+            }),
+          ),
         )
 
       if (res.body && isEventStream(res)) {

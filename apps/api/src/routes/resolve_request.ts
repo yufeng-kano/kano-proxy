@@ -27,11 +27,11 @@ export async function resolveRequestModel(
 ): Promise<RequestModelResolution> {
   const slug = c.req.param("slug")
   if (slug === undefined) {
-    const resolution = await resolveCandidates(c.env, userId, modelRaw)
+    const resolution = await resolveCandidates(c.env, userId, modelRaw, c.get("poolExtension"))
     return resolution ? { kind: "ok", resolution } : { kind: "invalid_model" }
   }
   const group = await getGroupBySlug(c.env.DB, userId, slug)
   if (!group) return { kind: "group_not_found", slug }
-  const resolution = await resolveGroupModelCandidates(c.env, userId, group, modelRaw)
+  const resolution = await resolveGroupModelCandidates(c.env, userId, group, modelRaw, c.get("poolExtension"))
   return resolution ? { kind: "ok", resolution } : { kind: "invalid_model", groupSlug: slug }
 }

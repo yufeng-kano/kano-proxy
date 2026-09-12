@@ -7,11 +7,12 @@
 
 import type { Env, ProviderId } from "../env"
 import { PROVIDERS } from "../env"
-import { listAccounts } from "../db/accounts"
+import { listAccounts, type AccountRow } from "../db/accounts"
 import { exposedCliModels, listCliProviders } from "../db/cli"
 import { listCustomProviders, type CustomProviderRow } from "../db/custom_providers"
 import { decryptJson } from "../crypto/token_crypto"
 import type { StoredCredential } from "../pool/acquire"
+import type { PoolExtension } from "../pool/extension"
 import { benchUntilFromRow } from "../pool/bench"
 import { getAdapter } from "../providers"
 import { createCustomAnthropicAdapter } from "../providers/custom_anthropic"
@@ -91,12 +92,20 @@ async function writeModelsCache(
   }
 }
 
+/**
+ * A bound, non-benched, decryptable account to query the live list with.
+ * `shared` are the rows a pool extension offers this viewer for a builtin
+ * provider (docs/cloud-edition.md § "Pool extension") — tried only after the
+ * viewer's own rows, and their credential is decrypted here exactly like an
+ * own one and never returned to the client.
+ */
 async function pickUsableAccount(
   env: Env,
   userId: string,
   provider: string,
+  shared: AccountRow[] = [],
 ): Promise<{ row: Awaited<ReturnType<typeof listAccounts>>[0]; credential: StoredCredential } | null> {
-  const rows = await listAccounts(env.DB, userId, provider)
+  const rows = [...(await listAccounts(env.DB, userId, provider)), ...shared]
   for (const row of rows) {
     if (benchUntilFromRow(row) !== null) continue
     try {
@@ -117,6 +126,7 @@ async function fetchProviderModels(
   userId: string,
   provider: ProviderId,
   force: boolean,
+  shared: AccountRow[] = [],
 ): Promise<ProviderModelsSection> {
   if (!force) {
     const cached = await readModelsCache(env, userId, provider)
@@ -130,7 +140,7 @@ async function fetchProviderModels(
     }
   }
 
-  const picked = await pickUsableAccount(env, userId, provider)
+  const picked = await pickUsableAccount(env, userId, provider, shared)
   if (!picked) {
     const empty: ProviderModelsSection = {
       provider,
@@ -252,7 +262,7 @@ async function fetchCustomProviderModels(
 export async function listModelsForUser(
   env: Env,
   userId: string,
-  opts?: { availableOnly?: boolean; force?: boolean },
+  opts?: { availableOnly?: boolean; force?: boolean; poolExtension?: PoolExtension },
 ): Promise<{
   models: CatalogModel[]
   providers: ProviderModelsSection[]
@@ -261,7 +271,14 @@ export async function listModelsForUser(
   const sections: ProviderModelsSection[] = []
 
   for (const provider of PROVIDERS) {
-    const section = await fetchProviderModels(env, userId, provider, force)
+    // A builtin provider counts as bound when the viewer has rows of their
+    // own **or** rows shared with them (docs/cloud-edition.md § "Pool
+    // extension"); the shared credential only ever leaves this process as an
+    // upstream Authorization header, never in the response.
+    const shared = opts?.poolExtension
+      ? (await opts.poolExtension.listShared(env, userId, provider)).map((s) => s.account)
+      : []
+    const section = await fetchProviderModels(env, userId, provider, force, shared)
     sections.push(section)
   }
 

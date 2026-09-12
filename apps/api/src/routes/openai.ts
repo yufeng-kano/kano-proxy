@@ -21,7 +21,7 @@ openaiRoutes.use("*", apiKeyAuth)
 openaiRoutes.get("/models", async (c) => {
   const userId = c.get("apiKeyUserId")!
   // Live upstream models for providers the key owner has accounts for
-  const { models } = await listModelsForUser(c.env, userId, { availableOnly: true })
+  const { models } = await listModelsForUser(c.env, userId, { availableOnly: true, poolExtension: c.get("poolExtension") })
   return c.json({
     object: "list",
     data: models.map((m) => ({
@@ -216,6 +216,7 @@ export async function handleChatCompletions(c: Context<HonoEnv>): Promise<Respon
     strategy: resolved.strategy,
     isBuiltin: resolved.primary.isBuiltin,
     customProvider: resolved.primary.customProvider,
+    poolExtension: c.get("poolExtension"),
     req: {
       model: modelRaw,
       rawModel: modelRaw,
@@ -388,6 +389,7 @@ export async function handleAudioTranscriptions(c: Context<HonoEnv>): Promise<Re
     strategy: resolved.strategy,
     isBuiltin: resolved.primary.isBuiltin,
     customProvider: resolved.primary.customProvider,
+    poolExtension: c.get("poolExtension"),
   })
 }
 

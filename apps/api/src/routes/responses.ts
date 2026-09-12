@@ -133,6 +133,7 @@ export async function handleResponses(c: Context<HonoEnv>): Promise<Response> {
     strategy: resolved.strategy,
     isBuiltin: resolved.primary.isBuiltin,
     customProvider: resolved.primary.customProvider,
+    poolExtension: c.get("poolExtension"),
     req: {
       model: modelRaw,
       rawModel: modelRaw,

@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono"
 import type { Env } from "../env"
 import { findUserById, type UserRow } from "../db/users"
+import type { PoolExtension } from "../pool/extension"
 import { newId, nowIso } from "../utils/id"
 
 const COOKIE = "kano-proxy_session"
@@ -9,6 +10,8 @@ const SESSION_DAYS = 14
 export type AppVariables = {
   /** Installed by the application factory; runs only after API-key authentication. */
   requestPolicy?: MiddlewareHandler<HonoEnv>
+  /** Installed by the application factory; local to this app instance, never a module-level registry (docs/cloud-edition.md § "Pool extension"). */
+  poolExtension?: PoolExtension
   user: UserRow | null
   apiKeyUserId: string | null
   apiKeyId: string | null

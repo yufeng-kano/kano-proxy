@@ -29,7 +29,7 @@ modelsRoutes.get("/", async (c) => {
   const user = await requireUser(c)
   if (!user) return c.json({ error: "unauthorized" }, 401)
   const force = c.req.query("refresh") === "true"
-  const { models, providers } = await listModelsForUser(c.env, user.id, { force })
+  const { models, providers } = await listModelsForUser(c.env, user.id, { force, poolExtension: c.get("poolExtension") })
   const origin = publicApiOrigin(c)
   return c.json({
     object: "list",

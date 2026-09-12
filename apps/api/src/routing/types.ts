@@ -6,6 +6,7 @@
  */
 import type { AccountRow } from "../db/accounts"
 import type { CustomProviderRow } from "../db/custom_providers"
+import type { SharedAccount } from "../pool/extension"
 import type { ProviderAdapter } from "../providers/types"
 
 /**
@@ -24,6 +25,8 @@ export type RoutingCandidate = {
   customProvider?: CustomProviderRow
   adapter: ProviderAdapter
   account: AccountRow
+  /** Set only when the row came from another user through the pool extension (docs/cloud-edition.md § "Pool extension"); absent for the caller's own rows. */
+  share?: SharedAccount["share"]
 }
 
 /** Per-candidate usability, computed from stored state only (facts.ts). */

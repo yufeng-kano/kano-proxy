@@ -32,6 +32,7 @@ import {
 import { getProviderStrategy } from "../db/provider_settings"
 import type { Env, ProviderId } from "../env"
 import { isProviderId } from "../env"
+import type { PoolExtension, SharedAccount } from "../pool/extension"
 import { createCliAdapter } from "../providers/cli"
 import { createCustomAnthropicAdapter } from "../providers/custom_anthropic"
 import { createCustomOpenAIAdapter } from "../providers/custom_openai"
@@ -115,9 +116,41 @@ function eligible(target: ResolvedTarget, account: AccountRow): boolean {
   return target.adapter.supportsModel?.(accountProfileMeta(account), target.upstreamModel) ?? true
 }
 
-async function poolCandidatesFor(env: Env, userId: string, target: ResolvedTarget): Promise<RoutingCandidate[]> {
-  const rows = await listAccounts(env.DB, userId, target.provider)
-  return rows.filter((account) => eligible(target, account)).map((account) => ({
+/**
+ * The viewer's own rows plus, for an **unpinned builtin** target and only
+ * when an edition passed a pool extension, the rows other users share with
+ * them (docs/cloud-edition.md § "Pool extension"). Both kinds are merged by
+ * `(priority DESC, created_at DESC)` — a shared row orders on the viewer's
+ * own `SharedAccount.priority`, never the owner's — and a `share` descriptor
+ * marks the borrowed ones for everything downstream. Pinned targets and
+ * custom/CLI providers never consult the extension.
+ */
+async function poolRows(
+  env: Env,
+  userId: string,
+  target: ResolvedTarget,
+  ext?: PoolExtension,
+): Promise<Array<{ account: AccountRow; priority: number; share?: SharedAccount["share"] }>> {
+  type PoolRow = { account: AccountRow; priority: number; share?: SharedAccount["share"] }
+  const own = await listAccounts(env.DB, userId, target.provider)
+  const rows: PoolRow[] = own.map((account) => ({ account, priority: account.priority }))
+  if (!ext || !target.isBuiltin || target.accountId) return rows
+  const shared = await ext.listShared(env, userId, target.provider as ProviderId)
+  for (const s of shared) rows.push({ account: s.account, priority: s.priority, share: s.share })
+  // Stable sort: rows that tie keep the order they were listed in, so the
+  // own-pool sequence `listAccounts` already produced never reshuffles.
+  rows.sort((a, b) => b.priority - a.priority || b.account.created_at.localeCompare(a.account.created_at))
+  return rows
+}
+
+async function poolCandidatesFor(
+  env: Env,
+  userId: string,
+  target: ResolvedTarget,
+  ext?: PoolExtension,
+): Promise<RoutingCandidate[]> {
+  const rows = await poolRows(env, userId, target, ext)
+  return rows.filter((row) => eligible(target, row.account)).map((row) => ({
     targetIndex: target.targetIndex,
     pinned: false,
     provider: target.provider,
@@ -125,7 +158,8 @@ async function poolCandidatesFor(env: Env, userId: string, target: ResolvedTarge
     isBuiltin: target.isBuiltin,
     customProvider: target.customProvider,
     adapter: target.adapter,
-    account,
+    account: row.account,
+    share: row.share,
   }))
 }
 
@@ -159,12 +193,17 @@ async function pinnedCandidateFor(
 }
 
 /** Candidates for one already-resolved target, honoring pinning. */
-export async function candidatesForTarget(env: Env, userId: string, target: ResolvedTarget): Promise<RoutingCandidate[]> {
+export async function candidatesForTarget(
+  env: Env,
+  userId: string,
+  target: ResolvedTarget,
+  ext?: PoolExtension,
+): Promise<RoutingCandidate[]> {
   if (target.accountId) {
     const c = await pinnedCandidateFor(env, userId, target)
     return c ? [c] : []
   }
-  return poolCandidatesFor(env, userId, target)
+  return poolCandidatesFor(env, userId, target, ext)
 }
 
 /**
@@ -185,8 +224,9 @@ export async function poolCandidates(
     adapter: ProviderAdapter
     accountId?: string | null
   },
+  ext?: PoolExtension,
 ): Promise<RoutingCandidate[]> {
-  return candidatesForTarget(env, userId, { ...target, targetIndex: 0, accountId: target.accountId ?? null })
+  return candidatesForTarget(env, userId, { ...target, targetIndex: 0, accountId: target.accountId ?? null }, ext)
 }
 
 export type GroupExpansion = {
@@ -204,6 +244,7 @@ export async function groupModelCandidates(
   env: Env,
   userId: string,
   modelRow: ModelGroupModelRow,
+  ext?: PoolExtension,
 ): Promise<GroupExpansion> {
   const targets = parseGroupTargets(modelRow.targets_json)
   const resolvedTargets: ResolvedTarget[] = []
@@ -211,7 +252,7 @@ export async function groupModelCandidates(
     const resolved = await resolveTargetPrefix(env, userId, i, targets[i]!)
     if (resolved) resolvedTargets.push(resolved)
   }
-  const perTarget = await Promise.all(resolvedTargets.map((t) => candidatesForTarget(env, userId, t)))
+  const perTarget = await Promise.all(resolvedTargets.map((t) => candidatesForTarget(env, userId, t, ext)))
   return { candidates: perTarget.flat(), resolvedTargets }
 }
 
@@ -252,6 +293,7 @@ export async function resolveCandidates(
   env: Env,
   userId: string,
   model: string,
+  ext?: PoolExtension,
 ): Promise<RoutingResolution | null> {
   const split = splitModelId(model)
   if (!split) return null
@@ -267,7 +309,7 @@ export async function resolveCandidates(
     return {
       raw: split.raw,
       primary,
-      candidates: await poolCandidates(env, userId, primary),
+      candidates: await poolCandidates(env, userId, primary, ext),
       strategy: await getProviderStrategy(env.DB, userId, split.prefix),
     }
   }
@@ -321,6 +363,7 @@ export async function resolveGroupModelCandidates(
   userId: string,
   group: ModelGroupRow,
   model: string,
+  ext?: PoolExtension,
 ): Promise<RoutingResolution | null> {
   const trimmed = model.trim()
   if (!trimmed) return null
@@ -328,7 +371,7 @@ export async function resolveGroupModelCandidates(
   const modelRow = await getGroupModelByName(env.DB, group.id, trimmed)
   if (!modelRow) return null
 
-  const { candidates, resolvedTargets } = await groupModelCandidates(env, userId, modelRow)
+  const { candidates, resolvedTargets } = await groupModelCandidates(env, userId, modelRow, ext)
   // No target's prefix resolves at all (e.g. every target pointed at a
   // since-deleted custom provider) — the model behaves as invalid_model.
   if (resolvedTargets.length === 0) return null
