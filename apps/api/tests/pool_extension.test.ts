@@ -315,6 +315,28 @@ describe("dispatch — the attempt lease settles exactly once, with the log row"
     expect(db.rows("request_logs")).toHaveLength(1)
   })
 
+  it("released on a non-stream upstream error passed through", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { id: "acc_1", userId: "user_1" })
+    const { lease, settled } = recordingLease()
+    const { adapter } = scriptedAdapter(() => Response.json({ error: "bad request" }, { status: 400 }))
+    const { waitUntil, drain } = collectWaitUntil()
+
+    const res = await dispatchChatCompletions(
+      buildEnv(db),
+      chatOpts({
+        adapter,
+        waitUntil,
+        poolExtension: fakeExtension({ reserveAttempt: vi.fn(async () => lease) }),
+      }),
+    )
+    await drain()
+
+    expect(res.status).toBe(400)
+    expect(settled).toEqual(["released"])
+    expect(db.rows("request_logs")).toHaveLength(1)
+  })
+
   it("consumed on a streamed success, at the stream-close log write", async () => {
     const db = new FakeD1()
     await seedAccount(db, { id: "acc_1", userId: "user_1" })

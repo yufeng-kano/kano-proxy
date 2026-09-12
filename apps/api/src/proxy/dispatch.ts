@@ -361,8 +361,13 @@ async function deliverNonStream(
 ): Promise<Response> {
   const row = candidateRow(candidate)
   const log = (fields: { errorCode?: string | null; usage: NormalizedUsage | null; sawOutput?: boolean }) =>
-    // The lease settles on the very decision that writes this row.
-    settleLease(lease, leaseOutcome(fields.errorCode, fields.sawOutput ?? true)).then(() =>
+    // The lease settles on the very decision that writes this row. An upstream
+    // error status passed through unchanged carries no useful output either,
+    // whatever the row's error_code says (docs/cloud-edition.md § "Pool extension").
+    settleLease(
+      lease,
+      res.status >= 400 ? "released" : leaseOutcome(fields.errorCode, fields.sawOutput ?? true),
+    ).then(() =>
       logRequest(env, {
         userId: t.userId,
         apiKeyId: t.apiKeyId,
