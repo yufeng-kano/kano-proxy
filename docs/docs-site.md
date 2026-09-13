@@ -15,6 +15,7 @@ The admin UI is a client-rendered SPA behind a login wall; search engines and li
 | `apps/docs/.vitepress/config.ts` | The standalone site: `defineDocsConfig()` with nothing added |
 | `apps/docs/.vitepress/theme/` | Default theme plus the origin fill (below) |
 | `apps/docs/*.md`, `apps/docs/zh-TW/*.md` | English (root) and Traditional Chinese content, one file per page in each tree |
+| `apps/docs/public/` | Static downloads served at the site root: `codex/models.json` is the Codex CLI catalog the Codex CLI page links, generated from `codex debug models` (Codex CLI 0.154.0) with slugs prefixed `codex/` and efforts trimmed to the proxy's ladder; regenerate it when Codex ships new models |
 | `apps/docs/.vitepress/dist/` | Build output (gitignored, like every `dist/`) |
 | `apps/docs/.vitepress/cache/` | Dev cache (gitignored) |
 

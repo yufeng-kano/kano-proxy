@@ -48,30 +48,19 @@ Codex models appear as `codex/<model>`. Switch with `codex --model <id>` or `/mo
 
 ### Putting proxy ids in the model picker
 
-Codex takes its `/model` picker and per-model metadata (context window, effort levels) from a catalog. Against a custom provider it uses the catalog bundled with the CLI, which knows `gpt-5.6-sol` but not `codex/gpt-5.6-sol`, so every proxy id counts as an unknown model: it runs on fallback metadata and never shows in the picker. `model_catalog_json` replaces that catalog with your own file.
+Codex's `/model` picker only knows the models in its catalog, and that catalog has no `codex/...` ids. A ready-made catalog with the GPT-6 and GPT-5.6 models is on this site. Download it and point the config at it:
 
-1. Dump the catalog Codex already has. It includes the instruction text each entry must carry:
+```bash
+curl -o ~/.codex/models.json https://<your-domain>/docs/codex/models.json
+```
 
-   ```bash
-   codex debug models > ~/.codex/models.json
-   ```
+```toml
+model_catalog_json = "models.json"
+```
 
-2. Edit `models.json`. Keep the entries you use and prefix each `slug` with `codex/`. For another provider, copy an entry and change `slug`, `display_name`, `context_window`, `max_context_window`, `default_reasoning_level`, and `supported_reasoning_levels` to what that model offers. Keep the copied `base_instructions`; a hand-written entry without it is rejected at startup.
-3. Point the config at the file. The key is top-level: place it above `[model_providers.kano]`, or it lands inside that table and is ignored.
+Put that line at the top of `config.toml`, above `[model_providers.kano]`, since it is a top-level key. The picker then lists `codex/gpt-6-astra`, `codex/gpt-5.6-sol`, `codex/gpt-5.6-terra`, and `codex/gpt-5.6-luna` with their real context windows and the effort levels the proxy accepts, and the unknown-model warning below goes away for them. The file's entries are copied from the Codex CLI's own catalog, including its instructions; only the slugs are prefixed with `codex/`.
 
-   ```toml
-   model_catalog_json = "/Users/<you>/.codex/models.json"
-   ```
-
-4. Check the result without sending a request:
-
-   ```bash
-   codex debug models
-   ```
-
-   The output lists exactly your file's entries, `codex/gpt-5.6-sol` and the rest, with the context window and effort levels you gave them. The picker now shows those ids, and the unknown-model warning below is gone.
-
-The proxy accepts `low`, `medium`, `high`, and `xhigh` on every provider and `max` on `claude-code`; the ladder is in [Endpoints and model ids](/guide/endpoints). Leave other efforts out of `supported_reasoning_levels`, or picking them fails the request.
+To add a Claude, Grok, Gemini, or custom model to the picker, copy one entry in the file, set `slug` to its proxy id, and set `display_name`, `context_window`, and `max_context_window` for that model. `codex debug models` prints what Codex will use without sending a request.
 
 ## Reasoning effort
 

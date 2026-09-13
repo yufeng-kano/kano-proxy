@@ -48,30 +48,19 @@ Codex 模型會以 `codex/<model>` 出現。用 `codex --model <id>` 或 CLI 內
 
 ### 讓 proxy 的模型 id 出現在選單裡
 
-Codex 的 `/model` 選單和每個模型的資料（context window、可用的 effort）都來自一份 catalog。接自訂 provider 時它用的是 CLI 內建那份，裡面有 `gpt-5.6-sol` 但沒有 `codex/gpt-5.6-sol`，所以每個 proxy 的 id 都算未知模型：用 fallback 設定執行，也不會出現在選單。`model_catalog_json` 可以用你自己的檔案取代這份 catalog。
+Codex 的 `/model` 選單只認得它 catalog 裡的模型，而那份 catalog 沒有 `codex/...` 這種 id。這個網站放了一份做好的 catalog，含 GPT-6 和 GPT-5.6 系列。下載後在設定檔指向它：
 
-1. 先把 Codex 現有的 catalog 倒出來，裡面含有每個項目必須帶的 instructions：
+```bash
+curl -o ~/.codex/models.json https://<your-domain>/docs/codex/models.json
+```
 
-   ```bash
-   codex debug models > ~/.codex/models.json
-   ```
+```toml
+model_catalog_json = "models.json"
+```
 
-2. 編輯 `models.json`。留下你會用的項目，把每個 `slug` 加上 `codex/` 前綴。要加其他供應商的模型，複製一個項目，改 `slug`、`display_name`、`context_window`、`max_context_window`、`default_reasoning_level`、`supported_reasoning_levels` 成那個模型的實際值。複製來的 `base_instructions` 要保留，手寫的項目少了它會在啟動時被拒絕。
-3. 在設定檔指向這個檔案。這個 key 是頂層的：要放在 `[model_providers.kano]` 上面，放在它下面會被當成那個 table 的欄位而被忽略。
+這行放在 `config.toml` 最上面、`[model_providers.kano]` 之前，因為它是頂層的 key。選單就會列出 `codex/gpt-6-astra`、`codex/gpt-5.6-sol`、`codex/gpt-5.6-terra`、`codex/gpt-5.6-luna`，帶著實際的 context window 和 proxy 接受的 effort，下面說的未知模型警告對這些模型也不會再出現。檔案裡的項目是從 Codex CLI 自己的 catalog 複製來的，含它的 instructions，只有 slug 加了 `codex/` 前綴。
 
-   ```toml
-   model_catalog_json = "/Users/<you>/.codex/models.json"
-   ```
-
-4. 不送請求就能檢查結果：
-
-   ```bash
-   codex debug models
-   ```
-
-   輸出會剛好是你檔案裡的項目，`codex/gpt-5.6-sol` 和其他的，帶著你給的 context window 和 effort。選單現在會列出這些 id，下面說的未知模型警告也不會再出現。
-
-proxy 在每個供應商都接受 `low`、`medium`、`high`、`xhigh`，`claude-code` 另外接受 `max`；完整規則見 [端點與模型 id](/zh-TW/guide/endpoints)。其他 effort 不要放進 `supported_reasoning_levels`，選到就會讓請求失敗。
+要把 Claude、Grok、Gemini 或自訂端點的模型加進選單，複製檔案裡的一個項目，把 `slug` 改成它在 proxy 的 id，再改 `display_name`、`context_window`、`max_context_window`。`codex debug models` 會印出 Codex 實際會用的內容，不會送任何請求。
 
 ## 推理強度
 
