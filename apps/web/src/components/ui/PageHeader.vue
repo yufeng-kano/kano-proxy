@@ -23,6 +23,12 @@ defineProps<{
 }>()
 
 defineSlots<{
+  /**
+   * Replaces the title *text* inside the `h1` — for a page whose name is
+   * itself a control, such as a team name that opens the team's menu. The
+   * `h1` stays, so the page still has exactly one.
+   */
+  title?: () => unknown
   /** Primary + secondary actions, right-aligned on the title row. */
   actions?: () => unknown
   /** Section nav or tabs, on their own row below the title. */
@@ -33,7 +39,7 @@ defineSlots<{
 <template>
   <header class="page-header">
     <div class="row">
-      <h1 class="title">{{ title }}</h1>
+      <h1 class="title"><slot name="title">{{ title }}</slot></h1>
       <div v-if="$slots.actions" class="actions">
         <slot name="actions" />
       </div>
