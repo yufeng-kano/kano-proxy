@@ -52,6 +52,8 @@ export const WEB_SEARCH_STUB_TOOL = {
 } as const
 
 const NAMESPACE_SEPARATOR = "__"
+const GEMINI_THOUGHT_SIGNATURE_MARKER_PREFIX =
+  "kano-proxy:gemini-thought-signature:v1:"
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v)
@@ -129,6 +131,43 @@ function customCallArguments(input: unknown): string {
   return JSON.stringify({ input: typeof input === "string" ? input : String(input ?? "") })
 }
 
+type GeminiThoughtSignatureMarker = {
+  callId: string
+  signature: string
+}
+
+function encodeGeminiThoughtSignature(callId: string, signature: string): string {
+  return `${GEMINI_THOUGHT_SIGNATURE_MARKER_PREFIX}${JSON.stringify({ call_id: callId, signature })}`
+}
+
+function decodeGeminiThoughtSignature(value: unknown): GeminiThoughtSignatureMarker | null {
+  if (typeof value !== "string" || !value.startsWith(GEMINI_THOUGHT_SIGNATURE_MARKER_PREFIX)) return null
+  try {
+    const payload = JSON.parse(value.slice(GEMINI_THOUGHT_SIGNATURE_MARKER_PREFIX.length)) as unknown
+    if (
+      !isRecord(payload) ||
+      typeof payload.call_id !== "string" ||
+      !payload.call_id ||
+      typeof payload.signature !== "string" ||
+      !payload.signature
+    ) {
+      return null
+    }
+    return { callId: payload.call_id, signature: payload.signature }
+  } catch {
+    return null
+  }
+}
+
+function geminiThoughtSignatureItem(callId: string, signature: string): Record<string, unknown> {
+  return {
+    id: newId("rs"),
+    type: "reasoning",
+    summary: [],
+    encrypted_content: encodeGeminiThoughtSignature(callId, signature),
+  }
+}
+
 /**
  * Responses request → Chat Completions request. Throws
  * `UnsupportedResponsesField` for the fields the proxy cannot honour.
@@ -162,6 +201,7 @@ export function responsesToChatRequest(body: Record<string, unknown>): Responses
   // before them — fold into one assistant message, which is the only shape
   // Chat Completions has for "the assistant said this and called these".
   let pendingAssistant: { content: string | null; tool_calls: unknown[] } | null = null
+  const thoughtSignatures = new Map<string, string>()
   const flush = () => {
     if (!pendingAssistant) return
     const msg: Record<string, unknown> = { role: "assistant", content: pendingAssistant.content }
@@ -201,31 +241,50 @@ export function responsesToChatRequest(body: Record<string, unknown>): Responses
         }
         break
       }
+      case "reasoning": {
+        const marker = decodeGeminiThoughtSignature(raw.encrypted_content)
+        if (marker) thoughtSignatures.set(marker.callId, marker.signature)
+        break
+      }
       case "function_call": {
         const name = typeof raw.name === "string" ? raw.name : ""
         const flat =
           typeof raw.namespace === "string" && raw.namespace
             ? `${raw.namespace}${NAMESPACE_SEPARATOR}${name}`
             : name
-        pushToolCall({
-          id: String(raw.call_id ?? raw.id ?? ""),
+        const callId = String(raw.call_id ?? raw.id ?? "")
+        const call: Record<string, unknown> = {
+          id: callId,
           type: "function",
           function: {
             name: flat,
             arguments: typeof raw.arguments === "string" ? raw.arguments : JSON.stringify(raw.arguments ?? {}),
           },
-        })
+        }
+        const signature = thoughtSignatures.get(callId)
+        if (signature) {
+          call.thought_signature = signature
+          thoughtSignatures.delete(callId)
+        }
+        pushToolCall(call)
         break
       }
       case "custom_tool_call": {
-        pushToolCall({
-          id: String(raw.call_id ?? raw.id ?? ""),
+        const callId = String(raw.call_id ?? raw.id ?? "")
+        const call: Record<string, unknown> = {
+          id: callId,
           type: "function",
           function: {
             name: typeof raw.name === "string" ? raw.name : "",
             arguments: customCallArguments(raw.input),
           },
-        })
+        }
+        const signature = thoughtSignatures.get(callId)
+        if (signature) {
+          call.thought_signature = signature
+          thoughtSignatures.delete(callId)
+        }
+        pushToolCall(call)
         break
       }
       case "function_call_output":
@@ -244,8 +303,8 @@ export function responsesToChatRequest(body: Record<string, unknown>): Responses
           "item_reference input items need stored responses, which this proxy does not keep",
         )
       default:
-        // reasoning items, hosted tool calls (web_search_call, …), unknown
-        // future item types: nothing on the Chat wire can carry them.
+        // Hosted tool calls (web_search_call, …) and unknown future item
+        // types: nothing on the Chat wire can carry them.
         break
     }
   }
@@ -455,6 +514,12 @@ function toolCallItem(
   return item
 }
 
+function thoughtSignatureOf(toolCall: Record<string, unknown>): string | undefined {
+  return typeof toolCall.thought_signature === "string" && toolCall.thought_signature
+    ? toolCall.thought_signature
+    : undefined
+}
+
 export type ResponsesOutputOptions = {
   /** `response.model` — the client-facing id, same as the Chat path's chunks. */
   model: string
@@ -502,7 +567,15 @@ export function openaiSseToResponsesStream(
   /** Chat `tool_calls[].index` → accumulated call. `closed` once its item is done (a late delta then has nowhere to go). */
   const tools = new Map<
     number,
-    { id: string; callId: string; name: string; args: string; custom: boolean; closed: boolean }
+    {
+      id: string
+      callId: string
+      name: string
+      args: string
+      custom: boolean
+      closed: boolean
+      thoughtSignature?: string
+    }
   >()
 
   return new ReadableStream<Uint8Array>({
@@ -619,12 +692,20 @@ export function openaiSseToResponsesStream(
         })
         return open
       }
-      const openTool = (toolIndex: number, callId: string, name: string) => {
+      const emitThoughtSignature = (callId: string, signature: string) => {
+        const item = geminiThoughtSignatureItem(callId, signature)
+        const index = output.length
+        output.push(item)
+        emit("response.output_item.added", { output_index: index, item })
+        emit("response.output_item.done", { output_index: index, item })
+      }
+      const openTool = (toolIndex: number, callId: string, name: string, thoughtSignature?: string) => {
         closeOpen()
+        if (thoughtSignature) emitThoughtSignature(callId, thoughtSignature)
         const id = newId(opts.toolNames.get(name)?.kind === "custom" ? "ctc" : "fc")
         const custom = opts.toolNames.get(name)?.kind === "custom"
         const index = output.length
-        const entry = { id, callId, name, args: "", custom, closed: false }
+        const entry = { id, callId, name, args: "", custom, closed: false, thoughtSignature }
         tools.set(toolIndex, entry)
         output.push({})
         open = { kind: "tool", id, index, toolIndex }
@@ -730,12 +811,15 @@ export function openaiSseToResponsesStream(
                   if (!isRecord(tc)) continue
                   const toolIndex = typeof tc.index === "number" ? tc.index : 0
                   const fn = isRecord(tc.function) ? tc.function : undefined
+                  const thoughtSignature = thoughtSignatureOf(tc)
                   let entry = tools.get(toolIndex)
                   if (!entry) {
                     const name = typeof fn?.name === "string" ? fn.name : ""
                     const callId = typeof tc.id === "string" && tc.id ? tc.id : `call_${toolIndex}_${seq}`
-                    openTool(toolIndex, callId, name)
+                    openTool(toolIndex, callId, name, thoughtSignature)
                     entry = tools.get(toolIndex)!
+                  } else if (!entry.thoughtSignature && thoughtSignature) {
+                    entry.thoughtSignature = thoughtSignature
                   }
                   const args = fn?.arguments
                   if (typeof args === "string" && args) {
@@ -812,11 +896,14 @@ export function openaiToResponsesObject(
         const fn = isRecord(tc.function) ? tc.function : undefined
         const name = typeof fn?.name === "string" ? fn.name : ""
         const args = typeof fn?.arguments === "string" ? fn.arguments : "{}"
+        const callId = typeof tc.id === "string" ? tc.id : newId("call")
+        const thoughtSignature = thoughtSignatureOf(tc)
         const custom = opts.toolNames.get(name)?.kind === "custom"
+        if (thoughtSignature) output.push(geminiThoughtSignatureItem(callId, thoughtSignature))
         output.push(
           toolCallItem(
             newId(custom ? "ctc" : "fc"),
-            typeof tc.id === "string" ? tc.id : newId("call"),
+            callId,
             name,
             args,
             opts.toolNames,

@@ -225,6 +225,99 @@ describe("antigravity routing — /openai/v1/chat/completions", () => {
   })
 })
 
+describe("antigravity routing — /openai/v1/responses", () => {
+  it("preserves Gemini thoughtSignature across a Codex-style tool round", async () => {
+    const db = new FakeD1()
+    await seed(db)
+    let turn = 0
+    const calls = stubUpstream(() => {
+      turn += 1
+      if (turn === 1) {
+        return new Response(
+          JSON.stringify({
+            response: {
+              candidates: [
+                {
+                  content: {
+                    role: "model",
+                    parts: [
+                      {
+                        functionCall: { id: "call_1", name: "exec_command", args: { cmd: "pwd" } },
+                        thoughtSignature: "sig-required-by-gemini",
+                      },
+                    ],
+                  },
+                  finishReason: "STOP",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        )
+      }
+      return geminiOk("done")
+    })
+    const tools = [
+      {
+        type: "function",
+        name: "exec_command",
+        description: "Run a command",
+        parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] },
+      },
+    ]
+
+    const first = await app.request(
+      "/openai/v1/responses",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "antigravity/gemini-3-flash",
+          input: [{ type: "message", role: "user", content: "run pwd" }],
+          tools,
+          stream: false,
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(first.status).toBe(200)
+    const firstJson = (await first.json()) as { output: Array<Record<string, unknown>> }
+    expect(firstJson.output.map((item) => item.type)).toEqual(["reasoning", "function_call"])
+    expect(firstJson.output[0]!.encrypted_content).toContain('"call_id":"call_1"')
+
+    const second = await app.request(
+      "/openai/v1/responses",
+      {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({
+          model: "antigravity/gemini-3-flash",
+          input: [
+            { type: "message", role: "user", content: "run pwd" },
+            ...firstJson.output,
+            { type: "function_call_output", call_id: "call_1", output: "/tmp" },
+          ],
+          tools,
+          stream: false,
+        }),
+      },
+      buildEnv(db),
+      execCtx,
+    )
+    expect(second.status).toBe(200)
+    const generateCalls = calls.filter((call) => call.url.endsWith("/v1internal:generateContent"))
+    expect(generateCalls).toHaveLength(2)
+    const sent = JSON.parse(generateCalls[1]!.init.body as string) as {
+      request: { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> }
+    }
+    expect(sent.request.contents[1]!.parts[0]).toEqual({
+      functionCall: { id: "call_1", name: "exec_command", args: { cmd: "pwd" } },
+      thoughtSignature: "sig-required-by-gemini",
+    })
+  })
+})
+
 describe("antigravity routing — /anthropic", () => {
   it("takes the converting-messages path, not the native passthrough", async () => {
     const db = new FakeD1()

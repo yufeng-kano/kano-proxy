@@ -221,6 +221,29 @@ describe("responsesToChatRequest", () => {
     ])
   })
 
+  it("restores only proxy-owned Gemini signatures to the matching call_id", () => {
+    const marker = (callId: string, signature: string) => ({
+      type: "reasoning",
+      summary: [],
+      encrypted_content: `kano-proxy:gemini-thought-signature:v1:${JSON.stringify({ call_id: callId, signature })}`,
+    })
+    const { chat } = responsesToChatRequest({
+      model: "antigravity/gemini-3-flash",
+      input: [
+        marker("call_2", "sig-2"),
+        { type: "reasoning", summary: [], encrypted_content: "foreign-encrypted-reasoning" },
+        marker("call_1", "sig-1"),
+        { type: "function_call", call_id: "call_1", name: "first", arguments: "{}" },
+        { type: "function_call", call_id: "call_2", name: "second", arguments: "{}" },
+        { type: "function_call", call_id: "call_3", name: "unsigned", arguments: "{}" },
+      ],
+    })
+    const calls = (chat.messages as Array<{ tool_calls?: Array<Record<string, unknown>> }>)[0]!.tool_calls!
+    expect(calls[0]).toMatchObject({ id: "call_1", thought_signature: "sig-1" })
+    expect(calls[1]).toMatchObject({ id: "call_2", thought_signature: "sig-2" })
+    expect(calls[2]).not.toHaveProperty("thought_signature")
+  })
+
   it("maps images, custom tools, text.format, reasoning.effort, max_output_tokens and tool_choice", () => {
     const { chat, toolNames } = responsesToChatRequest({
       model: "grok/grok-4.5",
@@ -397,6 +420,54 @@ describe("openaiSseToResponsesStream", () => {
     expect(String(output[2]!.id).startsWith("fc_")).toBe(true)
   })
 
+  it("emits and replays a Gemini function-call signature before the streamed call", async () => {
+    const text = await drain(
+      openaiSseToResponsesStream(
+        sseBody([
+          chatChunk({
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_sig",
+                type: "function",
+                function: { name: "exec_command", arguments: '{"cmd":"pwd"}' },
+                thought_signature: "sig-stream",
+              },
+            ],
+          }),
+          `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}`,
+          "data: [DONE]",
+        ]),
+        { model: "antigravity/gemini-3-flash", toolNames },
+      ),
+    )
+    const evs = events(text)
+    const completed = evs.at(-1)!.response as Record<string, unknown>
+    const output = completed.output as Array<Record<string, unknown>>
+    expect(evs.map((e) => e.type)).toEqual([
+      "response.created",
+      "response.in_progress",
+      "response.output_item.added",
+      "response.output_item.done",
+      "response.output_item.added",
+      "response.function_call_arguments.delta",
+      "response.function_call_arguments.done",
+      "response.output_item.done",
+      "response.completed",
+    ])
+    expect(output).toHaveLength(2)
+    expect(output[0]).toMatchObject({ type: "reasoning", summary: [] })
+    expect(output[0]!.encrypted_content).toContain('"call_id":"call_sig"')
+    expect(output[0]!.encrypted_content).toContain('"signature":"sig-stream"')
+    expect(output[1]).toMatchObject({ type: "function_call", call_id: "call_sig" })
+
+    const replay = responsesToChatRequest({ model: "antigravity/gemini-3-flash", input: output })
+    expect((replay.chat.messages as Array<{ tool_calls: unknown[] }>)[0]!.tool_calls[0]).toMatchObject({
+      id: "call_sig",
+      thought_signature: "sig-stream",
+    })
+  })
+
   it("puts namespace + bare name back on a flattened tool call, and emits a custom tool call whole", async () => {
     const text = await drain(
       openaiSseToResponsesStream(
@@ -536,6 +607,54 @@ describe("openaiToResponsesObject", () => {
       expect.objectContaining({ type: "custom_tool_call", call_id: "call_2", name: "apply_patch", input: "p" }),
     ])
     expect(out.usage).toEqual({ input_tokens: 3, output_tokens: 4, total_tokens: 7 })
+  })
+
+  it("emits one signature marker per signed non-stream tool call and maps parallel calls correctly", () => {
+    const out = openaiToResponsesObject(
+      {
+        choices: [
+          {
+            message: {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_a",
+                  type: "function",
+                  function: { name: "exec_command", arguments: "{}" },
+                  thought_signature: "sig-a",
+                },
+                {
+                  id: "call_b",
+                  type: "function",
+                  function: { name: "apply_patch", arguments: '{"input":"p"}' },
+                  thought_signature: "sig-b",
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+      },
+      {
+        model: "antigravity/gemini-3-flash",
+        toolNames: new Map([
+          ["exec_command", { kind: "function", name: "exec_command" }],
+          ["apply_patch", { kind: "custom", name: "apply_patch" }],
+        ]),
+      },
+    )
+    const output = out.output as Array<Record<string, unknown>>
+    expect(output.map((item) => item.type)).toEqual([
+      "reasoning",
+      "function_call",
+      "reasoning",
+      "custom_tool_call",
+    ])
+    const replay = responsesToChatRequest({ model: "antigravity/gemini-3-flash", input: output })
+    const calls = (replay.chat.messages as Array<{ tool_calls: Array<Record<string, unknown>> }>)[0]!.tool_calls
+    expect(calls[0]).toMatchObject({ id: "call_a", thought_signature: "sig-a" })
+    expect(calls[1]).toMatchObject({ id: "call_b", thought_signature: "sig-b" })
   })
 })
 
