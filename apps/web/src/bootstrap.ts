@@ -8,7 +8,7 @@ import "./styles.css"
 /** Creates an unmounted app so editions can compose before mounting. */
 export function createWebApp(extensions: WebExtensions = {}) {
   setLocale(detectLocale())
-  const router = createAppRouter(extensions.routes)
+  const router = createAppRouter(extensions.routes, { changelog: extensions.shell?.changelog !== false })
   const app = createApp(App).provide(webExtensionsKey, extensions).use(router)
   return { app, router }
 }

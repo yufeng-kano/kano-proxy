@@ -11,7 +11,8 @@ The admin UI is a client-rendered SPA behind a login wall; search engines and li
 | Path | Role |
 |------|------|
 | `apps/docs/` | VitePress project; pnpm workspace member `docs` |
-| `apps/docs/.vitepress/config.ts` | Site config: `base: "/docs/"`, locales, sidebar, local search, sitemap |
+| `apps/docs/.vitepress/site.ts` | `defineDocsConfig(edition)`: `base: "/docs/"`, locales, sidebar, local search, sitemap, plus whatever an edition appends (§ Editions) |
+| `apps/docs/.vitepress/config.ts` | The standalone site: `defineDocsConfig()` with nothing added |
 | `apps/docs/.vitepress/theme/` | Default theme plus the origin fill (below) |
 | `apps/docs/*.md`, `apps/docs/zh-TW/*.md` | English (root) and Traditional Chinese content, one file per page in each tree |
 | `apps/docs/.vitepress/dist/` | Build output (gitignored, like every `dist/`) |
@@ -74,7 +75,18 @@ Only `/docs/*` and `/login` are meant to be indexed. The admin routes render the
 
 Not done, on purpose: `apple-touch-icon` and a web manifest (nobody installs an admin panel to a home screen), `llms.txt` (revisit once the docs have settled), and any structured data.
 
+## Editions
+
+A private edition ([cloud-edition.md](./cloud-edition.md)) documents features the core does not have, on the same site. It does so from its own VitePress project rather than by patching this one:
+
+- Its `.vitepress/config.ts` imports `defineDocsConfig` from this package's `site.ts` and passes the sidebar groups and nav entries for its pages, which are appended after the core's. Its theme re-exports this package's theme so the origin fill still runs.
+- Its source tree is **assembled at build time**: the core's `*.md` files copied first, the edition's pages copied over them into the same `guide/`, `agents/`, `zh-TW/…` layout. An edition page may not have the path of a core page; the core's text is the core's to change.
+- The assembled copy has no git history, so the edition passes `lastUpdated: false` instead of letting every page date itself to the build.
+- The content rules above apply unchanged: an English page has its `zh-TW/` twin in the same change, placeholders only for secrets and hosts, no invented model ids.
+
+`site.ts` and the theme entry are build integration points for editions, like the web app's `@` alias; nothing else under `apps/docs/.vitepress/` is.
+
 ## Links into the docs
 
-- Login page footer: a "Docs" link beside the contact address.
-- Signed-in sidebar: a "Docs" entry above Changelog, opening in a new tab. Both use the `nav.docs` catalog key.
+- Login page footer: a "Documentation" link beside the contact address.
+- Signed-in sidebar: a "Documentation" entry above Changelog, opening in a new tab. Both use the `nav.docs` catalog key. An edition may move the sidebar entry into the account menu ([admin-ui.md](./admin-ui.md) § Layout: edition options).

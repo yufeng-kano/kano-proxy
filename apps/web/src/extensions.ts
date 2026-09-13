@@ -20,10 +20,26 @@ export interface AccountMenuItem {
   icon: Component
 }
 
+/**
+ * Shell chrome an edition may reshape. Every field defaults to the standalone
+ * layout (docs/admin-ui.md § Layout: the shell).
+ */
+export interface ShellOptions {
+  /**
+   * `false` removes the Changelog link, the version badge and the `/changelog`
+   * route, and the shell never asks `/api/changelog`. For an edition whose
+   * release notes are not written for the people signed in to it.
+   */
+  changelog?: boolean
+  /** Where the Documentation link lives. `"sidebar"` is the standalone default. */
+  docs?: "sidebar" | "accountMenu"
+}
+
 export interface WebExtensions {
   routes?: RouteRecordRaw[]
   navigation?: readonly NavigationItem[]
   accountMenu?: readonly AccountMenuItem[]
+  shell?: ShellOptions
 }
 
 export const webExtensionsKey: InjectionKey<WebExtensions> = Symbol("webExtensions")

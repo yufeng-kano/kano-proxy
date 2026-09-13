@@ -1,6 +1,6 @@
 # Changelog
 
-Signed-in operators see **what changed** and **which version they are running**, sourced from this repo's published GitHub Releases.
+Signed-in operators see **what changed** and **which version they are running**, sourced from this repo's published GitHub Releases. An edition may leave the whole surface out of its web shell (`ShellOptions.changelog`, [cloud-edition.md](./cloud-edition.md) § Web shell); this document describes the standalone build.
 
 There is no hand-maintained `CHANGELOG.md` and no changelog table in D1. The release notes written at release time (see [deployment.md](./deployment.md) — Releases) are the single source of truth; the admin UI reads them through the Worker.
 

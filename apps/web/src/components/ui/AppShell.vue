@@ -24,7 +24,12 @@ import { resetScroll, setScrollRegion } from "@/services/scrollRegion"
 import { useWebExtensions } from "@/extensions"
 import NavIcon from "./NavIcon.vue"
 
-const { navigation = [], accountMenu = [] } = useWebExtensions()
+const { navigation = [], accountMenu = [], shell = {} } = useWebExtensions()
+// Edition choices about the chrome itself (docs/admin-ui.md § Layout). The
+// standalone build shows the Changelog link and keeps Documentation in the
+// sidebar; an edition may drop the first and move the second into the menu.
+const showChangelog = shell.changelog !== false
+const docsInAccountMenu = shell.docs === "accountMenu"
 const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
@@ -63,7 +68,7 @@ watch(
   () => user.value?.id ?? null,
   (id) => {
     setUserId(id)
-    if (id) void loadChangelog()
+    if (id && showChangelog) void loadChangelog()
   },
   { immediate: true },
 )
@@ -244,13 +249,13 @@ async function onSignOut() {
       </nav>
 
       <!-- mt-auto: pinned to the bottom of the scroll area, above the user block. -->
-      <div class="sidebar-secondary">
+      <div v-if="!docsInAccountMenu || showChangelog" class="sidebar-secondary">
         <!-- Plain anchor: /docs/ is the static docs site, outside the router. -->
-        <a href="/docs/" class="nav-item subtle" target="_blank" rel="noopener">
+        <a v-if="!docsInAccountMenu" href="/docs/" class="nav-item subtle" target="_blank" rel="noopener">
           <NavIcon name="docs" />
           <span class="nav-label">{{ t("nav.docs") }}</span>
         </a>
-        <RouterLink to="/changelog" class="nav-item subtle" active-class="active">
+        <RouterLink v-if="showChangelog" to="/changelog" class="nav-item subtle" active-class="active">
           <NavIcon name="changelog" />
           <span class="nav-label">{{ t("nav.changelog") }}</span>
           <span v-if="version" class="version">
@@ -306,7 +311,20 @@ async function onSignOut() {
             <component :is="item.icon" />
             <span class="menu-label">{{ item.label }}</span>
           </RouterLink>
-          <div v-if="accountMenu.length" class="menu-rule" role="separator" />
+          <!-- Same static site as the sidebar link; a plain anchor, and it opens a new tab so the menu's page stays put. -->
+          <a
+            v-if="docsInAccountMenu"
+            href="/docs/"
+            role="menuitem"
+            class="menu-item"
+            target="_blank"
+            rel="noopener"
+            @click="accountOpen = false"
+          >
+            <NavIcon name="docs" />
+            <span class="menu-label">{{ t("nav.docs") }}</span>
+          </a>
+          <div v-if="accountMenu.length || docsInAccountMenu" class="menu-rule" role="separator" />
           <button type="button" role="menuitem" class="menu-item" @click="onSignOut">
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path

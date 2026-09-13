@@ -81,7 +81,8 @@ kano-proxy/
                           #   Built into apps/web/dist/docs/ by root `pnpm build:site`,
                           #   served at /docs/ from the same Pages project.
       .vitepress/
-        config.ts        # base /docs/, locales (root en + zh-TW), sidebar, local search
+        site.ts          # defineDocsConfig(edition): base /docs/, locales (root en + zh-TW), sidebar, local search
+        config.ts        # the standalone site: defineDocsConfig()
         theme/           # default theme + origin fill (<your-domain> → location.host)
       *.md               # English pages (reference tree)
       zh-TW/             # Traditional Chinese pages, same file names

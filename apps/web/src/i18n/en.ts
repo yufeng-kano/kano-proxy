@@ -37,7 +37,7 @@ export const en = {
   "nav.groups": "Groups",
   "nav.keys": "API keys",
   "nav.changelog": "Changelog",
-  "nav.docs": "Docs",
+  "nav.docs": "Documentation",
 
   // --- Shared actions -----------------------------------------------------
   "action.refresh": "Refresh",

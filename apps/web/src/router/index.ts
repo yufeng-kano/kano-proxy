@@ -15,7 +15,14 @@ import { useI18n, type MessageKey } from "@/i18n"
 // keep — a restore onto the bare path could only show "request missing".
 const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli", "/cli/authorize"])
 
-export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], history: RouterHistory = createWebHistory()) {
+export interface RouterOptions {
+  /** `false` leaves `/changelog` out, so it falls through to the catch-all (ShellOptions.changelog). */
+  changelog?: boolean
+  history?: RouterHistory
+}
+
+export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: RouterOptions = {}) {
+  const history = options.history ?? createWebHistory()
   const router = createRouter({
     history,
     /**
@@ -85,12 +92,16 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], history: Rou
         component: () => import("@/pages/ModelsPage.vue"),
         meta: { titleKey: "nav.models" },
       },
-      {
-        path: "/changelog",
-        name: "changelog",
-        component: () => import("@/pages/ChangelogPage.vue"),
-        meta: { titleKey: "nav.changelog" },
-      },
+      ...(options.changelog === false
+        ? []
+        : [
+            {
+              path: "/changelog",
+              name: "changelog",
+              component: () => import("@/pages/ChangelogPage.vue"),
+              meta: { titleKey: "nav.changelog" },
+            } satisfies RouteRecordRaw,
+          ]),
       ...extraRoutes,
       // Pre-2.0 paths. A bookmark or a persisted last-route from an older build
       // must land on the renamed page, not fall through the catch-all.

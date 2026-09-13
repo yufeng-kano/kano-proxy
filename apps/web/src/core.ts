@@ -1,6 +1,6 @@
 export { createWebApp } from "./bootstrap"
 export { createAppRouter } from "./router"
-export type { WebExtensions, NavigationItem, AccountMenuItem } from "./extensions"
+export type { WebExtensions, NavigationItem, AccountMenuItem, ShellOptions } from "./extensions"
 export { request as apiRequest } from "./services/api"
 export { useAuth } from "./composables/useAuth"
 export { default as PageHeader } from "./components/ui/PageHeader.vue"

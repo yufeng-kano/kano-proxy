@@ -72,3 +72,18 @@ Core obligations:
 An optional `ownBars(env, viewerUserId, provider, accountIds)` lets the edition put bars before the upstream windows on the viewer's own rows on the Providers page (their allowance on an account they lend out); those bars are added after the routing dot was decided and never reach `routing/facts`.
 
 Teams themselves (membership, limits, ledgers, UI) stay in the private edition.
+
+## Web shell (composition-time, optional)
+
+`createWebApp` takes `shell` beside `routes`, `navigation` and `accountMenu`:
+
+```ts
+export interface ShellOptions {
+  changelog?: boolean                 // false: no Changelog link, no version badge, no /changelog route, no /api/changelog request
+  docs?: "sidebar" | "accountMenu"    // where the Documentation link lives; "sidebar" is the standalone default
+}
+```
+
+Both exist for a hosted edition whose release notes are written for its operator, not for the people signed in to it ([admin-ui.md](./admin-ui.md) § Layout: edition options). The API keeps serving `/api/changelog`; an edition that hides the page also leaves `GITHUB_REPO` unset so the route reports unavailable.
+
+The public documentation site is extended the same way, from the edition's own VitePress project ([docs-site.md](./docs-site.md) § Editions).
