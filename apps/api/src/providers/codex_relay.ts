@@ -183,6 +183,25 @@ export async function relayFetch(
     if (res.headers.has("x-relay-fault")) return relayFaultResponse(res)
   }
 
+  if (res.status === 413) {
+    return Response.json(
+      {
+        error: {
+          message: "Codex relay rejected the request body as too large; compact the conversation and retry",
+          type: "invalid_request_error",
+          code: "request_too_large",
+        },
+      },
+      {
+        status: 413,
+        headers: {
+          "x-kano-relay-error": "request_too_large",
+          "x-should-retry": "false",
+        },
+      },
+    )
+  }
+
   return Response.json({ error: { type: "relay_unavailable", status: res.status } }, { status: 502 })
 }
 

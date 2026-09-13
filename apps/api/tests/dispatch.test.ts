@@ -1043,6 +1043,74 @@ describe("dispatch candidate-walk exhaustion", () => {
     expect(await res.text()).toBe("upstream says no")
     expect(calls).toBe(1)
   })
+
+  it("turns a relay 413 into a non-retryable request_too_large stream error", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "grok" })
+    const { waitUntil, drain } = collectWaitUntil()
+    const message = "Codex relay rejected the request body as too large; compact the conversation and retry"
+
+    const res = await dispatchChatCompletions(buildEnv(db), {
+      userId: "user_1", apiKeyId: "key_1", provider: "grok", waitUntil,
+      adapter: {
+        id: "grok",
+        async chatCompletions() {
+          return Response.json(
+            { error: { message, type: "invalid_request_error", code: "request_too_large" } },
+            { status: 413, headers: { "x-kano-relay-error": "request_too_large", "x-should-retry": "false" } },
+          )
+        },
+      },
+      req: { model: "grok/grok-4.5", rawModel: "grok/grok-4.5", upstreamModel: "grok-4.5", messages: [], stream: true, rawBody: {} },
+    })
+
+    expect(res.status).toBe(200)
+    const text = await drainBody(res.body)
+    expect(text).toContain('"type":"invalid_request_error"')
+    expect(text).toContain('"code":"request_too_large"')
+    expect(text).toContain(message)
+    await drain()
+    expect(db.rows("request_logs")[0]).toMatchObject({
+      status_code: 200,
+      error_code: "request_too_large",
+      upstream_status: 413,
+    })
+  })
+
+  it("shapes a relay 413 as an Anthropic non-retryable error", async () => {
+    const db = new FakeD1()
+    await seedAccount(db, { userId: "user_1", provider: "claude-code" })
+    const message = "Codex relay rejected the request body as too large; compact the conversation and retry"
+
+    const res = await dispatchAnthropicMessages(buildEnv(db), {
+      userId: "user_1", apiKeyId: "key_1",
+      body: { model: "claude-opus-5", max_tokens: 10, messages: [] },
+      headers: new Headers(), model: "claude-code/claude-opus-5", provider: "claude-code",
+      adapter: {
+        id: "claude-code",
+        async chatCompletions() { throw new Error("not used") },
+        async messages() {
+          return Response.json(
+            { error: { message, type: "invalid_request_error", code: "request_too_large" } },
+            { status: 413, headers: { "x-kano-relay-error": "request_too_large", "x-should-retry": "false" } },
+          )
+        },
+      },
+      waitUntil: () => {},
+    })
+
+    expect(res.status).toBe(413)
+    expect(res.headers.get("x-should-retry")).toBe("false")
+    expect(await res.json()).toEqual({
+      type: "error",
+      error: { type: "invalid_request_error", message },
+    })
+    expect(db.rows("request_logs")[0]).toMatchObject({
+      status_code: 413,
+      error_code: "request_too_large",
+      upstream_status: 413,
+    })
+  })
 })
 
 describe("dispatchChatCompletions — bottom-of-loop 503 also carries Retry-After (Item 2)", () => {

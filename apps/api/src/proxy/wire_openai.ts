@@ -25,6 +25,7 @@ export const openaiWire: Wire = {
     frame(`No usable ${provider} account for this user`, "invalid_request_error", "no_upstream_account"),
   unavailableFrame: () => frame("All upstream accounts unavailable", "api_error", "upstream_unavailable"),
   upstreamErrorFrame: () => frame("upstream error", "api_error", "upstream_error"),
+  requestTooLargeFrame: (message) => frame(message, "invalid_request_error", "request_too_large"),
   upstreamErrorFrameFromBody: (message, text) => frame(message, errorTypeFromBody(text), "upstream_error"),
   noAccountBody: (provider) => ({
     error: {
@@ -35,6 +36,9 @@ export const openaiWire: Wire = {
   }),
   unavailableBody: () => ({ error: { message: "All upstream accounts unavailable", code: "upstream_unavailable" } }),
   upstreamErrorBody: () => ({ error: { message: "upstream error", code: "upstream_error" } }),
+  requestTooLargeBody: (message) => ({
+    error: { message, type: "invalid_request_error", code: "request_too_large" },
+  }),
   nonStreamResponse: "content_type_only",
   createUsageSniffer: createOpenAISseUsageSniffer,
   parseUsage: fromOpenAIUsage,

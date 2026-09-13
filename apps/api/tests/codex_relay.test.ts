@@ -262,6 +262,39 @@ describe("relayFetch tri-state guard", () => {
     const json = await res.json()
     expect(json).toEqual({ error: { type: "relay_unavailable", status: 429 } })
   })
+
+  it("a marker-less 413 becomes a non-retryable request_too_large instead of relay_unavailable", async () => {
+    const env = await relayEnvWithFreshKey()
+    let tokenExchangeCalls = 0
+    let relayCalls = 0
+    globalThis.fetch = (async (url: string) => {
+      if (url === TOKEN_EXCHANGE_URL) {
+        tokenExchangeCalls++
+        return jsonResponse({ id_token: buildFakeIdToken({ exp: freshExp() }) })
+      }
+      relayCalls++
+      return new Response("request too large", { status: 413 })
+    }) as typeof fetch
+
+    const upstream = codexUpstream(env)
+    const res = await relayFetch(upstream, `${upstream.base}/codex/responses`, {
+      method: "POST",
+      body: "{}",
+    })
+
+    expect(tokenExchangeCalls).toBe(1)
+    expect(relayCalls).toBe(1)
+    expect(res.status).toBe(413)
+    expect(res.headers.get("x-kano-relay-error")).toBe("request_too_large")
+    expect(res.headers.get("x-should-retry")).toBe("false")
+    expect(await res.json()).toEqual({
+      error: {
+        message: "Codex relay rejected the request body as too large; compact the conversation and retry",
+        type: "invalid_request_error",
+        code: "request_too_large",
+      },
+    })
+  })
 })
 
 describe("codexAdapter wiring", () => {

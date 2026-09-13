@@ -13,12 +13,14 @@ export type Wire = {
   noAccountFrame: (provider: string) => Uint8Array
   unavailableFrame: () => Uint8Array
   upstreamErrorFrame: () => Uint8Array
+  requestTooLargeFrame: (message: string) => Uint8Array
   /** Upstream non-2xx after failover: `message` already extracted from `text`, the error type is read from `text` in the surface's own envelope shape. */
   upstreamErrorFrameFromBody: (message: string, text: string) => Uint8Array
   /** Non-stream JSON error envelopes (docs/api.md "Errors"). */
   noAccountBody: (provider: string) => Record<string, unknown>
   unavailableBody: () => Record<string, unknown>
   upstreamErrorBody: () => Record<string, unknown>
+  requestTooLargeBody: (message: string) => Record<string, unknown>
   /**
    * How a non-stream upstream response reaches the client. `content_type_only`
    * (OpenAI surface) reads the body and rebuilds the response with just

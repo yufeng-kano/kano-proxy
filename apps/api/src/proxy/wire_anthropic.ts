@@ -27,6 +27,7 @@ export const anthropicWire: Wire = {
   noAccountFrame: (provider) => frame(`No usable ${provider} account`, "invalid_request_error"),
   unavailableFrame: () => frame("upstream_unavailable", "api_error"),
   upstreamErrorFrame: () => frame("upstream error", "api_error"),
+  requestTooLargeFrame: (message) => frame(message, "invalid_request_error"),
   upstreamErrorFrameFromBody: (message, text) => frame(message, errorTypeFromBody(text)),
   noAccountBody: (provider) => ({
     type: "error",
@@ -34,6 +35,10 @@ export const anthropicWire: Wire = {
   }),
   unavailableBody: () => ({ type: "error", error: { type: "api_error", message: "upstream_unavailable" } }),
   upstreamErrorBody: () => ({ type: "error", error: { type: "api_error", message: "upstream error" } }),
+  requestTooLargeBody: (message) => ({
+    type: "error",
+    error: { type: "invalid_request_error", message },
+  }),
   nonStreamResponse: "as_received",
   createUsageSniffer: createAnthropicSseUsageSniffer,
   parseUsage: fromAnthropicUsage,

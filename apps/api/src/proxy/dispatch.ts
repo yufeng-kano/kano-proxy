@@ -150,6 +150,10 @@ async function safeResponseText(res: Response): Promise<string> {
   }
 }
 
+function isRelayRequestTooLarge(res: Response): boolean {
+  return res.status === 413 && res.headers.get("x-kano-relay-error") === "request_too_large"
+}
+
 /** `null` (nothing captured) flattens to all-NULL request_logs token fields. */
 export function usageFields(usage: NormalizedUsage | null): {
   promptTokens: number | null
@@ -270,6 +274,12 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
 
       const text = await safeResponseText(res)
       if (!res.ok) {
+        if (isRelayRequestTooLarge(res)) {
+          return fail(
+            "request_too_large",
+            t.wire.requestTooLargeFrame(messageFromUpstreamErrorBody(text, "request body too large")),
+          )
+        }
         return fail(
           "upstream_error",
           t.wire.upstreamErrorFrameFromBody(messageFromUpstreamErrorBody(text, "upstream error"), text),
@@ -407,6 +417,16 @@ async function deliverNonStream(
         ...usageFields(fields.usage),
       }),
     )
+
+  if (isRelayRequestTooLarge(res)) {
+    const text = await safeResponseText(res)
+    const message = messageFromUpstreamErrorBody(text, "request body too large")
+    await log({ usage: null, errorCode: "request_too_large", sawOutput: false })
+    return Response.json(t.wire.requestTooLargeBody(message), {
+      status: 413,
+      headers: { "x-should-retry": "false" },
+    })
+  }
 
   if (res.body && isEventStream(res)) {
     const sniffer = t.wire.createUsageSniffer()

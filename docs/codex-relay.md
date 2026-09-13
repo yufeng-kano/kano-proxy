@@ -48,7 +48,7 @@ plus a forced `accept-encoding: identity` (bytes cross the wire 1:1; no decompre
 ### Streaming
 
 - **Response body is a straight pipe.** The upstream body streams through untouched — never `await text()`, never buffered, no `Content-Length` set by hand. This is the streaming rule in `CLAUDE.md` and it is pinned by a test, not by care.
-- **Request body is read fully before forwarding.** Deliberate asymmetry: request bodies are bounded JSON (Cloud Run caps HTTP/1 requests at 32 MiB; real prompts are a few MB), and sending a known `Content-Length` avoids chunked-POST ambiguity at OpenAI's edge. The streaming rule protects the SSE *response* path; it is not violated by buffering a bounded request.
+- **Request body is read fully before forwarding.** Deliberate asymmetry: request bodies are bounded JSON, and sending a known `Content-Length` avoids chunked-POST ambiguity at OpenAI's edge. Cloud Run uses end-to-end HTTP/2 (`--use-http2`), and Deno accepts the resulting cleartext HTTP/2 (h2c), so Cloud Run's 32 MiB HTTP/1 request cap does not truncate long agent conversations before the container. The streaming rule protects the SSE *response* path; it is not violated by buffering a bounded request. Cloudflare's ingress limit and the Worker's 128 MB isolate memory remain the next bounds; lifting them would require a separate design.
 - **Cancellation propagates.** Client disconnect (an agent stopped mid-run) aborts the upstream fetch via the request signal, so the upstream stops generating and Cloud Run stops billing the wait.
 
 ### Response
@@ -67,7 +67,8 @@ The Worker applies a tri-state guard to every relay response:
 
 1. `x-relay-upstream` present → treat exactly like a direct upstream response.
 2. `x-relay-fault` present → return 502 to the client; log; **do not bench**.
-3. Neither, status 401/403 → assume a stale ID token: mint a fresh token, retry **once**; if still marker-less, return 502 as a relay fault. Any other marker-less response → 502 relay fault.
+3. Neither, status 401/403 → assume a stale ID token: mint a fresh token, retry **once**; if still marker-less, return 502 as a relay fault.
+4. Neither, status 413 → the platform rejected the request before the relay app. Return a surface-shaped `413 request_too_large` with `x-should-retry: false`; streaming callers receive the matching terminal error event. Any other marker-less response → 502 relay fault.
 
 ### Token counting (local, no upstream)
 
@@ -117,6 +118,7 @@ Service `kano-codex-relay`, region **us-central1** (always-free egress tier is N
 | `--max-instances` | `10` | With concurrency 1 this is the concurrent-codex-stream ceiling *and* the runaway-cost fuse; requests past it get a marker-less 429 → Worker guard → non-benching 502 |
 | `--concurrency` | `1` | Forced: Cloud Run rejects CPU < 1 with concurrency > 1 (measured 2026-08-03). Instance-per-stream at 0.25 vCPU bills less than shared instances at 1 vCPU |
 | `--cpu` / `--memory` | `0.25` / `512Mi` | CPU size is the only real cost lever — see below. Memory raised from the original 256Mi when `/count-tokens` landed: the `o200k_base` ranks stay resident in any instance that has served a count (~tens of MB on top of the Deno baseline), and memory is billed only while requests are active, so the bump costs ~nothing |
+| `--use-http2` | | End-to-end h2c avoids Cloud Run's 32 MiB HTTP/1 request limit. The Deno server must keep accepting `curl --http2-prior-knowledge` locally before deploy |
 | billing mode | request-based (default; **no** `--no-cpu-throttling`) | See correction below |
 
 **Billing model, corrected from the original proposal.** The proposal implied request-based billing makes SSE waits free. It does not: request-based billing charges configured vCPU + memory for **wall-clock time while ≥1 request is active on an instance** — a 10-minute agentic stream is 600 billed seconds. What request-based billing avoids is idle-between-requests time. Mitigations are structural: small vCPU (forwarding uses ~none) and scale to zero. Because the platform ties fractional CPU to `concurrency=1`, each stream runs on its own instance and billing scales per stream: ~11k req/month × ~60s active ≈ 660k stream-seconds × 0.25 vCPU ≈ 165k vCPU-s, inside the 180k vCPU-s free tier (memory: 165k GiB-s vs 360k free). The rejected alternative — 1 vCPU shared at concurrency 80 — would bill ~660k vCPU-s ≈ $10/month at the same load unless streams overlap heavily. Config, not luck, keeps this near $0.
@@ -146,7 +148,7 @@ Relay (`deno task test` in `apps/relay`):
 Worker (`pnpm --filter api test`):
 
 1. ID-token mint: JWT claims (`iss`, `aud`, `target_audience`), exchange call shape, in-memory cache hit, near-expiry refresh.
-2. Tri-state guard: upstream-marker 401 passes through (bench semantics intact); fault-marker → 502 no bench; marker-less 401 → one re-mint + retry → then 502.
+2. Tri-state guard: upstream-marker 401 passes through (bench semantics intact); fault-marker → 502 no bench; marker-less 401 → one re-mint + retry → then 502; marker-less 413 → `413 request_too_large` + no-retry marker and surface-shaped streaming/non-stream errors.
 3. Wiring: relay configured → requests hit the relay base with `X-Serverless-Authorization` and the upstream bearer in `Authorization`; unconfigured → direct, no serverless header.
 
 **Post-deploy spike (free, one-time per environment):** call the deployed relay with a **deliberately fake** upstream token — expect `401` JSON from OpenAI (proves egress escapes the wall: a Worker-style block would be `403` HTML). Repeat with manual `CF-Worker: test` on the request — still `401` proves the allowlist drops it. Never spike with a real token or a real prompt.

@@ -215,13 +215,13 @@ cd apps/relay
 deno task test && deno task check
 gcloud run deploy kano-codex-relay --source . --region us-central1 \
   --no-allow-unauthenticated --timeout=3600 --min-instances=0 --max-instances=10 \
-  --concurrency=1 --cpu=0.25 --memory=512Mi
+  --concurrency=1 --cpu=0.25 --memory=512Mi --use-http2
 gcloud run services add-iam-policy-binding kano-codex-relay --region=us-central1 \
   --member="serviceAccount:kano-relay-invoker@<gcp-project-id>.iam.gserviceaccount.com" \
   --role="roles/run.invoker"
 ```
 
-(`--concurrency=1` is forced: Cloud Run rejects fractional CPU with concurrency > 1 (`Total cpu < 1 is not supported with concurrency > 1`, measured 2026-08-03), and 0.25 vCPU billing beats 1 vCPU shared — see [codex-relay.md](./codex-relay.md#cloud-run-configuration-and-cost). With instance-per-stream, `--max-instances` is the concurrent-codex-stream ceiling; requests past it get a marker-less 429 that the Worker guard converts to a non-benching 502.)
+(`--concurrency=1` is forced: Cloud Run rejects fractional CPU with concurrency > 1 (`Total cpu < 1 is not supported with concurrency > 1`, measured 2026-08-03), and 0.25 vCPU billing beats 1 vCPU shared — see [codex-relay.md](./codex-relay.md#cloud-run-configuration-and-cost). `--use-http2` is also required: Deno accepts Cloud Run's h2c traffic, avoiding the 32 MiB HTTP/1 request cap on long agent conversations. With instance-per-stream, `--max-instances` is the concurrent-codex-stream ceiling; requests past it get a marker-less 429 that the Worker guard converts to a non-benching 502.)
 
 ### Wire the Worker to it
 
