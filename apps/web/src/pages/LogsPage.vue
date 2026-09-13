@@ -309,15 +309,6 @@ function failureLabel(row: RequestLogRow): string {
   return row.error_code ?? String(row.status_code)
 }
 
-/**
- * An account the server could not name at read time: `account_id` set, no
- * label. It was disconnected after serving this request — which happened all
- * the same, so the row stays and says which part of it is gone.
- */
-function isRemovedAccount(row: RequestLogRow): boolean {
-  return row.account_id !== null && row.account_label === null
-}
-
 /** The row's visible timestamp — also its tooltip and part of its button's name. */
 function timeLabel(row: RequestLogRow): string {
   return format.timestamp(row.created_at)
@@ -432,24 +423,34 @@ function typeLabel(row: RequestLogRow): string {
             </Badge>
           </template>
 
+          <!-- A removed record keeps its last name and gains the tag; a row
+               older than the name snapshot has only the tag to show. A
+               borrowed account is named by its lender and tagged Shared. -->
           <template #cell-account="{ row }">
-            <Badge v-if="isRemovedAccount(row)" tone="warn">
-              {{ t("logs.accountRemoved") }}
-            </Badge>
-            <span v-else-if="row.account_label" class="account" :title="row.account_label">
+            <span
+              v-if="row.account_label"
+              class="account"
+              :title="row.account_shared_by ? t('logs.sharedBy', { owner: row.account_shared_by }) : row.account_label"
+            >
               {{ row.account_label }}
             </span>
-            <span v-else class="none">—</span>
+            <Badge v-if="row.account_removed" tone="warn">
+              {{ row.account_label ? t("logs.removed") : t("logs.accountRemoved") }}
+            </Badge>
+            <Badge v-else-if="row.account_shared_by" tone="neutral" :title="t('logs.sharedBy', { owner: row.account_shared_by })">
+              {{ t("logs.shared") }}
+            </Badge>
+            <span v-else-if="!row.account_label" class="none">—</span>
           </template>
 
           <template #cell-apiKey="{ row }">
-            <Badge v-if="row.api_key_removed" tone="warn">
-              {{ t("logs.keyRemoved") }}
-            </Badge>
-            <span v-else-if="row.api_key_name" class="api-key" :title="row.api_key_name">
+            <span v-if="row.api_key_name" class="api-key" :title="row.api_key_name">
               {{ row.api_key_name }}
             </span>
-            <span v-else class="none">—</span>
+            <Badge v-if="row.api_key_removed" tone="warn">
+              {{ row.api_key_name ? t("logs.removed") : t("logs.keyRemoved") }}
+            </Badge>
+            <span v-else-if="!row.api_key_name" class="none">—</span>
           </template>
 
           <template #cell-type="{ row }">

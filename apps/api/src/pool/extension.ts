@@ -56,6 +56,13 @@ export interface PoolExtension {
    * they never feed routing facts.
    */
   ownBars?(env: Env, viewerUserId: string, provider: ProviderId, accountIds: string[]): Promise<Map<string, UsageWindow[]>>
+  /**
+   * Names for borrowed accounts the viewer may still see. `GET /api/logs`
+   * asks once per page for the `account_id`s that are not the viewer's own;
+   * an id left out of the answer renders as removed (docs/admin-ui.md § Logs
+   * page). The edition decides what "may still see" means.
+   */
+  labelShared?(env: Env, viewerUserId: string, accountIds: string[]): Promise<Map<string, { label: string; ownerLabel: string }>>
 }
 
 /** A lease must never take the response down with it — settle failures are the extension's problem, not the client's. */

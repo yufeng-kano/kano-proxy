@@ -564,6 +564,8 @@ describe("POST /openai/v1/audio/transcriptions advanced behavior", () => {
     expect(json.text).toBe("transcribed text")
 
     // Check request_logs in D1
+    // The deferred log write reads the key and account names before its INSERT; one macrotask turn covers it.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     const logRows = db.rows("request_logs")
     expect(logRows.length).toBeGreaterThan(0)
     const lastRow = logRows[logRows.length - 1]
@@ -647,6 +649,8 @@ describe("POST /openai/v1/audio/transcriptions advanced behavior", () => {
 
     expect(res.status).toBe(400)
     await res.text()
+    // The deferred log write reads the key and account names before its INSERT; one macrotask turn covers it.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     const logRows = db.rows("request_logs")
     const lastRow = logRows[logRows.length - 1]
     expect(lastRow.error_code).toBe("upstream_error")

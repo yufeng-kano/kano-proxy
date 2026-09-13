@@ -173,10 +173,16 @@ export const en = {
   // "via" names the alias the client actually sent, so a group's traffic reads
   // apart from a direct call to the same model; "Account removed" and
   // "Key removed" are records deleted since the request ran — which happened
-  // all the same, so the row stays and says which part of it is gone.
+  // all the same, so the row stays and says which part of it is gone. When
+  // the row still carries the record's last name, the shorter "Removed" sits
+  // beside that name instead. "Shared" marks a row served by an account
+  // another user lends the viewer.
   "logs.via": "via {group}",
   "logs.accountRemoved": "Account removed",
   "logs.keyRemoved": "Key removed",
+  "logs.removed": "Removed",
+  "logs.shared": "Shared",
+  "logs.sharedBy": "Shared by {owner}",
   "logs.type.oauth": "OAuth",
   "logs.type.api": "API",
   // The row's own control: the visible text is the timestamp, so the name it

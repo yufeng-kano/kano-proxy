@@ -474,12 +474,12 @@ export type LogUsageType = "oauth" | "api"
  * One `request_logs` row, as the log explorer reads it.
  *
  * Nullable fields are *unreported*, not zero (docs/database.md): a token count
- * or a cost of `null` renders as an em dash, never as 0. `account_label` is
- * resolved at read time and never stored, so an id set with a **null** label
- * is an account deleted since the request ran — a state the UI has to show,
- * not drop. The API key follows a different convention: the `api_keys` id is
- * resolved server-side and never returned, so `api_key_name` pairs with the
- * explicit `api_key_removed` boolean instead (docs/admin-ui.md § Logs page).
+ * or a cost of `null` renders as an em dash, never as 0. Names come from the
+ * live record when it still exists and otherwise from the snapshot stored on
+ * the row at write time, so removal is the explicit `*_removed` flag, never a
+ * null name — a removed key or account still reads by its last name. The
+ * `api_keys` id is resolved server-side and never returned
+ * (docs/admin-ui.md § Logs page).
  */
 export type RequestLogRow = {
   id: string
@@ -490,7 +490,12 @@ export type RequestLogRow = {
   /** The group alias the client addressed; `null` for a direct call. */
   group_name: string | null
   account_id: string | null
+  /** Live label, a lender's label, or the label stored at write time; `null` for rows older than that snapshot or with no account. */
   account_label: string | null
+  /** True when the account is neither the viewer's own nor still shared with them — removed since the request ran. */
+  account_removed: boolean
+  /** The owner lending this account, when the row was served by a shared account the viewer may still see. */
+  account_shared_by: string | null
   api_key_name: string | null
   /** True when the row points at an `api_keys` id that no longer resolves — the key was deleted since the request ran. */
   api_key_removed: boolean

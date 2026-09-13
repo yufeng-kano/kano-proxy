@@ -23,12 +23,13 @@ const { t, format } = useI18n()
 /** Rendered wherever a field has nothing to show, like every formatter does. */
 const EM_DASH = "—"
 
-/** A resolved name, the deleted-record note, or nothing to name at all. */
-type Reference = { name: string | null; missing: boolean; id: string | null }
+/** A name (live or the last one stored), whether the record is gone, who lends it, and the id. */
+type Reference = { name: string | null; missing: boolean; sharedBy: string | null; id: string | null }
 
 const account = computed<Reference>(() => ({
   name: props.row.account_label,
-  missing: props.row.account_id !== null && props.row.account_label === null,
+  missing: props.row.account_removed,
+  sharedBy: props.row.account_shared_by,
   id: props.row.account_id,
 }))
 
@@ -86,9 +87,10 @@ const fields = computed<{ key: string; label: string; value: string; mono?: bool
       <div class="field">
         <dt>{{ t("logs.detail.account") }}</dt>
         <dd>
-          <Badge v-if="account.missing" tone="warn">{{ t("logs.accountRemoved") }}</Badge>
-          <span v-else-if="account.name">{{ account.name }}</span>
-          <span v-else class="none">{{ EM_DASH }}</span>
+          <span v-if="account.name">{{ account.name }}</span>
+          <Badge v-if="account.missing" tone="warn">{{ account.name ? t("logs.removed") : t("logs.accountRemoved") }}</Badge>
+          <span v-else-if="account.sharedBy" class="shared-by">{{ t("logs.sharedBy", { owner: account.sharedBy }) }}</span>
+          <span v-else-if="!account.name" class="none">{{ EM_DASH }}</span>
           <span v-if="account.id" class="mono id">{{ account.id }}</span>
         </dd>
       </div>
@@ -99,9 +101,9 @@ const fields = computed<{ key: string; label: string; value: string; mono?: bool
       <div class="field">
         <dt>{{ t("logs.detail.apiKey") }}</dt>
         <dd>
-          <Badge v-if="apiKey.missing" tone="warn">{{ t("logs.detail.keyRemoved") }}</Badge>
-          <span v-else-if="apiKey.name">{{ apiKey.name }}</span>
-          <span v-else class="none">{{ EM_DASH }}</span>
+          <span v-if="apiKey.name">{{ apiKey.name }}</span>
+          <Badge v-if="apiKey.missing" tone="warn">{{ apiKey.name ? t("logs.removed") : t("logs.detail.keyRemoved") }}</Badge>
+          <span v-else-if="!apiKey.name" class="none">{{ EM_DASH }}</span>
         </dd>
       </div>
 
@@ -152,6 +154,11 @@ dd {
    has since been removed, so it is set to read: body size, one tone down from
    the name rather than shrunk out of the way (docs/admin-ui.md
    § Design restraint). */
+.shared-by {
+  display: block;
+  color: var(--text-secondary);
+}
+
 .id {
   display: block;
   margin-top: var(--space-1);

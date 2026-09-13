@@ -62,9 +62,11 @@ export const CACHE_TTL_MS = 120_000
  * summaries grew calendar-aligned Day/Week/Month support with rangeKey
  * caching (`day:YYYY-MM-DD`, etc.). v12: CLI providers grew `account_id`
  * (the Groups picker's pin handle) — a v11 entry has none, so the picker
- * would render an empty rail until the TTL expired.
+ * would render an empty rail until the TTL expired. v13: log rows grew
+ * `account_removed` / `account_shared_by` and keep a removed record's last
+ * name — a v12 entry would read a stored name as a live account.
  */
-const CACHE_SCHEMA_VERSION = 12
+const CACHE_SCHEMA_VERSION = 13
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

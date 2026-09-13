@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { createSession } from "../src/auth/session"
 import type { Env } from "../src/env"
+import { Hono } from "hono"
+import type { HonoEnv } from "../src/auth/session"
+import type { PoolExtension } from "../src/pool/extension"
+import { logRequest } from "../src/logging/request_log"
 import { logsRoutes } from "../src/routes/logs"
 import { _resetPricingForTests } from "../src/pricing/litellm"
 import { FakeD1, fakeKV } from "./helpers/fake_d1"
@@ -208,6 +212,16 @@ describe("GET /api/logs", () => {
       account_id: "deleted_account",
       api_key_id: null,
     })
+    // Written after 0016: the names travelled with the row, so both records
+    // being gone still leaves something to read.
+    seedLog(db, {
+      user_id: "user_1",
+      id: "named-and-gone",
+      account_id: "deleted_account_2",
+      account_label: "Old laptop",
+      api_key_id: "deleted_key_2",
+      api_key_name: "Old CI key",
+    })
 
     const res = await logsRoutes.request("/?limit=10", req(cookie), env)
     expect(res.status).toBe(200)
@@ -222,6 +236,8 @@ describe("GET /api/logs", () => {
     const oauth = json.rows.find((row) => row.id === "oauth")!
     expect(oauth).toMatchObject({
       account_label: "Primary",
+      account_removed: false,
+      account_shared_by: null,
       api_key_name: "Production",
       api_key_removed: false,
       usage_type: "oauth",
@@ -240,6 +256,75 @@ describe("GET /api/logs", () => {
     // "deleted-account" has a NULL api_key_id (never had a key attributed) —
     // that is not "removed", it is "not reported", so the flag stays false.
     const deleted = json.rows.find((row) => row.id === "deleted-account")!
-    expect(deleted).toMatchObject({ account_label: null, api_key_name: null, api_key_removed: false })
+    expect(deleted).toMatchObject({ account_label: null, account_removed: true, api_key_name: null, api_key_removed: false })
+    // A removed record keeps its last name: removal is the flag, not a null name.
+    const named = json.rows.find((row) => row.id === "named-and-gone")!
+    expect(named).toMatchObject({
+      account_label: "Old laptop",
+      account_removed: true,
+      api_key_name: "Old CI key",
+      api_key_removed: true,
+    })
+  })
+
+  it("names a borrowed account through the pool extension, and never another user's row on its own", async () => {
+    const db = new FakeD1()
+    seedUser(db)
+    const env = buildEnv(db)
+    const cookie = await cookieFor(env, "user_1")
+    db.seed("upstream_accounts", [
+      { id: "own", user_id: "user_1", custom_label: null, label: "Mine" },
+      { id: "lent", user_id: "user_2", custom_label: "Team Claude", label: "owner@example.test" },
+      { id: "withdrawn", user_id: "user_2", custom_label: null, label: "No longer shared" },
+    ])
+    seedLog(db, { user_id: "user_1", id: "own", account_id: "own" })
+    seedLog(db, { user_id: "user_1", id: "lent", account_id: "lent", account_label: "Team Claude" })
+    seedLog(db, { user_id: "user_1", id: "withdrawn", account_id: "withdrawn", account_label: "Was shared" })
+
+    const asked: string[][] = []
+    const extension = {
+      async labelShared(_env: Env, viewerUserId: string, accountIds: string[]) {
+        asked.push([viewerUserId, ...accountIds])
+        return new Map([["lent", { label: "Team Claude", ownerLabel: "Owner Person" }]])
+      },
+    } as unknown as PoolExtension
+    const app = new Hono<HonoEnv>()
+    app.use("*", async (c, next) => {
+      c.set("poolExtension", extension)
+      await next()
+    })
+    app.route("/", logsRoutes)
+
+    const res = await app.request("/?limit=10", req(cookie), env)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { rows: Array<Record<string, unknown>> }
+    // Only the ids that are not the viewer's own rows are asked about, once.
+    expect(asked).toEqual([["user_1", "withdrawn", "lent"]])
+    const byId = new Map(json.rows.map((row) => [row.id, row]))
+    expect(byId.get("own")).toMatchObject({ account_label: "Mine", account_removed: false, account_shared_by: null })
+    expect(byId.get("lent")).toMatchObject({ account_label: "Team Claude", account_removed: false, account_shared_by: "Owner Person" })
+    // The extension did not name it, so the other user's live label must not
+    // leak: the row falls back to the label stored when it was written.
+    expect(byId.get("withdrawn")).toMatchObject({ account_label: "Was shared", account_removed: true, account_shared_by: null })
+
+    // Without an extension the same rows read as removed, by their stored names.
+    const bare = (await (await logsRoutes.request("/?limit=10", req(cookie), env)).json()) as { rows: Array<Record<string, unknown>> }
+    expect(bare.rows.find((row) => row.id === "lent")).toMatchObject({ account_label: "Team Claude", account_removed: true, account_shared_by: null })
+  })
+
+  it("stores the key's name and the account's label with the row when it is written", async () => {
+    const db = new FakeD1()
+    db.seed("api_keys", [{ id: "key_1", user_id: "user_1", name: "CI" }])
+    db.seed("upstream_accounts", [{ id: "acct_1", user_id: "user_1", custom_label: null, label: "Laptop" }])
+    const env = buildEnv(db)
+    const base = { userId: "user_1", provider: "claude-code", model: "claude-code/claude-opus-5", statusCode: 200, latencyMs: 1 }
+    await logRequest(env, { ...base, apiKeyId: "key_1", accountId: "acct_1" })
+    await logRequest(env, { ...base, apiKeyId: "gone_key", accountId: "gone_account" })
+    await logRequest(env, { ...base, apiKeyId: null, accountId: null })
+    expect(db.rows("request_logs").map((row) => [row.api_key_name, row.account_label])).toEqual([
+      ["CI", "Laptop"],
+      [null, null],
+      [null, null],
+    ])
   })
 })

@@ -331,6 +331,7 @@ describe("/openai/v1/chat/completions — streaming capture", () => {
       execCtx,
     )
     await drain(res.body)
+    await settleDeferredLog()
     const rows = db.rows("request_logs")
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({
@@ -402,6 +403,7 @@ describe("/openai/v1/chat/completions — streaming capture", () => {
       execCtx,
     )
     await drain(res.body)
+    await settleDeferredLog()
     const rows = db.rows("request_logs")
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({

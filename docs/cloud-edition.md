@@ -58,6 +58,8 @@ export interface PoolExtension {
   /** Every candidate attempt, own or shared. `null` = not governed; `{ skip: true }` = exhausted, move on; a lease = admitted. */
   reserveAttempt(env: Env, ctx: { userId: string; apiKeyId: string | null; upstreamModel: string }, candidate: RoutingCandidate): Promise<AttemptLease | { skip: true } | null>
   setSharedPriority(env: Env, viewerUserId: string, accountId: string, priority: number): Promise<boolean>
+  /** Names for borrowed accounts the viewer may still see: `GET /api/logs` asks for the account ids on the page that are not the viewer's own. Absent ids are treated as removed. */
+  labelShared?(env: Env, viewerUserId: string, accountIds: string[]): Promise<Map<string, { label: string; ownerLabel: string }>>
 }
 ```
 
@@ -68,6 +70,8 @@ Core obligations:
 - Promote/unpause/delete/patch on a shared row from a non-owner return 403, except promote, which delegates to `setSharedPriority`.
 - Credentials of shared accounts are decrypted only inside dispatch, as for own accounts, and never returned by any route.
 - A borrowed row's upstream response headers are stripped of everything that states the **owner's** account rather than this request — rate-limit budgets and resets (`anthropic-ratelimit-*`, `x-ratelimit-*`, the internal `x-kano-ratelimit-reset`), `retry-after`, and any organization/account identifier — on every delivery path (non-stream passthrough, streamed passthrough, audio). Own rows and standalone installs are byte-identical to before.
+
+An optional `labelShared(env, viewerUserId, accountIds)` lets the Logs page name a borrowed account: `routes/logs.ts` collects the page's `account_id`s that are not the viewer's own rows and asks the extension once; an id it returns renders as the label with a Shared tag and `account_shared_by` set to `ownerLabel`, an id it omits falls back to the label stored on the row at write time with the removed tag ([admin-ui.md](./admin-ui.md) § Logs page). The edition decides what "may still see" means — the cloud edition answers only for accounts currently shared with the viewer's team.
 
 An optional `ownBars(env, viewerUserId, provider, accountIds)` lets the edition put bars before the upstream windows on the viewer's own rows on the Providers page (their allowance on an account they lend out); those bars are added after the routing dot was decided and never reach `routing/facts`.
 

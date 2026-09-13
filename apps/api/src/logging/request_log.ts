@@ -24,6 +24,23 @@ export async function logRequest(
   },
 ): Promise<void> {
   try {
+    // Name snapshots (docs/database.md § request_logs): the key's name and the
+    // account's display label as they are right now, so a record deleted later
+    // still reads by its last name on the Logs page. Two point reads off the
+    // request path; a record already gone simply leaves NULL.
+    const [key, account] = await Promise.all([
+      entry.apiKeyId
+        ? env.DB.prepare("SELECT name FROM api_keys WHERE id = ?").bind(entry.apiKeyId).first<{ name: string }>()
+        : null,
+      entry.accountId
+        ? env.DB.prepare("SELECT custom_label, label FROM upstream_accounts WHERE id = ?")
+            .bind(entry.accountId)
+            .first<{ custom_label: string | null; label: string | null }>()
+        : null,
+    ])
+    const apiKeyName = key?.name ?? null
+    const accountLabel = account ? account.custom_label || account.label || null : null
+
     // Estimated USD at write time (docs/pricing.md). getPriceTable never
     // fetches — memo/KV only — so a missing table degrades to NULL cost
     // without delaying the deferred log write.
@@ -45,8 +62,8 @@ export async function logRequest(
       `INSERT INTO request_logs
        (id, user_id, api_key_id, provider, model, account_id, status_code, latency_ms,
         prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-        cost, error_code, upstream_status, group_name, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        cost, error_code, upstream_status, group_name, api_key_name, account_label, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         newId("log"),
@@ -65,6 +82,8 @@ export async function logRequest(
         entry.errorCode ?? null,
         entry.upstreamStatus ?? null,
         entry.groupName ?? null,
+        apiKeyName,
+        accountLabel,
         nowIso(),
       )
       .run()
