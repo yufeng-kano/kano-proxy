@@ -230,6 +230,10 @@ function spendCell(key: ApiKey): string {
 
           <dl class="details">
             <div class="detail">
+              <dt>{{ t("keys.connect.protocols") }}</dt>
+              <dd>{{ t("keys.connect.protocolsValue") }}</dd>
+            </div>
+            <div class="detail">
               <dt>{{ t("keys.connect.auth") }}</dt>
               <dd>{{ t("keys.connect.authValue", { header: API_KEY_HEADER }) }}</dd>
             </div>

@@ -41,7 +41,7 @@ claude
 
 ## 切換模型
 
-在 session 內用 `/model <id>` 可以切到 proxy 上任何 id，例如 `/model codex/gpt-5.4`。按 Enter 存成預設，按 `s` 只在這次 session 生效。
+在 session 內用 `/model <id>` 可以切到 proxy 上任何 id，例如 `/model codex/gpt-5.6-sol`。按 Enter 存成預設，按 `s` 只在這次 session 生效。
 
 設定 `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 後，Claude Code 會向 proxy 讀 `GET /v1/models`，把結果加進 `/model` 選單。它只保留含 `claude` 或 `anthropic` 字樣的 id，所以 `claude-code/...` 會出現，`codex/...` 不會，後者請手動輸入。
 

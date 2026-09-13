@@ -24,7 +24,7 @@ Put this in `~/.config/opencode/opencode.json` for all projects, or in `opencode
       },
       "models": {
         "claude-code/claude-opus-5": { "name": "Claude Opus 5" },
-        "codex/gpt-5.4": { "name": "GPT-5.4" }
+        "codex/gpt-5.6-sol": { "name": "GPT-5.6-Sol" }
       }
     }
   },

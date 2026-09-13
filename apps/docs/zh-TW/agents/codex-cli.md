@@ -9,7 +9,7 @@ description: 把 Codex CLI 指向 Kano Proxy 作為自訂 model provider，用�
 
 同名的兩件事要分開看：
 
-- **Codex 作為供應商**：在 Providers 頁面連接你的 ChatGPT 訂閱，就能從這份清單上的任何工具呼叫 `codex/gpt-5.4` 等 Codex 模型。
+- **Codex 作為供應商**：在 Providers 頁面連接你的 ChatGPT 訂閱，就能從這份清單上的任何工具呼叫 `codex/gpt-5.6-sol` 等 Codex 模型。
 - **Codex CLI 作為客戶端**：就是這一頁。CLI 把請求送到 proxy，proxy 依模型 id 轉給對應的供應商。
 
 ## 設定
@@ -33,7 +33,7 @@ wire_api = "responses"
 export KANO_PROXY_API_KEY=<your-api-key>
 ```
 
-- `model` 可以填 Models 頁面上的任何 id：`codex/gpt-5.4`、`claude-code/claude-opus-5`、`grok/grok-4.5`、`antigravity/gemini-3-flash`，或自訂端點的 `<slug>/<model>`。用 `codex --model <id>` 或 CLI 內的 `/model` 切換。
+- `model` 可以填 Models 頁面上的任何 id：`codex/gpt-5.6-sol`、`claude-code/claude-opus-5`、`grok/grok-4.5`、`antigravity/gemini-3-flash`，或自訂端點的 `<slug>/<model>`。用 `codex --model <id>` 或 CLI 內的 `/model` 切換。
 - 群組端點也可以：`base_url` 設成 `https://<your-domain>/g/<group-slug>/openai/v1`，`model` 填群組定義的名稱。
 - 目前的 Codex 版本只接受 `wire_api = "responses"`。
 

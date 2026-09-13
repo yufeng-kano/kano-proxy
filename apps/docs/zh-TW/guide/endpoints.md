@@ -43,7 +43,7 @@ x-api-key: <your-api-key>
 | 供應商 | 範例 id |
 |--------|---------|
 | `claude-code` | `claude-code/claude-opus-5` |
-| `codex` | `codex/gpt-5.4` |
+| `codex` | `codex/gpt-5.6-sol` |
 | `grok` | `grok/grok-4.5` |
 | `antigravity` | `antigravity/gemini-3-flash` |
 | slug 為 `mygw` 的自訂端點 | `mygw/<該端點認得的模型>` |

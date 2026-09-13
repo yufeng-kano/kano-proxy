@@ -13,7 +13,7 @@ description: 透過 Cursor 的 OpenAI API Key 與 Override OpenAI Base URL 設�
 
 1. 開啟 **OpenAI API Key**，貼上 `<your-api-key>`。
 2. 開啟 **Override OpenAI Base URL**，填入 `https://<your-domain>/openai/v1`。
-3. 用 **+ Add model** 輸入你 Models 頁面上的模型 id，例如 `claude-code/claude-opus-5` 或 `codex/gpt-5.4`。
+3. 用 **+ Add model** 輸入你 Models 頁面上的模型 id，例如 `claude-code/claude-opus-5` 或 `codex/gpt-5.6-sol`。
 4. 在聊天的模型選單選那個模型。
 
 Claude 模型同樣走 OpenAI 相容端點。Cursor 的 Anthropic 金鑰沒有 base URL 覆寫，該欄位請保持關閉。

@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Cloudflare-Workers_%26_Pages-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare" />
-  <img src="https://img.shields.io/badge/OpenAI-Chat_Completions-00A67E?style=flat-square" alt="OpenAI API" />
+  <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
   <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Anthropic API" />
   <img src="https://img.shields.io/badge/隱私-零對話日誌-059669?style=flat-square" alt="隱私" />
   <img src="https://img.shields.io/badge/授權-MIT-blue?style=flat-square" alt="授權" />
@@ -57,8 +57,10 @@
 
 | 協議格式 | 端點 URL | 適用客戶端工具 |
 |---|---|---|
-| **OpenAI 相容** | `https://<your-domain>/openai/v1` | Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
+| **OpenAI 相容** | `https://<your-domain>/openai/v1` | Codex CLI, Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
 | **Anthropic Messages** | `https://<your-domain>/anthropic` | Claude Code CLI, Anthropic SDK, Claude 格式工具 |
+
+OpenAI 相容端點同時提供 **Chat Completions**（`/chat/completions`）與 **Responses API**（`/responses`），後者就是 Codex CLI 使用的協議。Codex 模型在此原生透傳到你的 ChatGPT 訂閱，其他供應商由 proxy 即時轉換。
 
 ### 2. 身份驗證
 
@@ -72,7 +74,7 @@ Authorization: Bearer sk-kano-proxy-...
 在兩種協議端點上，皆使用統一的 `provider/model` 命名格式：
 
 - `claude-code/claude-opus-5` / `claude-code/claude-sonnet-5`
-- `codex/gpt-5.4`
+- `codex/gpt-5.6-sol`
 - `grok/grok-4.5`
 - `antigravity/gemini-3-flash`
 - `<custom-slug>/<model-name>`
@@ -90,9 +92,24 @@ export ANTHROPIC_BASE_URL="https://<your-domain>/anthropic"
 export ANTHROPIC_API_KEY="sk-kano-proxy-..."
 
 # 在 Claude Code 內使用 GPT 或 Gemini
-claude --model codex/gpt-5.4
+claude --model codex/gpt-5.6-sol
 # 或
 claude --model antigravity/gemini-3-flash
+```
+
+### 在 Codex CLI 裡執行 Claude 或 Gemini
+
+在 `~/.codex/config.toml` 把 Kano Proxy 加成 model provider。CLI 維持原生的 Responses 協議，Models 頁面上的任何模型 id 都能用：
+
+```toml
+model = "claude-code/claude-opus-5"
+model_provider = "kano"
+
+[model_providers.kano]
+name = "Kano Proxy"
+base_url = "https://<your-domain>/openai/v1"
+env_key = "KANO_PROXY_API_KEY"
+wire_api = "responses"
 ```
 
 ### 在 Cursor / OpenAI SDK 使用 Claude

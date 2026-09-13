@@ -9,7 +9,7 @@ Works. Codex CLI speaks the OpenAI Responses API, and Kano Proxy serves it at `<
 
 Two different things share the name:
 
-- **Codex as a provider**: connect your ChatGPT subscription on the Providers page and call `codex/gpt-5.4` and other Codex models from any tool on this list.
+- **Codex as a provider**: connect your ChatGPT subscription on the Providers page and call `codex/gpt-5.6-sol` and other Codex models from any tool on this list.
 - **Codex CLI as a client**: this page. The CLI sends its requests to the proxy, which routes them to whichever provider the model id names.
 
 ## Settings
@@ -33,7 +33,7 @@ Then export the key:
 export KANO_PROXY_API_KEY=<your-api-key>
 ```
 
-- `model` takes any id from your Models page: `codex/gpt-5.4`, `claude-code/claude-opus-5`, `grok/grok-4.5`, `antigravity/gemini-3-flash`, or `<slug>/<model>` for a custom endpoint. Switch with `codex --model <id>` or `/model` inside the CLI.
+- `model` takes any id from your Models page: `codex/gpt-5.6-sol`, `claude-code/claude-opus-5`, `grok/grok-4.5`, `antigravity/gemini-3-flash`, or `<slug>/<model>` for a custom endpoint. Switch with `codex --model <id>` or `/model` inside the CLI.
 - A group endpoint works too: set `base_url` to `https://<your-domain>/g/<group-slug>/openai/v1` and `model` to one of the group's names.
 - `wire_api = "responses"` is the only value current Codex releases accept.
 

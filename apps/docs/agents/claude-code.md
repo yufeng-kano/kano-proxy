@@ -41,7 +41,7 @@ Do not put the key in a project's committed `.claude/settings.json`.
 
 ## Switching models
 
-`/model <id>` inside a session switches to any id your proxy serves, for example `/model codex/gpt-5.4`. Press Enter to save it as your default or `s` to keep it for this session only.
+`/model <id>` inside a session switches to any id your proxy serves, for example `/model codex/gpt-5.6-sol`. Press Enter to save it as your default or `s` to keep it for this session only.
 
 Setting `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` makes Claude Code read `GET /v1/models` from the proxy and add the results to the `/model` picker. Claude Code keeps only ids containing `claude` or `anthropic`, so `claude-code/...` ids appear and `codex/...` ids do not; type those by hand.
 

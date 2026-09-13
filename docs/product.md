@@ -57,7 +57,7 @@ Same id on **both** surfaces (OpenAI and Anthropic):
 Examples:
 
 - `claude-code/claude-opus-5`
-- `codex/gpt-5.4`
+- `codex/gpt-5.6-sol`
 - `grok/grok-4.5`
 - `antigravity/gemini-3-flash`
 - `<your-slug>/<upstream_model_id>` — a user-defined custom endpoint. Only the *first* `/` splits the id, so an upstream id that itself contains `/` (e.g. an OpenRouter-style `org/model`) still routes: `openrouter/anthropic/claude-3.7-sonnet` is slug `openrouter`, upstream id `anthropic/claude-3.7-sonnet`.

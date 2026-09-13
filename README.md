@@ -10,7 +10,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Cloudflare-Workers_%26_Pages-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare" />
-  <img src="https://img.shields.io/badge/OpenAI-Chat_Completions-00A67E?style=flat-square" alt="OpenAI API" />
+  <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
   <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Anthropic API" />
   <img src="https://img.shields.io/badge/Privacy-Zero_Prompt_Logging-059669?style=flat-square" alt="Privacy" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" />
@@ -57,8 +57,10 @@ Your upstream OAuth credentials never leave the server; clients only use isolate
 
 | Protocol | Base URL | Supported Clients |
 |---|---|---|
-| **OpenAI-compatible** | `https://<your-domain>/openai/v1` | Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
+| **OpenAI-compatible** | `https://<your-domain>/openai/v1` | Codex CLI, Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
 | **Anthropic Messages** | `https://<your-domain>/anthropic` | Claude Code CLI, Anthropic SDK, Claude-shaped tools |
+
+The OpenAI-compatible base serves both **Chat Completions** (`/chat/completions`) and the **Responses API** (`/responses`), the wire the Codex CLI speaks. Codex models pass through to your ChatGPT subscription natively on it; every other provider is converted on the fly.
 
 ### 2. Authentication
 
@@ -72,7 +74,7 @@ Authorization: Bearer sk-kano-proxy-...
 Use standard `provider/model` naming on **both** endpoints:
 
 - `claude-code/claude-opus-5` / `claude-code/claude-sonnet-5`
-- `codex/gpt-5.4`
+- `codex/gpt-5.6-sol`
 - `grok/grok-4.5`
 - `antigravity/gemini-3-flash`
 - `<custom-slug>/<model-name>`
@@ -90,9 +92,24 @@ export ANTHROPIC_BASE_URL="https://<your-domain>/anthropic"
 export ANTHROPIC_API_KEY="sk-kano-proxy-..."
 
 # Run Claude Code powered by GPT or Gemini
-claude --model codex/gpt-5.4
+claude --model codex/gpt-5.6-sol
 # or
 claude --model antigravity/gemini-3-flash
+```
+
+### Run Claude or Gemini in the Codex CLI
+
+Add Kano Proxy as a model provider in `~/.codex/config.toml`. The CLI keeps its native Responses wire; any model id from your Models page works:
+
+```toml
+model = "claude-code/claude-opus-5"
+model_provider = "kano"
+
+[model_providers.kano]
+name = "Kano Proxy"
+base_url = "https://<your-domain>/openai/v1"
+env_key = "KANO_PROXY_API_KEY"
+wire_api = "responses"
 ```
 
 ### Run Claude in Cursor / OpenAI SDK

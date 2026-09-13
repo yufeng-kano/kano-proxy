@@ -609,6 +609,9 @@ export const en = {
   "keys.connect.title": "Connect a client",
   "keys.connect.openai": "OpenAI-compatible",
   "keys.connect.anthropic": "Anthropic-compatible",
+  "keys.connect.protocols": "Protocols",
+  "keys.connect.protocolsValue":
+    "The OpenAI base serves Chat Completions and the Responses API (what the Codex CLI speaks). The Anthropic base serves Messages.",
   "keys.connect.auth": "Authorization",
   "keys.connect.authValue": "Send your key as a bearer token or as {header}",
   "keys.connect.modelHint": "Use model ids in the form {example}",

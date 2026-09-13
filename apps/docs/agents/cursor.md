@@ -13,7 +13,7 @@ In **Cursor Settings › Models**:
 
 1. Turn on **OpenAI API Key** and paste `<your-api-key>`.
 2. Turn on **Override OpenAI Base URL** and enter `https://<your-domain>/openai/v1`.
-3. Use **+ Add model** and type a model id from your Models page, for example `claude-code/claude-opus-5` or `codex/gpt-5.4`.
+3. Use **+ Add model** and type a model id from your Models page, for example `claude-code/claude-opus-5` or `codex/gpt-5.6-sol`.
 4. Select that model in the chat model picker.
 
 Claude models go through the OpenAI-compatible base as well. Cursor has no base URL override for its Anthropic key, so leave that key off.

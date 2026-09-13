@@ -349,7 +349,7 @@ OpenAI-compatible:     https://<your-domain>/openai/v1
 Anthropic-compatible:  https://<your-domain>/anthropic
 ```
 
-…plus how to send the key and the `provider/model` id form. Each value is a copy field.
+…plus which protocols each base serves (Chat Completions and the Responses API — the Codex CLI's wire — on the OpenAI base, Messages on the Anthropic base), how to send the key, and the `provider/model` id form. Each URL is a copy field.
 
 ## Changelog page
 

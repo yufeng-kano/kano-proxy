@@ -24,7 +24,7 @@ description: 在 opencode.json 用 @ai-sdk/openai-compatible 把 Kano Proxy 加�
       },
       "models": {
         "claude-code/claude-opus-5": { "name": "Claude Opus 5" },
-        "codex/gpt-5.4": { "name": "GPT-5.4" }
+        "codex/gpt-5.6-sol": { "name": "GPT-5.6-Sol" }
       }
     }
   },

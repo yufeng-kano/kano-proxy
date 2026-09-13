@@ -43,7 +43,7 @@ Every model id has two parts, split at the first slash:
 | Provider | Example id |
 |----------|------------|
 | `claude-code` | `claude-code/claude-opus-5` |
-| `codex` | `codex/gpt-5.4` |
+| `codex` | `codex/gpt-5.6-sol` |
 | `grok` | `grok/grok-4.5` |
 | `antigravity` | `antigravity/gemini-3-flash` |
 | a custom endpoint with slug `mygw` | `mygw/<model the endpoint knows>` |
