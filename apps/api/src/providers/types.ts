@@ -7,6 +7,8 @@ export type UsageWindow = {
   /** Percent used, 0–100 (not a 0–1 fraction). Adapters normalize to this. */
   utilization: number | null
   resets_at: string | null
+  /** Replaces the percent caption when set — an edition's own "used / ceiling" reading. */
+  value?: string | null
 }
 
 /**

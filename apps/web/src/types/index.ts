@@ -28,6 +28,8 @@ export type UsageWindow = {
   label: string
   utilization: number | null
   resets_at: string | null
+  /** Replaces the percent caption when set — an edition's own "used / ceiling" reading. */
+  value?: string | null
 }
 
 export type ProviderAccount = {

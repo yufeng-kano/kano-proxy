@@ -52,7 +52,7 @@ const resetText = computed(() =>
     >
       <div class="fill" :class="level" :style="{ width: `${pct ?? 0}%` }" />
     </div>
-    <span class="usage-value tabular">{{ format.percentValue(pct) }}</span>
+    <span class="usage-value tabular">{{ window.value ?? format.percentValue(pct) }}</span>
     <span v-if="resetText" class="usage-reset">{{ resetText }}</span>
   </div>
 </template>
@@ -63,7 +63,7 @@ const resetText = computed(() =>
   /* The label column is fixed so bars line up down the card. Sized for the
      longest label any adapter emits — Antigravity's group-prefixed
      "Gemini Week" (docs/providers.md § Antigravity) — not for a bare "5h". */
-  grid-template-columns: 78px minmax(0, 1fr) 44px;
+  grid-template-columns: 78px minmax(0, 1fr) minmax(44px, auto);
   align-items: center;
   gap: var(--space-3);
 }
