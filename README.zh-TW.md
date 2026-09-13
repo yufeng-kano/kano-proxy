@@ -97,12 +97,12 @@ claude --model codex/gpt-5.6-sol
 claude --model antigravity/gemini-3-flash
 ```
 
-### 在 Codex CLI 裡執行 Claude 或 Gemini
+### 讓 Codex CLI 走 proxy
 
-在 `~/.codex/config.toml` 把 Kano Proxy 加成 model provider。CLI 維持原生的 Responses 協議，Models 頁面上的任何模型 id 都能用：
+在 `~/.codex/config.toml` 把 Kano Proxy 加成 model provider。Codex 模型在 CLI 原生的 Responses 協議上直接透傳；Models 頁面上的其他模型 id（`claude-code/...`、`antigravity/...`）也能填在同一個位置：
 
 ```toml
-model = "claude-code/claude-opus-5"
+model = "codex/gpt-5.6-sol"
 model_provider = "kano"
 
 [model_providers.kano]

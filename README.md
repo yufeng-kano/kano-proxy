@@ -97,12 +97,12 @@ claude --model codex/gpt-5.6-sol
 claude --model antigravity/gemini-3-flash
 ```
 
-### Run Claude or Gemini in the Codex CLI
+### Run the Codex CLI through the proxy
 
-Add Kano Proxy as a model provider in `~/.codex/config.toml`. The CLI keeps its native Responses wire; any model id from your Models page works:
+Add Kano Proxy as a model provider in `~/.codex/config.toml`. Codex models pass through natively on the CLI's own Responses wire; any other model id from your Models page (`claude-code/...`, `antigravity/...`) works in the same slot:
 
 ```toml
-model = "claude-code/claude-opus-5"
+model = "codex/gpt-5.6-sol"
 model_provider = "kano"
 
 [model_providers.kano]
