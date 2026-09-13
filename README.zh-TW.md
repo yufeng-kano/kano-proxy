@@ -109,7 +109,7 @@ model_catalog_json = "kano-models.json"  # 讓 /model 列出 codex/... 的 id，
 [model_providers.kano]
 name = "Kano Proxy"
 base_url = "https://<your-domain>/openai/v1"
-env_key = "KANO_PROXY_API_KEY"
+experimental_bearer_token = "<your-api-key>"
 wire_api = "responses"
 ```
 

@@ -27,18 +27,12 @@ model_catalog_json = "kano-models.json"  # generated in step 2, relative to ~/.c
 [model_providers.kano]
 name = "Kano Proxy"
 base_url = "https://<your-domain>/openai/v1"
-env_key = "KANO_PROXY_API_KEY"
+experimental_bearer_token = "<your-api-key>"
 wire_api = "responses"
 ```
 
-Then export the key:
-
-```bash
-export KANO_PROXY_API_KEY=<your-api-key>
-```
-
 - `model_catalog_json` and `model_reasoning_effort` are top-level keys: keep them above `[model_providers.kano]`, or they land inside that table and are ignored.
-- To keep the key in the file instead of the environment, replace `env_key` with `experimental_bearer_token = "<your-api-key>"`.
+- To keep the key out of the file, replace `experimental_bearer_token` with `env_key = "KANO_PROXY_API_KEY"` and `export KANO_PROXY_API_KEY=<your-api-key>` in your shell. Codex reads `~/.codex/auth.json` only for its own OpenAI login, not for a custom provider.
 - `wire_api = "responses"` is the only value current Codex releases accept.
 - A group endpoint works too: set `base_url` to `https://<your-domain>/g/<group-slug>/openai/v1` and `model` to one of the group's names.
 

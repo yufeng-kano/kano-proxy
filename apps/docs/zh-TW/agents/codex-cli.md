@@ -27,18 +27,12 @@ model_catalog_json = "kano-models.json"  # 第 2 步產生，相對於 ~/.codex
 [model_providers.kano]
 name = "Kano Proxy"
 base_url = "https://<your-domain>/openai/v1"
-env_key = "KANO_PROXY_API_KEY"
+experimental_bearer_token = "<your-api-key>"
 wire_api = "responses"
 ```
 
-然後匯出金鑰：
-
-```bash
-export KANO_PROXY_API_KEY=<your-api-key>
-```
-
 - `model_catalog_json` 和 `model_reasoning_effort` 是頂層的 key：要放在 `[model_providers.kano]` 上面，放在它下面會被當成那個 table 的欄位而被忽略。
-- 想把金鑰直接寫在檔案裡而不是環境變數，把 `env_key` 換成 `experimental_bearer_token = "<your-api-key>"`。
+- 不想把金鑰寫在檔案裡，把 `experimental_bearer_token` 換成 `env_key = "KANO_PROXY_API_KEY"`，並在 shell 裡 `export KANO_PROXY_API_KEY=<your-api-key>`。Codex 的 `~/.codex/auth.json` 只給它自己的 OpenAI 登入用，自訂 provider 不會讀。
 - 目前的 Codex 版本只接受 `wire_api = "responses"`。
 - 群組端點也可以：`base_url` 設成 `https://<your-domain>/g/<group-slug>/openai/v1`，`model` 填群組定義的名稱。
 
