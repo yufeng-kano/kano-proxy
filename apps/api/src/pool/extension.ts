@@ -12,6 +12,7 @@
  */
 import type { AccountRow } from "../db/accounts"
 import type { Env, ProviderId } from "../env"
+import type { UsageWindow } from "../providers/types"
 import type { RoutingCandidate } from "../routing/types"
 
 /** One other user's builtin-provider account row, offered to a viewer. */
@@ -21,6 +22,17 @@ export type SharedAccount = {
   /** The viewer's own ordering value; merged with the viewer's rows by `(priority DESC, created_at DESC)`. */
   priority: number
   share: { teamId: string; teamName: string; ownerLabel: string }
+  /**
+   * The edition's own bars for this viewer on this row — what the viewer may
+   * still use of it (an allowance), never the owner's upstream windows. Only
+   * filled when asked for with `{ usage: true }`; routing never asks.
+   */
+  usage?: { windows: UsageWindow[] } | null
+}
+
+export type ListSharedOptions = {
+  /** Fill `SharedAccount.usage`; the Providers page asks, the router does not. */
+  usage?: boolean
 }
 
 /** One admitted attempt, settled exactly once at the point its `request_logs` row is decided. */
@@ -28,7 +40,7 @@ export type AttemptLease = { settle(outcome: "consumed" | "released"): Promise<v
 
 export interface PoolExtension {
   /** Rows the viewer may borrow for one builtin provider. Never called for pinned targets or custom/CLI providers. */
-  listShared(env: Env, viewerUserId: string, provider: ProviderId): Promise<SharedAccount[]>
+  listShared(env: Env, viewerUserId: string, provider: ProviderId, options?: ListSharedOptions): Promise<SharedAccount[]>
   /** Every candidate attempt, own or shared. `null` = not governed; `{ skip: true }` = exhausted, move on; a lease = admitted. */
   reserveAttempt(
     env: Env,

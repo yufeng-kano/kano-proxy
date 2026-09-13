@@ -44,7 +44,7 @@ import { encryptJson } from "../crypto/token_crypto"
 import { isProviderId, type ProviderId } from "../env"
 import { benchUntilFromRow, clearBench } from "../pool/bench"
 import type { StoredCredential } from "../pool/acquire"
-import type { SharedAccount } from "../pool/extension"
+import type { ListSharedOptions, SharedAccount } from "../pool/extension"
 import { getAdapter } from "../providers"
 import type { AccountStatus } from "../providers/types"
 import { usageWindowUnusableUntil, windowsUnusableUntil } from "../routing/facts"
@@ -73,10 +73,11 @@ async function sharedAccounts(
   c: Context<HonoEnv>,
   userId: string,
   provider: ProviderId | null,
+  options?: ListSharedOptions,
 ): Promise<SharedAccount[]> {
   const ext = c.get("poolExtension")
   if (!ext || !provider) return []
-  return ext.listShared(c.env, userId, provider)
+  return ext.listShared(c.env, userId, provider, options)
 }
 
 /** One row the viewer borrows rather than owns — mutating it is the owner's right alone (403), except promote. */
@@ -89,7 +90,7 @@ async function findShared(
   return (await sharedAccounts(c, userId, provider)).find((s) => s.account.id === accountId) ?? null
 }
 
-/** One row of `GET /:provider/accounts`. Shared rows carry `share` and no usage surface. */
+/** One row of `GET /:provider/accounts`. Shared rows carry `share` and only the bars the extension supplies. */
 type AccountView = {
   id: string
   priority: number
@@ -251,7 +252,7 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   // call for someone else's account. Status/bench/label stay, because they
   // are what says where a request goes; the routing facts behind the dot are
   // still read from the row's stored snapshot.
-  for (const shared of await sharedAccounts(c, user.id, provider)) {
+  for (const shared of await sharedAccounts(c, user.id, provider, { usage: true })) {
     const row = shared.account
     accounts.push({
       id: row.id,
@@ -260,7 +261,9 @@ providerRoutes.get("/:provider/accounts", async (c) => {
       label: row.custom_label || row.label || row.id,
       custom_label: row.custom_label ?? null,
       account: null,
-      usage: null,
+      // The extension's own bars for the borrower (an allowance), never the
+      // owner's upstream windows.
+      usage: shared.usage ?? null,
       error: null,
       stale: false,
       share: shared.share,

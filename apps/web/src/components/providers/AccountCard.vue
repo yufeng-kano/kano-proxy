@@ -246,10 +246,15 @@ const creditsText = computed(() => {
       </div>
     </div>
 
-    <!-- A shared row has no usage surface at all: its windows and its probe
-         errors are the owner's, shown on the owner's own page, and nothing
-         here ever asks upstream about someone else's account. -->
-    <template v-if="!share">
+    <!-- A shared row never shows the owner's upstream windows or probe
+         errors — those are the owner's, on the owner's own page, and nothing
+         here ever asks upstream about someone else's account. What it may
+         show are the bars the edition hands it: the borrower's own allowance
+         on this row. Without any, the usage area is simply absent. -->
+    <div v-if="share && windows.length" class="windows">
+      <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
+    </div>
+    <template v-else-if="!share">
       <div v-if="windows.length" class="windows">
         <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
       </div>

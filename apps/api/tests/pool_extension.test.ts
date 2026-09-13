@@ -909,6 +909,24 @@ describe("GET /api/providers/:provider/accounts — the borrower's view", () => 
     expect(JSON.stringify(json)).not.toContain("token-shared_1")
   })
 
+  it("passes the extension's own bars through for a shared row, and asks for them", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = (await createSession(env, "user_1")).cookie.split(";")[0]!
+    const borrowed = await accountRow({ id: "shared_1", userId: "user_2" })
+    const windows = [{ label: "Team · 100 requests / month", utilization: 42, resets_at: null }]
+    const listShared = vi.fn(async (_env, _viewer, provider, options) =>
+      provider === "grok" && options?.usage ? [{ account: borrowed, priority: 3, share: share(), usage: { windows } }] : [],
+    )
+    const app = createApplication({ poolExtension: fakeExtension({ listShared }) })
+    const res = await app.request("/api/providers/grok/accounts", sessionRequest("GET", cookie), env, executionCtx)
+    const json = (await res.json()) as { accounts: { id: string; usage: unknown }[] }
+
+    expect(listShared).toHaveBeenCalledWith(expect.anything(), "user_1", "grok", { usage: true })
+    expect(json.accounts[0]).toMatchObject({ id: "shared_1", usage: { windows } })
+  })
+
   it("lists rows in the router's merged order, a promoted shared row first and Active", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
