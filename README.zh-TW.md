@@ -104,6 +104,7 @@ claude --model antigravity/gemini-3-flash
 ```toml
 model = "codex/gpt-5.6-sol"
 model_provider = "kano"
+model_catalog_json = "kano-models.json"  # 讓 /model 列出 codex/... 的 id，產生方式見文件
 
 [model_providers.kano]
 name = "Kano Proxy"

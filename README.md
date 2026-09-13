@@ -104,6 +104,7 @@ Add Kano Proxy as a model provider in `~/.codex/config.toml`. Codex models pass 
 ```toml
 model = "codex/gpt-5.6-sol"
 model_provider = "kano"
+model_catalog_json = "kano-models.json"  # so /model lists codex/... ids; see the docs
 
 [model_providers.kano]
 name = "Kano Proxy"
