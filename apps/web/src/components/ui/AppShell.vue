@@ -538,11 +538,18 @@ async function onSignOut() {
   background: var(--chart-input);
 }
 
+/* Pinned to the bottom. With the secondary group present that group takes the
+   auto margin and the footer follows it; without it (an edition that dropped
+   both links) the footer takes the auto margin itself. */
 .sidebar-foot {
   position: relative;
   padding-top: var(--space-2);
-  margin-top: var(--space-1);
+  margin-top: auto;
   border-top: 1px solid var(--border);
+}
+
+.sidebar-secondary + .sidebar-foot {
+  margin-top: var(--space-1);
 }
 
 .user {
