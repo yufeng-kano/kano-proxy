@@ -97,3 +97,7 @@ Rules:
 - OpenAI-shaped `usage.completion_tokens` is already the total completion count inclusive of reasoning tokens (with `completion_tokens_details.reasoning_tokens` reported as a detail breakdown). It is stored directly as `request_logs.completion_tokens` and mapped to Anthropic `output_tokens` on conversion paths without adding `reasoning_tokens` a second time.
 
 The Overview page aggregates these rows via `GET /api/usage/summary`, and the Logs page lists them per request via `GET /api/logs` (see [auth.md](./auth.md), [admin-ui.md](./admin-ui.md)).
+
+## Request start timestamps
+
+Migration `0017_request_log_started_at.sql` adds nullable `request_logs.started_at` (UTC ISO text). Dispatch captures its start before the candidate walk and carries it through eager streams, non-stream delivery and legacy stream attachment. Deferred logging preserves that timestamp independently of `created_at` (write time) and `latency_ms` (TTFB). Other log callers default to invocation time. Existing rows remain NULL; consumers needing a start boundary fall back to `created_at`. No request content is recorded.

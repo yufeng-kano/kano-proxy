@@ -5,6 +5,8 @@ import { newId, nowIso } from "../utils/id"
 export async function logRequest(
   env: Env,
   entry: {
+    /** UTC epoch milliseconds captured before dispatch. */
+    startedAt?: number
     userId: string
     apiKeyId?: string | null
     provider: string
@@ -24,6 +26,7 @@ export async function logRequest(
   },
 ): Promise<void> {
   try {
+    const startedAt = new Date(entry.startedAt ?? Date.now()).toISOString()
     // Name snapshots (docs/database.md § request_logs): the key's name and the
     // account's display label as they are right now, so a record deleted later
     // still reads by its last name on the Logs page. Two point reads off the
@@ -62,8 +65,8 @@ export async function logRequest(
       `INSERT INTO request_logs
        (id, user_id, api_key_id, provider, model, account_id, status_code, latency_ms,
         prompt_tokens, completion_tokens, cache_read_input_tokens, cache_creation_input_tokens,
-        cost, error_code, upstream_status, group_name, api_key_name, account_label, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        cost, error_code, upstream_status, group_name, api_key_name, account_label, created_at, started_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         newId("log"),
@@ -85,6 +88,7 @@ export async function logRequest(
         apiKeyName,
         accountLabel,
         nowIso(),
+        startedAt,
       )
       .run()
   } catch {

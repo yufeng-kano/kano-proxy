@@ -269,3 +269,7 @@ npx wrangler d1 migrations create kano-proxy --local "init"
 npx wrangler d1 migrations apply kano-proxy --local
 npx wrangler d1 migrations apply kano-proxy --remote
 ```
+
+## Request start timestamps
+
+Migration `0017_request_log_started_at.sql` adds nullable `request_logs.started_at` (UTC ISO text). Dispatch captures its start before the candidate walk and carries it through eager streams, non-stream delivery and legacy stream attachment. Deferred logging preserves that timestamp independently of `created_at` (write time) and `latency_ms` (TTFB). Other log callers default to invocation time. Existing rows remain NULL; consumers needing a start boundary fall back to `created_at`. No request content is recorded.

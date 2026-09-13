@@ -69,7 +69,7 @@ export async function dispatchAudioTranscriptions(
       wire: openaiWire,
       captureUsage: true,
     },
-    async (candidate, res, latencyMs, lease) => {
+    async (candidate, res, latencyMs, lease, startedAt) => {
       const errorCode = res.ok ? null : "upstream_error"
       /** Whether any response byte reached the client — the same rule the other transports use. */
       let sawOutput = false
@@ -80,6 +80,7 @@ export async function dispatchAudioTranscriptions(
         opts.waitUntil(
           settleLease(lease, res.status >= 400 ? "released" : leaseOutcome(code, sawOutput)).then(() =>
             logRequest(env, {
+              startedAt,
               userId: opts.userId,
               apiKeyId: opts.apiKeyId,
               provider: candidate.provider,

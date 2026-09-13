@@ -300,6 +300,7 @@ async function dispatchEager(env: Env, t: TransportOpts): Promise<Response> {
         else pendingOutcome = outcome
         t.waitUntil(
           logRequest(env, {
+            startedAt: started,
             userId: t.userId,
             apiKeyId: t.apiKeyId,
             groupName: t.groupName ?? null,
@@ -335,12 +336,13 @@ export async function dispatchNonStream(
     latencyMs: number,
     /** This attempt's pool-extension lease — settle it where this delivery decides the log row. */
     lease: AttemptLease | null,
-  ) => Promise<Response> = (c, res, ms, lease) => deliverNonStream(env, t, c, res, ms, lease),
+    startedAt: number,
+  ) => Promise<Response> = (c, res, ms, lease, startedAt) => deliverNonStream(env, t, c, res, ms, lease, startedAt),
 ): Promise<Response> {
   const started = Date.now()
   const progress: WalkProgress = { candidate: null, upstreamStatus: null }
   const log = (row: LogRow) =>
-    logRequest(env, { userId: t.userId, apiKeyId: t.apiKeyId, groupName: t.groupName ?? null, ...row })
+    logRequest(env, { startedAt: started, userId: t.userId, apiKeyId: t.apiKeyId, groupName: t.groupName ?? null, ...row })
 
   const outcome = await walkCandidates(env, { ...t, progress })
   switch (outcome.kind) {
@@ -377,7 +379,7 @@ export async function dispatchNonStream(
       })
       return Response.json(t.wire.upstreamErrorBody(), { status: 502 })
     case "response":
-      return deliver(outcome.candidate, outcome.response, Date.now() - started, outcome.lease)
+      return deliver(outcome.candidate, outcome.response, Date.now() - started, outcome.lease, started)
   }
 }
 
@@ -395,6 +397,7 @@ async function deliverNonStream(
   res: Response,
   latencyMs: number,
   lease: AttemptLease | null,
+  startedAt: number,
 ): Promise<Response> {
   const row = candidateRow(candidate)
   const log = (fields: { errorCode?: string | null; usage: NormalizedUsage | null; sawOutput?: boolean }) =>
@@ -406,6 +409,7 @@ async function deliverNonStream(
       res.status >= 400 ? "released" : leaseOutcome(fields.errorCode, fields.sawOutput ?? true),
     ).then(() =>
       logRequest(env, {
+        startedAt,
         userId: t.userId,
         apiKeyId: t.apiKeyId,
         groupName: t.groupName ?? null,

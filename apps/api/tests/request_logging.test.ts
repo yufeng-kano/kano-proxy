@@ -274,6 +274,7 @@ describe("/openai/v1/chat/completions — streaming capture", () => {
     globalThis.fetch = (async () =>
       trickleResponse(OPENAI_SSE_WITH_USAGE, "text/event-stream")) as typeof fetch
 
+    const beforeDispatch = Date.now()
     const res = await app.request(
       "/openai/v1/chat/completions",
       {
@@ -292,12 +293,17 @@ describe("/openai/v1/chat/completions — streaming capture", () => {
     // Nothing written yet — the row is deferred to stream close.
     expect(db.rows("request_logs")).toHaveLength(0)
 
+    const beforeClose = Date.now()
     const body = await drain(res.body)
     expect(body).toContain("hi")
     await settleDeferredLog()
 
     const rows = db.rows("request_logs")
     expect(rows).toHaveLength(1)
+    const started = Date.parse(String(rows[0]!.started_at))
+    expect(started).toBeGreaterThanOrEqual(beforeDispatch)
+    expect(started).toBeLessThanOrEqual(beforeClose)
+    expect(Date.parse(String(rows[0]!.created_at))).toBeGreaterThan(started)
     expect(rows[0]).toMatchObject({
       provider: "grok",
       prompt_tokens: 50,
