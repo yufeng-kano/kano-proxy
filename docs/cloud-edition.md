@@ -69,6 +69,6 @@ Core obligations:
 - Credentials of shared accounts are decrypted only inside dispatch, as for own accounts, and never returned by any route.
 - A borrowed row's upstream response headers are stripped of everything that states the **owner's** account rather than this request — rate-limit budgets and resets (`anthropic-ratelimit-*`, `x-ratelimit-*`, the internal `x-kano-ratelimit-reset`), `retry-after`, and any organization/account identifier — on every delivery path (non-stream passthrough, streamed passthrough, audio). Own rows and standalone installs are byte-identical to before.
 
-An optional `ownBars(env, viewerUserId, provider, accountIds)` lets the edition append bars to the viewer's own rows on the Providers page (their allowance on an account they lend out); those bars are added after the routing dot was decided and never reach `routing/facts`.
+An optional `ownBars(env, viewerUserId, provider, accountIds)` lets the edition put bars before the upstream windows on the viewer's own rows on the Providers page (their allowance on an account they lend out); those bars are added after the routing dot was decided and never reach `routing/facts`.
 
 Teams themselves (membership, limits, ledgers, UI) stay in the private edition.

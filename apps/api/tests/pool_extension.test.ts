@@ -103,6 +103,7 @@ function fakeExtension(overrides: Partial<PoolExtension> = {}) {
     reserveAttempt: overrides.reserveAttempt ?? vi.fn(async () => null),
     setSharedPriority: overrides.setSharedPriority ?? vi.fn(async () => true),
   }
+  if (overrides.ownBars) ext.ownBars = overrides.ownBars
   return ext
 }
 
@@ -927,7 +928,7 @@ describe("GET /api/providers/:provider/accounts — the borrower's view", () => 
     expect(json.accounts[0]).toMatchObject({ id: "shared_1", usage: { windows } })
   })
 
-  it("appends the extension's ownBars to the viewer's own rows without touching the dot", async () => {
+  it("puts the extension's ownBars first on the viewer's own rows without touching the dot", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")
     const env = buildEnv(db)

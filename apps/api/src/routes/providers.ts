@@ -246,14 +246,14 @@ providerRoutes.get("/:provider/accounts", async (c) => {
   }
 
   // The edition's own bars on the viewer's own rows (an allowance on an
-  // account they lend out), appended after the upstream windows. Added after
+  // account they lend out), placed before the upstream windows. Added after
   // `limitedUntil` was read so they never colour the routing dot.
   const ownBars = c.get("poolExtension")?.ownBars
   if (ownBars && accounts.length) {
     const extra = await ownBars(c.env, user.id, provider, accounts.map((a) => a.id))
     for (const account of accounts) {
       const bars = extra.get(account.id)
-      if (bars?.length) account.usage = { windows: [...(account.usage?.windows ?? []), ...bars] }
+      if (bars?.length) account.usage = { windows: [...bars, ...(account.usage?.windows ?? [])] }
     }
   }
 

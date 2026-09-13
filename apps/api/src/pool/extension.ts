@@ -52,7 +52,7 @@ export interface PoolExtension {
   /**
    * Extra bars for the viewer's OWN rows of one provider — e.g. the viewer's
    * allowance on an account they lend out and are themselves limited on.
-   * Appended after the row's upstream windows on the Providers page only;
+   * Placed before the row's upstream windows on the Providers page only;
    * they never feed routing facts.
    */
   ownBars?(env: Env, viewerUserId: string, provider: ProviderId, accountIds: string[]): Promise<Map<string, UsageWindow[]>>
