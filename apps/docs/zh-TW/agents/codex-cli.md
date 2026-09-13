@@ -46,6 +46,33 @@ curl https://<your-domain>/openai/v1/models -H "Authorization: Bearer <your-api-
 
 Codex 模型會以 `codex/<model>` 出現。用 `codex --model <id>` 或 CLI 內的 `/model <id>` 切換，按 Enter 存成預設。
 
+### 讓 proxy 的模型 id 出現在選單裡
+
+Codex 的 `/model` 選單和每個模型的資料（context window、可用的 effort）都來自一份 catalog。接自訂 provider 時它用的是 CLI 內建那份，裡面有 `gpt-5.6-sol` 但沒有 `codex/gpt-5.6-sol`，所以每個 proxy 的 id 都算未知模型：用 fallback 設定執行，也不會出現在選單。`model_catalog_json` 可以用你自己的檔案取代這份 catalog。
+
+1. 先把 Codex 現有的 catalog 倒出來，裡面含有每個項目必須帶的 instructions：
+
+   ```bash
+   codex debug models > ~/.codex/models.json
+   ```
+
+2. 編輯 `models.json`。留下你會用的項目，把每個 `slug` 加上 `codex/` 前綴。要加其他供應商的模型，複製一個項目，改 `slug`、`display_name`、`context_window`、`max_context_window`、`default_reasoning_level`、`supported_reasoning_levels` 成那個模型的實際值。複製來的 `base_instructions` 要保留，手寫的項目少了它會在啟動時被拒絕。
+3. 在設定檔指向這個檔案。這個 key 是頂層的：要放在 `[model_providers.kano]` 上面，放在它下面會被當成那個 table 的欄位而被忽略。
+
+   ```toml
+   model_catalog_json = "/Users/<you>/.codex/models.json"
+   ```
+
+4. 不送請求就能檢查結果：
+
+   ```bash
+   codex debug models
+   ```
+
+   輸出會剛好是你檔案裡的項目，`codex/gpt-5.6-sol` 和其他的，帶著你給的 context window 和 effort。選單現在會列出這些 id，下面說的未知模型警告也不會再出現。
+
+proxy 在每個供應商都接受 `low`、`medium`、`high`、`xhigh`，`claude-code` 另外接受 `max`；完整規則見 [端點與模型 id](/zh-TW/guide/endpoints)。其他 effort 不要放進 `supported_reasoning_levels`，選到就會讓請求失敗。
+
 ## 推理強度
 
 對自訂 provider，Codex 預設不送 effort，需要自己設定：
@@ -54,7 +81,7 @@ Codex 模型會以 `codex/<model>` 出現。用 `codex --model <id>` 或 CLI 內
 model_reasoning_effort = "high"
 ```
 
-可用的值有 `minimal`、`low`、`medium`、`high`、`xhigh`（`xhigh` 視模型而定）。用 Codex 模型時原值送到上游；用其他供應商時，proxy 會壓到該供應商接受的最高強度。
+proxy 接受 `low`、`medium`、`high`、`xhigh`、`max`，`minimal` 和 `ultra` 會回 `400 invalid reasoning.effort`。Codex 模型的上限是 `xhigh`：`max` 送上游前會降成 `xhigh`。其他供應商也一樣，壓到該供應商接受的最高強度。
 
 ## 其他模型
 
@@ -68,4 +95,4 @@ Models 頁面上的任何 id 都能當 Codex 的模型：`claude-code/claude-opu
 
 ## 查證來源
 
-Codex CLI 0.150.1，2026-09-04 對本機端點錄下的請求。設定文件：[learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference)。
+Codex CLI 0.150.1，2026-09-04 對本機端點錄下的請求。catalog 步驟以 Codex CLI 0.154.0 和 `codex debug models` 於 2026-09-13 驗證。設定文件：[learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference)。

@@ -78,3 +78,15 @@ On a group endpoint only that group's model names resolve. `GET .../models` on a
 ## Streaming and tools
 
 Streaming (`stream: true` or the Anthropic SSE stream) is passed through chunk by chunk. Tool calls, images, JSON output modes, `reasoning_effort`, `stop`, `temperature`, and `top_p` are forwarded where the target provider supports them.
+
+## Reasoning effort
+
+`reasoning_effort` (OpenAI base) and `output_config.effort` (Anthropic base) take `low`, `medium`, `high`, `xhigh`, or `max`. Anything else, including `minimal` and `ultra`, is rejected with `400 invalid reasoning_effort`. A value above what the target provider accepts is lowered to that provider's ceiling instead of failing:
+
+| Provider | Highest effort |
+|----------|----------------|
+| `claude-code` | `max` |
+| `codex` | `xhigh` |
+| `grok` | `xhigh` |
+| `antigravity` | `high` |
+| custom endpoint, OpenAI format | forwarded as sent |

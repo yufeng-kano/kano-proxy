@@ -78,3 +78,15 @@ curl https://<your-domain>/openai/v1/models -H "Authorization: Bearer <your-api-
 ## 串流與工具呼叫
 
 串流（`stream: true` 或 Anthropic 的 SSE）逐塊直接轉送。工具呼叫、圖片、JSON 輸出模式、`reasoning_effort`、`stop`、`temperature`、`top_p` 會在目標供應商支援的範圍內轉送。
+
+## 推理強度
+
+`reasoning_effort`（OpenAI base）和 `output_config.effort`（Anthropic base）接受 `low`、`medium`、`high`、`xhigh`、`max`。其他值包括 `minimal`、`ultra` 都會回 `400 invalid reasoning_effort`。超過目標供應商上限的值會被壓到該上限，不會失敗：
+
+| 供應商 | 最高強度 |
+|--------|----------|
+| `claude-code` | `max` |
+| `codex` | `xhigh` |
+| `grok` | `xhigh` |
+| `antigravity` | `high` |
+| 自訂端點（OpenAI 格式） | 原樣轉送 |

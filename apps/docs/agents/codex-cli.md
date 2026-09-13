@@ -46,6 +46,33 @@ curl https://<your-domain>/openai/v1/models -H "Authorization: Bearer <your-api-
 
 Codex models appear as `codex/<model>`. Switch with `codex --model <id>` or `/model <id>` inside the CLI; press Enter to save it as the default.
 
+### Putting proxy ids in the model picker
+
+Codex takes its `/model` picker and per-model metadata (context window, effort levels) from a catalog. Against a custom provider it uses the catalog bundled with the CLI, which knows `gpt-5.6-sol` but not `codex/gpt-5.6-sol`, so every proxy id counts as an unknown model: it runs on fallback metadata and never shows in the picker. `model_catalog_json` replaces that catalog with your own file.
+
+1. Dump the catalog Codex already has. It includes the instruction text each entry must carry:
+
+   ```bash
+   codex debug models > ~/.codex/models.json
+   ```
+
+2. Edit `models.json`. Keep the entries you use and prefix each `slug` with `codex/`. For another provider, copy an entry and change `slug`, `display_name`, `context_window`, `max_context_window`, `default_reasoning_level`, and `supported_reasoning_levels` to what that model offers. Keep the copied `base_instructions`; a hand-written entry without it is rejected at startup.
+3. Point the config at the file. The key is top-level: place it above `[model_providers.kano]`, or it lands inside that table and is ignored.
+
+   ```toml
+   model_catalog_json = "/Users/<you>/.codex/models.json"
+   ```
+
+4. Check the result without sending a request:
+
+   ```bash
+   codex debug models
+   ```
+
+   The output lists exactly your file's entries, `codex/gpt-5.6-sol` and the rest, with the context window and effort levels you gave them. The picker now shows those ids, and the unknown-model warning below is gone.
+
+The proxy accepts `low`, `medium`, `high`, and `xhigh` on every provider and `max` on `claude-code`; the ladder is in [Endpoints and model ids](/guide/endpoints). Leave other efforts out of `supported_reasoning_levels`, or picking them fails the request.
+
 ## Reasoning effort
 
 Codex sends no effort for a custom provider unless you set one:
@@ -54,7 +81,7 @@ Codex sends no effort for a custom provider unless you set one:
 model_reasoning_effort = "high"
 ```
 
-Accepted values are `minimal`, `low`, `medium`, `high`, and `xhigh` (`xhigh` depends on the model). On a Codex model the value goes upstream as is. On any other provider the proxy clamps it to the highest effort that provider accepts.
+The proxy accepts `low`, `medium`, `high`, `xhigh`, and `max`, and rejects `minimal` and `ultra` with `400 invalid reasoning.effort`. A Codex model tops out at `xhigh`: `max` is lowered to `xhigh` before the request goes upstream. On any other provider the value is clamped the same way, to the highest effort that provider accepts.
 
 ## Other models
 
@@ -68,4 +95,4 @@ Any id from your Models page works as the Codex model: `claude-code/claude-opus-
 
 ## Checked against
 
-Codex CLI 0.150.1, request captured against a local endpoint, 2026-09-04. Config reference: [learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference).
+Codex CLI 0.150.1, request captured against a local endpoint, 2026-09-04. Catalog steps checked with Codex CLI 0.154.0 and `codex debug models`, 2026-09-13. Config reference: [learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference).
