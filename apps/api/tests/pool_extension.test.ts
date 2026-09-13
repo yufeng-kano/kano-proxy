@@ -927,6 +927,25 @@ describe("GET /api/providers/:provider/accounts — the borrower's view", () => 
     expect(json.accounts[0]).toMatchObject({ id: "shared_1", usage: { windows } })
   })
 
+  it("appends the extension's ownBars to the viewer's own rows without touching the dot", async () => {
+    const db = new FakeD1()
+    seedUser(db, "user_1")
+    const env = buildEnv(db)
+    const cookie = (await createSession(env, "user_1")).cookie.split(";")[0]!
+    await seedAccount(db, { id: "own_1", userId: "user_1", priority: 1 })
+    globalThis.fetch = (async () => new Response("upstream down", { status: 500 })) as typeof fetch
+    const bar = { label: "Request", value: "100 / 100", utilization: 100, resets_at: "2999-01-01T00:00:00.000Z" }
+    const ownBars = vi.fn(async (_env, _viewer, _provider, ids: string[]) => new Map(ids.map((id) => [id, [bar]])))
+    const app = createApplication({ poolExtension: fakeExtension({ ownBars }) })
+    const res = await app.request("/api/providers/grok/accounts", sessionRequest("GET", cookie), env, executionCtx)
+    const json = (await res.json()) as { accounts: { id: string; status: string; usage: { windows: unknown[] } | null }[] }
+
+    expect(ownBars).toHaveBeenCalledWith(expect.anything(), "user_1", "grok", ["own_1"])
+    expect(json.accounts[0]!.usage?.windows).toEqual([bar])
+    // A full allowance bar is the edition's business; the routing dot still reads active.
+    expect(json.accounts[0]!.status).toBe("active")
+  })
+
   it("lists rows in the router's merged order, a promoted shared row first and Active", async () => {
     const db = new FakeD1()
     seedUser(db, "user_1")

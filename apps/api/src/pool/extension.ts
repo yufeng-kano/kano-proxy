@@ -49,6 +49,13 @@ export interface PoolExtension {
   ): Promise<AttemptLease | { skip: true } | null>
   /** Reorder a shared row inside the viewer's merged pool; `false` when the viewer may not (404 to the caller). */
   setSharedPriority(env: Env, viewerUserId: string, accountId: string, priority: number): Promise<boolean>
+  /**
+   * Extra bars for the viewer's OWN rows of one provider — e.g. the viewer's
+   * allowance on an account they lend out and are themselves limited on.
+   * Appended after the row's upstream windows on the Providers page only;
+   * they never feed routing facts.
+   */
+  ownBars?(env: Env, viewerUserId: string, provider: ProviderId, accountIds: string[]): Promise<Map<string, UsageWindow[]>>
 }
 
 /** A lease must never take the response down with it — settle failures are the extension's problem, not the client's. */
