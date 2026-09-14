@@ -28,6 +28,7 @@ import {
   type GeminiPart,
   type GeminiRequest,
   type GeminiResponse,
+  openWithUserTurn,
 } from "./gemini_wire"
 
 // ── Request: OpenAI → Gemini ───────────────────────────────────────────────
@@ -202,6 +203,7 @@ function messagesToGemini(messages: unknown[]): {
       pushContent(contents, "model", parts)
     }
   }
+  openWithUserTurn(contents)
 
   return {
     contents,

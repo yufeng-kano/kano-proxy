@@ -25,6 +25,21 @@ export type GeminiContent = {
   parts?: GeminiPart[]
 }
 
+/**
+ * Gemini validates `contents` from the top: a `functionCall` in a model turn
+ * must follow a user turn, and the first content has nothing before it, so a
+ * history opening with a model turn is rejected outright ("Please ensure that
+ * function call turn comes immediately after a user turn or after a function
+ * response turn"). Anthropic accepts an assistant-first conversation, and
+ * agents that seed a cache-stable prefix with synthetic tool calls send one.
+ * The text is non-empty because Gemini also rejects an empty text part.
+ */
+export function openWithUserTurn(contents: GeminiContent[]): void {
+  if (contents[0]?.role === "model") {
+    contents.unshift({ role: "user", parts: [{ text: "(conversation start)" }] })
+  }
+}
+
 export type GeminiUsageMetadata = {
   promptTokenCount?: number
   candidatesTokenCount?: number

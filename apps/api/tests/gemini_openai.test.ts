@@ -49,6 +49,28 @@ function chunks(raw: string): Array<Record<string, unknown>> {
 }
 
 describe("openaiToGeminiRequest", () => {
+  it("opens an assistant-first history with a user turn so Gemini accepts the tool call", () => {
+    const out = openaiToGeminiRequest(
+      req({
+        messages: [
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              { id: "call_1", type: "function", function: { name: "read_file", arguments: "{\"path\":\"a.md\"}" } },
+            ],
+          },
+          { role: "tool", tool_call_id: "call_1", content: "# a" },
+          { role: "user", content: "hi" },
+        ],
+      }),
+    )
+    expect(out.contents[0]).toEqual({ role: "user", parts: [{ text: "(conversation start)" }] })
+    expect(out.contents[1]!.role).toBe("model")
+    expect(out.contents[1]!.parts?.[0]).toEqual({ functionCall: { id: "call_1", name: "read_file", args: { path: "a.md" } } })
+    expect(out.contents).toHaveLength(3)
+  })
+
   it("lifts system messages into systemInstruction and keeps the rest as contents", () => {
     const out = openaiToGeminiRequest(
       req({

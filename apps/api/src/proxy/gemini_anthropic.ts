@@ -28,6 +28,7 @@ import {
   type GeminiPart,
   type GeminiRequest,
   type GeminiResponse,
+  openWithUserTurn,
 } from "./gemini_wire"
 import { mapReasoning, parseReasoningEffort, type ReasoningEffort } from "../utils/reasoning"
 
@@ -299,6 +300,7 @@ export function anthropicToGeminiRequest(
     if (last && last.role === role && Array.isArray(last.parts)) last.parts.push(...parts)
     else contents.push({ role, parts })
   }
+  openWithUserTurn(contents)
 
   const generationConfig: Record<string, unknown> = {}
   if (typeof body.temperature === "number") generationConfig.temperature = body.temperature

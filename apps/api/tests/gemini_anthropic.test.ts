@@ -104,6 +104,27 @@ describe("anthropicToGeminiRequest", () => {
     expect(request.generationConfig).toMatchObject({ maxOutputTokens: 64 })
   })
 
+  it("opens an assistant-first history with a user turn so Gemini accepts the function call", () => {
+    const { request } = anthropicToGeminiRequest({
+      system: "boot",
+      messages: [
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_boot", name: "read_file", input: { path: "a.md" } }],
+        },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_boot", content: "# a" }] },
+        { role: "user", content: "hi" },
+      ],
+    })
+    expect(request.contents[0]).toEqual({ role: "user", parts: [{ text: "(conversation start)" }] })
+    expect(request.contents[1]).toEqual({
+      role: "model",
+      parts: [{ functionCall: { id: "toolu_boot", name: "read_file", args: { path: "a.md" } } }],
+    })
+    expect(request.contents[2].role).toBe("user")
+    expect(request.contents).toHaveLength(3)
+  })
+
   it("names a tool_result from the tool_use it answers", () => {
     const { request } = anthropicToGeminiRequest({
       messages: [
@@ -208,7 +229,8 @@ describe("anthropicToGeminiRequest", () => {
         },
       ],
     })
-    expect(out.request.contents[0]!.parts).toEqual([
+    // An assistant-first fixture: the converter opens it with a user turn.
+    expect(out.request.contents[1]!.parts).toEqual([
       { text: "reasoning", thought: true },
       {
         functionCall: { id: "toolu_1", name: "search", args: {} },
@@ -280,7 +302,8 @@ describe("anthropicToGeminiRequest", () => {
         },
       ],
     })
-    expect(request.contents[0].parts).toEqual([
+    // An assistant-first fixture: the converter opens it with a user turn.
+    expect(request.contents[1]!.parts).toEqual([
       { text: "hmm", thought: true, thoughtSignature: "sig-abc" },
       { text: "done" },
     ])
