@@ -227,7 +227,7 @@ export function codexSseToOpenAIStream(
             if (!text) continue
             ensureRole()
             if (ev.type === "response.output_text.delta") {
-              assistantText += text
+            if (opts?.onReplayItems) assistantText += text
               chunk({ delta: { content: text } })
             } else {
               // De-facto extension field (DeepSeek/OpenRouter convention);
