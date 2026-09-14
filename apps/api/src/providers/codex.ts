@@ -513,8 +513,12 @@ function contentToCodex(content: unknown): unknown[] {
   for (const p of content as Array<Record<string, unknown>>) {
     if (p.type === "text") out.push({ type: "input_text", text: p.text })
     else if (p.type === "image_url") {
-      const url = (p.image_url as { url?: string })?.url
-      if (url) out.push({ type: "input_image", image_url: url })
+      const image = p.image_url as { url?: string; detail?: string } | undefined
+      if (image?.url) out.push({
+        type: "input_image",
+        image_url: image.url,
+        ...(typeof image.detail === "string" ? { detail: image.detail } : {}),
+      })
     }
   }
   return out.length ? out : [{ type: "input_text", text: "" }]

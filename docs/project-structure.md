@@ -21,6 +21,8 @@ kano-proxy/
           cli.ts                 # /api/cli: session-side CLI device/provider management
         auth/            # session, google, api keys
         proxy/           # stream helpers, openai↔provider; responses_openai.ts = Responses API ↔ Chat Completions
+                          #   sse_lines.ts = bounded linear line reader; backpressure.ts = demand/cancellation;
+                          #   sse_error_rewrite.ts = bounded error detection + byte passthrough; request_json.ts = release raw JSON cache
                           #   dispatch.ts (Chat Completions + Anthropic Messages entry
                           #   points: one eager and one non-stream transport, both
                           #   generic over a `Wire`), dispatch_walk.ts (the single

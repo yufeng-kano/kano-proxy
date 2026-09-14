@@ -1,3 +1,4 @@
+import { readProxyJson } from "../proxy/request_json"
 import type { Context } from "hono"
 import type { HonoEnv } from "../auth/session"
 import { logRequest } from "../logging/request_log"
@@ -36,7 +37,7 @@ export async function handleResponses(c: Context<HonoEnv>): Promise<Response> {
   const apiKeyId = c.get("apiKeyId")
   let body: Record<string, unknown>
   try {
-    body = await c.req.json()
+    body = await readProxyJson(c.req)
   } catch {
     return c.json({ error: { message: "Invalid JSON", type: "invalid_request_error", code: "invalid_request" } }, 400)
   }

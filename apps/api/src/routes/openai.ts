@@ -1,3 +1,4 @@
+import { readProxyJson } from "../proxy/request_json"
 import { Hono } from "hono"
 import type { Context } from "hono"
 import { apiKeyAuth } from "../auth/api_key_auth"
@@ -45,7 +46,7 @@ export async function handleChatCompletions(c: Context<HonoEnv>): Promise<Respon
   const apiKeyId = c.get("apiKeyId")
   let body: Record<string, unknown>
   try {
-    body = await c.req.json()
+    body = await readProxyJson(c.req)
   } catch {
     return c.json(
       { error: { message: "Invalid JSON", code: "invalid_request" } },

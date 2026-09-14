@@ -1,3 +1,5 @@
+import { readSseLines } from "./sse_lines"
+import { backpressuredStream } from "./backpressure"
 /**
  * Anthropic Messages ↔ xAI Responses for `/anthropic` → grok.
  *
@@ -495,9 +497,7 @@ export function grokResponsesSseToAnthropicStream(
 ): ReadableStream<Uint8Array> {
   const thinkingMode = opts?.thinkingMode ?? "default"
   const emitThinking = thinkingMode !== "disabled"
-  const decoder = new TextDecoder()
   const encoder = new TextEncoder()
-  let buffer = ""
   const msgId = `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`
   let started = false
   let stopped = false
@@ -516,7 +516,6 @@ export function grokResponsesSseToAnthropicStream(
   let assistantText = ""
   let encryptedContent = ""
   let thinkingSignaturePending = ""
-  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | null = null
   // cli-chat-proxy often emits function_call / output_text before
   // reasoning.output_item.done. Closing the thinking block early would either
   // drop the final signature or emit a preliminary blob — both break the next
@@ -532,474 +531,460 @@ export function grokResponsesSseToAnthropicStream(
   } | null = null
   const pendingArgs = new Map<string, string>()
 
-  return new ReadableStream({
-    async start(controller) {
-      const reader = body.getReader()
-      upstreamReader = reader
-      const emitEvent = (event: string, data: unknown) => {
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        )
+  return backpressuredStream(body, async (reader, controller) => {
+    const emitEvent = (event: string, data: unknown) => {
+      controller.enqueue(
+        encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
+      )
+    }
+    const flushDeferred = () => {
+      const queued = deferredEvents.splice(0)
+      for (const run of queued) run()
+    }
+    /** Run now, or after the in-flight reasoning item finishes. */
+    const afterReasoning = (run: () => void) => {
+      if (reasoningOpen) deferredEvents.push(run)
+      else run()
+    }
+    /**
+     * Responses usage, from whichever event carries it. Called for *every*
+     * event, not just the terminal one: `message_start.usage.input_tokens`
+     * is the client's context indicator (docs/api.md), so an upstream that
+     * reports the input side early is worth catching before the first
+     * content block opens.
+     */
+    const harvestUsage = (u: NonNullable<GrokResponsesEvent["response"]>["usage"]) => {
+      if (!u) return
+      if (typeof u.input_tokens === "number") promptTokens = u.input_tokens
+      // Responses output_tokens already includes reasoning for xAI.
+      if (typeof u.output_tokens === "number") completionTokens = u.output_tokens
+      if (typeof u.input_tokens_details?.cached_tokens === "number") {
+        cacheReadInputTokens = u.input_tokens_details.cached_tokens
       }
-      const flushDeferred = () => {
-        const queued = deferredEvents.splice(0)
-        for (const run of queued) run()
-      }
-      /** Run now, or after the in-flight reasoning item finishes. */
-      const afterReasoning = (run: () => void) => {
-        if (reasoningOpen) deferredEvents.push(run)
-        else run()
-      }
-      /**
-       * Responses usage, from whichever event carries it. Called for *every*
-       * event, not just the terminal one: `message_start.usage.input_tokens`
-       * is the client's context indicator (docs/api.md), so an upstream that
-       * reports the input side early is worth catching before the first
-       * content block opens.
-       */
-      const harvestUsage = (u: NonNullable<GrokResponsesEvent["response"]>["usage"]) => {
-        if (!u) return
-        if (typeof u.input_tokens === "number") promptTokens = u.input_tokens
-        // Responses output_tokens already includes reasoning for xAI.
-        if (typeof u.output_tokens === "number") completionTokens = u.output_tokens
-        if (typeof u.input_tokens_details?.cached_tokens === "number") {
-          cacheReadInputTokens = u.input_tokens_details.cached_tokens
-        }
-      }
-      const ensureStart = () => {
-        if (started) return
-        started = true
-        const input =
-          promptTokens != null ? promptTokens - (cacheReadInputTokens ?? 0) : 0
-        emitEvent("message_start", {
-          type: "message_start",
-          message: {
-            id: msgId,
-            type: "message",
-            role: "assistant",
-            model,
-            content: [],
-            stop_reason: null,
-            stop_sequence: null,
-            usage: {
-              input_tokens: Math.max(0, input),
-              output_tokens: 0,
-              ...(cacheReadInputTokens != null
-                ? { cache_read_input_tokens: cacheReadInputTokens }
-                : {}),
-            },
-          },
-        })
-      }
-      const closeText = () => {
-        if (!textBlockOpen) return
-        emitEvent("content_block_stop", {
-          type: "content_block_stop",
-          index: textBlockIndex,
-        })
-        textBlockOpen = false
-      }
-      const closeTool = () => {
-        if (!liveTool) return
-        emitEvent("content_block_stop", {
-          type: "content_block_stop",
-          index: liveTool.blockIndex,
-        })
-        liveTool = null
-      }
-      const closeThinking = () => {
-        if (!thinkingBlockOpen) return
-        if (thinkingSignaturePending) {
-          emitEvent("content_block_delta", {
-            type: "content_block_delta",
-            index: thinkingBlockIndex,
-            delta: {
-              type: "signature_delta",
-              signature: thinkingSignaturePending,
-            },
-          })
-          thinkingSignaturePending = ""
-        }
-        emitEvent("content_block_stop", {
-          type: "content_block_stop",
-          index: thinkingBlockIndex,
-        })
-        thinkingBlockOpen = false
-      }
-      const openThinking = () => {
-        if (!emitThinking || thinkingBlockOpen) return
-        if (textBlockOpen || liveTool) return
-        ensureStart()
-        thinkingBlockIndex = nextBlockIndex++
-        thinkingBlockOpen = true
-        emitEvent("content_block_start", {
-          type: "content_block_start",
-          index: thinkingBlockIndex,
-          content_block: { type: "thinking", thinking: "" },
-        })
-      }
-      const appendThinking = (text: string) => {
-        if (!emitThinking || !text) return
-        if (textBlockOpen || liveTool) {
-          pendingThinking += text
-          return
-        }
-        openThinking()
-        if (!thinkingBlockOpen) return
-        emitEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: thinkingBlockIndex,
-          delta: { type: "thinking_delta", thinking: text },
-        })
-      }
-      const flushPendingThinking = () => {
-        if (!pendingThinking || !emitThinking) {
-          pendingThinking = ""
-          return
-        }
-        const thinking = pendingThinking
-        pendingThinking = ""
-        const index = nextBlockIndex++
-        emitEvent("content_block_start", {
-          type: "content_block_start",
-          index,
-          content_block: {
-            type: "thinking",
-            thinking: "",
-            ...(encryptedContent ? { signature: encryptedContent } : {}),
-          },
-        })
-        emitEvent("content_block_delta", {
-          type: "content_block_delta",
-          index,
-          delta: { type: "thinking_delta", thinking },
-        })
-        emitEvent("content_block_stop", { type: "content_block_stop", index })
-      }
-      const appendText = (text: string) => {
-        if (!text) return
-        ensureStart()
-        closeThinking()
-        if (liveTool) return
-        assistantText += text
-        if (!textBlockOpen) {
-          textBlockIndex = nextBlockIndex++
-          textBlockOpen = true
-          emitEvent("content_block_start", {
-            type: "content_block_start",
-            index: textBlockIndex,
-            content_block: { type: "text", text: "" },
-          })
-        }
-        emitEvent("content_block_delta", {
-          type: "content_block_delta",
-          index: textBlockIndex,
-          delta: { type: "text_delta", text },
-        })
-      }
-      const openTool = (itemId: string, callId: string, name: string) => {
-        ensureStart()
-        closeText()
-        closeThinking()
-        liveTool = {
-          itemId,
-          blockIndex: nextBlockIndex++,
-          id: callId,
-          sawArgs: false,
-        }
-        sawToolCall = true
-        emitEvent("content_block_start", {
-          type: "content_block_start",
-          index: liveTool.blockIndex,
-          content_block: {
-            type: "tool_use",
-            id: callId,
-            name: name || "unknown",
-            input: {},
-          },
-        })
-        const stashed = pendingArgs.get(itemId)
-        if (stashed) {
-          pendingArgs.delete(itemId)
-          liveTool.sawArgs = true
-          emitEvent("content_block_delta", {
-            type: "content_block_delta",
-            index: liveTool.blockIndex,
-            delta: { type: "input_json_delta", partial_json: stashed },
-          })
-        }
-      }
-      const emitUpstreamError = (message: string) => {
-        if (stopped) return
-        stopped = true
-        emitEvent("error", {
-          type: "error",
-          error: { type: "api_error", message },
-        })
-      }
-      const finish = (reason: string) => {
-        if (stopped) return
-        stopped = true
-        ensureStart()
-        // Settle any in-flight reasoning first so deferred tool/text blocks
-        // still follow a signature_delta when upstream omitted .done.
-        closeThinking()
-        reasoningOpen = false
-        flushDeferred()
-        closeText()
-        closeTool()
-        flushPendingThinking()
-        if (nextBlockIndex === 0) {
-          emitEvent("content_block_start", {
-            type: "content_block_start",
-            index: nextBlockIndex,
-            content_block: { type: "text", text: "" },
-          })
-          emitEvent("content_block_stop", {
-            type: "content_block_stop",
-            index: nextBlockIndex++,
-          })
-        }
-        const finalReason =
-          reason === "end_turn" && sawToolCall ? "tool_use" : reason
-        const inputTokens =
-          promptTokens != null && cacheReadInputTokens != null
-            ? promptTokens - cacheReadInputTokens
-            : promptTokens
-        emitEvent("message_delta", {
-          type: "message_delta",
-          delta: { stop_reason: finalReason, stop_sequence: null },
+    }
+    const ensureStart = () => {
+      if (started) return
+      started = true
+      const input =
+        promptTokens != null ? promptTokens - (cacheReadInputTokens ?? 0) : 0
+      emitEvent("message_start", {
+        type: "message_start",
+        message: {
+          id: msgId,
+          type: "message",
+          role: "assistant",
+          model,
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
           usage: {
-            ...(inputTokens != null ? { input_tokens: inputTokens } : {}),
-            output_tokens: completionTokens ?? 0,
+            input_tokens: Math.max(0, input),
+            output_tokens: 0,
             ...(cacheReadInputTokens != null
               ? { cache_read_input_tokens: cacheReadInputTokens }
               : {}),
           },
+        },
+      })
+    }
+    const closeText = () => {
+      if (!textBlockOpen) return
+      emitEvent("content_block_stop", {
+        type: "content_block_stop",
+        index: textBlockIndex,
+      })
+      textBlockOpen = false
+    }
+    const closeTool = () => {
+      if (!liveTool) return
+      emitEvent("content_block_stop", {
+        type: "content_block_stop",
+        index: liveTool.blockIndex,
+      })
+      liveTool = null
+    }
+    const closeThinking = () => {
+      if (!thinkingBlockOpen) return
+      if (thinkingSignaturePending) {
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: thinkingBlockIndex,
+          delta: {
+            type: "signature_delta",
+            signature: thinkingSignaturePending,
+          },
         })
-        emitEvent("message_stop", { type: "message_stop" })
-        if (!opts?.onTurnOutcome) return
-        if (
-          thinkingMode !== "disabled" &&
-          encryptedContent &&
-          isValidGrokEncryptedContent(encryptedContent)
-        ) {
-          opts.onTurnOutcome({
-            kind: "replayable",
-            encrypted_content: encryptedContent,
-            assistant_text: assistantText,
-          })
-        } else {
-          // Completed turn with no replayable state (disabled / no ciphertext)
-          // must not leave a prior turn's entry for a later inject.
-          opts.onTurnOutcome({ kind: "clear" })
-        }
+        thinkingSignaturePending = ""
       }
+      emitEvent("content_block_stop", {
+        type: "content_block_stop",
+        index: thinkingBlockIndex,
+      })
+      thinkingBlockOpen = false
+    }
+    const openThinking = () => {
+      if (!emitThinking || thinkingBlockOpen) return
+      if (textBlockOpen || liveTool) return
+      ensureStart()
+      thinkingBlockIndex = nextBlockIndex++
+      thinkingBlockOpen = true
+      emitEvent("content_block_start", {
+        type: "content_block_start",
+        index: thinkingBlockIndex,
+        content_block: { type: "thinking", thinking: "" },
+      })
+    }
+    const appendThinking = (text: string) => {
+      if (!emitThinking || !text) return
+      if (textBlockOpen || liveTool) {
+        pendingThinking += text
+        return
+      }
+      openThinking()
+      if (!thinkingBlockOpen) return
+      emitEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: thinkingBlockIndex,
+        delta: { type: "thinking_delta", thinking: text },
+      })
+    }
+    const flushPendingThinking = () => {
+      if (!pendingThinking || !emitThinking) {
+        pendingThinking = ""
+        return
+      }
+      const thinking = pendingThinking
+      pendingThinking = ""
+      const index = nextBlockIndex++
+      emitEvent("content_block_start", {
+        type: "content_block_start",
+        index,
+        content_block: {
+          type: "thinking",
+          thinking: "",
+          ...(encryptedContent ? { signature: encryptedContent } : {}),
+        },
+      })
+      emitEvent("content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "thinking_delta", thinking },
+      })
+      emitEvent("content_block_stop", { type: "content_block_stop", index })
+    }
+    const appendText = (text: string) => {
+      if (!text) return
+      ensureStart()
+      closeThinking()
+      if (liveTool) return
+      assistantText += text
+      if (!textBlockOpen) {
+        textBlockIndex = nextBlockIndex++
+        textBlockOpen = true
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index: textBlockIndex,
+          content_block: { type: "text", text: "" },
+        })
+      }
+      emitEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: textBlockIndex,
+        delta: { type: "text_delta", text },
+      })
+    }
+    const openTool = (itemId: string, callId: string, name: string) => {
+      ensureStart()
+      closeText()
+      closeThinking()
+      liveTool = {
+        itemId,
+        blockIndex: nextBlockIndex++,
+        id: callId,
+        sawArgs: false,
+      }
+      sawToolCall = true
+      emitEvent("content_block_start", {
+        type: "content_block_start",
+        index: liveTool.blockIndex,
+        content_block: {
+          type: "tool_use",
+          id: callId,
+          name: name || "unknown",
+          input: {},
+        },
+      })
+      const stashed = pendingArgs.get(itemId)
+      if (stashed) {
+        pendingArgs.delete(itemId)
+        liveTool.sawArgs = true
+        emitEvent("content_block_delta", {
+          type: "content_block_delta",
+          index: liveTool.blockIndex,
+          delta: { type: "input_json_delta", partial_json: stashed },
+        })
+      }
+    }
+    const emitUpstreamError = (message: string) => {
+      if (stopped) return
+      stopped = true
+      emitEvent("error", {
+        type: "error",
+        error: { type: "api_error", message },
+      })
+    }
+    const finish = (reason: string) => {
+      if (stopped) return
+      stopped = true
+      ensureStart()
+      // Settle any in-flight reasoning first so deferred tool/text blocks
+      // still follow a signature_delta when upstream omitted .done.
+      closeThinking()
+      reasoningOpen = false
+      flushDeferred()
+      closeText()
+      closeTool()
+      flushPendingThinking()
+      if (nextBlockIndex === 0) {
+        emitEvent("content_block_start", {
+          type: "content_block_start",
+          index: nextBlockIndex,
+          content_block: { type: "text", text: "" },
+        })
+        emitEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: nextBlockIndex++,
+        })
+      }
+      const finalReason =
+        reason === "end_turn" && sawToolCall ? "tool_use" : reason
+      const inputTokens =
+        promptTokens != null && cacheReadInputTokens != null
+          ? promptTokens - cacheReadInputTokens
+          : promptTokens
+      emitEvent("message_delta", {
+        type: "message_delta",
+        delta: { stop_reason: finalReason, stop_sequence: null },
+        usage: {
+          ...(inputTokens != null ? { input_tokens: inputTokens } : {}),
+          output_tokens: completionTokens ?? 0,
+          ...(cacheReadInputTokens != null
+            ? { cache_read_input_tokens: cacheReadInputTokens }
+            : {}),
+        },
+      })
+      emitEvent("message_stop", { type: "message_stop" })
+      if (!opts?.onTurnOutcome) return
+      if (
+        thinkingMode !== "disabled" &&
+        encryptedContent &&
+        isValidGrokEncryptedContent(encryptedContent)
+      ) {
+        opts.onTurnOutcome({
+          kind: "replayable",
+          encrypted_content: encryptedContent,
+          assistant_text: assistantText,
+        })
+      } else {
+        // Completed turn with no replayable state (disabled / no ciphertext)
+        // must not leave a prior turn's entry for a later inject.
+        opts.onTurnOutcome({ kind: "clear" })
+      }
+    }
 
-      try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const parts = buffer.split("\n")
-          buffer = parts.pop() ?? ""
-          for (const line of parts) {
-            if (!line.startsWith("data:")) continue
-            const data = line.slice(5).trim()
-            if (!data || data === "[DONE]") continue
-            if (stopped) continue
-            try {
-              const ev = JSON.parse(data) as GrokResponsesEvent
-              // Every event, not just the terminal one — see harvestUsage.
-              harvestUsage(ev.response?.usage)
-              if (ev.type === "response.failed" || ev.type === "error") {
-                emitUpstreamError(
-                  ev.response?.error?.message ||
-                    ev.error?.message ||
-                    ev.message ||
-                    "upstream error",
-                )
-                continue
+    try {
+      for await (const line of readSseLines(reader)) {
+        if (!line.startsWith("data:")) continue
+        const data = line.slice(5).trim()
+        if (!data || data === "[DONE]") continue
+        if (stopped) continue
+        try {
+          const ev = JSON.parse(data) as GrokResponsesEvent
+          // Every event, not just the terminal one — see harvestUsage.
+          harvestUsage(ev.response?.usage)
+          if (ev.type === "response.failed" || ev.type === "error") {
+            emitUpstreamError(
+              ev.response?.error?.message ||
+                ev.error?.message ||
+                ev.message ||
+                "upstream error",
+            )
+            continue
+          }
+
+          if (
+            ev.type === "response.reasoning_summary_text.delta" &&
+            ev.delta
+          ) {
+            appendThinking(ev.delta)
+          } else if (ev.type === "response.output_text.delta" && ev.delta) {
+            const text = ev.delta
+            afterReasoning(() => appendText(text))
+          } else if (
+            ev.type === "response.output_item.added" &&
+            ev.item?.type === "reasoning"
+          ) {
+            reasoningOpen = true
+            // Pre-content encrypted snapshot — keep for fallback only;
+            // final value arrives on output_item.done. Do not close the
+            // thinking block until then (see afterReasoning).
+            if (
+              typeof ev.item.encrypted_content === "string" &&
+              isValidGrokEncryptedContent(ev.item.encrypted_content)
+            ) {
+              thinkingSignaturePending = ev.item.encrypted_content
+              if (!encryptedContent) {
+                encryptedContent = ev.item.encrypted_content
               }
-
-              if (
-                ev.type === "response.reasoning_summary_text.delta" &&
-                ev.delta
-              ) {
-                appendThinking(ev.delta)
-              } else if (ev.type === "response.output_text.delta" && ev.delta) {
-                const text = ev.delta
-                afterReasoning(() => appendText(text))
-              } else if (
-                ev.type === "response.output_item.added" &&
-                ev.item?.type === "reasoning"
-              ) {
-                reasoningOpen = true
-                // Pre-content encrypted snapshot — keep for fallback only;
-                // final value arrives on output_item.done. Do not close the
-                // thinking block until then (see afterReasoning).
-                if (
-                  typeof ev.item.encrypted_content === "string" &&
-                  isValidGrokEncryptedContent(ev.item.encrypted_content)
-                ) {
-                  thinkingSignaturePending = ev.item.encrypted_content
-                  if (!encryptedContent) {
-                    encryptedContent = ev.item.encrypted_content
-                  }
-                }
-                if (emitThinking) openThinking()
-              } else if (
-                ev.type === "response.output_item.done" &&
-                ev.item?.type === "reasoning"
-              ) {
-                if (
-                  typeof ev.item.encrypted_content === "string" &&
-                  isValidGrokEncryptedContent(ev.item.encrypted_content)
-                ) {
-                  encryptedContent = ev.item.encrypted_content
-                  thinkingSignaturePending = ev.item.encrypted_content
-                }
-                // Summary text may only appear on the done item.
-                const summaryText = summaryTextFromItem(ev.item)
-                if (summaryText) appendThinking(summaryText)
-                // Signature-only reasoning (no summary text streamed): still
-                // open a thinking block so signature_delta can be delivered.
-                if (
-                  emitThinking &&
-                  !thinkingBlockOpen &&
-                  !textBlockOpen &&
-                  !liveTool &&
-                  thinkingSignaturePending
-                ) {
-                  openThinking()
-                }
-                closeThinking()
-                reasoningOpen = false
-                flushDeferred()
-              } else if (
-                ev.type === "response.output_item.added" &&
-                ev.item?.type === "function_call"
-              ) {
-                const itemId =
-                  ev.item.id || ev.item.call_id || `item_${nextBlockIndex}`
-                const callId = ev.item.call_id || itemId
-                const name = ev.item.name || "unknown"
-                afterReasoning(() => {
-                  if (!liveTool || liveTool.itemId !== itemId) {
-                    if (liveTool) closeTool()
-                    openTool(itemId, callId, name)
-                  }
+            }
+            if (emitThinking) openThinking()
+          } else if (
+            ev.type === "response.output_item.done" &&
+            ev.item?.type === "reasoning"
+          ) {
+            if (
+              typeof ev.item.encrypted_content === "string" &&
+              isValidGrokEncryptedContent(ev.item.encrypted_content)
+            ) {
+              encryptedContent = ev.item.encrypted_content
+              thinkingSignaturePending = ev.item.encrypted_content
+            }
+            // Summary text may only appear on the done item.
+            const summaryText = summaryTextFromItem(ev.item)
+            if (summaryText) appendThinking(summaryText)
+            // Signature-only reasoning (no summary text streamed): still
+            // open a thinking block so signature_delta can be delivered.
+            if (
+              emitThinking &&
+              !thinkingBlockOpen &&
+              !textBlockOpen &&
+              !liveTool &&
+              thinkingSignaturePending
+            ) {
+              openThinking()
+            }
+            closeThinking()
+            reasoningOpen = false
+            flushDeferred()
+          } else if (
+            ev.type === "response.output_item.added" &&
+            ev.item?.type === "function_call"
+          ) {
+            const itemId =
+              ev.item.id || ev.item.call_id || `item_${nextBlockIndex}`
+            const callId = ev.item.call_id || itemId
+            const name = ev.item.name || "unknown"
+            afterReasoning(() => {
+              if (!liveTool || liveTool.itemId !== itemId) {
+                if (liveTool) closeTool()
+                openTool(itemId, callId, name)
+              }
+            })
+          } else if (ev.type === "response.function_call_arguments.delta") {
+            const itemId = ev.item_id
+            const delta = ev.delta ?? ""
+            if (!itemId || !delta) continue
+            afterReasoning(() => {
+              if (liveTool && liveTool.itemId === itemId) {
+                liveTool.sawArgs = true
+                emitEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index: liveTool.blockIndex,
+                  delta: { type: "input_json_delta", partial_json: delta },
                 })
-              } else if (ev.type === "response.function_call_arguments.delta") {
-                const itemId = ev.item_id
-                const delta = ev.delta ?? ""
-                if (!itemId || !delta) continue
-                afterReasoning(() => {
-                  if (liveTool && liveTool.itemId === itemId) {
-                    liveTool.sawArgs = true
-                    emitEvent("content_block_delta", {
-                      type: "content_block_delta",
-                      index: liveTool.blockIndex,
-                      delta: { type: "input_json_delta", partial_json: delta },
-                    })
-                  } else {
-                    pendingArgs.set(
-                      itemId,
-                      (pendingArgs.get(itemId) ?? "") + delta,
-                    )
-                  }
+              } else {
+                pendingArgs.set(
+                  itemId,
+                  (pendingArgs.get(itemId) ?? "") + delta,
+                )
+              }
+            })
+          } else if (
+            ev.type === "response.output_item.done" &&
+            ev.item?.type === "function_call"
+          ) {
+            const itemId = ev.item.id || ev.item.call_id || ""
+            const callId =
+              ev.item.call_id || itemId || `call_${nextBlockIndex}`
+            const name = ev.item.name || "unknown"
+            const args = ev.item.arguments
+            afterReasoning(() => {
+              if (!liveTool || liveTool.itemId !== itemId) {
+                if (liveTool) closeTool()
+                openTool(
+                  itemId || `item_${nextBlockIndex}`,
+                  callId,
+                  name,
+                )
+              }
+              if (liveTool && !liveTool.sawArgs && args) {
+                liveTool.sawArgs = true
+                emitEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index: liveTool.blockIndex,
+                  delta: {
+                    type: "input_json_delta",
+                    partial_json: args,
+                  },
                 })
-              } else if (
-                ev.type === "response.output_item.done" &&
-                ev.item?.type === "function_call"
-              ) {
-                const itemId = ev.item.id || ev.item.call_id || ""
-                const callId =
-                  ev.item.call_id || itemId || `call_${nextBlockIndex}`
-                const name = ev.item.name || "unknown"
-                const args = ev.item.arguments
-                afterReasoning(() => {
-                  if (!liveTool || liveTool.itemId !== itemId) {
-                    if (liveTool) closeTool()
-                    openTool(
-                      itemId || `item_${nextBlockIndex}`,
-                      callId,
-                      name,
-                    )
-                  }
-                  if (liveTool && !liveTool.sawArgs && args) {
-                    liveTool.sawArgs = true
-                    emitEvent("content_block_delta", {
-                      type: "content_block_delta",
-                      index: liveTool.blockIndex,
-                      delta: {
-                        type: "input_json_delta",
-                        partial_json: args,
-                      },
-                    })
-                  }
-                  closeTool()
-                })
-              } else if (
-                ev.type === "response.completed" ||
-                ev.type === "response.done"
-              ) {
-                harvestUsage(ev.response?.usage)
-                // Also harvest encrypted_content from completed output if stream
-                // events omitted it.
-                if (!encryptedContent && Array.isArray(ev.response?.output)) {
-                  for (const item of ev.response!.output as Array<
+              }
+              closeTool()
+            })
+          } else if (
+            ev.type === "response.completed" ||
+            ev.type === "response.done"
+          ) {
+            harvestUsage(ev.response?.usage)
+            // Also harvest encrypted_content from completed output if stream
+            // events omitted it.
+            if (!encryptedContent && Array.isArray(ev.response?.output)) {
+              for (const item of ev.response!.output as Array<
+                Record<string, unknown>
+              >) {
+                if (
+                  item.type === "reasoning" &&
+                  typeof item.encrypted_content === "string" &&
+                  isValidGrokEncryptedContent(item.encrypted_content)
+                ) {
+                  encryptedContent = item.encrypted_content
+                }
+                if (item.type === "message" && Array.isArray(item.content)) {
+                  for (const part of item.content as Array<
                     Record<string, unknown>
                   >) {
                     if (
-                      item.type === "reasoning" &&
-                      typeof item.encrypted_content === "string" &&
-                      isValidGrokEncryptedContent(item.encrypted_content)
+                      part.type === "output_text" &&
+                      typeof part.text === "string" &&
+                      !assistantText
                     ) {
-                      encryptedContent = item.encrypted_content
-                    }
-                    if (item.type === "message" && Array.isArray(item.content)) {
-                      for (const part of item.content as Array<
-                        Record<string, unknown>
-                      >) {
-                        if (
-                          part.type === "output_text" &&
-                          typeof part.text === "string" &&
-                          !assistantText
-                        ) {
-                          assistantText += part.text
-                        }
-                      }
+                      assistantText += part.text
                     }
                   }
                 }
-                sawCompleted = true
-                stopReason = sawToolCall ? "tool_use" : "end_turn"
-                finish(stopReason)
               }
-            } catch {
-              /* ignore parse */
             }
+            sawCompleted = true
+            stopReason = sawToolCall ? "tool_use" : "end_turn"
+            finish(stopReason)
           }
+        } catch {
+          /* ignore parse */
         }
-        // Truncated upstream: never fabricate a successful message_stop.
-        if (!stopped) {
-          if (sawCompleted) {
-            finish(stopReason ?? (sawToolCall ? "tool_use" : "end_turn"))
-          } else {
-            emitUpstreamError(
-              "upstream stalled: stream ended before response.completed",
-            )
-          }
-        }
-        controller.close()
-      } catch (e) {
-        controller.error(e)
       }
-    },
-    cancel() {
-      void upstreamReader?.cancel()
-    },
+      // Truncated upstream: never fabricate a successful message_stop.
+      if (!stopped) {
+        if (sawCompleted) {
+          finish(stopReason ?? (sawToolCall ? "tool_use" : "end_turn"))
+        } else {
+          emitUpstreamError(
+            "upstream stalled: stream ended before response.completed",
+          )
+        }
+      }
+      controller.close()
+    } catch (e) {
+      controller.error(e)
+    }
   })
 }
 
@@ -1027,9 +1012,7 @@ export async function collectGrokResponsesSseToAnthropic(
   },
 ): Promise<Record<string, unknown> | { error: { message: string; type: string } }> {
   const stream = grokResponsesSseToAnthropicStream(body, model, opts)
-  const decoder = new TextDecoder()
   const reader = stream.getReader()
-  let buffer = ""
   let event = ""
   let error: { message: string; type: string } | null = null
   const content: Array<Record<string, unknown>> = []
@@ -1042,95 +1025,88 @@ export async function collectGrokResponsesSseToAnthropic(
     { type: string; thinking?: string; text?: string; signature?: string; id?: string; name?: string; partial?: string }
   >()
 
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split("\n")
-    buffer = lines.pop() ?? ""
-    for (const line of lines) {
-      if (line.startsWith("event:")) event = line.slice(6).trim()
-      else if (line.startsWith("data:")) {
-        const data = line.slice(5).trim()
-        if (!data) continue
-        try {
-          const json = JSON.parse(data) as Record<string, unknown>
-          if (event === "error" || json.type === "error") {
-            const err = json.error as { message?: string; type?: string } | undefined
-            error = {
-              message: err?.message || "upstream error",
-              type: err?.type || "api_error",
-            }
-          } else if (event === "message_start") {
-            const msg = json.message as { id?: string } | undefined
-            if (msg?.id) msgId = msg.id
-          } else if (event === "content_block_start") {
-            const index = typeof json.index === "number" ? json.index : 0
-            const block = json.content_block as Record<string, unknown>
-            open.set(index, {
-              type: String(block.type ?? "text"),
-              thinking: block.type === "thinking" ? "" : undefined,
-              text: block.type === "text" ? "" : undefined,
-              signature:
-                typeof block.signature === "string" ? block.signature : undefined,
-              id: typeof block.id === "string" ? block.id : undefined,
-              name: typeof block.name === "string" ? block.name : undefined,
-              partial: block.type === "tool_use" ? "" : undefined,
-            })
-          } else if (event === "content_block_delta") {
-            const index = typeof json.index === "number" ? json.index : 0
-            const delta = json.delta as Record<string, unknown>
-            const block = open.get(index)
-            if (!block) continue
-            if (delta.type === "thinking_delta") {
-              block.thinking = (block.thinking ?? "") + String(delta.thinking ?? "")
-            } else if (delta.type === "signature_delta") {
-              block.signature = String(delta.signature ?? "")
-            } else if (delta.type === "text_delta") {
-              block.text = (block.text ?? "") + String(delta.text ?? "")
-            } else if (delta.type === "input_json_delta") {
-              block.partial = (block.partial ?? "") + String(delta.partial_json ?? "")
-            }
-          } else if (event === "content_block_stop") {
-            const index = typeof json.index === "number" ? json.index : 0
-            const block = open.get(index)
-            if (!block) continue
-            open.delete(index)
-            if (block.type === "thinking") {
-              const thinkingBlock: Record<string, unknown> = {
-                type: "thinking",
-                thinking: block.thinking ?? "",
-              }
-              if (block.signature) thinkingBlock.signature = block.signature
-              content.push(thinkingBlock)
-            } else if (block.type === "text") {
-              content.push({ type: "text", text: block.text ?? "" })
-            } else if (block.type === "tool_use") {
-              let input: unknown = {}
-              try {
-                input = JSON.parse(block.partial || "{}")
-              } catch {
-                input = { raw: block.partial }
-              }
-              content.push({
-                type: "tool_use",
-                id: block.id,
-                name: block.name,
-                input,
-              })
-            }
-          } else if (event === "message_delta") {
-            const d = json.delta as { stop_reason?: string } | undefined
-            if (d?.stop_reason) stopReason = d.stop_reason
-            if (json.usage && typeof json.usage === "object") {
-              usage = json.usage as Record<string, unknown>
-            }
+  for await (const line of readSseLines(reader)) {
+    if (line.startsWith("event:")) event = line.slice(6).trim()
+    else if (line.startsWith("data:")) {
+      const data = line.slice(5).trim()
+      if (!data) continue
+      try {
+        const json = JSON.parse(data) as Record<string, unknown>
+        if (event === "error" || json.type === "error") {
+          const err = json.error as { message?: string; type?: string } | undefined
+          error = {
+            message: err?.message || "upstream error",
+            type: err?.type || "api_error",
           }
-        } catch {
-          /* */
+        } else if (event === "message_start") {
+          const msg = json.message as { id?: string } | undefined
+          if (msg?.id) msgId = msg.id
+        } else if (event === "content_block_start") {
+          const index = typeof json.index === "number" ? json.index : 0
+          const block = json.content_block as Record<string, unknown>
+          open.set(index, {
+            type: String(block.type ?? "text"),
+            thinking: block.type === "thinking" ? "" : undefined,
+            text: block.type === "text" ? "" : undefined,
+            signature:
+              typeof block.signature === "string" ? block.signature : undefined,
+            id: typeof block.id === "string" ? block.id : undefined,
+            name: typeof block.name === "string" ? block.name : undefined,
+            partial: block.type === "tool_use" ? "" : undefined,
+          })
+        } else if (event === "content_block_delta") {
+          const index = typeof json.index === "number" ? json.index : 0
+          const delta = json.delta as Record<string, unknown>
+          const block = open.get(index)
+          if (!block) continue
+          if (delta.type === "thinking_delta") {
+            block.thinking = (block.thinking ?? "") + String(delta.thinking ?? "")
+          } else if (delta.type === "signature_delta") {
+            block.signature = String(delta.signature ?? "")
+          } else if (delta.type === "text_delta") {
+            block.text = (block.text ?? "") + String(delta.text ?? "")
+          } else if (delta.type === "input_json_delta") {
+            block.partial = (block.partial ?? "") + String(delta.partial_json ?? "")
+          }
+        } else if (event === "content_block_stop") {
+          const index = typeof json.index === "number" ? json.index : 0
+          const block = open.get(index)
+          if (!block) continue
+          open.delete(index)
+          if (block.type === "thinking") {
+            const thinkingBlock: Record<string, unknown> = {
+              type: "thinking",
+              thinking: block.thinking ?? "",
+            }
+            if (block.signature) thinkingBlock.signature = block.signature
+            content.push(thinkingBlock)
+          } else if (block.type === "text") {
+            content.push({ type: "text", text: block.text ?? "" })
+          } else if (block.type === "tool_use") {
+            let input: unknown = {}
+            try {
+              input = JSON.parse(block.partial || "{}")
+            } catch {
+              input = { raw: block.partial }
+            }
+            content.push({
+              type: "tool_use",
+              id: block.id,
+              name: block.name,
+              input,
+            })
+          }
+        } else if (event === "message_delta") {
+          const d = json.delta as { stop_reason?: string } | undefined
+          if (d?.stop_reason) stopReason = d.stop_reason
+          if (json.usage && typeof json.usage === "object") {
+            usage = json.usage as Record<string, unknown>
+          }
         }
-        event = ""
+      } catch {
+        /* */
       }
+      event = ""
     }
   }
 

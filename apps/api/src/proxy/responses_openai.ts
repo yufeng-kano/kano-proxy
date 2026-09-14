@@ -1,3 +1,6 @@
+import { backpressuredStream } from "./backpressure"
+import { rewriteSseErrors } from "./sse_error_rewrite"
+import { readSseLines } from "./sse_lines"
 /**
  * OpenAI Responses API ↔ Chat Completions (docs/api.md § `POST
  * /openai/v1/responses`). The conversion path for every non-codex target:
@@ -548,9 +551,7 @@ export function openaiSseToResponsesStream(
   body: ReadableStream<Uint8Array>,
   opts: ResponsesOutputOptions,
 ): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder()
   const encoder = new TextEncoder()
-  let buffer = ""
   let seq = 0
   const responseId = newId("resp")
   const createdAt = Math.floor(Date.now() / 1000)
@@ -578,284 +579,274 @@ export function openaiSseToResponsesStream(
     }
   >()
 
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const reader = body.getReader()
-      const emit = (type: string, payload: Record<string, unknown>) => {
-        controller.enqueue(
-          encoder.encode(
-            `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...payload })}\n\n`,
-          ),
-        )
-      }
-      const snapshot = (extra: Record<string, unknown>) => ({
-        id: responseId,
-        object: "response",
-        created_at: createdAt,
-        model: opts.model,
-        output,
-        ...extra,
-      })
+  return backpressuredStream(body, async (reader, controller) => {
 
-      const closeOpen = () => {
-        if (!open) return
-        const cur = open
-        open = null
-        if (cur.kind === "reasoning") {
-          const item = { id: cur.id, type: "reasoning", summary: [{ type: "summary_text", text: cur.text }] }
-          emit("response.reasoning_summary_text.done", {
-            item_id: cur.id,
-            output_index: cur.index,
-            summary_index: 0,
-            text: cur.text,
-          })
-          emit("response.reasoning_summary_part.done", {
-            item_id: cur.id,
-            output_index: cur.index,
-            summary_index: 0,
-            part: { type: "summary_text", text: cur.text },
-          })
-          output[cur.index] = item
-          emit("response.output_item.done", { output_index: cur.index, item })
-          return
-        }
-        if (cur.kind === "message") {
-          const part = { type: "output_text", text: cur.text, annotations: [] }
-          const item = { id: cur.id, type: "message", role: "assistant", status: "completed", content: [part] }
-          emit("response.output_text.done", {
-            item_id: cur.id,
-            output_index: cur.index,
-            content_index: 0,
-            text: cur.text,
-          })
-          emit("response.content_part.done", {
-            item_id: cur.id,
-            output_index: cur.index,
-            content_index: 0,
-            part,
-          })
-          output[cur.index] = item
-          emit("response.output_item.done", { output_index: cur.index, item })
-          return
-        }
-        const tool = tools.get(cur.toolIndex)
-        if (!tool) return
-        tool.closed = true
-        const item = toolCallItem(tool.id, tool.callId, tool.name, tool.args, opts.toolNames)
-        if (tool.custom) {
-          // Custom tools carry a raw string the model produced as JSON
-          // fragments — only whole at the end, so the item goes out whole.
-          emit("response.output_item.added", { output_index: cur.index, item: { ...item, status: "in_progress" } })
-        } else {
-          emit("response.function_call_arguments.done", {
-            item_id: tool.id,
-            output_index: cur.index,
-            arguments: tool.args,
-          })
-        }
+    const emit = (type: string, payload: Record<string, unknown>) => {
+      controller.enqueue(
+        encoder.encode(
+          `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: seq++, ...payload })}\n\n`,
+        ),
+      )
+    }
+    const snapshot = (extra: Record<string, unknown>) => ({
+      id: responseId,
+      object: "response",
+      created_at: createdAt,
+      model: opts.model,
+      output,
+      ...extra,
+    })
+
+    const closeOpen = () => {
+      if (!open) return
+      const cur = open
+      open = null
+      if (cur.kind === "reasoning") {
+        const item = { id: cur.id, type: "reasoning", summary: [{ type: "summary_text", text: cur.text }] }
+        emit("response.reasoning_summary_text.done", {
+          item_id: cur.id,
+          output_index: cur.index,
+          summary_index: 0,
+          text: cur.text,
+        })
+        emit("response.reasoning_summary_part.done", {
+          item_id: cur.id,
+          output_index: cur.index,
+          summary_index: 0,
+          part: { type: "summary_text", text: cur.text },
+        })
         output[cur.index] = item
         emit("response.output_item.done", { output_index: cur.index, item })
+        return
       }
-
-      const openReasoning = () => {
-        if (open?.kind === "reasoning") return open
-        closeOpen()
-        const id = newId("rs")
-        const index = output.length
-        output.push({ id, type: "reasoning", summary: [] })
-        open = { kind: "reasoning", id, index, text: "" }
-        emit("response.output_item.added", { output_index: index, item: { id, type: "reasoning", summary: [] } })
-        emit("response.reasoning_summary_part.added", {
-          item_id: id,
-          output_index: index,
-          summary_index: 0,
-          part: { type: "summary_text", text: "" },
-        })
-        return open
-      }
-      const openMessage = () => {
-        if (open?.kind === "message") return open
-        closeOpen()
-        const id = newId("msg")
-        const index = output.length
-        output.push({ id, type: "message", role: "assistant", status: "in_progress", content: [] })
-        open = { kind: "message", id, index, text: "" }
-        emit("response.output_item.added", {
-          output_index: index,
-          item: { id, type: "message", role: "assistant", status: "in_progress", content: [] },
-        })
-        emit("response.content_part.added", {
-          item_id: id,
-          output_index: index,
+      if (cur.kind === "message") {
+        const part = { type: "output_text", text: cur.text, annotations: [] }
+        const item = { id: cur.id, type: "message", role: "assistant", status: "completed", content: [part] }
+        emit("response.output_text.done", {
+          item_id: cur.id,
+          output_index: cur.index,
           content_index: 0,
-          part: { type: "output_text", text: "", annotations: [] },
+          text: cur.text,
         })
-        return open
+        emit("response.content_part.done", {
+          item_id: cur.id,
+          output_index: cur.index,
+          content_index: 0,
+          part,
+        })
+        output[cur.index] = item
+        emit("response.output_item.done", { output_index: cur.index, item })
+        return
       }
-      const emitThoughtSignature = (callId: string, signature: string) => {
-        const item = geminiThoughtSignatureItem(callId, signature)
-        const index = output.length
-        output.push(item)
-        emit("response.output_item.added", { output_index: index, item })
-        emit("response.output_item.done", { output_index: index, item })
+      const tool = tools.get(cur.toolIndex)
+      if (!tool) return
+      tool.closed = true
+      const item = toolCallItem(tool.id, tool.callId, tool.name, tool.args, opts.toolNames)
+      if (tool.custom) {
+        // Custom tools carry a raw string the model produced as JSON
+        // fragments — only whole at the end, so the item goes out whole.
+        emit("response.output_item.added", { output_index: cur.index, item: { ...item, status: "in_progress" } })
+      } else {
+        emit("response.function_call_arguments.done", {
+          item_id: tool.id,
+          output_index: cur.index,
+          arguments: tool.args,
+        })
       }
-      const openTool = (toolIndex: number, callId: string, name: string, thoughtSignature?: string) => {
-        closeOpen()
-        if (thoughtSignature) emitThoughtSignature(callId, thoughtSignature)
-        const id = newId(opts.toolNames.get(name)?.kind === "custom" ? "ctc" : "fc")
-        const custom = opts.toolNames.get(name)?.kind === "custom"
-        const index = output.length
-        const entry = { id, callId, name, args: "", custom, closed: false, thoughtSignature }
-        tools.set(toolIndex, entry)
-        output.push({})
-        open = { kind: "tool", id, index, toolIndex }
-        if (!custom) {
-          const ref = opts.toolNames.get(name)
-          const item: Record<string, unknown> = {
-            id,
-            type: "function_call",
-            call_id: callId,
-            name: ref?.name ?? name,
-            arguments: "",
-            status: "in_progress",
-          }
-          if (ref?.namespace) item.namespace = ref.namespace
-          emit("response.output_item.added", { output_index: index, item })
+      output[cur.index] = item
+      emit("response.output_item.done", { output_index: cur.index, item })
+    }
+
+    const openReasoning = () => {
+      if (open?.kind === "reasoning") return open
+      closeOpen()
+      const id = newId("rs")
+      const index = output.length
+      output.push({ id, type: "reasoning", summary: [] })
+      open = { kind: "reasoning", id, index, text: "" }
+      emit("response.output_item.added", { output_index: index, item: { id, type: "reasoning", summary: [] } })
+      emit("response.reasoning_summary_part.added", {
+        item_id: id,
+        output_index: index,
+        summary_index: 0,
+        part: { type: "summary_text", text: "" },
+      })
+      return open
+    }
+    const openMessage = () => {
+      if (open?.kind === "message") return open
+      closeOpen()
+      const id = newId("msg")
+      const index = output.length
+      output.push({ id, type: "message", role: "assistant", status: "in_progress", content: [] })
+      open = { kind: "message", id, index, text: "" }
+      emit("response.output_item.added", {
+        output_index: index,
+        item: { id, type: "message", role: "assistant", status: "in_progress", content: [] },
+      })
+      emit("response.content_part.added", {
+        item_id: id,
+        output_index: index,
+        content_index: 0,
+        part: { type: "output_text", text: "", annotations: [] },
+      })
+      return open
+    }
+    const emitThoughtSignature = (callId: string, signature: string) => {
+      const item = geminiThoughtSignatureItem(callId, signature)
+      const index = output.length
+      output.push(item)
+      emit("response.output_item.added", { output_index: index, item })
+      emit("response.output_item.done", { output_index: index, item })
+    }
+    const openTool = (toolIndex: number, callId: string, name: string, thoughtSignature?: string) => {
+      closeOpen()
+      if (thoughtSignature) emitThoughtSignature(callId, thoughtSignature)
+      const id = newId(opts.toolNames.get(name)?.kind === "custom" ? "ctc" : "fc")
+      const custom = opts.toolNames.get(name)?.kind === "custom"
+      const index = output.length
+      const entry = { id, callId, name, args: "", custom, closed: false, thoughtSignature }
+      tools.set(toolIndex, entry)
+      output.push({})
+      open = { kind: "tool", id, index, toolIndex }
+      if (!custom) {
+        const ref = opts.toolNames.get(name)
+        const item: Record<string, unknown> = {
+          id,
+          type: "function_call",
+          call_id: callId,
+          name: ref?.name ?? name,
+          arguments: "",
+          status: "in_progress",
         }
+        if (ref?.namespace) item.namespace = ref.namespace
+        emit("response.output_item.added", { output_index: index, item })
       }
+    }
 
-      const fail = (message: string, code: string | undefined) => {
-        if (finished) return
-        finished = true
-        closeOpen()
-        emit("response.failed", {
-          response: snapshot({ status: "failed", error: { code: code ?? "upstream_error", message } }),
-        })
-      }
-      const finish = () => {
-        if (finished) return
-        finished = true
-        closeOpen()
-        const { status, incomplete_details } = responseStatusFromFinish(finishReason)
-        const extra: Record<string, unknown> = { status }
-        if (incomplete_details) extra.incomplete_details = incomplete_details
-        const u = chatUsageToResponses(usage)
-        if (u) extra.usage = u
-        emit(status === "incomplete" ? "response.incomplete" : "response.completed", {
-          response: snapshot(extra),
-        })
-      }
+    const fail = (message: string, code: string | undefined) => {
+      if (finished) return
+      finished = true
+      closeOpen()
+      emit("response.failed", {
+        response: snapshot({ status: "failed", error: { code: code ?? "upstream_error", message } }),
+      })
+    }
+    const finish = () => {
+      if (finished) return
+      finished = true
+      closeOpen()
+      const { status, incomplete_details } = responseStatusFromFinish(finishReason)
+      const extra: Record<string, unknown> = { status }
+      if (incomplete_details) extra.incomplete_details = incomplete_details
+      const u = chatUsageToResponses(usage)
+      if (u) extra.usage = u
+      emit(status === "incomplete" ? "response.incomplete" : "response.completed", {
+        response: snapshot(extra),
+      })
+    }
 
-      emit("response.created", { response: snapshot({ status: "in_progress" }) })
-      emit("response.in_progress", { response: snapshot({ status: "in_progress" }) })
+    emit("response.created", { response: snapshot({ status: "in_progress" }) })
+    emit("response.in_progress", { response: snapshot({ status: "in_progress" }) })
 
-      try {
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          const lines = buffer.split("\n")
-          buffer = lines.pop() ?? ""
-          for (const line of lines) {
-            if (finished) break
-            if (!line.startsWith("data:")) continue
-            const data = line.slice(5).trim()
-            if (!data) continue
-            if (data === "[DONE]") {
-              finish()
-              break
-            }
-            let json: Record<string, unknown>
-            try {
-              json = JSON.parse(data) as Record<string, unknown>
-            } catch {
-              continue
-            }
-            if (isRecord(json.error)) {
-              const err = json.error as { message?: unknown; code?: unknown }
-              fail(
-                typeof err.message === "string" && err.message ? err.message : "upstream error",
-                typeof err.code === "string" ? err.code : undefined,
-              )
-              break
-            }
-            if (isRecord(json.usage)) usage = json.usage as ChatUsage
-            const choice = Array.isArray(json.choices) ? (json.choices[0] as Record<string, unknown>) : undefined
-            if (!choice) continue
-            const delta = isRecord(choice.delta) ? choice.delta : undefined
-            if (delta) {
-              const reasoning = delta.reasoning_content
-              if (typeof reasoning === "string" && reasoning) {
-                const cur = openReasoning()
-                cur.text += reasoning
-                emit("response.reasoning_summary_text.delta", {
-                  item_id: cur.id,
-                  output_index: cur.index,
-                  summary_index: 0,
-                  delta: reasoning,
-                })
+    try {
+      for await (const line of readSseLines(reader)) {
+        if (finished) break
+        if (!line.startsWith("data:")) continue
+        const data = line.slice(5).trim()
+        if (!data) continue
+        if (data === "[DONE]") {
+          finish()
+          break
+        }
+        let json: Record<string, unknown>
+        try {
+          json = JSON.parse(data) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        if (isRecord(json.error)) {
+          const err = json.error as { message?: unknown; code?: unknown }
+          fail(
+            typeof err.message === "string" && err.message ? err.message : "upstream error",
+            typeof err.code === "string" ? err.code : undefined,
+          )
+          break
+        }
+        if (isRecord(json.usage)) usage = json.usage as ChatUsage
+        const choice = Array.isArray(json.choices) ? (json.choices[0] as Record<string, unknown>) : undefined
+        if (!choice) continue
+        const delta = isRecord(choice.delta) ? choice.delta : undefined
+        if (delta) {
+          const reasoning = delta.reasoning_content
+          if (typeof reasoning === "string" && reasoning) {
+            const cur = openReasoning()
+            cur.text += reasoning
+            emit("response.reasoning_summary_text.delta", {
+              item_id: cur.id,
+              output_index: cur.index,
+              summary_index: 0,
+              delta: reasoning,
+            })
+          }
+          const content = delta.content
+          if (typeof content === "string" && content) {
+            const cur = openMessage()
+            cur.text += content
+            emit("response.output_text.delta", {
+              item_id: cur.id,
+              output_index: cur.index,
+              content_index: 0,
+              delta: content,
+            })
+          }
+          if (Array.isArray(delta.tool_calls)) {
+            for (const tc of delta.tool_calls) {
+              if (!isRecord(tc)) continue
+              const toolIndex = typeof tc.index === "number" ? tc.index : 0
+              const fn = isRecord(tc.function) ? tc.function : undefined
+              const thoughtSignature = thoughtSignatureOf(tc)
+              let entry = tools.get(toolIndex)
+              if (!entry) {
+                const name = typeof fn?.name === "string" ? fn.name : ""
+                const callId = typeof tc.id === "string" && tc.id ? tc.id : `call_${toolIndex}_${seq}`
+                openTool(toolIndex, callId, name, thoughtSignature)
+                entry = tools.get(toolIndex)!
+              } else if (!entry.thoughtSignature && thoughtSignature) {
+                entry.thoughtSignature = thoughtSignature
               }
-              const content = delta.content
-              if (typeof content === "string" && content) {
-                const cur = openMessage()
-                cur.text += content
-                emit("response.output_text.delta", {
-                  item_id: cur.id,
-                  output_index: cur.index,
-                  content_index: 0,
-                  delta: content,
-                })
-              }
-              if (Array.isArray(delta.tool_calls)) {
-                for (const tc of delta.tool_calls) {
-                  if (!isRecord(tc)) continue
-                  const toolIndex = typeof tc.index === "number" ? tc.index : 0
-                  const fn = isRecord(tc.function) ? tc.function : undefined
-                  const thoughtSignature = thoughtSignatureOf(tc)
-                  let entry = tools.get(toolIndex)
-                  if (!entry) {
-                    const name = typeof fn?.name === "string" ? fn.name : ""
-                    const callId = typeof tc.id === "string" && tc.id ? tc.id : `call_${toolIndex}_${seq}`
-                    openTool(toolIndex, callId, name, thoughtSignature)
-                    entry = tools.get(toolIndex)!
-                  } else if (!entry.thoughtSignature && thoughtSignature) {
-                    entry.thoughtSignature = thoughtSignature
-                  }
-                  const args = fn?.arguments
-                  if (typeof args === "string" && args) {
-                    if (entry.closed) continue
-                    entry.args += args
-                    if (!entry.custom && open?.kind === "tool" && open.toolIndex === toolIndex) {
-                      emit("response.function_call_arguments.delta", {
-                        item_id: entry.id,
-                        output_index: open.index,
-                        delta: args,
-                      })
-                    }
-                  }
+              const args = fn?.arguments
+              if (typeof args === "string" && args) {
+                if (entry.closed) continue
+                entry.args += args
+                if (!entry.custom && open?.kind === "tool" && open.toolIndex === toolIndex) {
+                  emit("response.function_call_arguments.delta", {
+                    item_id: entry.id,
+                    output_index: open.index,
+                    delta: args,
+                  })
                 }
               }
             }
-            if (typeof choice.finish_reason === "string" && choice.finish_reason) {
-              finishReason = choice.finish_reason
-            }
           }
-          if (finished) break
         }
-        // Clean EOF without [DONE]: end the turn properly rather than leave
-        // the client waiting for a completion event that never comes.
-        finish()
-        controller.close()
-      } catch (e) {
-        controller.error(e)
-      } finally {
-        try {
-          reader.releaseLock()
-        } catch {
-          /* */
+        if (typeof choice.finish_reason === "string" && choice.finish_reason) {
+          finishReason = choice.finish_reason
         }
       }
-    },
+      // Clean EOF without [DONE]: end the turn properly rather than leave
+      // the client waiting for a completion event that never comes.
+      finish()
+      controller.close()
+    } catch (e) {
+      controller.error(e)
+    } finally {
+      try {
+        reader.releaseLock()
+      } catch {
+        /* */
+      }
+    }
   })
 }
 
@@ -936,15 +927,12 @@ export function openaiToResponsesObject(
  * Rewrites dispatch's OpenAI-shaped in-stream error lines
  * (`data: {"error":…}` — pool exhaustion, upstream non-2xx, stall) into a
  * `response.failed` event, leaving every other byte of the relayed
- * Responses SSE untouched. Line-bounded: holds one partial line at most.
+ * Responses SSE untouched. Only error candidates are buffered, up to 64 KiB.
  */
 export function rewriteOpenAIErrorFramesToResponses(
   body: ReadableStream<Uint8Array>,
   model: string,
 ): ReadableStream<Uint8Array> {
-  const decoder = new TextDecoder()
-  const encoder = new TextEncoder()
-  let carry = ""
   const rewrite = (line: string): string => {
     if (!line.startsWith("data: {\"error\"") && !line.startsWith("data:{\"error\"")) return line
     try {
@@ -971,20 +959,7 @@ export function rewriteOpenAIErrorFramesToResponses(
       return line
     }
   }
-  return body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        carry += decoder.decode(chunk, { stream: true })
-        const lines = carry.split("\n")
-        carry = lines.pop() ?? ""
-        if (lines.length) controller.enqueue(encoder.encode(lines.map(rewrite).join("\n") + "\n"))
-      },
-      flush(controller) {
-        carry += decoder.decode()
-        if (carry) controller.enqueue(encoder.encode(rewrite(carry)))
-      },
-    }),
-  )
+  return rewriteSseErrors(body, rewrite)
 }
 
 export type CollectedResponses =
@@ -993,39 +968,30 @@ export type CollectedResponses =
 
 /** Non-stream native path: drain a Responses SSE and return its terminal `response` object, or the failure. */
 export async function collectResponsesSse(body: ReadableStream<Uint8Array>): Promise<CollectedResponses> {
-  const decoder = new TextDecoder()
   const reader = body.getReader()
-  let buffer = ""
   let response: Record<string, unknown> | null = null
   let error: string | null = null
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split("\n")
-    buffer = lines.pop() ?? ""
-    for (const line of lines) {
-      if (!line.startsWith("data:")) continue
-      const data = line.slice(5).trim()
-      if (!data || data === "[DONE]" || error) continue
-      try {
-        const ev = JSON.parse(data) as {
-          type?: string
-          response?: Record<string, unknown> & { error?: { message?: string } }
-          error?: { message?: string }
-          message?: string
-        }
-        if (ev.type === "response.failed" || ev.type === "error") {
-          error = ev.response?.error?.message || ev.error?.message || ev.message || "codex upstream failure"
-        } else if (
-          (ev.type === "response.completed" || ev.type === "response.incomplete" || ev.type === "response.done") &&
-          isRecord(ev.response)
-        ) {
-          response = ev.response
-        }
-      } catch {
-        /* */
+  for await (const line of readSseLines(reader)) {
+    if (!line.startsWith("data:")) continue
+    const data = line.slice(5).trim()
+    if (!data || data === "[DONE]" || error) continue
+    try {
+      const ev = JSON.parse(data) as {
+        type?: string
+        response?: Record<string, unknown> & { error?: { message?: string } }
+        error?: { message?: string }
+        message?: string
       }
+      if (ev.type === "response.failed" || ev.type === "error") {
+        error = ev.response?.error?.message || ev.error?.message || ev.message || "codex upstream failure"
+      } else if (
+        (ev.type === "response.completed" || ev.type === "response.incomplete" || ev.type === "response.done") &&
+        isRecord(ev.response)
+      ) {
+        response = ev.response
+      }
+    } catch {
+      /* */
     }
   }
   if (error) return { error: { message: error, type: "upstream_error" } }

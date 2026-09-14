@@ -1,3 +1,4 @@
+import { readSseLines } from "./sse_lines"
 /**
  * Shared Gemini `GenerateContent` wire shapes and the pieces both antigravity
  * conversion surfaces need (`gemini_openai.ts` for `/openai/v1`,
@@ -161,33 +162,10 @@ export async function* sseDataLines(
 ): AsyncGenerator<string> {
   // Callers that need to cancel the upstream fetch from a wrapper stream's
   // `cancel()` hook acquire the reader themselves and pass it in.
-  const reader = "getReader" in source ? source.getReader() : source
-  const decoder = new TextDecoder()
-  let carry = ""
-  try {
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      carry += decoder.decode(value, { stream: true })
-      const lines = carry.split("\n")
-      carry = lines.pop() ?? ""
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue
-        const data = line.slice(5).trim()
-        if (data) yield data
-      }
-    }
-    const tail = carry.trim()
-    if (tail.startsWith("data:")) {
-      const data = tail.slice(5).trim()
-      if (data) yield data
-    }
-  } finally {
-    try {
-      reader.releaseLock()
-    } catch {
-      /* already released */
-    }
+  for await (const line of readSseLines(source)) {
+    if (!line.startsWith("data:")) continue
+    const data = line.slice(5).trim()
+    if (data) yield data
   }
 }
 

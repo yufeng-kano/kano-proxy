@@ -1,3 +1,4 @@
+import { readProxyJson } from "../proxy/request_json"
 import { Hono } from "hono"
 import type { Context } from "hono"
 import { apiKeyAuth } from "../auth/api_key_auth"
@@ -106,7 +107,7 @@ export async function handleAnthropicMessages(c: Context<HonoEnv>): Promise<Resp
   const apiKeyId = c.get("apiKeyId")
   let body: Record<string, unknown>
   try {
-    body = await c.req.json()
+    body = await readProxyJson(c.req)
   } catch {
     return c.json(
       { type: "error", error: { type: "invalid_request_error", message: "Invalid JSON" } },
@@ -258,7 +259,7 @@ export async function handleAnthropicCountTokens(c: Context<HonoEnv>): Promise<R
   const apiKeyId = c.get("apiKeyId")
   let body: Record<string, unknown>
   try {
-    body = await c.req.json()
+    body = await readProxyJson(c.req)
   } catch {
     return c.json(
       { type: "error", error: { type: "invalid_request_error", message: "Invalid JSON" } },

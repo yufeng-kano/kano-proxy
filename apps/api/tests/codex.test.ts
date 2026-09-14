@@ -166,6 +166,13 @@ describe("codex upstream request headers", () => {
 })
 
 describe("buildCodexRequestBody", () => {
+  it.each(["low", "high", "auto", undefined])("preserves image detail %s without adding a default", async detail => {
+    const body = await buildCodexRequestBody({
+      upstreamModel: "test-model",
+      messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "https://example.com/image.png", ...(detail ? { detail } : {}) } }] }],
+    })
+    expect(body.input).toEqual([{ role: "user", content: [{ type: "input_image", image_url: "https://example.com/image.png", ...(detail ? { detail } : {}) }] }])
+  })
   it("always includes encrypted reasoning and only enables parallel tools when tools exist", async () => {
     const noTools = await buildCodexRequestBody({
       upstreamModel: "m",
