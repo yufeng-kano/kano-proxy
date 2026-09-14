@@ -239,6 +239,55 @@ describe("anthropicToGeminiRequest", () => {
     ])
   })
 
+  it("carries a signature past the text that preceded the tool call", () => {
+    // The response side flushes thinking before the pre-call text, so this
+    // is exactly what a think-then-say-then-call turn replays as.
+    const out = anthropicToGeminiRequest({
+      messages: [
+        { role: "user", content: "send it" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "plan" },
+            { type: "thinking", thinking: "", signature: "sig-call" },
+            { type: "text", text: "Sending now." },
+            { type: "tool_use", id: "toolu_1", name: "send_message", input: {} },
+          ],
+        },
+      ],
+    })
+    expect(out.request.contents[1]!.parts).toEqual([
+      { text: "plan", thought: true },
+      { text: "Sending now." },
+      {
+        functionCall: { id: "toolu_1", name: "send_message", args: {} },
+        thoughtSignature: "sig-call",
+      },
+    ])
+  })
+
+  it("does not borrow an earlier call's signature across that call", () => {
+    const out = anthropicToGeminiRequest({
+      messages: [
+        { role: "user", content: "run both" },
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "", signature: "sig-first" },
+            { type: "tool_use", id: "toolu_1", name: "a", input: {} },
+            { type: "text", text: "and" },
+            { type: "tool_use", id: "toolu_2", name: "b", input: {} },
+          ],
+        },
+      ],
+    })
+    expect(out.request.contents[1]!.parts).toEqual([
+      { functionCall: { id: "toolu_1", name: "a", args: {} }, thoughtSignature: "sig-first" },
+      { text: "and" },
+      { functionCall: { id: "toolu_2", name: "b", args: {} } },
+    ])
+  })
+
   it("signs parallel tool calls after streamed thinking", () => {
     // The shape a real Claude Code turn replays: the first call's signature
     // rides the textual thinking block, later calls get a signature-only one.

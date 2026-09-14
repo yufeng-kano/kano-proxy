@@ -278,14 +278,28 @@ export function anthropicToGeminiRequest(
         // dropped, a textual one stays as an unsigned thought part. Replaying
         // an unsigned functionCall makes Google reject the turn as missing
         // thought_signature in the functionCall part.
-        const preceding = rawParts[index - 1]
-        if (!part.thoughtSignature && preceding?.thought && preceding.thoughtSignature) {
-          part.thoughtSignature = preceding.thoughtSignature
-          // `preceding` is the same object already pushed into `parts`.
-          if (preceding.text === "") {
-            if (parts.at(-1) === preceding) parts.pop()
+        // The carrier is the nearest signed thought part before this call,
+        // not necessarily the adjacent one: the response flushes thinking
+        // before the text that preceded the call, so a think-then-say-then-
+        // call turn replays as [thought, thought(sig), text, tool_use].
+        // Never reach past an earlier call — its signature is its own.
+        let carrier: GeminiPart | undefined
+        for (let back = index - 1; back >= 0 && !part.thoughtSignature; back--) {
+          const candidate = rawParts[back]!
+          if (candidate.functionCall) break
+          if (candidate.thought && candidate.thoughtSignature) {
+            carrier = candidate
+            break
+          }
+        }
+        if (carrier) {
+          part.thoughtSignature = carrier.thoughtSignature
+          // `carrier` is the same object already pushed into `parts`.
+          if (carrier.text === "") {
+            const at = parts.indexOf(carrier)
+            if (at >= 0) parts.splice(at, 1)
           } else {
-            delete preceding.thoughtSignature
+            delete carrier.thoughtSignature
           }
         }
         if (part.functionCall.id) callNames.set(part.functionCall.id, part.functionCall.name)
