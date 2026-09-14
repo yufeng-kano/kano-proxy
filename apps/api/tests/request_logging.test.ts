@@ -18,9 +18,12 @@ const TOKEN_KEY = "test-token-encryption-key-not-secret"
 const API_KEY_PLAINTEXT = "sk-kano-proxy-test-client-key-0001"
 
 /** apiKeyAuth calls c.executionCtx.waitUntil — Hono throws without one supplied. */
+const pendingTasks = new Set<Promise<unknown>>()
 const execCtx = {
   waitUntil: (p: Promise<unknown>) => {
-    p.catch(() => {})
+    const task = p.catch(() => {})
+    pendingTasks.add(task)
+    void task.finally(() => pendingTasks.delete(task))
   },
   passThroughOnException: () => {},
 } as unknown as ExecutionContext
@@ -122,17 +125,18 @@ async function drain(body: ReadableStream<Uint8Array> | null): Promise<string> {
 }
 
 /**
- * Lets a stream-close deferred logRequest finish. The write is fired into
- * waitUntil at close and now awaits the pricing memo/KV lookup before its
- * INSERT, so it completes a few microtasks after `drain` resolves — one
- * macrotask turn covers it.
+ * Drain invocation-owned work, including account-usage refreshes, before a
+ * later test installs a different fetch stub. One timer tick is insufficient
+ * when CI schedules these operations across several macrotasks.
  */
 async function settleDeferredLog(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 0))
+  while (pendingTasks.size) await Promise.all([...pendingTasks])
 }
 
 const originalFetch = globalThis.fetch
-afterEach(() => {
+afterEach(async () => {
+  // Account-usage refreshes must finish under their own test's fetch stub.
+  await settleDeferredLog()
   globalThis.fetch = originalFetch
 })
 
