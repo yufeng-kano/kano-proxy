@@ -34,6 +34,16 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm build:site
 
+  server-test:
+    name: Server cargo test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
   cli-test:
     name: CLI cargo test
     runs-on: ubuntu-latest

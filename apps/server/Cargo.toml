@@ -1,0 +1,19 @@
+[package]
+name = "kano-proxy-server"
+version = "0.1.0"
+description = "Standalone kano-proxy server (docs/rust-server.md)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "kano-proxy-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+kano-proxy-core = { path = "../../crates/kano-proxy-core" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

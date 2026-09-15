@@ -30,3 +30,6 @@ apps/api/wrangler.production.toml
 # Python bytecode (CI helper scripts)
 __pycache__/
 *.pyc
+
+# Rust workspace build output (docs/rust-server.md)
+target/
