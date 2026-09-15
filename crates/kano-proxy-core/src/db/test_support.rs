@@ -53,9 +53,12 @@ pub async fn test_pool() -> Option<PgPool> {
         Ok(p) => p,
         Err(_) => return None,
     };
+    sweep_stale_test_databases(&admin).await;
     let mut bytes = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut bytes);
-    let name = format!("kano_test_{}", hex::encode(bytes));
+    // The name carries its creation time so a later run can drop what an aborted or
+    // finished run left behind without touching databases another live run is using.
+    let name = format!("kano_test_{}_{}", crate::app::now_ms() / 1000, hex::encode(bytes));
     sqlx::query(&format!("CREATE DATABASE {name}")).execute(&admin).await.expect("create test database");
     admin.close().await;
 
@@ -153,4 +156,29 @@ pub async fn insert_api_key_with_limit(
 ) -> (crate::db::keys::ApiKeyRow, String) {
     let created = crate::db::keys::create_key(pool, user_id, "limited key", Some(limits)).await.expect("insert api key");
     (created.row, created.plaintext)
+}
+
+/// Drops `kano_test_<secs>_<hex>` databases older than thirty minutes. Test pools are never
+/// dropped by their own test (there is no teardown hook), so without this the server
+/// accumulates thousands of databases and eventually exhausts its shared memory.
+async fn sweep_stale_test_databases(admin: &PgPool) {
+    let cutoff = crate::app::now_ms() / 1000 - 30 * 60;
+    let names: Vec<String> = match sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE 'kano_test_%'")
+        .fetch_all(admin)
+        .await
+    {
+        Ok(n) => n,
+        Err(_) => return,
+    };
+    for name in names {
+        let created: Option<i64> = name.strip_prefix("kano_test_").and_then(|rest| rest.split('_').next()).and_then(|s| s.parse().ok());
+        let stale = match created {
+            Some(secs) => secs < cutoff,
+            // Old naming scheme (no timestamp): always stale.
+            None => true,
+        };
+        if stale {
+            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).execute(admin).await;
+        }
+    }
 }

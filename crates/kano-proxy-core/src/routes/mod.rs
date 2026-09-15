@@ -32,7 +32,10 @@ pub fn core_routes(state: &AppState) -> Router<AppState> {
     let admin = Router::new()
         .nest("/api/auth", auth::routes())
         .nest("/api/keys", keys::routes())
+        .nest("/api/cli", cli::routes())
         .layer(crate::http::cors::admin_cors(&state.config().app_url))
         .layer(crate::http::cors::no_store_layer());
-    Router::new().merge(admin)
+    // `/agent/v1` is its own namespace beside `/api/*`: token-authenticated, never
+    // session, and no CORS — the CLI is the only caller (docs/cli.md § Server routes).
+    Router::new().merge(admin).nest("/agent/v1", agent::routes())
 }
