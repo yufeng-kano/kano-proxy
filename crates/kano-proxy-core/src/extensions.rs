@@ -33,10 +33,11 @@ pub struct ApiKeyIdentity {
 
 #[derive(Default)]
 pub struct Extensions {
-    /// Extra routes merged after the core routes (the TypeScript `registerRoutes`). Routes
-    /// here may shadow core paths only when registered on a path the core also serves and the
-    /// edition intends the override (the hosted `/api/changelog`).
+    /// Extra routes merged after the core routes (the TypeScript `registerRoutes`).
     pub routes: Option<Router<AppState>>,
+    /// Core paths the edition serves itself instead (the hosted `/api/changelog`); the core
+    /// skips mounting them. Only paths `routes::core_routes` knows how to skip take effect.
+    pub shadowed_paths: Vec<String>,
     pub request_policy: Option<Arc<dyn RequestPolicy>>,
     pub pool_extension: Option<Arc<dyn PoolExtension>>,
     /// Service name reported by `GET /health`; the core reports `kano-proxy`.

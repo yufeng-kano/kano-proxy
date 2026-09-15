@@ -36,6 +36,10 @@ pub struct Inner {
     pub pool_extension: Option<Arc<dyn PoolExtension>>,
     pub tunnels: TunnelRegistry,
     pub service_name: &'static str,
+    /// Whether request handling may spawn deferred work that reaches upstreams (the usage
+    /// refresh the Worker ran under `waitUntil`). Tests disable it so their mock transports
+    /// see exactly the requests the handler itself made.
+    pub background_work: bool,
 }
 
 /// Builder for [`AppState`]; production uses [`AppState::new`], tests swap the transport.
@@ -48,11 +52,12 @@ pub struct AppStateBuilder {
     pool_extension: Option<Arc<dyn PoolExtension>>,
     tunnels: Option<TunnelRegistry>,
     service_name: &'static str,
+    background_work: bool,
 }
 
 impl AppStateBuilder {
     pub fn new(config: CoreConfig, pool: PgPool) -> Self {
-        Self { config, pool, transport: None, cache: None, request_policy: None, pool_extension: None, tunnels: None, service_name: "kano-proxy" }
+        Self { config, pool, transport: None, cache: None, request_policy: None, pool_extension: None, tunnels: None, service_name: "kano-proxy", background_work: true }
     }
     pub fn transport(mut self, transport: Arc<dyn UpstreamTransport>) -> Self {
         self.transport = Some(transport);
@@ -79,6 +84,10 @@ impl AppStateBuilder {
         self.service_name = name;
         self
     }
+    pub fn background_work(mut self, enabled: bool) -> Self {
+        self.background_work = enabled;
+        self
+    }
     pub fn build(self) -> AppState {
         let timeout = Duration::from_millis(self.config.upstream_first_byte_timeout_ms);
         AppState {
@@ -91,6 +100,7 @@ impl AppStateBuilder {
                 pool_extension: self.pool_extension,
                 tunnels: self.tunnels.unwrap_or_default(),
                 service_name: self.service_name,
+                background_work: self.background_work,
             }),
         }
     }
@@ -129,6 +139,9 @@ impl AppState {
     pub fn tunnels(&self) -> &TunnelRegistry {
         &self.inner.tunnels
     }
+    pub fn background_work(&self) -> bool {
+        self.inner.background_work
+    }
     /// Epoch milliseconds now (`Date.now()`).
     pub fn now_ms(&self) -> i64 {
         now_ms()
@@ -148,7 +161,7 @@ async fn health(axum::extract::State(state): axum::extract::State<AppState>) -> 
 pub fn build_router(state: AppState, extensions: Extensions) -> Router {
     let health_cors = CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]);
     let mut router = Router::new().route("/health", get(health).layer(health_cors));
-    router = router.merge(crate::routes::core_routes(&state));
+    router = router.merge(crate::routes::core_routes(&state, &extensions.shadowed_paths));
     if let Some(extra) = extensions.routes {
         router = router.merge(extra);
     }

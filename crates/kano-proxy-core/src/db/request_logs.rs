@@ -116,6 +116,149 @@ pub async fn account_label(db: &PgPool, account_id: &str) -> Result<Option<Strin
     Ok(row.and_then(|(custom, label)| custom.filter(|s| !s.is_empty()).or(label.filter(|s| !s.is_empty()))))
 }
 
+
+// ---------------------------------------------------------------------------
+// Aggregate/list reads for the admin surfaces. Appended by the `/api/logs` and
+// `/api/usage/summary` route ports (apps/api/src/routes/logs.ts, usage.ts), which built
+// these statements inline against D1; the write path above is untouched.
+// ---------------------------------------------------------------------------
+
+/// The columns the Logs page reads. `api_key_id` never leaves the process — the route
+/// resolves it to a name and a removed flag (docs/admin-ui.md § Logs page).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RequestLogPageRow {
+    pub id: String,
+    pub created_at: String,
+    pub provider: String,
+    pub model: String,
+    pub group_name: Option<String>,
+    pub account_id: Option<String>,
+    pub api_key_id: Option<String>,
+    /// Name snapshots taken at write time; NULL on rows older than the column.
+    pub api_key_name: Option<String>,
+    pub account_label: Option<String>,
+    pub status_code: i32,
+    pub upstream_status: Option<i32>,
+    pub error_code: Option<String>,
+    pub latency_ms: i64,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<i64>,
+    pub cost: Option<f64>,
+}
+
+/// One page of the Logs list. `cursor` is `(created_at, id)` of the last row already shown;
+/// `limit` is the caller's limit **plus one**, so the route can tell there is a next page.
+#[derive(Debug, Clone)]
+pub struct LogPageQuery<'a> {
+    pub user_id: &'a str,
+    pub provider: Option<&'a str>,
+    pub errors_only: bool,
+    pub cursor: Option<(&'a str, &'a str)>,
+    pub limit: i64,
+}
+
+/// Newest first, `(created_at DESC, id DESC)` — the same total order the cursor encodes, so
+/// paging stays stable when many rows share a timestamp.
+pub async fn list_request_log_page(
+    db: &PgPool,
+    query: &LogPageQuery<'_>,
+) -> Result<Vec<RequestLogPageRow>, sqlx::Error> {
+    let mut sql = String::from(
+        "SELECT id, created_at, provider, model, group_name, account_id, api_key_id, api_key_name,
+                account_label, status_code, upstream_status, error_code, latency_ms, prompt_tokens,
+                completion_tokens, cache_read_input_tokens, cache_creation_input_tokens, cost
+         FROM request_logs
+         WHERE user_id = $1",
+    );
+    let mut n = 1;
+    if query.provider.is_some() {
+        n += 1;
+        sql.push_str(&format!(" AND provider = ${n}"));
+    }
+    if query.errors_only {
+        n += 1;
+        sql.push_str(&format!(" AND (error_code IS NOT NULL OR status_code >= ${n})"));
+    }
+    if query.cursor.is_some() {
+        sql.push_str(&format!(
+            " AND (created_at < ${} OR (created_at = ${} AND id < ${}))",
+            n + 1,
+            n + 2,
+            n + 3
+        ));
+        n += 3;
+    }
+    sql.push_str(&format!(" ORDER BY created_at DESC, id DESC LIMIT ${}", n + 1));
+
+    let mut q = sqlx::query_as::<_, RequestLogPageRow>(&sql).bind(query.user_id);
+    if let Some(provider) = query.provider {
+        q = q.bind(provider);
+    }
+    if query.errors_only {
+        q = q.bind(400_i32);
+    }
+    if let Some((created_at, id)) = query.cursor {
+        q = q.bind(created_at).bind(created_at).bind(id);
+    }
+    q.bind(query.limit).fetch_all(db).await
+}
+
+/// The columns `/api/usage/summary` aggregates over.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct UsageLogRow {
+    pub provider: String,
+    pub model: String,
+    pub status_code: i32,
+    pub latency_ms: i64,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<i64>,
+    pub cost: Option<f64>,
+    pub created_at: String,
+}
+
+/// One user's rows with `created_at` inside `[from, to]`, oldest first. The aggregation is
+/// done in the route (apps/api/src/routes/usage.ts `summarizeUsageRows`), not in SQL, so the
+/// same pure math is unit-testable without a database.
+pub async fn usage_rows_in_range(
+    db: &PgPool,
+    user_id: &str,
+    from: &str,
+    to: &str,
+) -> Result<Vec<UsageLogRow>, sqlx::Error> {
+    sqlx::query_as::<_, UsageLogRow>(
+        "SELECT provider, model, status_code, latency_ms, prompt_tokens, completion_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens, cost, created_at
+         FROM request_logs
+         WHERE user_id = $1 AND created_at >= $2 AND created_at <= $3
+         ORDER BY created_at ASC",
+    )
+    .bind(user_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await
+}
+
+/// Every account the viewer owns, as `(id, display label)` — the live names the Logs page
+/// prefers over the snapshot stored with the row. An id absent from this list is either
+/// borrowed through the pool extension or removed; the route decides which, and this function
+/// never reads another user's row.
+pub async fn viewer_account_labels(db: &PgPool, user_id: &str) -> Result<Vec<(String, Option<String>)>, sqlx::Error> {
+    let rows: Vec<(String, Option<String>, Option<String>)> =
+        sqlx::query_as("SELECT id, custom_label, label FROM upstream_accounts WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(db)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, custom, label)| (id, custom.filter(|s| !s.is_empty()).or(label.filter(|s| !s.is_empty()))))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

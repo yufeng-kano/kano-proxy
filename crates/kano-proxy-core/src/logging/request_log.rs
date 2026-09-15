@@ -129,7 +129,7 @@ mod tests {
     /// A price table in the cache, so `get_price_table` (memo → cache → None) finds one without
     /// any network.
     async fn seed_price_table(state: &AppState) {
-        crate::pricing::litellm::reset_pricing_for_tests();
+        crate::pricing::litellm::reset_pricing_for_tests(state.cache());
         let mut table = PriceTable::new();
         table.insert(
             "some-model".into(),

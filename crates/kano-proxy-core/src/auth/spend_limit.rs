@@ -106,10 +106,6 @@ const MEMO_TTL_MS: i64 = 60_000;
 /// each other's numbers by accident.
 static MEMO: Lazy<Mutex<HashMap<String, (i64, f64)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-pub fn reset_spend_memo_for_tests() {
-    MEMO.lock().expect("memo lock").clear();
-}
-
 /// Memoized [`key_window_spend`] for the request path. A `None` (storage failure) is never
 /// memoized, so the next request retries instead of caching an outage.
 pub async fn key_window_spend_cached(db: &PgPool, key: &SpendKey, now_ms: i64) -> Option<f64> {
@@ -237,7 +233,6 @@ mod tests {
         let now = crate::app::now_ms();
         // Dropping the table is the local stand-in for the D1 outage the TypeScript stubbed.
         sqlx::query("ALTER TABLE request_logs RENAME TO request_logs_hidden").execute(&pool).await.unwrap();
-        reset_spend_memo_for_tests();
         assert_eq!(key_window_spend(&pool, &SpendKey::from(&row), now).await, None);
         assert_eq!(key_window_spend_cached(&pool, &SpendKey::from(&row), now).await, None);
         sqlx::query("ALTER TABLE request_logs_hidden RENAME TO request_logs").execute(&pool).await.unwrap();
@@ -252,7 +247,6 @@ mod tests {
         let (row, _) = insert_api_key_with_limit(&pool, &user.id, limits).await;
         let now = crate::db::accounts::parse_iso_ms("2026-08-04T15:30:00.000Z").unwrap();
         let inside = "2026-08-04T00:00:01.000Z";
-        reset_spend_memo_for_tests();
         seed_spend(&pool, &user.id, &row.id, Some(1.0), "claude-code", inside).await;
         let spend_key = SpendKey::from(&row);
         assert_eq!(key_window_spend_cached(&pool, &spend_key, now).await, Some(1.0));

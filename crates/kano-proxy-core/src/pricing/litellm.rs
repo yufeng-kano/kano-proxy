@@ -81,22 +81,44 @@ struct MemoState {
     checked_at: i64,
 }
 
-static MEMO: Lazy<Mutex<MemoState>> = Lazy::new(|| Mutex::new(MemoState::default()));
+// One memo per cache instance (the app's KV replacement), so separately built apps — and
+// parallel tests — never observe each other's freshness state. Production has one cache.
+static MEMOS: Lazy<Mutex<std::collections::HashMap<u64, MemoState>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
-fn memo_state() -> std::sync::MutexGuard<'static, MemoState> {
-    MEMO.lock().unwrap_or_else(|e| e.into_inner())
+struct MemoGuard {
+    guard: std::sync::MutexGuard<'static, std::collections::HashMap<u64, MemoState>>,
+    id: u64,
 }
 
-/// Clears the process-wide memo (the TypeScript `_resetPricingForTests`).
-pub fn reset_pricing_for_tests() {
-    let mut state = memo_state();
+impl std::ops::Deref for MemoGuard {
+    type Target = MemoState;
+    fn deref(&self) -> &MemoState {
+        self.guard.get(&self.id).expect("memo entry exists")
+    }
+}
+
+impl std::ops::DerefMut for MemoGuard {
+    fn deref_mut(&mut self) -> &mut MemoState {
+        self.guard.get_mut(&self.id).expect("memo entry exists")
+    }
+}
+
+fn memo_state(cache: &Cache) -> MemoGuard {
+    let mut guard = MEMOS.lock().unwrap_or_else(|e| e.into_inner());
+    guard.entry(cache.id()).or_default();
+    MemoGuard { guard, id: cache.id() }
+}
+
+/// Clears this cache's memo (the TypeScript `_resetPricingForTests`).
+pub fn reset_pricing_for_tests(cache: &Cache) {
+    let mut state = memo_state(cache);
     state.memo = None;
     state.checked_at = 0;
 }
 
 /// Whether the loaded snapshot has separately persisted, source-tagged tables.
-pub fn has_source_tagged_price_tables() -> bool {
-    let state = memo_state();
+pub fn has_source_tagged_price_tables(cache: &Cache) -> bool {
+    let state = memo_state(cache);
     state.memo.as_ref().is_some_and(|m| m.litellm_table.is_some() && m.open_router_table.is_some())
 }
 
@@ -111,17 +133,17 @@ pub async fn get_price_table(state: &AppState) -> Option<PriceTable> {
 pub async fn get_price_table_with(cache: &Cache) -> Option<PriceTable> {
     let now = now_ms();
     {
-        let mut memo = memo_state();
+        let mut memo = memo_state(cache);
         if now - memo.checked_at < MEMO_RECHECK_MS {
             return memo.memo.as_ref().map(|m| m.table.clone());
         }
         memo.checked_at = now;
     }
     if let Some(snap) = cache.get_json::<CachedTable>(CACHE_KEY).await {
-        let mut memo = memo_state();
+        let mut memo = memo_state(cache);
         memo.memo = Some(snap);
     }
-    let memo = memo_state();
+    let memo = memo_state(cache);
     memo.memo.as_ref().map(|m| m.table.clone())
 }
 
@@ -164,7 +186,7 @@ pub async fn refresh_price_table_with(
     .await;
 
     let (litellm_table, open_router_table, previous_table) = {
-        let memo = memo_state();
+        let memo = memo_state(cache);
         // Legacy combined snapshots have no provenance: preserve their LiteLLM entries for
         // non-OpenRouter traffic only, and never treat any of their openrouter/<id> entries
         // as catalog prices. A source-tagged snapshot's `table` is just a merged read view
@@ -202,7 +224,7 @@ pub async fn refresh_price_table_with(
         open_router_table: Some(open_router_table),
     };
     {
-        let mut memo = memo_state();
+        let mut memo = memo_state(cache);
         memo.checked_at = snap.fetched_at;
         memo.memo = Some(snap.clone());
     }
@@ -218,7 +240,7 @@ pub async fn ensure_fresh_price_table(state: &AppState) {
 pub async fn ensure_fresh_price_table_with(transport: &dyn UpstreamTransport, cache: &Cache) {
     get_price_table_with(cache).await;
     {
-        let memo = memo_state();
+        let memo = memo_state(cache);
         let fresh = memo.memo.as_ref().is_some_and(|m| {
             m.litellm_table.is_some()
                 && m.open_router_table.is_some()
@@ -504,9 +526,7 @@ mod tests {
     static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     async fn guard() -> tokio::sync::MutexGuard<'static, ()> {
-        let g = SERIAL.lock().await;
-        reset_pricing_for_tests();
-        g
+        SERIAL.lock().await
     }
 
     fn openrouter_json() -> Value {
@@ -829,7 +849,7 @@ mod tests {
         let table = refresh_price_table_with(mock.as_ref(), &cache).await.expect("a table");
         assert!(table.contains_key("claude-opus-5"));
 
-        reset_pricing_for_tests(); // force the cache path
+        reset_pricing_for_tests(&cache); // force the cache path
         let from_cache = get_price_table_with(&cache).await.expect("a cached table");
         assert!(from_cache.contains_key("claude-opus-5"));
     }
@@ -941,7 +961,7 @@ mod tests {
         ensure_fresh_price_table_with(mock.as_ref(), &cache).await;
         assert_eq!(mock.requests().len(), 2);
 
-        reset_pricing_for_tests();
+        reset_pricing_for_tests(&cache);
         let refreshed = get_price_table_with(&cache).await.expect("a refreshed table");
         assert_eq!(
             resolve_model_price(&refreshed, "openrouter/z-ai/glm-5.2"),
@@ -979,6 +999,6 @@ mod tests {
         let table = refresh_price_table(&state).await.expect("a table");
         assert!(table.contains_key("claude-opus-5"));
         assert!(get_price_table(&state).await.is_some());
-        assert!(has_source_tagged_price_tables());
+        assert!(has_source_tagged_price_tables(state.cache()));
     }
 }

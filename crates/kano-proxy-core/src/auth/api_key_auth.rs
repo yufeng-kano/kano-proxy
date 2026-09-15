@@ -227,7 +227,6 @@ mod tests {
         let user = insert_user(state.pool(), "limit@example.com").await;
         let (key, plaintext) = insert_api_key_with_limit(state.pool(), &user.id, limits(2.0)).await;
         seed_spend(&state, &user.id, &key.id, 2.5).await;
-        crate::auth::spend_limit::reset_spend_memo_for_tests();
 
         let response = router(state.clone())
             .oneshot(post_request("/openai/v1/chat/completions", ("authorization", format!("Bearer {plaintext}"))))
@@ -269,7 +268,6 @@ mod tests {
         seed_spend(&state, &user.id, &limited.id, 5.0).await;
         let (unlimited, unlimited_key) = insert_api_key(state.pool(), &user.id).await;
         seed_spend(&state, &user.id, &unlimited.id, 10_000.0).await;
-        crate::auth::spend_limit::reset_spend_memo_for_tests();
 
         // GET stays free even when the key is over its limit.
         let response = router(state.clone())
@@ -299,7 +297,6 @@ mod tests {
         let user = insert_user(state.pool(), "open@example.com").await;
         let (key, plaintext) = insert_api_key_with_limit(state.pool(), &user.id, limits(1.0)).await;
         seed_spend(&state, &user.id, &key.id, 5.0).await;
-        crate::auth::spend_limit::reset_spend_memo_for_tests();
         sqlx::query("ALTER TABLE request_logs RENAME TO request_logs_hidden").execute(state.pool()).await.unwrap();
 
         let response = router(state.clone())

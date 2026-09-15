@@ -17,7 +17,12 @@ struct Entry {
 #[derive(Clone)]
 pub struct Cache {
     inner: Moka<String, Entry>,
+    /// Distinguishes cache instances, so per-process memos keyed on it never leak between
+    /// separately built apps (production has one cache; tests build many).
+    id: u64,
 }
+
+static NEXT_CACHE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Default for Cache {
     fn default() -> Self {
@@ -32,7 +37,11 @@ impl Cache {
             .weigher(|k: &String, e: &Entry| (k.len() + e.value.len()).min(u32::MAX as usize) as u32)
             .expire_after(TtlExpiry)
             .build();
-        Self { inner }
+        Self { inner, id: NEXT_CACHE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     pub async fn get(&self, key: &str) -> Option<Bytes> {

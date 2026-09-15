@@ -135,6 +135,9 @@ pub async fn refresh_account_usage_in_background(cx: &AppState, row: &AccountRow
 pub fn spawn_account_usage_refresh(cx: &AppState, row: AccountRow, adapter: DynAdapter) -> tokio::task::JoinHandle<()> {
     let cx = cx.clone();
     tokio::spawn(async move {
+        if !cx.background_work() {
+            return;
+        }
         refresh_account_usage_in_background(&cx, &row, adapter.as_ref()).await;
     })
 }
@@ -377,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn the_spawned_form_runs_the_same_refresh() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
-        let cx = test_state(pool.clone(), MockTransport::new());
+        let cx = AppState::builder(crate::db::test_support::test_config(), pool.clone()).transport(MockTransport::new()).background_work(true).build();
         let user = insert_user(&pool, "spawned@example.com").await;
         let row = insert_account(&pool, &user.id, "grok", &StoredCredential { access_token: "tok".into(), ..Default::default() }).await;
         let adapter = Arc::new(StubAdapter::new(usage(

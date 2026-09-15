@@ -67,7 +67,14 @@ pub async fn test_pool() -> Option<PgPool> {
         let (head, _) = base.rsplit_once('/').expect("database url has a path");
         format!("{head}/{name}")
     };
-    let pool = crate::db::connect(&url).await.expect("connect to the fresh test database");
+    // A few connections per test: the suite runs many tests in parallel against one server,
+    // and the production pool size (16) multiplied out would exhaust its connection limit.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(&url)
+        .await
+        .expect("connect to the fresh test database");
     crate::db::migrate(&pool, crate::db::CORE_MIGRATIONS_TABLE, crate::db::CORE_MIGRATIONS)
         .await
         .expect("core migrations apply");
@@ -105,8 +112,10 @@ pub fn test_config() -> CoreConfig {
 
 /// An [`AppState`] on `pool` whose only upstream is `transport` — no test ever reaches a real
 /// provider or Google (docs/testing.md).
+/// Background work is off, as the Worker tests' no-op `waitUntil` left it: the mock
+/// transport then sees exactly the handler's own requests.
 pub fn test_state(pool: PgPool, transport: Arc<dyn UpstreamTransport>) -> AppState {
-    AppState::builder(test_config(), pool).transport(transport).build()
+    AppState::builder(test_config(), pool).transport(transport).background_work(false).build()
 }
 
 /// The core router for `state`, with no edition extensions.
@@ -158,11 +167,11 @@ pub async fn insert_api_key_with_limit(
     (created.row, created.plaintext)
 }
 
-/// Drops `kano_test_<secs>_<hex>` databases older than thirty minutes. Test pools are never
+/// Drops `kano_test_<secs>_<hex>` databases older than ten minutes. Test pools are never
 /// dropped by their own test (there is no teardown hook), so without this the server
 /// accumulates thousands of databases and eventually exhausts its shared memory.
 async fn sweep_stale_test_databases(admin: &PgPool) {
-    let cutoff = crate::app::now_ms() / 1000 - 30 * 60;
+    let cutoff = crate::app::now_ms() / 1000 - 10 * 60;
     let names: Vec<String> = match sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE 'kano_test_%'")
         .fetch_all(admin)
         .await
