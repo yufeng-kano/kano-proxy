@@ -41,7 +41,9 @@ Existing data and clients must keep working without user action, so the crypto m
 
 ## Verification
 
-`cargo test`, `cargo clippy --all-targets` and `cargo build --release` at the repository root (the CLI keeps `cargo test` inside `apps/cli`). Route ports carry their TypeScript test cases across with stubbed upstreams; no real upstream traffic, as the cost rule requires.
+`cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo build --release` at the repository root (the CLI keeps `cargo test` inside `apps/cli`). Database-backed tests need `KANO_TEST_DATABASE_URL` (a throwaway Postgres; CI starts one) and skip without it; each test gets a fresh database and stale ones are swept. Route ports carry their TypeScript test cases across with stubbed upstreams; no real upstream traffic, as the cost rule requires.
+
+Status 2026-09-16: every module of `apps/api/src` is ported and 1295 tests pass (three consecutive full runs, clippy clean). The released CLI binary (1.0.0, built from `apps/cli`) was paired against the Rust server with the `--no-tui` flow, registered a local OpenAI-format provider, connected with `proto 1`, reported its models, and served `/openai/v1/models`, non-stream and streaming chat completions and an Anthropic-surface conversion through the tunnel with correct `request_logs` rows; the local target was a stub server, so no real upstream was called.
 
 ## Module map and porting conventions
 
