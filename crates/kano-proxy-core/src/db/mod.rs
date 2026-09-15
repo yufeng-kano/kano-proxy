@@ -1,6 +1,21 @@
-//! Postgres pool and the migration runner. Histories stay separate per edition, as
-//! with D1: the core records in `core_migrations`, an edition in its own table, and the
-//! core always applies first (docs/rust-server.md § Storage).
+//! Postgres pool, migration runner and per-table query modules (apps/api/src/db). Histories
+//! stay separate per edition, as with D1: the core records in `core_migrations`, an edition
+//! in its own table, and the core always applies first (docs/rust-server.md § Storage).
+
+pub mod accounts;
+pub mod cli;
+pub mod custom_providers;
+pub mod keys;
+pub mod model_groups;
+pub mod oauth_states;
+pub mod provider_settings;
+pub mod request_logs;
+pub mod sessions;
+pub mod test_support;
+pub mod users;
+
+pub use accounts::AccountRow;
+pub use custom_providers::CustomProviderRow;
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
@@ -16,7 +31,7 @@ pub const CORE_MIGRATIONS_TABLE: &str = "core_migrations";
 
 pub const CORE_MIGRATIONS: &[Migration] = &[Migration {
     name: "0001_core_baseline",
-    sql: include_str!("../migrations/0001_core_baseline.sql"),
+    sql: include_str!("../../migrations/0001_core_baseline.sql"),
 }];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -80,3 +95,4 @@ pub async fn pending(pool: &PgPool, table: &str, migrations: &[Migration]) -> an
         .await?;
     Ok(migrations.iter().filter(|m| !applied.iter().any(|a| a == m.name)).map(|m| m.name).collect())
 }
+

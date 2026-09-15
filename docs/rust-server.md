@@ -42,3 +42,31 @@ Existing data and clients must keep working without user action, so the crypto m
 ## Verification
 
 `cargo test`, `cargo clippy --all-targets` and `cargo build --release` at the repository root (the CLI keeps `cargo test` inside `apps/cli`). Route ports carry their TypeScript test cases across with stubbed upstreams; no real upstream traffic, as the cost rule requires.
+
+## Module map and porting conventions
+
+The crate mirrors `apps/api/src` one module per TypeScript file, same names in snake_case (`do/` becomes `tunnel/`). Every module's doc comment names its TypeScript source and the docs section that owns the behavior; the TypeScript file and its tests are the specification for the port, and the docs remain the contract. A port is complete when the vitest cases for that file exist as Rust tests and pass.
+
+Shared seams, owned by the crate root and not changed by module ports:
+
+| Seam | Rust | Replaces |
+|---|---|---|
+| Configuration | `CoreConfig` (`config.rs`) | Worker `Env` vars/secrets |
+| Storage | `AppState::pool()` (`sqlx` Postgres), `db::*` query modules, `db::test_support` for tests | D1, `env.DB` |
+| Outbound HTTP | `AppState::transport()` (`upstream::UpstreamTransport`; `MockTransport` in tests) | `fetch`, test `fetch` stubs |
+| Cache | `AppState::cache()` (`cache::Cache`, TTL per put) | KV `CACHE` |
+| Background work | `tokio::spawn` | `ctx.waitUntil` |
+| Errors | `http::ApiError` (surface-aware envelopes, `x-should-retry`, `Retry-After`) | per-route `c.json({error…})` |
+| Identity | `extensions::ApiKeyIdentity` in request extensions; session user likewise | `c.get("user")`, `apiKeyUserId` |
+| Extensions | `extensions::{RequestPolicy, Extensions}`, `pool::PoolExtension` | `ApplicationOptions` |
+| Adapters | `providers::ProviderAdapter` (`async_trait`), `AcquiredAccount`, `ChatCompletionRequest` | `providers/types.ts` |
+| Time | `app::now_ms()` (epoch ms), `ids::now_iso()` (JS `toISOString`) | `Date.now()`, `nowIso()` |
+| Responses | `axum::response::Response` with `Body::from_stream` for SSE; `bytes::Bytes` for bounded bodies | `Response`, `ReadableStream` |
+
+Conventions:
+
+- JSON is `serde_json::Value` with `preserve_order`, so object key order matches the JavaScript objects the tests and prefix hashes depend on. Typed structs are used where a shape is stable (rows, credentials, usage).
+- Streams are never buffered whole: converters operate line by line (`proxy::sse_lines`) and dispatch pipes with bounded backpressure, as `docs/api.md` § Streaming requires. Bounded reads (JSON error bodies, non-stream responses) go through `UpstreamResponse::bytes()`.
+- Route handlers return `Result<Response, ApiError>`; storage errors map to `500 internal_error`, never a panic. Logging goes through `tracing` and never includes prompts, completions, tokens or secrets (`docs/logging.md`).
+- Tests port the vitest cases for the same file: pure modules as `#[cfg(test)] mod tests`, HTTP surfaces through `axum::Router` + `tower::ServiceExt::oneshot`, upstreams through `MockTransport`, storage through `db::test_support::test_pool()` (a fresh database per test on `KANO_TEST_DATABASE_URL`, migrated with the baseline). No test reaches a real upstream.
+- Module ports touch only their own files. A needed change to a shared seam is reported, not made in place, so the seam stays consistent for every module.

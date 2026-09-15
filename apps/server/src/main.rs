@@ -11,6 +11,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool, db::CORE_MIGRATIONS_TABLE, db::CORE_MIGRATIONS).await?;
     let addr = config.listen_addr;
-    let state = AppState::new(config, pool, "kano-proxy");
-    serve(addr, build_router(state, Extensions::default())).await
+    let extensions = Extensions::default();
+    let state = AppState::new(config, pool, &extensions);
+    serve(addr, build_router(state, extensions)).await
 }
