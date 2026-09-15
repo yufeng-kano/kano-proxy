@@ -30,6 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 tiktoken-rs = "0.7"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["io"] }
+tokio-tungstenite = "0.29" # dev-only: the in-process WebSocket client the tunnel tests drive
 url = "2"
 anyhow = "1"
 axum = { version = "0.8", features = ["ws", "macros", "multipart", "query", "json"] }

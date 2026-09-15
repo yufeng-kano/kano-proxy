@@ -17,6 +17,7 @@ use crate::cache::Cache;
 use crate::config::CoreConfig;
 use crate::extensions::{Extensions, RequestPolicy};
 use crate::pool::PoolExtension;
+use crate::tunnel::registry::TunnelRegistry;
 use crate::upstream::{ReqwestTransport, UpstreamTransport};
 
 /// Everything a handler or adapter needs (the TypeScript `Env` plus per-app extension
@@ -33,6 +34,7 @@ pub struct Inner {
     pub cache: Cache,
     pub request_policy: Option<Arc<dyn RequestPolicy>>,
     pub pool_extension: Option<Arc<dyn PoolExtension>>,
+    pub tunnels: TunnelRegistry,
     pub service_name: &'static str,
 }
 
@@ -44,12 +46,13 @@ pub struct AppStateBuilder {
     cache: Option<Cache>,
     request_policy: Option<Arc<dyn RequestPolicy>>,
     pool_extension: Option<Arc<dyn PoolExtension>>,
+    tunnels: Option<TunnelRegistry>,
     service_name: &'static str,
 }
 
 impl AppStateBuilder {
     pub fn new(config: CoreConfig, pool: PgPool) -> Self {
-        Self { config, pool, transport: None, cache: None, request_policy: None, pool_extension: None, service_name: "kano-proxy" }
+        Self { config, pool, transport: None, cache: None, request_policy: None, pool_extension: None, tunnels: None, service_name: "kano-proxy" }
     }
     pub fn transport(mut self, transport: Arc<dyn UpstreamTransport>) -> Self {
         self.transport = Some(transport);
@@ -67,6 +70,11 @@ impl AppStateBuilder {
         self.pool_extension = ext;
         self
     }
+    /// The CLI tunnel registry; call its builders before passing it here (docs/cli.md).
+    pub fn tunnels(mut self, tunnels: TunnelRegistry) -> Self {
+        self.tunnels = Some(tunnels);
+        self
+    }
     pub fn service_name(mut self, name: &'static str) -> Self {
         self.service_name = name;
         self
@@ -81,6 +89,7 @@ impl AppStateBuilder {
                 pool: self.pool,
                 request_policy: self.request_policy,
                 pool_extension: self.pool_extension,
+                tunnels: self.tunnels.unwrap_or_default(),
                 service_name: self.service_name,
             }),
         }
@@ -116,6 +125,9 @@ impl AppState {
     }
     pub fn pool_extension(&self) -> Option<&Arc<dyn PoolExtension>> {
         self.inner.pool_extension.as_ref()
+    }
+    pub fn tunnels(&self) -> &TunnelRegistry {
+        &self.inner.tunnels
     }
     /// Epoch milliseconds now (`Date.now()`).
     pub fn now_ms(&self) -> i64 {

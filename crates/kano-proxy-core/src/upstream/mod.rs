@@ -4,4 +4,4 @@
 
 pub mod transport;
 
-pub use transport::{MockTransport, ReqwestTransport, UpstreamRequest, UpstreamResponse, UpstreamTransport};
+pub use transport::{ByteStream, MockTransport, ReqwestTransport, TransportError, UpstreamRequest, UpstreamResponse, UpstreamTransport};

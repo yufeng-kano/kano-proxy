@@ -24,6 +24,15 @@ use axum::Router;
 use crate::AppState;
 
 /// All core route groups, without state applied (so an edition can merge its own).
-pub fn core_routes(_state: &AppState) -> Router<AppState> {
-    Router::new()
+///
+/// `/api/*` carries the admin CORS rule from `application.ts`: cookie-credentialed and locked
+/// to `APP_URL`, so a page on any other origin gets no `Access-Control-Allow-Origin` header
+/// and cannot read an admin response. Admin JSON is `no-store` (`http::cors`).
+pub fn core_routes(state: &AppState) -> Router<AppState> {
+    let admin = Router::new()
+        .nest("/api/auth", auth::routes())
+        .nest("/api/keys", keys::routes())
+        .layer(crate::http::cors::admin_cors(&state.config().app_url))
+        .layer(crate::http::cors::no_store_layer());
+    Router::new().merge(admin)
 }
