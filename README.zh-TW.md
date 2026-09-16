@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Cloudflare-Workers_%26_Pages-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare" />
+  <img src="https://img.shields.io/badge/Rust-server-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/PostgreSQL-storage-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
   <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Anthropic API" />
   <img src="https://img.shields.io/badge/隱私-零對話日誌-059669?style=flat-square" alt="隱私" />
@@ -144,18 +145,25 @@ curl https://<your-domain>/openai/v1/chat/completions \
 
 ## 本地開發與部署
 
-全專案採用 Cloudflare Serverless 架構（Workers + Pages + D1 + KV）。
+一支 Rust server 加一個 PostgreSQL，用 docker compose 跑在自己的機器上。
 
 ```bash
-# 安裝依賴
-pnpm install
-
-# 執行測試與型別檢查
-pnpm test
-pnpm typecheck
+git clone https://github.com/yufeng-kano/kano-proxy.git
+cd kano-proxy
+cp .env.example .env     # 填好設定
+docker compose up -d --build
 ```
 
-詳細部署步驟、Cloudflare 資源配置及本機開發指引請參閱 [docs/deployment.md](./docs/deployment.md)。
+每個 app 各自安裝、各自建置，專案根目錄沒有共用的套件設定檔。
+
+```bash
+cd apps/server && cargo test --workspace
+cd apps/cli    && cargo test
+cd apps/web    && pnpm install && pnpm typecheck && pnpm build
+cd apps/docs   && pnpm install && pnpm build
+```
+
+設定、憑證、資料庫遷移與發版流程請參閱 [docs/deployment.md](./docs/deployment.md)，架構說明在 [docs/rust-server.md](./docs/rust-server.md)。
 
 ---
 

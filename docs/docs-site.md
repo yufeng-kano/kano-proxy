@@ -4,7 +4,7 @@ The one public, indexable surface of a kano-proxy instance. It tells an end user
 
 ## Why a separate static site
 
-The admin UI is a client-rendered SPA behind a login wall; search engines and link-preview scrapers see an empty shell. A docs site needs real HTML, a sidebar, and full-text search. VitePress gives all three as static files with no runtime, no D1, and no server rendering of the admin app. Nuxt was considered and rejected for now: it solves problems this site does not have (per-viewer content, one framework for the whole product) at the cost of a second runtime. Visual alignment with the admin UI is **not** a goal: the docs use the VitePress default theme as is (operator decision 2026-09-04).
+The admin UI is a client-rendered SPA behind a login wall; search engines and link-preview scrapers see an empty shell. A docs site needs real HTML, a sidebar, and full-text search. VitePress gives all three as static files with no runtime, no database, and no server rendering of the admin app. Nuxt was considered and rejected for now: it solves problems this site does not have (per-viewer content, one framework for the whole product) at the cost of a second runtime. Visual alignment with the admin UI is **not** a goal: the docs use the VitePress default theme as is (operator decision 2026-09-04).
 
 ## Location and build
 
@@ -18,9 +18,9 @@ The admin UI is a client-rendered SPA behind a login wall; search engines and li
 | `apps/docs/.vitepress/dist/` | Build output (gitignored, like every `dist/`) |
 | `apps/docs/.vitepress/cache/` | Dev cache (gitignored) |
 
-The docs are served from the **same Pages project and hostname** as the admin UI, under `/docs/`. Root `pnpm build:site` builds the web app, builds the docs, and copies the docs output into `apps/web/dist/docs/`; that single directory is what `wrangler pages deploy` uploads.
+The docs are served from the **same hostname** as the admin UI, under `/docs/`. Root `pnpm build:site` builds the web app, builds the docs, and copies the docs output into `apps/web/dist/docs/`; that single directory is what the web image serves.
 
-**No `_redirects` file.** The old `/* /index.html 200` rule is gone: Cloudflare applies `_redirects` rules before it looks for a matching asset ("Redirects are always followed, regardless of whether or not an asset matches the incoming request"), so that rule would have swallowed every docs page. The SPA fallback now comes from Pages' built-in behavior instead: a project with no top-level `404.html` is treated as a single-page app and unknown paths serve `/index.html`. VitePress emits its own `404.html` inside `/docs/`. Cloudflare documents both a per-directory `404.html` lookup and the SPA fallback, but not which one wins when a project has a nested `404.html` and no root one, so it was unknown which an unknown `/docs/` path would show. **Observed on the v4.7.0 deploy (2026-09-04): the per-directory lookup wins.** `/docs/no-such-page` returns HTTP 404 with the VitePress 404 page, while `/keys` still serves the SPA with `X-Robots-Tag: noindex`. A scoped `_redirects` rule cannot fix this either way, since redirects run before asset lookup and would swallow the real docs pages. Pages also serves `/docs/guide/x.html` at `/docs/guide/x`, which is what VitePress `cleanUrls` expects. Pinned versions: `vitepress@^1.6.4` (the 2.x line is still alpha as of 2026-09).
+**SPA fallback and the docs.** The static server answers an unknown path under `/docs/` with VitePress's own `404.html` and a real `404` status, and every other unknown path with the SPA's `index.html`. A blanket rewrite to `index.html` would swallow the documentation pages, so the two rules are separate and `/docs/` is matched first. Extensionless docs URLs (`/docs/guide/x`) resolve to `x.html`, which is what VitePress's own links expect.
 
 Checked by hand after the v4.7.0 deploy: `/docs/` and a docs page return 200 with their own titles, `/keys` returns the SPA shell with `noindex`, `/docs/no-such-page` returns 404. `/robots.txt` also carries `noindex` from the `/*` rule; harmless, since the file is read, not indexed.
 
@@ -67,7 +67,7 @@ Only `/docs/*` and `/login` are meant to be indexed. The admin routes render the
 
 | Piece | Where | What it does |
 |-------|-------|--------------|
-| `apps/web/public/robots.txt` | site root | Allows crawling, except the Worker-routed API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/agent/`): those never reach Pages, so `_headers` cannot mark them, and an API surface is what `Disallow` is for. No `Sitemap:` line because the directive needs an absolute URL and tracked files carry no hostname; submit `/docs/sitemap.xml` in Search Console instead |
+| `apps/web/public/robots.txt` | site root | Allows crawling, except the API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/agent/`): those never reach the static server, so `_headers` cannot mark them, and an API surface is what `Disallow` is for. No `Sitemap:` line because the directive needs an absolute URL and tracked files carry no hostname; submit `/docs/sitemap.xml` in Search Console instead |
 | `apps/web/public/_headers` | site root | `X-Robots-Tag: noindex` on `/*`, detached again (`! X-Robots-Tag`) for `/docs/*` and `/login`. A catch-all rather than a route list, because any unknown path also serves the SPA shell. Nothing to maintain when a route is added |
 | `apps/web/index.html` | SPA shell | `description`, Open Graph and Twitter card tags, so a shared link to the app gets a preview card. Copy repeats the login pitch from the message catalog; keep them in sync |
 | Router `afterEach` | SPA | Sets `document.title` to `<page> · <site name>` from the route's `titleKey` (a catalog key), so tabs and history are readable. `<html lang>` is already set by `setLocale()` ([i18n.md](./i18n.md)) |

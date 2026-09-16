@@ -16,23 +16,28 @@ permissions:
   contents: read
 
 jobs:
-  api-web:
-    name: API + web (test, typecheck, build)
+  web:
+    name: Web app and docs site
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
         with:
-          version: 9.15.0
+          version: 10.12.4
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm test
+        working-directory: apps/web
       - run: pnpm typecheck
-      - run: pnpm build:site
+        working-directory: apps/web
+      - run: pnpm build
+        working-directory: apps/web
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/docs
+      - run: pnpm build
+        working-directory: apps/docs
 
   server-test:
     name: Server cargo test
@@ -40,7 +45,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16
+        image: postgres:17
         env:
           POSTGRES_PASSWORD: test
         ports: ["55432:5432"]
@@ -51,8 +56,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/server
       - run: cargo test --workspace
+        working-directory: apps/server
       - run: cargo clippy --workspace --all-targets -- -D warnings
+        working-directory: apps/server
 
   cli-test:
     name: CLI cargo test
@@ -102,3 +111,13 @@ jobs:
             cargo build --release --target ${{ matrix.target }}
           fi
         shell: bash
+
+  images:
+    name: Deploy images
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -f deploy/server/Dockerfile -t kano-proxy-server:ci .
+      - run: docker build -f deploy/web/Dockerfile -t kano-proxy-web:ci .
+      - run: docker build -f deploy/caddy/Dockerfile -t kano-proxy-caddy:ci .

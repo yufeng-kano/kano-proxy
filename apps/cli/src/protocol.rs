@@ -1,5 +1,5 @@
 //! Agent tunnel wire protocol v1, CLI side (docs/cli.md § Wire protocol).
-//! Mirrors apps/api/src/do/protocol.ts: JSON text control frames, binary body
+//! The agent tunnel wire protocol (docs/cli.md): JSON text control frames, binary body
 //! frames `[u32 BE request id][u8 kind][chunk]`. Both ends enforce the bounds.
 
 use serde::{Deserialize, Serialize};

@@ -3,8 +3,8 @@
 ## Admin UI — Google OIDC
 
 - **No password login.**
-- Flow: Authorization Code + PKCE (preferred) or code flow suitable for Workers.
-- Session: HTTP-only cookie (`kano-proxy_session`), HMAC-signed with `SESSION_SECRET`. The `Secure` attribute is set whenever the request that issued it was HTTPS — `createSession(env, userId, { secure })` / `clearSessionCookie(secure)` take an explicit flag; the callback and logout routes derive it from that request's own `protocol` — so local HTTP dev still gets a working cookie while production (always HTTPS behind the Worker) gets `Secure`.
+- Flow: Authorization Code + PKCE.
+- Session: HTTP-only cookie (`kano-proxy_session`), HMAC-signed with `SESSION_SECRET`. The `Secure` attribute is set whenever the request that issued it was HTTPS — `createSession(env, userId, { secure })` / `clearSessionCookie(secure)` take an explicit flag; the callback and logout routes derive it from that request's own `protocol` — so local HTTP dev still gets a working cookie while production (always HTTPS) gets `Secure`.
 - Cookie signature verification (`loadSessionUser`) uses a constant-time comparison (`timingSafeEqual` in `auth/session.ts`), not `!==`, so response timing cannot be used to guess the HMAC byte-by-byte.
 - CSRF: state param on OAuth; same-site cookies for mutating `/api/*`.
 
@@ -34,7 +34,7 @@ GOOGLE_REDIRECT_URI=http://127.0.0.1:8787/api/auth/callback
 
 Anyone with a Google account may register on first login (insert user row).
 
-The callback redirects to the SPA root (`APP_URL/`), not to a specific page: landing on bare `/` is what lets the app restore the route the user was last on instead of dropping everyone on one fixed page (see [admin-ui.md](./admin-ui.md) § View preferences). Never leave the user on the Worker root — that is an API, not a UI.
+The callback redirects to the SPA root (`APP_URL/`), not to a specific page: landing on bare `/` is what lets the app restore the route the user was last on instead of dropping everyone on one fixed page (see [admin-ui.md](./admin-ui.md) § View preferences). Never leave the user on an API path — that is an API, not a UI.
 
 ## CORS
 
@@ -78,7 +78,7 @@ Secrets for public OAuth client ids may use well-known CLI defaults (override vi
 
 **Device code flow only.** The browser-redirect flow is gone: the public OpenAI client's only registered redirect is `http://localhost:1455/auth/callback` — unchangeable, and nothing listens there when the proxy runs the flow, so it left the user copying a dead URL out of the address bar. Device code needs no redirect the proxy can serve, so the dialog matches Grok's: show a code, wait.
 
-- Endpoints (OpenAI-specific, **not** RFC 8628 `/oauth/device/code` — that path sits behind a Cloudflare challenge):
+- Endpoints (OpenAI-specific, **not** RFC 8628 `/oauth/device/code` — that path sits behind a bot challenge):
   - start: `POST https://auth.openai.com/api/accounts/deviceauth/usercode`
   - poll: `POST https://auth.openai.com/api/accounts/deviceauth/token`
   - exchange: `POST https://auth.openai.com/oauth/token`
@@ -139,7 +139,7 @@ The endpoints themselves are undocumented and may change or be closed without no
 
 `PATCH /api/providers/:provider/accounts/:id` renames an account: body `{custom_label: string | null}`, trimmed, max 64 chars, `null`/`""` clears it and falls back to the upstream identity. It touches **only** `custom_label` — never tokens, priority, or the upstream-synced `label` (see [database.md](./database.md)) — and returns `{ok: true, custom_label}`. 404 when the id is not the caller's — `403 {"error":"forbidden"}` instead when it is a row *shared with* the caller by a cloud edition's pool extension ([cloud-edition.md](./cloud-edition.md) § Pool extension), which also applies to unpause and delete. Promote is the exception: on a shared id it delegates to the extension's `setSharedPriority`, reordering the row inside the caller's own merged pool (`{ok: true}`, or 404 if the extension refuses).
 
-`POST /api/providers/:provider/accounts/:id/unpause` nulls the D1 `bench_until`/`bench_reason` columns for that account so it is eligible for acquire again ([providers.md](./providers.md) § Routing module "Manual unpause"). Session required. Returns `{ok: true}`. Idempotent when the account is not currently benched. 404 when the id is not the caller's **or** the row's `provider` does not match the path (403 for a shared row, as above). Does not rewrite usage snapshots, tokens, priority, or labels — a still-exhausted usage window keeps the account unusable for routing until `resets_at`. The next bench-status upstream response re-benches it.
+`POST /api/providers/:provider/accounts/:id/unpause` nulls the `bench_until`/`bench_reason` columns for that account so it is eligible for acquire again ([providers.md](./providers.md) § Routing module "Manual unpause"). Session required. Returns `{ok: true}`. Idempotent when the account is not currently benched. 404 when the id is not the caller's **or** the row's `provider` does not match the path (403 for a shared row, as above). Does not rewrite usage snapshots, tokens, priority, or labels — a still-exhausted usage window keeps the account unusable for routing until `resets_at`. The next bench-status upstream response re-benches it.
 
 `PATCH /api/providers/:provider` sets the pool's routing strategy: body `{strategy}` — `ordered` is the only accepted value today, anything else is `400` ([providers.md](./providers.md) § Routing module). Upserts the `provider_settings` row ([database.md](./database.md)) and returns `{ok: true, strategy}`. The current value rides on `GET /api/providers/:provider/accounts` as a top-level `strategy` field (defaulting to `ordered` when no row exists) — no separate read route.
 
@@ -155,7 +155,7 @@ Custom providers (BYO OpenAI-/Anthropic-compatible endpoint — see [providers.m
 | POST | `/api/custom-providers` | Create — body `{name, slug, format, base_url, api_key, count_tokens_url?, models_mode?, manual_models?}`; inserts the provider row plus one `upstream_accounts` row |
 | PUT | `/api/custom-providers/:id` | Update — body `{name?, base_url?, api_key?, count_tokens_url?, models_mode?, manual_models?}`; `slug`/`format` are immutable (`400` if a differing value is sent); omitted or empty `api_key` keeps the stored key; a non-empty `api_key` re-encrypts and replaces it in place (same account row) |
 | DELETE | `/api/custom-providers/:id` | Deletes the provider row and all its `upstream_accounts` rows (code-level cascade), then best-effort clears their bench keys |
-| POST | `/api/custom-providers/:id/unpause` | Nulls the D1 bench columns on every `upstream_accounts` row of that endpoint (one key today). `{ok: true}`. Idempotent when none are benched. 404 if the id is not the caller's. Same contract as the builtin unpause: does not touch the stored key, and the next bench-status upstream response re-benches |
+| POST | `/api/custom-providers/:id/unpause` | Nulls the bench columns on every `upstream_accounts` row of that endpoint (one key today). `{ok: true}`. Idempotent when none are benched. 404 if the id is not the caller's. Same contract as the builtin unpause: does not touch the stored key, and the next bench-status upstream response re-benches |
 | PUT | `/api/custom-providers/order` | Reorder for display — body `{ids: string[]}` listing **every** one of the user's custom provider ids exactly once, in the desired order; renumbers `sort_order` densely in one transaction. `400` on a missing/extra/duplicate/foreign id (no partial write). Display only — routing is unaffected |
 | POST | `/api/custom-providers/test` | Connectivity probe — body either `{format, base_url, api_key}` (pre-save) or `{id, base_url?}` (saved provider, uses its stored key); always `200` with `{ok, ...}` — see [providers.md](./providers.md) for the outcome mapping |
 
@@ -176,7 +176,7 @@ The CLI-provider subsystem ([cli.md](./cli.md)) has two auth surfaces:
 |--------|------|-------|
 | GET | `/api/cli/devices` | The user's devices: `{id, name, last_seen_at, created_at, revoked_at}` |
 | POST | `/api/cli/devices/:id/revoke` | Sets `revoked_at` (idempotent). Next refresh fails; live sockets die at access-token expiry ([cli.md](./cli.md)) |
-| GET | `/api/cli/providers` | The user's CLI providers + live connection state (AgentTunnel DO read-through): `{id, slug, name, format, connected, account_id, models, model_filter, models_updated_at, device_name, …}` — `account_id` is the internal pool-state row the Groups picker pins to ([admin-ui.md](./admin-ui.md) § Groups page) |
+| GET | `/api/cli/providers` | The user's CLI providers + live connection state (read from the tunnel registry): `{id, slug, name, format, connected, account_id, models, model_filter, models_updated_at, device_name, …}` — `account_id` is the internal pool-state row the Groups picker pins to ([admin-ui.md](./admin-ui.md) § Groups page) |
 | PATCH | `/api/cli/providers/:id` | Rename display name — body `{name}` (1–64 chars). Slug/format immutable |
 | DELETE | `/api/cli/providers/:id` | Delete the provider + its internal account row, force-close any live socket |
 | GET | `/api/cli/login-requests/:id` | Pending login for the authorize view: `{device_name, expires_at, approved}`. 404 when unknown/expired |
@@ -193,12 +193,12 @@ Virtual endpoints — a slug under `/g/`, plus per-group models each mapping a n
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/model-groups` | List the user's groups: `{id, name, slug, strategy, models, created_at, updated_at}` each. `models` is the group's model list; each model is `{name, targets, routing}` where `targets` is the priority-ordered array of `{model, account_id, account_label}` — `account_id` `null` for an unpinned (whole-pool) target; `account_label` is resolved at read time for display (`custom_label` \|\| upstream `label`, `null` when unpinned or the account no longer exists) and is **never** stored. `routing` is that model's current-route indicator ([providers.md](./providers.md) § Routing module): `{current_target_index, targets: [{usable, reason, unusable_until}]}`, aligned by index with its `targets`. Computed at read time from **stored state only** (D1 bench columns + usage snapshots — the same facts dispatch uses; no upstream calls). `current_target_index` is the target the ordered walk would dispatch right now (`null` when none is usable); per-target `reason` is `null` when usable, else `"benched"` \| `"limit"` (bench wins when both apply and expires later) \| `"unresolved"` (prefix no longer resolves) \| `"no_account"` (pinned account gone, or unpinned pool empty); `unusable_until` is an ISO timestamp or `null` when unknown. Unpinned targets are usable when the provider pool has ≥1 usable account |
+| GET | `/api/model-groups` | List the user's groups: `{id, name, slug, strategy, models, created_at, updated_at}` each. `models` is the group's model list; each model is `{name, targets, routing}` where `targets` is the priority-ordered array of `{model, account_id, account_label}` — `account_id` `null` for an unpinned (whole-pool) target; `account_label` is resolved at read time for display (`custom_label` \|\| upstream `label`, `null` when unpinned or the account no longer exists) and is **never** stored. `routing` is that model's current-route indicator ([providers.md](./providers.md) § Routing module): `{current_target_index, targets: [{usable, reason, unusable_until}]}`, aligned by index with its `targets`. Computed at read time from **stored state only** (bench columns + usage snapshots — the same facts dispatch uses; no upstream calls). `current_target_index` is the target the ordered walk would dispatch right now (`null` when none is usable); per-target `reason` is `null` when usable, else `"benched"` \| `"limit"` (bench wins when both apply and expires later) \| `"unresolved"` (prefix no longer resolves) \| `"no_account"` (pinned account gone, or unpinned pool empty); `unusable_until` is an ISO timestamp or `null` when unknown. Unpinned targets are usable when the provider pool has ≥1 usable account |
 | POST | `/api/model-groups` | Create — body `{name, slug, models, strategy?}` (`strategy` defaults to `ordered`; only `ordered` accepted today — [providers.md](./providers.md) § Routing module). `models` is an array of `{name, targets}`; each target is `{model, account_id?}` or a bare `"provider/model"` string (shorthand for `{model}`). Validation: `name` trimmed, 1–64 chars, free text, unique per user; `slug` matches the custom-provider slug shape (`^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`), unique across the caller's groups; `models` 1–20 entries, each `name` trimmed, 1–128 chars, no whitespace (`/` allowed), no duplicate names in the payload (group-scoped uniqueness — other groups may reuse a name); per model `targets` 1–20 entries, each `model` parses as `provider/model` with a prefix that is a builtin or one of the caller's custom slugs; `account_id`, when present, must be an `upstream_accounts` row owned by the caller whose `provider` matches the target's prefix; no duplicate `model`+`account_id` pairs within one model's list; max 50 groups per user. `400` with a field-level message on any violation |
 | PUT | `/api/model-groups/:id` | Update — body `{name?, slug?, models?, strategy?}`; `models`, when present, replaces the whole set (no per-entry patching — order is the semantics for targets, and the model set is saved as one unit). Changing `slug` moves the endpoint URL immediately. Same validation as create. 404 when the id is not the caller's |
 | DELETE | `/api/model-groups/:id` | Delete (model rows cascade). Requests already in flight finish; the next request to `/g/<slug>/…` is a 404 |
 
 ## Encryption
 
-- `TOKEN_ENCRYPTION_KEY`: 32-byte key (base64) for AES-GCM of refresh/access tokens in D1.
+- `TOKEN_ENCRYPTION_KEY`: 32-byte key (base64) for AES-GCM of refresh/access tokens at rest.
 - Never return raw upstream tokens to the browser.

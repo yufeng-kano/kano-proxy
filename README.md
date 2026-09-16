@@ -9,7 +9,8 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Cloudflare-Workers_%26_Pages-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare" />
+  <img src="https://img.shields.io/badge/Rust-server-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/PostgreSQL-storage-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
   <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Anthropic API" />
   <img src="https://img.shields.io/badge/Privacy-Zero_Prompt_Logging-059669?style=flat-square" alt="Privacy" />
@@ -144,21 +145,25 @@ curl https://<your-domain>/openai/v1/chat/completions \
 
 ## Self-Hosting & Development
 
-`main` runs on Cloudflare (Workers + Pages + D1 + KV). The `rust` branch moves the server to a Rust binary with PostgreSQL, run with docker compose; see [docs/rust-server.md](./docs/rust-server.md).
+A Rust server and a PostgreSQL database, run with docker compose on a machine you control.
+
+```bash
+git clone https://github.com/yufeng-kano/kano-proxy.git
+cd kano-proxy
+cp .env.example .env     # fill it in
+docker compose up -d --build
+```
 
 Each app installs and builds on its own — there is no repository-wide package manifest.
 
 ```bash
-# the server and the CLI
-cargo test --workspace
-cd apps/cli && cargo test
-
-# the web app and the docs site
-cd apps/web  && pnpm install && pnpm typecheck && pnpm build
-cd apps/docs && pnpm install && pnpm build
+cd apps/server && cargo test --workspace
+cd apps/cli    && cargo test
+cd apps/web    && pnpm install && pnpm typecheck && pnpm build
+cd apps/docs   && pnpm install && pnpm build
 ```
 
-Deployment instructions and local development guides are in [docs/deployment.md](./docs/deployment.md) for the Cloudflare edition and [docs/rust-server.md](./docs/rust-server.md) for the Rust one.
+Configuration, TLS, migrations and releases are in [docs/deployment.md](./docs/deployment.md); the architecture is in [docs/rust-server.md](./docs/rust-server.md).
 
 ---
 

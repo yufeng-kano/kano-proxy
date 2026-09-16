@@ -1,0 +1,29 @@
+# DOMAIN and ACME_EMAIL come from the environment of the caddy service.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	# The API owns these paths; everything else is the web app's.
+	@api path /api/* /openai/* /anthropic/* /g/* /agent/* /health
+	handle @api {
+		# Model streams and the agent tunnel are long-lived: never buffer the response,
+		# and a ten-minute idle gap is normal on a quiet stream.
+		reverse_proxy server:8787 {
+			flush_interval -1
+			transport http {
+				read_timeout 30m
+				write_timeout 30m
+				dial_timeout 10s
+			}
+		}
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+
+	log {
+		output stdout
+	}
+}

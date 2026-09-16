@@ -1,9 +1,5 @@
 node_modules/
 dist/
-.wrangler/
-.dev.vars
-.dev.vars.*
-!.dev.vars.example
 .env
 .env.local
 .env.*.local
@@ -13,17 +9,12 @@ coverage/
 .DS_Store
 apps/web/dist/
 apps/docs/.vitepress/cache/
-apps/api/.wrangler/
 *.log
 .turbo/
 
 # Local agent / operator private data (never open-source)
 # Template: .local.example/  — copy to .local/ and fill in.
 .local/
-
-# Operator production Wrangler config (real D1/KV ids + production host vars)
-# Template: apps/api/wrangler.production.example.toml
-apps/api/wrangler.production.toml
 
 .zed/
 
@@ -32,4 +23,8 @@ __pycache__/
 *.pyc
 
 # Rust workspace build output (docs/rust-server.md)
-target/
+apps/server/target/
+apps/cli/target/
+
+# Runtime data mounted into the compose stack (certificates, database files)
+/data/

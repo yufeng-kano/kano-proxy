@@ -1,5 +1,5 @@
 ---
-description: kano-proxy project conventions (docs, Cloudflare stack, LLM proxy)
+description: kano-proxy project conventions (docs, self-hosted Rust stack, LLM proxy)
 alwaysApply: true
 ---
 
@@ -15,26 +15,26 @@ Canonical project rules (`.rule`; Cursor / AGENTS.md / CLAUDE.md symlink here). 
 
 ## Secrets and private context
 
-- Never commit secrets (API tokens, upstream LLM keys, OAuth client secrets, session/cookie secrets). Real values live in `.dev.vars` / `wrangler secret` / CI secret stores; tracked files and docs use placeholders like `<upstream-api-key>`. Never print secret values — only whether one exists. If unsure whether a value is secret, treat it as secret.
+- Never commit secrets (API tokens, upstream LLM keys, OAuth client secrets, session/cookie secrets). Real values live in the server's gitignored `.env` or a CI secret store; tracked files and docs use placeholders like `<upstream-api-key>`. Never print secret values — only whether one exists. If unsure whether a value is secret, treat it as secret.
 - `.local/` (gitignored; committed template `.local.example/`) holds private ops context: real DNS, hostnames, route bind order, deploy notes. Read it before deploy/DNS/production work and prefer its facts; never copy its contents into tracked files, commits, or PR text. No tokens in `.local/` either. If it's missing, use placeholders and ask the user for private values.
-- Committed `apps/api/wrangler.toml` keeps placeholder D1/KV ids and local `APP_URL`; real production ids/hosts go only in gitignored `wrangler.production.toml`. Deploy/migrate/secret with `--config wrangler.production.toml`.
+- Tracked examples (`apps/web/.env.example` and the docs) keep placeholder hosts and ids; real production hosts and secrets live only in the server's gitignored `.env`.
 
 ## Stack
 
-- Cloudflare by default: Workers (API/proxy, TypeScript), Pages (Vue 3 + Vite + TypeScript web), D1, KV, Durable Objects only if coordination requires. Single approved exception: Codex egress relay on Cloud Run (`docs/codex-relay.md`). Any other non-Cloudflare service or new primary language requires a docs rationale first.
+- Rust (axum, tokio, sqlx) for the server, Vue 3 + Vite + TypeScript for the web app, PostgreSQL for storage, run with docker compose on a machine you control. No managed platform is assumed and no external service sits in the request path. A new primary language or an added infrastructure dependency requires a docs rationale first (`docs/rust-server.md` is the one for this stack).
 - Environments: local + production only. No staging without explicit user approval and a docs update.
-- D1 schema changes only via Wrangler migrations under `apps/api/migrations/`, docs (`docs/database.md`) updated first; never edit production schema in the Dashboard.
-- Monorepo layout and module boundaries: `docs/project-structure.md`. Domains, DNS, Wrangler, release CI: `docs/deployment.md` (tracked docs keep placeholders; real DNS lives in `.local/dns.md`).
+- Schema changes only via new migration files under `apps/server/crates/kano-proxy-core/migrations/`, docs (`docs/database.md`) updated first; applied migrations are immutable and nothing edits a production schema by hand.
+- Every app owns its own manifest, lockfile and Dockerfile; nothing language-specific belongs at the repository root, and the release version lives in `VERSION`. Layout and module boundaries: `docs/project-structure.md`. Domains, configuration and releases: `docs/deployment.md` (tracked docs keep placeholders; real DNS lives in `.local/dns.md`).
 - Cloud split: official production deployment moves to private `kano-proxy-cloud`; public production deployment is disabled during the transition. Public verification and independent CLI releases stay enabled. See `docs/cloud-edition.md`.
-- Core boundaries: `apps/api/src/core.ts` and `apps/web/src/core.ts` are the supported edition entry points. Keep standalone entry points runnable. Public code never imports private cloud code; Paddle billing, hosted request allowances and cloud-only pages belong in the private repository. Each repository owns its own `.rule` and instruction symlinks.
-- Releases: a public `vX.Y.Z` Release does not deploy the official website. Official production deploys are triggered only by Releases in private `kano-proxy-cloud`, never pushes or PRs. Public SemVer tags must match root `package.json` `"version"`, bumped + committed + pushed before tagging; default bump is minor. The CLI is versioned **independently**: tag `cli-vX.Y.Z` must match `apps/cli/Cargo.toml` `version`, published with `--latest=false`, and never triggers a Worker deploy. Full flow: `docs/deployment.md`.
+- Core boundaries: the `kano-proxy-core` crate's extension traits and `apps/web/src/core.ts` are the supported edition entry points. Keep standalone entry points runnable. Public code never imports private cloud code; Paddle billing, hosted request allowances and cloud-only pages belong in the private repository. Each repository owns its own `.rule` and instruction symlinks.
+- Releases: a public `vX.Y.Z` Release does not deploy the official website. Official production deploys are triggered only by Releases in private `kano-proxy-cloud`, never pushes or PRs. Public SemVer tags must match `VERSION`, bumped + committed + pushed before tagging; default bump is minor. The CLI is versioned **independently**: tag `cli-vX.Y.Z` must match `apps/cli/Cargo.toml` `version`, published with `--latest=false`, and never triggers a server deploy. Full flow: `docs/deployment.md`.
 - Release notes are **hand-written** and passed inline via `--notes` (no scratch file); never publish with `--generate-notes` alone. It summarizes merged PRs, this repo lands direct commits, so it emits a bare compare link — and those notes are the only thing the in-app `/changelog` page has to show. Write for the operator, not the diff.
 
 ## Proxy guardrails
 
 - Preserve end-to-end streaming (SSE/chunked); never buffer a whole upstream stream in memory.
 - Clients authenticate with project-issued API keys or sessions — upstream provider keys stay in secrets and never reach clients.
-- Rate limits and usage accounting fail closed for abuse but must not crash the Worker or wipe unrelated state.
+- Rate limits and usage accounting fail closed for abuse but must not crash the server or wipe unrelated state.
 - Do not log full prompts, completions, or secrets by default (`docs/logging.md`).
 - No password login — admin sign-in is Google OIDC; API keys stored hashed at rest (`docs/auth.md`). API behavior, failover, pools: `docs/api.md`, `docs/providers.md`. Admin UI cache-first rules: `docs/admin-ui.md`.
 
@@ -42,12 +42,12 @@ Canonical project rules (`.rule`; Cursor / AGENTS.md / CLAUDE.md symlink here). 
 
 - **Never** debug, reproduce, bisect, or benchmark by sending real requests through the deployed proxy or directly to paid upstreams; every such request bills the operator, and large-context probes against premium models cost dollars each. Verification is unit tests with stubbed `fetch`.
 - A live smoke test needs the user's explicit per-instance approval and must be minimal: tiny prompt, `max_tokens` ≤ 32, no long-context/`[1M]` variants, never in a loop or size sweep.
-- For production failures use free evidence first: `request_logs` in D1 (`wrangler d1 execute --remote`), `wrangler tail`, Cloudflare dashboards. Do not generate traffic to make logs appear.
+- For production failures use free evidence first: the `request_logs` table and the server's own logs. Do not generate traffic to make logs appear.
 - Treat paid upstream credit balances like production data: exhausting them is an outage.
 
 ## Real data only
 
-- Never fabricate product data (models, accounts, usage, keys, profiles). Frontend renders only what the backend returns (empty is fine); backend never hard-codes model ids, emails, or usage as if live — source from upstream APIs or D1 rows created by real flows. If a live source is missing, return empty/`available: false` and document the gap.
+- Never fabricate product data (models, accounts, usage, keys, profiles). Frontend renders only what the backend returns (empty is fine); backend never hard-codes model ids, emails, or usage as if live — source from upstream APIs or database rows created by real flows. If a live source is missing, return empty/`available: false` and document the gap.
 - Allowed exceptions: unit-test fixtures/mocks in `tests/`, docs examples with explicit placeholders, pure UI chrome. Treat existing hard-coded product lists as debt: replace when touching that area.
 
 ## Misc

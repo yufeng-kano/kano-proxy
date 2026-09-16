@@ -36,7 +36,7 @@ A request that fails before any upstream call is logged only when the caller **a
 
 A streamed request's row is written once, deferred to stream close (`waitUntil`) — see "Token usage capture" below. Two independent fields describe how it ended:
 
-- **Eager commit** (`stream: true`): the Worker returns `200` + SSE headers **before** acquire / upstream, so `status_code` is always `200` for these rows — a failure discovered after commit (no account, pool exhausted, upstream 4xx/5xx, idle stall, client abort) cannot change the HTTP status. The failure mode lives in `error_code` (and the in-stream error frame the client already saw). See [api.md](./api.md) "Eager streaming commit".
+- **Eager commit** (`stream: true`): the server returns `200` + SSE headers **before** acquire / upstream, so `status_code` is always `200` for these rows — a failure discovered after commit (no account, pool exhausted, upstream 4xx/5xx, idle stall, client abort) cannot change the HTTP status. The failure mode lives in `error_code` (and the in-stream error frame the client already saw). See [api.md](./api.md) "Eager streaming commit".
 - **Legacy attach** (only when a non-eager path still waits for upstream headers then wraps an event-stream body): `status_code` is whatever those upstream headers said (typically `200`).
 - `provider` / `model` / `account_id` on an eager row describe the **last candidate actually attempted** (canonical `provider/model`, expanded from a group alias when one was used), on both surfaces; a row that failed before any attempt (`no_upstream_account`, pool `unavailable`) carries the requested target with no `account_id`. Before the dispatch consolidation (2026-09) the Anthropic eager path logged the requested model even when a group had expanded it to a different target.
 - `error_code` for a stream close:
@@ -46,7 +46,7 @@ A streamed request's row is written once, deferred to stream close (`waitUntil`)
 
 ### Why pre-commit timeouts left no row
 
-Before eager commit, a client that abandoned the connection while the Worker was still `await`ing upstream response headers tore down the invocation with **no** `logRequest` (every log site sat after that await). Those incidents produced client-side timeouts and empty D1. Eager commit + stream `cancel` → `client_abort` closes that gap.
+Before eager commit, a client that abandoned the connection while the server was still awaiting upstream response headers tore the request down with **no** log row (every log site sat after that await). Those incidents produced client-side timeouts and no log row. Eager commit + stream `cancel` → `client_abort` closes that gap.
 
 ## Forbidden by default
 
@@ -55,26 +55,26 @@ Before eager commit, a client that abandoned the connection while the Worker was
 - Client API key plaintext
 - OAuth codes / cookies
 
-Retention: swept by a daily Worker Cron Trigger — see below.
+Retention: swept by a daily scheduled task — see below.
 
 ## Temporary diagnostics
 
 A short-lived `console.*` probe is allowed when production is the only place a question can be answered for free, provided it logs no forbidden value above, is scoped to the failing branch, and **names the release that removes it**. Anything still in the tree past that release is a bug.
 
-Read one with `wrangler tail` or Dashboard → Workers → Logs while the relevant page refreshes.
+Read one in the server's own log output while the relevant page refreshes.
 
 **None active.** The last was `[antigravity] no GOOGLE_ONE_AI credit entry` (v3.11.2, removed in v3.11.3): it established that a Google AI Pro account returns the credit entry with no `creditAmount` field at all, recorded in [providers.md](./providers.md) § Antigravity. One caution learned from it — the `paidTier` subtree also carried the account's email inside `upgradeSubscriptionUri`. Scope a probe to the fields you need, not a whole subtree, and assume an unexamined payload holds an identifier you did not plan to log.
 
 ## Retention sweep
 
-A daily Cron Trigger (`[triggers] crons` in every Wrangler config — committed `wrangler.toml`, `wrangler.production.example.toml`, the CI generator, and the operator's gitignored `wrangler.production.toml`; `scheduled` handler in `apps/api/src/index.ts`) deletes:
+A daily scheduled task inside the server deletes, in bounded batches:
 
 - `request_logs` rows older than **90 days** (default; override with the optional `REQUEST_LOG_RETENTION_DAYS` var, a positive integer of days — invalid values fall back to 90). Deletes run in bounded batches (id-subquery `IN (SELECT … LIMIT n)` loop with a per-run batch cap) so a large backlog never produces one long-running statement; steady state is roughly one day of rows per run.
 - Expired `sessions` rows (`expires_at` in the past — `loadSessionUser` already rejects them; this just removes dead rows).
 - Expired `oauth_login_states` rows (`expires_at` in the past).
 - Expired `cli_login_requests` rows (`expires_at` in the past — [cli.md](./cli.md) § Device auth).
 
-The sweep is idempotent and safe to run any time (locally: `wrangler dev --test-scheduled`, then `GET /__scheduled?cron=...`). A sweep failure affects nothing but cleanup — it never touches live request handling.
+The sweep is idempotent and safe to run at any time. A sweep failure affects nothing but cleanup — it never touches live requests.
 
 ## Token usage capture
 

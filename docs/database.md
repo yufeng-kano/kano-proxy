@@ -1,6 +1,6 @@
-# Database (D1)
+# Database (PostgreSQL)
 
-Migrations live in `apps/api/migrations/` and are applied only via Wrangler.
+Migrations live in `apps/server/crates/kano-proxy-core/migrations/` and are applied by the server at start.
 
 ## Tables
 
@@ -58,7 +58,7 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 | usage_snapshot_json | TEXT | nullable; last successful usage read — `{windows, error, stale, edgeBlocked}` (`0006_account_usage_cache.sql`) |
 | usage_fetched_at | TEXT | nullable; when `usage_snapshot_json` was written. Drives the 2 min server-side TTL |
 | usage_fetching_at | TEXT | nullable; lock holder's timestamp while an upstream fetch is in flight (`NULL` = free) |
-| bench_until | TEXT | nullable; ISO time until which this account is benched (`0011_bench_and_refresh_state.sql`). `NULL` or past = not benched — expired values are compared at read, never proactively deleted. Writes are **monotonic**: a bench write only lands when it extends (`bench_until IS NULL OR bench_until < new`), so a shorter concurrent penalty can never truncate a longer one. Replaces the KV `BENCH` namespace ([providers.md](./providers.md) § Routing module) |
+| bench_until | TEXT | nullable; ISO time until which this account is benched (`0011_bench_and_refresh_state.sql`). `NULL` or past = not benched — expired values are compared at read, never proactively deleted. Writes are **monotonic**: a bench write only lands when it extends (`bench_until IS NULL OR bench_until < new`), so a shorter concurrent penalty can never truncate a longer one. Replaces the bench cache ([providers.md](./providers.md) § Routing module) |
 | bench_reason | TEXT | nullable; content-free cause of the current bench — the upstream status as text (`"429"`, `"524"`, …) or `"refresh_failed"`. Written with `bench_until`, nulled by unpause |
 | refreshing_at | TEXT | nullable; OAuth refresh single-flight lock, same CAS pattern as `usage_fetching_at` (30s breakable) — see [providers.md](./providers.md) § OAuth refresh single-flight |
 | edge_strikes | INTEGER | `NOT NULL DEFAULT 0`; consecutive upstream edge-timeout (520/522/524) strikes. Incremented atomically on each edge-timeout; the 3rd within 10 minutes benches 30s and resets to 0 ([providers.md](./providers.md) § Penalties). Never written on success |
@@ -68,7 +68,7 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 
 `label` and `custom_label` are two different jobs and must not be merged: `label` is a cache of upstream identity (the accounts read overwrites it whenever the upstream email/display name changes), so a rename written there survives only until the next poll. `custom_label` is user intent — set by `PATCH /api/providers/:provider/accounts/:id`, cleared by sending `null`/`""`, and read first by the display-name resolver.
 
-**There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / limited / benched / unusable" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order, the bench columns above (`pool/bench.ts`) and the stored `usage_snapshot_json` windows (`routing/facts.ts`), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02. Bench state lived in the KV `BENCH` namespace until `0011` — moved to these D1 columns because KV's eventual consistency made bench state flap across requests, its 1-write/sec-per-key limit made the bench key a hotspot under bursts, and the account row is already read on every dispatch, so the columns ride along with zero extra reads.)
+**There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / limited / benched / unusable" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order, the bench columns above (`pool/bench.ts`) and the stored `usage_snapshot_json` windows (`routing/facts.ts`), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02. Bench state lived in a key-value cache until `0011` — moved to these columns because its eventual consistency made bench state flap across requests, its 1-write/sec-per-key limit made the bench key a hotspot under bursts, and the account row is already read on every dispatch, so the columns ride along with zero extra reads.)
 
 Unique optional: `(user_id, provider, external_account_id)` when known.
 
@@ -93,7 +93,7 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 `sort_order` is **display only** — it never affects routing, pooling, or failover (a custom provider is selected by slug, not by list position; within-provider key priority stays in `upstream_accounts.priority`). Backfilled by `created_at ASC` so existing lists keep their current visual order. Reads sort `ORDER BY sort_order ASC, created_at ASC`, so ties and a all-zero legacy table degrade to the old behavior. Writes renumber the user's full list to a dense `0..n-1` sequence in one transaction rather than patching single rows; a create appends at the end.
 
-`UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-KV-bench convention as `upstream_accounts`, over that provider's account row(s).
+`UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-bench convention as `upstream_accounts`, over that provider's account row(s).
 
 **Slug reservation vs. existing rows.** When a slug later becomes a builtin provider id, reserving it only blocks *new* creates — an already-stored custom provider under that slug would be shadowed by the builtin lookup and become unreachable. `0013_rename_custom_antigravity_slug.sql` is the pattern: a data migration renames the stored slug (`antigravity` → `antigravity-custom`) and rewrites everything keyed by it in the same step (`upstream_accounts.provider`, `provider_settings.provider`, `model_groups.targets_json` prefixes). A user who already owns the target slug falls through to `antigravity-custom-2`, then `-3` — static passes because the targets_json rewrite is a string replace that must know the exact replacement. Each pass first deletes an *orphaned* `provider_settings` row under its target name (deleting a custom provider leaves that row behind as inert data, and it would collide with the `(user_id, provider)` primary key on rename). `request_logs.provider` is left as history.
 
@@ -110,7 +110,7 @@ One machine that ran `kano-proxy init` (contract: [cli.md](./cli.md)). Added in 
 | refresh_token_prev_hash | TEXT | nullable; hash of the immediately superseded token. A refresh presenting a token that matches **this** column is reuse-as-theft and revokes the device ([cli.md](./cli.md) § Device auth); a token matching neither column is a plain 401 |
 | last_seen_at | TEXT | nullable; bumped on token rotation and tunnel connect |
 | created_at | TEXT | |
-| revoked_at | TEXT | nullable; set by the web UI's revoke — refresh and connect refuse once set, live sockets die at access-token expiry via the DO alarm |
+| revoked_at | TEXT | nullable; set by the web UI's revoke — refresh and connect refuse once set, live sockets die at access-token expiry |
 
 ### `cli_login_requests`
 
@@ -135,7 +135,7 @@ One local endpoint registered by `kano-proxy add` (contract: [cli.md](./cli.md))
 
 | Column | Type | Notes |
 |--------|------|-------|
-| id | TEXT PK | also the AgentTunnel DO name (`idFromName(id)`) |
+| id | TEXT PK | also the tunnel registry key |
 | user_id | TEXT FK | `ON DELETE CASCADE` |
 | device_id | TEXT | nullable, informational "registered from" — no FK enforcement; a deleted device leaves the provider intact |
 | slug | TEXT | custom-provider slug rules, immutable, unique per user **across both** `custom_providers` and `cli_providers` (both create paths check the other table) |
@@ -248,27 +248,19 @@ Rows past the retention window (default 90 days) are deleted by the daily cron s
 
 ### `oauth_login_states`
 
-Pending provider or Google login state (PKCE verifier, expiry). Short-lived; may use KV instead.
+Pending provider or Google login state (PKCE verifier, expiry). Short-lived; pruned on the path that adds rows.
 
-## KV namespaces
+## Caches
 
-Cloudflare titles: `kano-proxy-bench`, `kano-proxy-cache`. Bindings in Worker code stay short:
+Nothing cached is persisted. The model catalog, the Codex and Grok reasoning replay caches and the changelog live in bounded in-process caches with their own TTLs; a restart simply refetches. The one exception is the price table, which is kept in a small table so a restart does not refetch it ([pricing.md](./pricing.md)).
 
-| Binding | Cloudflare title | Use |
-|---------|------------------|-----|
-| `BENCH` | `kano-proxy-bench` | **Deprecated since `0011`** — bench state moved to `upstream_accounts.bench_until`/`bench_reason` (see above). The binding stays declared so existing configs keep deploying, but no code path reads or writes it; remove the namespace in a later cleanup |
-| `CACHE` | `kano-proxy-cache` | models list cache, codex/grok reasoning replay cache |
-
-D1 database name: **`kano-proxy`** (Worker script name is also `kano-proxy`).
+Bench state is not a cache: it is `upstream_accounts.bench_until` / `bench_reason`, on the row itself.
 
 ## Migrations
 
-```bash
-cd apps/api
-npx wrangler d1 migrations create kano-proxy --local "init"
-npx wrangler d1 migrations apply kano-proxy --local
-npx wrangler d1 migrations apply kano-proxy --remote
-```
+Migrations are plain SQL files in `apps/server/crates/kano-proxy-core/migrations/`, applied in filename order when the server starts, each inside one transaction, and recorded in `core_migrations`. Restarting the same build applies nothing.
+
+Applied migrations are immutable. A schema change is a new file; never an edit to one already released. An edition composing this core keeps its own history table and applies after the core.
 
 ## Request start timestamps
 

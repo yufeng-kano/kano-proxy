@@ -1,423 +1,124 @@
 # Deployment
 
-## Cloud split transition
+kano-proxy runs as four containers on a machine you control: PostgreSQL, the API server, the web app, and Caddy in front for TLS and routing. There is no managed platform and no external service in the request path.
 
-The public production workflow is disabled while the operator migrates official hosting to the private `kano-proxy-cloud` repository. Public CI and independent CLI release remain enabled. The production instructions below describe the existing infrastructure and migration baseline; publishing a public product Release no longer authorizes or executes a production deployment after the disabled workflow lands. Cloud cutover gates are in [cloud-edition.md](./cloud-edition.md). Self-hosted deployment remains supported.
+## Quick start
 
+```sh
+git clone https://github.com/yufeng-kano/kano-proxy.git
+cd kano-proxy
+cp .env.example .env     # fill it in — see Configuration
+docker compose up -d --build
+```
+
+Point `DOMAIN`'s DNS at the machine and open port 80 and 443 to it. Caddy gets a certificate on first request. The server applies its migrations at start, so an empty database is ready by the time it listens.
+
+If you already run a reverse proxy, delete the `caddy` service and send `/api/*`, `/openai/*`, `/anthropic/*`, `/g/*`, `/agent/*` and `/health` to the server on `:8787` and everything else to the web app on `:80`. Do not buffer responses and allow long idle gaps: model streams and the agent tunnel are long-lived connections.
 
 ## Domains
 
-Pick any hostname you control (example: `proxy.example.com`). Same host for UI + API is recommended.
-
-| Host | Role |
-|------|------|
-| `https://<your-domain>` | Pages (UI + public docs) + Worker routes for `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*`, `/agent/*` |
-
-Public LLM bases and admin “copy base URL” use the **request / browser origin** — no domain is hard-coded in app source. After deploy, set production vars to match:
+One hostname serves both the UI and the API; that is the arrangement the app assumes. Public LLM bases and the admin "copy base URL" button use the request origin, so no domain is hard-coded anywhere in the source.
 
 ```text
 APP_URL=https://<your-domain>
 GOOGLE_REDIRECT_URI=https://<your-domain>/api/auth/callback
 ```
 
+The same `<your-domain>/api/auth/callback` must be registered as an authorized redirect URI on the Google OAuth client.
+
 ### Private operator data (not in git)
 
-Real production hostname, DNS tables, route bind order, and bootstrap scratch notes are **not** stored in this open docs tree. Use the gitignored local agent folder:
+Real hostnames, DNS tables and deploy notes do not belong in this open documentation tree. Use the gitignored local folder:
 
-```bash
+```sh
 cp -R .local.example .local
 # edit .local/dns.md, .local/deploy-notes.md, …
 ```
 
-| Path | Tracked? | Contents |
-|------|----------|----------|
-| `.local.example/` | yes | Placeholder templates |
-| `.local/` | **no** (gitignored) | Your real DNS, host, deploy checklist |
+## Configuration
 
-Agents and humans should read `.local/` when present; never copy live values from it into commits or public docs. Secrets (OAuth client secret, session keys, etc.) still go in `.dev.vars` / `wrangler secret`, not only as notes in `.local/`.
+Everything is environment variables, read once at start. `.env.example` is the complete list; these are the ones you must set.
 
-### DNS (Cloudflare)
+| Variable | Meaning |
+|---|---|
+| `DOMAIN`, `ACME_EMAIL` | What Caddy serves and who Let's Encrypt contacts |
+| `APP_URL`, `GOOGLE_REDIRECT_URI` | The public origin and the OAuth callback on it |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The Google OAuth client that admin sign-in uses |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | The database the compose file creates and the server connects to |
+| `SESSION_SECRET` | Signs session cookies. Changing it signs everyone out |
+| `TOKEN_ENCRYPTION_KEY` | Encrypts stored upstream credentials. **Changing it makes every bound account permanently unreadable** |
+| `CLI_TOKEN_SECRET` | Signs CLI access tokens ([cli.md](./cli.md)) |
 
-| Type | Name | Target | Proxy |
-|------|------|--------|-------|
-| CNAME or A/AAAA | `<subdomain>` (or apex) | Pages/Workers as per CF attach flow | Proxied (orange cloud) |
+Optional: provider OAuth client ids (unset uses the pinned defaults), `GITHUB_REPO` and `GITHUB_TOKEN` for the in-app changelog, `REQUEST_LOG_RETENTION_DAYS`, `UPSTREAM_FIRST_BYTE_TIMEOUT_MS`, `RUST_LOG`.
 
-Record exact bind order when attaching custom domain in dashboard; prefer Worker routes + Pages project on same zone. **Write the filled-in table to `.local/dns.md`**, not into this file.
+Generate the three secrets once and keep them somewhere you will not lose them:
 
-Suggested Worker routes (replace host):
-
-- `<your-domain>/openai/*`
-- `<your-domain>/anthropic/*`
-- `<your-domain>/g/*` (model-group endpoints — required since v4)
-- `<your-domain>/api/*`
-- `<your-domain>/agent/*` (CLI device auth + tunnel, [cli.md](./cli.md) — required since v4.4; without it `kano-proxy init` gets the SPA instead of the API)
-
-Pages serves remaining paths: the public docs at `/docs/*` as static files, everything else as the SPA ([docs-site.md](./docs-site.md)).
-
-## Production deploy
-
-### Resources (once)
-
-```bash
-cd apps/api
-npx wrangler login   # if needed
-npx wrangler d1 create kano-proxy
-npx wrangler kv namespace create kano-proxy-bench
-npx wrangler kv namespace create kano-proxy-cache
+```sh
+openssl rand -hex 32     # SESSION_SECRET, CLI_TOKEN_SECRET
+openssl rand -base64 32  # TOKEN_ENCRYPTION_KEY
 ```
 
-**Do not put real production ids into the committed `apps/api/wrangler.toml`** (open-source placeholders only). Copy the production template and fill ids there:
+## Database and migrations
 
-```bash
-cd apps/api
-cp wrangler.production.example.toml wrangler.production.toml
-# paste D1 database_id + KV ids; set APP_URL / GOOGLE_REDIRECT_URI to your domain
-```
+The server applies the migrations in `apps/server/crates/kano-proxy-core/migrations/` in order at start and records what it applied in `core_migrations`. Restarting the same build applies nothing. Applied migrations are immutable: a schema change is a new file, never an edit to an old one ([database.md](./database.md)).
 
-`wrangler.production.toml` is gitignored. Resource titles use the full `kano-proxy` prefix; Worker script name and D1 `database_name` are both `kano-proxy`. Optional: also mirror ids in gitignored `.local/deploy-notes.md`.
+An edition built on this core keeps its own migration table and applies after the core.
 
-Every Wrangler config (committed `wrangler.toml`, the production example, the CI-generated production config) carries the same `[triggers] crons` block for the daily retention sweep (see [logging.md](./logging.md)). If your `wrangler.production.toml` predates it, copy the `[triggers]` block from `wrangler.production.example.toml` — a deploy from a config without it silently drops the cron.
-
-The same three configs also carry `[limits] cpu_ms = 15000` — a per-invocation CPU ceiling that bounds runaway-billing risk (an infinite-loop bug or abusive request errors out at 15s of CPU instead of billing the platform maximum). **Requires Workers Paid**: a Free-plan deploy rejects the `[limits]` block, so delete it if running this project on Free (Free enforces its own ~10ms budget, which long SSE streams exceed — see the observability note below). The value is sized from production measurements: the heaviest legitimate request observed (48s stream, ~5.4k output tokens) accrued 1.3s of CPU; an extrapolated worst case (~32k-token output) stays under ~8s; raise the ceiling if Workers Logs ever shows `exceededCpu` on legitimate traffic.
-
-Every Wrangler config also carries the **AgentTunnel Durable Object** binding (`[durable_objects]` + the `new_sqlite_classes = ["AgentTunnel"]` migration tag) for CLI providers ([cli.md](./cli.md)). If your `wrangler.production.toml` predates it, copy the two blocks from `wrangler.production.example.toml` — a deploy from a config without them breaks `/agent/v1/connect` and every CLI-provider request.
-
-The same three configs also carry `[observability] enabled = true` (Workers Logs / invocation logs). This is the only place resource-limit kills are visible: a request killed for exceeding CPU/memory (Cloudflare error 1102, tail outcome `exceededCpu`/`exceededMemory`) loses its `waitUntil` work, so its `request_logs` row is never written — D1 shows a *gap*, not an error. Workers Logs records the invocation outcome platform-side, so those kills (and any other invisible failure) can be diagnosed after the fact instead of only while a `wrangler tail` happens to be attached. Query them in Dashboard → Workers → kano-proxy → Logs. Volume guard: unauthenticated 401 floods count too — investigate any client hammering the endpoints, since log events are the billable unit past the included allotment.
-
-### Vars vs secrets
-
-Public vars (Dashboard or wrangler production vars) — **not** the local defaults in `wrangler.toml`:
-
-```text
-APP_URL=https://<your-domain>
-GOOGLE_REDIRECT_URI=https://<your-domain>/api/auth/callback
-CODEX_RELAY_URL=https://<relay>.run.app   # optional — codex egress relay (docs/codex-relay.md); unset = relay off
-```
-
-Secrets via `wrangler secret put` (never commit):
-
-```text
-GOOGLE_CLIENT_ID
-GOOGLE_CLIENT_SECRET
-SESSION_SECRET
-TOKEN_ENCRYPTION_KEY
-CLI_TOKEN_SECRET     # CLI device access-token HMAC key (docs/cli.md) — random 32+ bytes; unset disables /agent/v1 device auth
-CODEX_RELAY_SA_KEY   # optional — GCP SA JSON key for the codex relay (docs/codex-relay.md)
-```
-
-Optional overrides:
-
-```text
-CLAUDE_CODE_OAUTH_CLIENT_ID
-CODEX_OAUTH_CLIENT_ID
-GROK_OAUTH_CLIENT_ID
-ANTIGRAVITY_CLIENT_VERSION       # Antigravity CLI version in the upstream User-Agent; default is pinned
-ANTIGRAVITY_CLIENT_BUILD         # Antigravity CLI `cl=` build number in that User-Agent; default is pinned
-ANTIGRAVITY_HUB_VERSION          # Hub version used only by the onboardUser control-plane call; default is pinned
-REQUEST_LOG_RETENTION_DAYS   # retention sweep window in days; default 90
-GITHUB_TOKEN                 # optional; raises the /changelog GitHub rate limit (secret)
-```
-
-**Antigravity is opt-in and has no default credential.** Unlike the other three providers it needs an OAuth client *secret*, which is never committed here, so it stays off until an operator supplies both halves — sign-in answers `400` naming them until then:
-
-```text
-ANTIGRAVITY_OAUTH_CLIENT_ID      # wrangler secret put — both halves or neither
-ANTIGRAVITY_OAUTH_CLIENT_SECRET  # wrangler secret put, never [vars]
-```
-
-Put **both** through `wrangler secret put`, not `[vars]`; a half-configured pair is treated as unconfigured rather than failing later inside Google's token endpoint. Where the pair comes from, the redirect-URI constraint it inherits, and the terms-of-service risk that comes with it: [auth.md](./auth.md) § Antigravity.
-
-`GITHUB_REPO` (`owner/repo`, source of the `/changelog` release notes) is **public**, so it lives in `wrangler.toml` `[vars]` and is carried into production by the CI config writer — not in the secret store. `GITHUB_TOKEN` is optional: the KV cache keeps a deploy inside the unauthenticated 60/hr budget on its own. See [changelog.md](./changelog.md).
-
-Google Cloud Console: authorize `https://<your-domain>/api/auth/callback`.
-
-### Migrate + Worker
-
-Always pass the **production** config so public `wrangler.toml` placeholders are not used against prod:
-
-```bash
-pnpm test
-pnpm --filter api typecheck
-cd apps/api
-pnpm exec wrangler d1 migrations apply kano-proxy --remote --config wrangler.production.toml
-pnpm exec wrangler deploy --config wrangler.production.toml
-# secrets (values from .dev.vars or a password manager — never commit):
-#   printf %s "$VAL" | pnpm exec wrangler secret put NAME --config wrangler.production.toml
-```
-
-Local dev keeps using `wrangler.toml` + `.dev.vars` (`pnpm --filter api dev`).
-
-### Pages (admin UI + public docs)
-
-```bash
-APP_URL=https://<your-domain> pnpm build:site   # web build + docs build → apps/web/dist (docs under dist/docs/)
-npx wrangler pages deploy apps/web/dist --project-name=kano-proxy --branch=main
-```
-
-`build:site` is the root script that builds `apps/web`, then `apps/docs`, and copies the docs output into `apps/web/dist/docs/` — one upload serves both ([docs-site.md](./docs-site.md)). `APP_URL` is optional at build time: when set, the docs emit `/docs/sitemap.xml` with absolute URLs; when unset, no sitemap and no failure. There is no `_redirects` file any more; Pages' built-in SPA fallback (no top-level `404.html`) serves `/index.html` for unknown paths, and `apps/web/public/_headers` marks admin routes `noindex`.
-
-`--branch` must equal the Pages project's **production branch** (`main`), or the upload becomes a Preview deployment and the production domain keeps serving the old build. This matters especially in CI, where a release checkout is a detached HEAD and wrangler would otherwise infer branch `HEAD`.
-
-Production builds leave `VITE_API_ORIGIN` unset (same-origin to Worker routes on the same host).
-
-#### Web env files
-
-`vite build` runs in production mode and loads `apps/web/.env.production`. All four files are in `apps/web/`:
-
-| File | Loaded by | Committed |
-|------|-----------|-----------|
-| `.env.example` | nothing — template only | yes |
-| `.env.development` | `pnpm --filter web dev` | yes |
-| `.env.production` | `pnpm --filter web build` | yes |
-| `.env.*.local` | matching mode, overrides the above | **no** (gitignored) |
-
-| Var | Dev | Production |
-|-----|-----|------------|
-| `VITE_API_ORIGIN` | `http://127.0.0.1:8787` | unset (same-origin) |
-| `VITE_CONTACT_EMAIL` | contact address in the login footer | same |
-
-`VITE_*` values are **inlined into the client bundle** at build time and are therefore public. Never put a secret in one — secrets go in `apps/api/.dev.vars` or `wrangler secret put`.
-
-A `VITE_*` variable set in the Cloudflare Pages build environment **overrides** the committed `.env.production` value, so per-deploy changes need no commit.
-
-### DNS + routes
-
-1. Pages custom domain: `<your-domain>`
-2. Worker routes: `/openai/*`, `/anthropic/*`, `/g/*`, `/api/*`, `/agent/*` (optional `/health`) on that host
-3. DNS CNAME/A, Proxied
-
-| Surface | URL |
-|---------|-----|
-| Admin UI | `https://<your-domain>/` |
-| Public docs | `https://<your-domain>/docs/` |
-| OpenAI | `https://<your-domain>/openai/v1` |
-| Anthropic | `https://<your-domain>/anthropic` |
-
-## Codex egress relay (Cloud Run)
-
-Design and rationale: [codex-relay.md](./codex-relay.md). The relay is the one approved non-Cloudflare component. **Deploys are manual** — release CI never touches it. Real project id / region / service URL go in gitignored `.local/relay.md`; placeholders only here.
-
-### GCP one-time setup
-
-```bash
-gcloud auth login
-gcloud projects create <gcp-project-id>
-gcloud billing projects link <gcp-project-id> --billing-account=<billing-account-id>
-gcloud config set project <gcp-project-id>
-gcloud services enable run.googleapis.com cloudbuild.googleapis.com artifactregistry.googleapis.com
-gcloud iam service-accounts create kano-relay-invoker --display-name="kano-proxy relay invoker"
-```
-
-### Deploy / update the relay
-
-```bash
-cd apps/relay
-deno task test && deno task check
-gcloud run deploy kano-codex-relay --source . --region us-central1 \
-  --no-allow-unauthenticated --timeout=3600 --min-instances=0 --max-instances=10 \
-  --concurrency=1 --cpu=0.25 --memory=512Mi --use-http2
-gcloud run services add-iam-policy-binding kano-codex-relay --region=us-central1 \
-  --member="serviceAccount:kano-relay-invoker@<gcp-project-id>.iam.gserviceaccount.com" \
-  --role="roles/run.invoker"
-```
-
-(`--concurrency=1` is forced: Cloud Run rejects fractional CPU with concurrency > 1 (`Total cpu < 1 is not supported with concurrency > 1`, measured 2026-08-03), and 0.25 vCPU billing beats 1 vCPU shared — see [codex-relay.md](./codex-relay.md#cloud-run-configuration-and-cost). `--use-http2` is also required: Deno accepts Cloud Run's h2c traffic, avoiding the 32 MiB HTTP/1 request cap on long agent conversations. With instance-per-stream, `--max-instances` is the concurrent-codex-stream ceiling; requests past it get a marker-less 429 that the Worker guard converts to a non-benching 502.)
-
-### Wire the Worker to it
-
-```bash
-# SA key → Cloudflare secret (never commit the JSON; delete the local file after)
-gcloud iam service-accounts keys create relay-invoker.json \
-  --iam-account=kano-relay-invoker@<gcp-project-id>.iam.gserviceaccount.com
-cd apps/api
-pnpm exec wrangler secret put CODEX_RELAY_SA_KEY --config wrangler.production.toml < relay-invoker.json
-rm relay-invoker.json
-```
-
-- `CODEX_RELAY_URL` (the service's `https://….run.app` origin) goes in `wrangler.production.toml` `[vars]` **and** in the GitHub repository variable `CODEX_RELAY_URL` so release CI keeps it (see the CI section). Leave both unset to disable the relay — codex then 403s direct, as before the relay existed.
-- Local dev (optional): put both values in `apps/api/.dev.vars` to exercise the relay from `wrangler dev`.
-- Key rotation: create a new key, `wrangler secret put` again, delete the old key in GCP. No relay redeploy.
-
-### Spike check (free)
-
-After deploy, verify egress with a **deliberately fake** upstream token. Expected: `401` + JSON (the wall would be `403` + HTML). Sending `CF-Worker` manually proves the allowlist drops it:
-
-```bash
-curl -sS -D - -o /dev/null -X POST \
-  -H "X-Serverless-Authorization: Bearer $(gcloud auth print-identity-token)" \
-  -H "Authorization: Bearer fake-spike-token" \
-  -H "content-type: application/json" \
-  -H "CF-Worker: spike-test" -H "CF-Connecting-IP: 1.2.3.4" \
-  "https://<relay>.run.app/backend-api/codex/responses" -d '{"model":"gpt-5"}'
-```
-
-Never spike with a real token or a real prompt (cost-safety rule in `CLAUDE.md`).
+The database lives in `./data/postgres` and the certificates in `./data/caddy`, both gitignored. Back those up; everything else is rebuildable from the repository.
 
 ## Local development
 
-```bash
-# root
-pnpm install
+```sh
+# the API, against a Postgres you already have
+cd apps/server
+DATABASE_URL=postgres://… GOOGLE_CLIENT_ID=… cargo run -p kano-proxy-server
 
-# D1 migrations
-cd apps/api && pnpm db:migrate:local
+# the web app, in another terminal — it proxies /api to 127.0.0.1:8787
+cd apps/web && pnpm install && pnpm dev
 
-# API
-pnpm --filter api dev    # wrangler dev :8787
-
-# Web
-pnpm --filter web dev    # :5173
-pnpm --filter docs dev   # :5174, public docs alone at /docs/ (docs/docs-site.md)
+# the documentation site
+cd apps/docs && pnpm install && pnpm dev
 ```
 
-Use **`http://127.0.0.1:5173`** (not `localhost`) for the admin UI so the session cookie host matches OAuth (`127.0.0.1:8787`).  
-`apps/web/.env.development` sets `VITE_API_ORIGIN=http://127.0.0.1:8787`.  
-`APP_URL` in `wrangler.toml` is `http://127.0.0.1:5173` so post-login redirects land on the SPA, not the Worker root (which is not a UI).
+Each app installs and builds where it lives; there is no repository-wide package manifest.
 
-`.dev.vars` in `apps/api/` (gitignored):
+The server serves the built SPA itself when `WEB_DIST_DIR` points at it, which is useful for a single-process run. The compose stack does not use that: the web app is its own container so the two concerns cannot drift into one process.
 
-```text
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-SESSION_SECRET=dev-session-secret-change-me
-TOKEN_ENCRYPTION_KEY=   # 32 bytes base64
-GOOGLE_REDIRECT_URI=http://127.0.0.1:8787/api/auth/callback
+## Verify before deploying
+
+```sh
+cd apps/server && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
+cd apps/web    && pnpm test && pnpm typecheck && pnpm build
+cd apps/docs   && pnpm build
+cd apps/cli    && cargo test
 ```
 
-### Local D1 / KV persistence
+Database-backed tests need `KANO_TEST_DATABASE_URL` pointing at a throwaway PostgreSQL and skip themselves without it. No test sends real upstream traffic ([testing.md](./testing.md)).
 
-Local data **does** persist across `wrangler dev` restarts. It is **not** the same as production D1.
+## Updating
 
-| Rule | Why |
-|------|-----|
-| Always run API via `pnpm --filter api dev` / `pnpm --filter api db:migrate:local` | Scripts pin `--persist-to .wrangler/state` under `apps/api/`. Running bare `wrangler` from the monorepo root creates a **different** state tree. |
-| Do **not** change `database_id` in committed `wrangler.toml` | Local Miniflare maps D1 to a durable-object-style sqlite file keyed off that id. Changing the placeholder creates a **new empty** local DB and leaves the old one orphaned under `.wrangler/state/v3/d1/`. |
-| Keep `TOKEN_ENCRYPTION_KEY` stable in `.dev.vars` | Upstream OAuth blobs in `upstream_accounts.encrypted_payload` are AES-GCM with this key. Rotating it makes old local accounts decrypt-fail (UI looks empty / unusable). |
-| Do **not** delete `apps/api/.wrangler/state/` unless you want a wipe | That directory is the local D1 + KV store (gitignored). |
-| Prefer one wrangler dev at a time on this project | Concurrent dev processes can race local sqlite / metadata. |
-
-Quick health check (counts on the active local DB):
-
-```bash
-pnpm --filter api db:local:status
+```sh
+git pull
+docker compose up -d --build
 ```
 
-If accounts “vanish” after a re-login but the Google user still works: check for **multiple** `*.sqlite` under `apps/api/.wrangler/state/v3/d1/miniflare-D1DatabaseObject/`. Only one file should hold your data; extras are usually orphans from an earlier `database_id` / state split. Back up, then either re-bind accounts or merge rows into the sqlite that `db:local:status` is reading (same path as `--persist-to`).
+The server migrates on the way up. Read the release notes before updating across a schema change, and take a database backup first.
 
-Local backups from recovery work may live under `apps/api/.wrangler/backups/` (also gitignored).
+## Releases
 
-## Verify before deploy
+A published `vX.Y.Z` Release is the product's release. It does not deploy anything by itself: this repository builds and verifies, and operators update their own instances. Tags must match the `version` in `apps/server/crates/kano-proxy-core/Cargo.toml`, bumped, committed and pushed before tagging; the default bump is minor.
 
-```bash
-pnpm test
-pnpm --filter api typecheck
-pnpm build:site            # web + public docs → apps/web/dist
-# then migrate:remote + api deploy + pages deploy (see Production deploy)
-```
-
-## CI / GitHub Actions
-
-Public product Releases do not deploy the website. `.github/workflows/release-deploy.yml` is retired: no Release trigger, and its manual job is always skipped. Official hosting is deployed by the private repository’s `release.yml` after a matching published Release and configured secrets. Public pushes/PRs retain verification. The CLI has its own tag prefix, `cli-vX.Y.Z`, its own workflow, and its own version line — see § CLI release below; a CLI release never deploys the Worker, and a product release never builds the CLI.
-
-### Version tags
-
-| Policy | Rule |
-|--------|------|
-| Format | SemVer tag `vMAJOR.MINOR.PATCH` (e.g. `v1.2.0`) — product (Worker + web) only; `cli-v…` is the CLI's, see § CLI release |
-| Canonical package version | Root `package.json` → `"version": "MAJOR.MINOR.PATCH"` (no leading `v`) |
-| **Default next release** | **Minor bump** → `x.(y+1).0` (patch resets to `0`) |
-| Major | Breaking changes only, when intentional |
-| Patch | Fix-only when you explicitly want `x.y.(z+1)` |
-
-Example: last release `v0.3.1` → default next tag `v0.4.0` and `"version": "0.4.0"` in root `package.json`.
-
-### Cutting a release (required steps)
-
-A version bump is incomplete unless **all** of these land together:
-
-1. **Bump root `package.json` `"version"`** to the new SemVer (e.g. `1.0.1`). Keep the tag equal to `package.json`; the bundled version is reported by self-hosted Workers ([changelog.md](./changelog.md)). The retired public deploy job no longer enforces this. `apps/cli/Cargo.toml` is **not** part of a product release (it was until v4.5.2 — that lockstep is why v4.5.1 shipped with no CLI assets and v4.5.2 exists only to realign; the CLI now has its own line).
-2. **Commit** that change with the release work (and any code/docs for the release).
-3. **Push** the commit to `origin` (`main` or the release branch).
-4. **Write the release notes** (see below) — they are a deliverable of the release, not a formality.
-5. **Tag** `vMAJOR.MINOR.PATCH` on that commit and **publish a GitHub Release** (this publishes source and release notes, not a website deployment).
-
-Do **not** create a GitHub Release / tag without updating and pushing `package.json` first. Keep tag and `package.json` version in lockstep (`v1.0.1` ↔ `"1.0.1"`).
-
-#### Release notes are hand-written
-
-**Never cut a release with `--generate-notes` alone.** That flag builds its output from *merged pull requests*; this repo lands work as direct commits to `main`, so it has nothing to summarize and emits a bare `**Full Changelog**: …compare/…` line. A release published that way is blank on the `/changelog` page — and those notes are the **only** source that page has (no `CHANGELOG.md`, no D1 table — see [changelog.md](./changelog.md)). v2.1.0–v2.2.1 shipped blank this way and were backfilled by hand.
-
-Pass the notes inline with `gh release create --notes '<markdown>'` — no scratch file needed. What the notes are for:
-
-- **Address the operator, in the product's voice** (the copy rules in [i18n.md](./i18n.md) § Copy voice apply): say what they can now do, not which module changed. The commit message is where the mechanism goes.
-- Lead with a one-line summary of the release, then group under `##` headings when there is more than a handful of items.
-- Only these tags survive sanitization: `a code em h2 h3 li p strong tt ul`. Tables and images degrade to plain text — do not reach for them.
-- A fix-only release can be a few bullets; it still needs to name the fix in terms of the symptom the user saw.
-
-```bash
-# example: patch 1.0.0 → 1.0.1 after work is ready on main
-# 1) set "version": "1.0.1" in package.json
-git add package.json  # + other product release files; CLI version is independent
-git commit -m "Release v1.0.1: <summary>."
-git push origin main
-
-git tag -a v1.0.1 -m "v1.0.1"
-git push origin v1.0.1
-
-# 2) write the user-facing notes inline, then publish
-gh release create v1.0.1 --title v1.0.1 --notes '
-A one-line summary of the release.
-
-## What's new
-- First change users can see.
-- Second change users can see.
-'
-```
-
-Notes can be corrected after the fact with `gh release edit <tag> --notes '<markdown>'`; neither publishing nor editing a public product Release deploys the official website. The `/changelog` page refetches within an hour, or immediately via its Refresh.
-
-### Legacy deployment configuration reference
-
-The Cloudflare settings and steps below document the retired public pipeline for infrastructure reference. They do not enable public deployment. Configure official hosting in the private repository using its own deployment guide; `TAP_PUSH_TOKEN` still belongs here for active public CLI releases.
-
-#### Repository secrets (Settings → Secrets and variables → Actions)
-
-| Secret | Purpose |
-|--------|---------|
-| `CLOUDFLARE_API_TOKEN` | Deploy Worker/Pages, apply D1 migrations |
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account id |
-| `CF_D1_DATABASE_ID` | Production D1 `database_id` |
-| `CF_KV_BENCH_ID` | Production KV id for `BENCH` |
-| `CF_KV_CACHE_ID` | Production KV id for `CACHE` |
-| `TAP_PUSH_TOKEN` | Cross-repo token with push access to `yufeng-kano/homebrew-tap` and `yufeng-kano/scoop-bucket` — used by the CLI release job to bump the formula/manifest. When absent the bump steps are skipped with a warning and can be re-run after the secret is added |
-
-#### Repository variables
-
-| Variable | Purpose |
-|----------|---------|
-| `APP_URL` | Production origin, e.g. `https://<your-domain>` (no trailing slash). Workflow sets `GOOGLE_REDIRECT_URI` to `$APP_URL/api/auth/callback` and passes it to the docs build for the sitemap hostname. |
-| `CODEX_RELAY_URL` | **Optional.** Codex egress relay origin (`https://….run.app`, [codex-relay.md](./codex-relay.md)). Empty/unset omits the var from the generated config (relay off). |
-
-Worker secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `SESSION_SECRET`, `TOKEN_ENCRYPTION_KEY`) are **not** set by CI on each release; configure once with `wrangler secret put --config wrangler.production.toml`.
-
-#### What the retired workflow used to do
-
-1. Checkout release commit  
-2. `pnpm install` → test → typecheck → `pnpm build:site` (web + docs, `APP_URL` passed for the sitemap)  
-3. Write ephemeral `apps/api/wrangler.production.toml` from secrets/vars (not committed)  
-4. `wrangler d1 migrations apply --remote`  
-5. `wrangler deploy` (Worker)  
-6. `wrangler pages deploy` (project `kano-proxy`)
+Release notes are hand-written and passed inline with `--notes`; never publish with `--generate-notes` alone. Those notes are the only thing the in-app `/changelog` page has to show, so write them for the operator, not for the diff.
 
 ### CLI release (`cli-vX.Y.Z`, workflow `cli-release.yml`)
 
-The `kano-proxy` CLI ([cli.md](./cli.md) § Distribution) ships to end users' machines and has nothing to do with which Worker build is live, so it carries **its own SemVer line** — reset to `1.0.0` when it was decoupled from the product's 4.x — and its own tag prefix. Wire compatibility is the protocol's `proto` number, never a version comparison, so the two lines drift freely.
+The `kano-proxy` CLI ([cli.md](./cli.md) § Distribution) ships to end users' machines and has nothing to do with which server build is live, so it carries **its own SemVer line** — reset to `1.0.0` when it was decoupled from the product's 4.x — and its own tag prefix. Wire compatibility is the protocol's `proto` number, never a version comparison, so the two lines drift freely.
 
 | Policy | Rule |
 |--------|------|
 | Tag | `cli-vMAJOR.MINOR.PATCH` (e.g. `cli-v1.2.0`) |
 | Canonical version | `apps/cli/Cargo.toml` `version` (refresh the `kano-proxy` entry in `Cargo.lock` with `cargo update -p kano-proxy --offline` or a build) |
-| Cadence | Only when the CLI changed. A Worker hotfix does not bump the CLI; a CLI fix does not deploy the Worker |
+| Cadence | Only when the CLI changed. A server hotfix does not bump the CLI; a CLI fix does not deploy the server |
 | `gh release create … --latest=false` | **Required.** GitHub's `releases/latest` must keep pointing at the product release — the `/changelog` page and anyone reading `latest` expect a `v…` tag there. The CLI's own channels never read `latest` (below) |
 
 Steps, mirroring the product flow: bump `Cargo.toml` (+ `Cargo.lock`), commit, push, then
@@ -437,5 +138,3 @@ On publish, `cli-release.yml`:
 The release notes on a `cli-v` Release are for CLI users on GitHub; the `/changelog` page skips `cli-v` tags entirely ([changelog.md](./changelog.md)).
 
 PR CI (`ci.yml`) compile-checks all five targets plus `cargo test`, so a PR cannot merge a CLI that does not build.
-
-The retired public workflow cannot redeploy a ref. Use the private repository’s documented Release process for official hosting.

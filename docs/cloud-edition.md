@@ -8,7 +8,7 @@ Public releases retain verification and independent CLI distribution. The public
 
 ## Module boundaries
 
-- Public API exports an application factory and Worker handler factory, environment/context types and explicit extension contracts. The existing entry point remains the standalone Worker and exports AgentTunnel under its existing name.
+- The public core crate exports a router factory, configuration types and explicit extension traits. Its own standalone binary remains the reference self-hosted deployment.
 - Public web exports a bootstrap/router factory and explicit route, navigation and account-menu extension contracts. The existing entry point remains the standalone web app.
 - Extensions are passed at composition time; no global mutable plugin registry. Constructing two apps must not leak routes, middleware, or policies between them.
 - Authentication establishes the caller. Subscription policy runs after authentication without replacing the caller identity. Credentials are never returned to clients.
@@ -23,7 +23,7 @@ Count one client model request once, regardless of upstream retries. Rejects, ca
 
 Teams, model sharing, member roles and USD budgets are private-edition features built on the pool extension below; the core carries no team concept. Subscription cancellation preserves paid access until the paid-through date. Expiry falls back to Free without resetting earlier Free usage. Account management and export/revocation remain accessible. Configuration and personal resources are retained.
 
-Payment setup must use the operator's real merchant account and configured price identifiers. Never invent production products, prices, customers or entitlements. Use verified webhooks, deduplication and out-of-order reconciliation. Payment credentials stay in secrets. Paddle Billing is the operator-selected external payment exception because Cloudflare has no native merchant subscription checkout. Application compute and storage remain on Cloudflare.
+Payment setup must use the operator's real merchant account and configured price identifiers. Never invent production products, prices, customers or entitlements. Use verified webhooks, deduplication and out-of-order reconciliation. Payment credentials stay in secrets. Paddle Billing is the operator-selected external payment exception. Application compute and storage run on the operator's own server.
 
 ## Verification and cutover gates
 

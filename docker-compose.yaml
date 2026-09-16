@@ -1,0 +1,71 @@
+# Self-hosting kano-proxy: four containers, one job each (docs/deployment.md).
+#   cp .env.example .env    # fill it in; .env is gitignored
+#   docker compose up -d --build
+#
+# Caddy gets a certificate for DOMAIN and routes each request to the API or the web app.
+# If you already run a reverse proxy, drop the caddy service and point yours at the two.
+name: kano-proxy
+
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kano}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-kano_proxy}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kano} -d ${POSTGRES_DB:-kano_proxy}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # The API. It applies its migrations at start and answers only the API paths.
+  server:
+    build:
+      context: .
+      dockerfile: deploy/server/Dockerfile
+    image: kano-proxy-server:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-kano}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-kano_proxy}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [internal]
+
+  # The web app and the documentation site: static files, no backend logic.
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web/Dockerfile
+    image: kano-proxy-web:latest
+    restart: unless-stopped
+    networks: [internal]
+
+  caddy:
+    build:
+      context: .
+      dockerfile: deploy/caddy/Dockerfile
+    image: kano-proxy-caddy:latest
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN is required}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
+    networks: [internal]
+    depends_on:
+      - server
+      - web
+
+networks:
+  internal:
