@@ -556,12 +556,16 @@ pub fn llm_cors() -> tower_http::cors::CorsLayer {
 /// The whole LLM surface: the two shared bases and the group mounts, behind the API-key
 /// middleware (which also runs the edition's request policy) and permissive CORS — the order
 /// `application.ts` composes.
+/// Largest request body the LLM surfaces buffer (docs/api.md § Errors, "Request body limit").
+pub const LLM_REQUEST_BODY_LIMIT: usize = 64 * 1024 * 1024;
+
 pub fn llm_routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .nest("/openai/v1", routes())
         .nest("/anthropic", super::anthropic::routes())
         .nest("/g", super::group_endpoints::routes())
         .route_layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::api_key_auth::api_key_auth))
+        .layer(axum::extract::DefaultBodyLimit::max(LLM_REQUEST_BODY_LIMIT))
         .layer(llm_cors())
 }
 

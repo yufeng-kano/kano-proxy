@@ -312,6 +312,40 @@ mod tests {
          event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}\n\n\
          event: response.completed\ndata: {\"type\":\"response.completed\",\"sequence_number\":2,\"response\":{\"id\":\"resp_up\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":1,\"input_tokens_details\":{\"cached_tokens\":3}}}}\n\n";
 
+    #[tokio::test]
+    async fn a_request_body_past_axums_2_mib_default_reaches_the_upstream() {
+        // Codex turns carrying pasted logs or inline images routinely pass axum's 2 MiB default
+        // extractor limit; the proxy must forward them, not answer its own 413.
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        f.mock.respond_sse(StatusCode::OK, CHAT_SSE);
+        let big = "x".repeat(8 * 1024 * 1024);
+        let body = codex_cli_body(
+            "mygw/local-model",
+            json!({ "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": big }] }] }),
+        );
+
+        let response = f.router().oneshot(f.post("/openai/v1/responses", body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drain_sse(response).await;
+        assert_eq!(f.mock.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_request_body_past_the_ingress_limit_is_refused_without_reaching_the_upstream() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        let big = "x".repeat(super::super::openai::LLM_REQUEST_BODY_LIMIT);
+        let body = codex_cli_body(
+            "mygw/local-model",
+            json!({ "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": big }] }] }),
+        );
+
+        let response = f.router().oneshot(f.post("/openai/v1/responses", body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(f.mock.requests().is_empty());
+    }
+
     // ---- conversion path ----
 
     #[tokio::test]
