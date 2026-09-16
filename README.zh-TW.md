@@ -204,4 +204,4 @@ cd apps/docs && pnpm install && pnpm build
 
 ## 授權
 
-MIT
+[MIT](./LICENSE)

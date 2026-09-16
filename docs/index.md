@@ -31,7 +31,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 - **Data:** PostgreSQL. In-process caches replace what a key-value store used to hold; the tunnel registry lives in the process
 - **Envs:** local + production only
 
-Each app owns its own manifest, lockfile and build; nothing language-specific sits at the repository root, and the release version lives in `VERSION`.
+Each app owns its own manifest, lockfile and build; nothing language-specific sits at the repository root, and the release version is the `version` of the `kano-proxy-core` crate (`apps/api/crates/kano-proxy-core/Cargo.toml`).
 
 ## Product one-liner
 

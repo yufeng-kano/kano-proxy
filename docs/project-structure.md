@@ -2,13 +2,13 @@
 
 ```text
 kano-proxy/
-  VERSION                # the release version; no language owns it
+  LICENSE                # MIT
   apps/
     api/                 # the backend: its own Rust workspace, nothing above it
       Cargo.toml         # workspace over crates/*
       Cargo.lock
       crates/
-        kano-proxy-core/ # the library every edition composes
+        kano-proxy-core/ # the library every edition composes; its Cargo.toml version is the release version
           migrations/    # 0001_core_baseline.sql onward, tracked in core_migrations
           src/
             lib.rs       # what an edition imports

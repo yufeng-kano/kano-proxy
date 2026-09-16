@@ -204,4 +204,4 @@ Configuration, TLS, migrations and releases are in [docs/deployment.md](./docs/d
 
 ## License
 
-MIT
+[MIT](./LICENSE)
