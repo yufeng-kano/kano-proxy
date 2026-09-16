@@ -24,11 +24,11 @@ services:
       retries: 10
 
   # The API. It applies its migrations at start and answers only the API paths.
-  server:
+  api:
     build:
       context: .
-      dockerfile: deploy/server/Dockerfile
-    image: kano-proxy-server:latest
+      dockerfile: deploy/api/Dockerfile
+    image: kano-proxy-api:latest
     restart: unless-stopped
     env_file: .env
     environment:
@@ -64,7 +64,7 @@ services:
       - ./data/caddy/config:/config
     networks: [internal]
     depends_on:
-      - server
+      - api
       - web
 
 networks:

@@ -12,7 +12,7 @@ The server is a Rust binary and a PostgreSQL database, run with docker compose o
 ## Layout
 
 ```text
-apps/server/                        # the server's own Rust workspace
+apps/api/                        # the server's own Rust workspace
   Cargo.toml                        # workspace over crates/*
   crates/kano-proxy-core/           # the library an edition composes
     src/config.rs                   # environment → CoreConfig
@@ -21,7 +21,7 @@ apps/server/                        # the server's own Rust workspace
     src/app.rs                      # build_router(state, Extensions), SPA fallback, serve()
     src/extensions.rs               # composition-time extension points (no global registry)
     migrations/0001_core_baseline.sql
-  crates/kano-proxy-server/         # the standalone binary
+  crates/kano-proxy-api/         # the standalone binary
 ```
 
 Editions call `build_router(AppState, Extensions)` and add their routes, request policy and pool extension there. Nothing is registered globally, so two routers built from the same source never see each other's.
@@ -42,7 +42,7 @@ Existing data and clients kept working without user action, so the crypto module
 
 ## Verification
 
-`cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` from `apps/server`; the CLI keeps its own `cargo test` inside `apps/cli`. Database-backed tests need `KANO_TEST_DATABASE_URL` (a throwaway Postgres; CI starts one) and skip without it; each test gets a fresh database and stale ones are swept. No test sends real upstream traffic, as the cost rule requires.
+`cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings` from `apps/api`; the CLI keeps its own `cargo test` inside `apps/cli`. Database-backed tests need `KANO_TEST_DATABASE_URL` (a throwaway Postgres; CI starts one) and skip without it; each test gets a fresh database and stale ones are swept. No test sends real upstream traffic, as the cost rule requires.
 
 The port completed on 2026-09-16 with 1295 tests passing and clippy clean. The released CLI binary (1.0.0) was paired against this server with the `--no-tui` flow, registered a local OpenAI-format provider, connected with `proto 1`, reported its models, and served `/openai/v1/models`, non-stream and streaming chat completions and an Anthropic-surface conversion through the tunnel with correct `request_logs` rows; the local target was a stub server, so no real upstream was called.
 

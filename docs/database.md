@@ -1,6 +1,6 @@
 # Database (PostgreSQL)
 
-Migrations live in `apps/server/crates/kano-proxy-core/migrations/` and are applied by the server at start.
+Migrations live in `apps/api/crates/kano-proxy-core/migrations/` and are applied by the server at start.
 
 ## Tables
 
@@ -258,7 +258,7 @@ Bench state is not a cache: it is `upstream_accounts.bench_until` / `bench_reaso
 
 ## Migrations
 
-Migrations are plain SQL files in `apps/server/crates/kano-proxy-core/migrations/`, applied in filename order when the server starts, each inside one transaction, and recorded in `core_migrations`. Restarting the same build applies nothing.
+Migrations are plain SQL files in `apps/api/crates/kano-proxy-core/migrations/`, applied in filename order when the server starts, each inside one transaction, and recorded in `core_migrations`. Restarting the same build applies nothing.
 
 Applied migrations are immutable. A schema change is a new file; never an edit to one already released. An edition composing this core keeps its own history table and applies after the core.
 

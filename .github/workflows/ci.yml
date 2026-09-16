@@ -40,7 +40,7 @@ jobs:
         working-directory: apps/docs
 
   server-test:
-    name: Server cargo test
+    name: API cargo test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     services:
@@ -57,11 +57,11 @@ jobs:
       - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/server
+          workspaces: apps/api
       - run: cargo test --workspace
-        working-directory: apps/server
+        working-directory: apps/api
       - run: cargo clippy --workspace --all-targets -- -D warnings
-        working-directory: apps/server
+        working-directory: apps/api
 
   cli-test:
     name: CLI cargo test
@@ -118,6 +118,6 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
-      - run: docker build -f deploy/server/Dockerfile -t kano-proxy-server:ci .
+      - run: docker build -f deploy/api/Dockerfile -t kano-proxy-api:ci .
       - run: docker build -f deploy/web/Dockerfile -t kano-proxy-web:ci .
       - run: docker build -f deploy/caddy/Dockerfile -t kano-proxy-caddy:ci .

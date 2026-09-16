@@ -23,7 +23,7 @@ __pycache__/
 *.pyc
 
 # Rust workspace build output (docs/rust-server.md)
-apps/server/target/
+apps/api/target/
 apps/cli/target/
 
 # Runtime data mounted into the compose stack (certificates, database files)

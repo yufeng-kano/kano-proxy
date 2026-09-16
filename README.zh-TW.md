@@ -157,7 +157,7 @@ docker compose up -d --build
 每個 app 各自安裝、各自建置，專案根目錄沒有共用的套件設定檔。
 
 ```bash
-cd apps/server && cargo test --workspace
+cd apps/api && cargo test --workspace
 cd apps/cli    && cargo test
 cd apps/web    && pnpm install && pnpm typecheck && pnpm build
 cd apps/docs   && pnpm install && pnpm build

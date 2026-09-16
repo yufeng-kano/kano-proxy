@@ -1096,6 +1096,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kano-proxy-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kano-proxy-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kano-proxy-core"
 version = "4.10.1"
 dependencies = [
@@ -1137,17 +1148,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "kano-proxy-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "kano-proxy-core",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

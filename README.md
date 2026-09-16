@@ -157,7 +157,7 @@ docker compose up -d --build
 Each app installs and builds on its own — there is no repository-wide package manifest.
 
 ```bash
-cd apps/server && cargo test --workspace
+cd apps/api && cargo test --workspace
 cd apps/cli    && cargo test
 cd apps/web    && pnpm install && pnpm typecheck && pnpm build
 cd apps/docs   && pnpm install && pnpm build

@@ -60,7 +60,7 @@ openssl rand -base64 32  # TOKEN_ENCRYPTION_KEY
 
 ## Database and migrations
 
-The server applies the migrations in `apps/server/crates/kano-proxy-core/migrations/` in order at start and records what it applied in `core_migrations`. Restarting the same build applies nothing. Applied migrations are immutable: a schema change is a new file, never an edit to an old one ([database.md](./database.md)).
+The server applies the migrations in `apps/api/crates/kano-proxy-core/migrations/` in order at start and records what it applied in `core_migrations`. Restarting the same build applies nothing. Applied migrations are immutable: a schema change is a new file, never an edit to an old one ([database.md](./database.md)).
 
 An edition built on this core keeps its own migration table and applies after the core.
 
@@ -70,8 +70,8 @@ The database lives in `./data/postgres` and the certificates in `./data/caddy`, 
 
 ```sh
 # the API, against a Postgres you already have
-cd apps/server
-DATABASE_URL=postgres://… GOOGLE_CLIENT_ID=… cargo run -p kano-proxy-server
+cd apps/api
+DATABASE_URL=postgres://… GOOGLE_CLIENT_ID=… cargo run -p kano-proxy-api
 
 # the web app, in another terminal — it proxies /api to 127.0.0.1:8787
 cd apps/web && pnpm install && pnpm dev
@@ -87,7 +87,7 @@ The server serves the built SPA itself when `WEB_DIST_DIR` points at it, which i
 ## Verify before deploying
 
 ```sh
-cd apps/server && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
+cd apps/api && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
 cd apps/web    && pnpm test && pnpm typecheck && pnpm build
 cd apps/docs   && pnpm build
 cd apps/cli    && cargo test
@@ -106,7 +106,7 @@ The server migrates on the way up. Read the release notes before updating across
 
 ## Releases
 
-A published `vX.Y.Z` Release is the product's release. It does not deploy anything by itself: this repository builds and verifies, and operators update their own instances. Tags must match the `version` in `apps/server/crates/kano-proxy-core/Cargo.toml`, bumped, committed and pushed before tagging; the default bump is minor.
+A published `vX.Y.Z` Release is the product's release. It does not deploy anything by itself: this repository builds and verifies, and operators update their own instances. Tags must match the `version` in `apps/api/crates/kano-proxy-core/Cargo.toml`, bumped, committed and pushed before tagging; the default bump is minor.
 
 Release notes are hand-written and passed inline with `--notes`; never publish with `--generate-notes` alone. Those notes are the only thing the in-app `/changelog` page has to show, so write them for the operator, not for the diff.
 

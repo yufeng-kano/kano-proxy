@@ -4,7 +4,7 @@
 kano-proxy/
   VERSION                # the release version; no language owns it
   apps/
-    server/              # the server: its own Rust workspace, nothing above it
+    api/                 # the backend: its own Rust workspace, nothing above it
       Cargo.toml         # workspace over crates/*
       Cargo.lock
       crates/
@@ -29,7 +29,7 @@ kano-proxy/
             logging/     # request log rows and token usage capture
             maintenance/ # the daily retention sweep
             changelog/   # release notes cache and version comparison
-        kano-proxy-server/ # the standalone binary: core plus the static web directory
+        kano-proxy-api/  # the standalone binary
     cli/                 # the kano-proxy CLI — its own crate and release pipeline
     web/                 # Vue + Vite, built to static files
       public/            # robots.txt, _headers (noindex except /docs/* and /login)
@@ -42,7 +42,7 @@ kano-proxy/
       package.json, pnpm-lock.yaml
     docs/                # the public documentation site — VitePress (docs/docs-site.md)
       .vitepress/        # site.ts (shared config), config.ts (standalone), theme/
-      *.md, zh-TW/       # English pages and their Traditional Chinese twins
+      pages/             # English pages and their Traditional Chinese twins under zh-TW/
       package.json, pnpm-lock.yaml
   docs/                  # this documentation set
   scripts/               # release helpers
@@ -70,7 +70,7 @@ Every app owns its own manifest, lockfile and build, and nothing language-specif
 
 The dependency direction is private edition → public core. This repository must not import cloud code or enforce the hosted Free/Paddle policy in its standalone entry. Keep provider/protocol fixes here; billing and cloud-only pages belong in the private repository. Rules for the two repositories are maintained independently; each repository's instruction links point to its own `.rule`.
 
-The `kano-proxy-core` crate exports `build_router`, `AppState`, `CoreConfig` and the extension traits (`RequestPolicy`, `PoolExtension`, and the row and candidate types their signatures name). `kano-proxy-server` is the standalone binary. `build_router` accepts instance-local routes, an authenticated API-key request policy and an optional pool extension, all passed at composition time and carried per request, so two routers built from the same source never see each other's. The policy wraps all API-key routes, including group mounts; editions decide which operations to meter.
+The `kano-proxy-core` crate exports `build_router`, `AppState`, `CoreConfig` and the extension traits (`RequestPolicy`, `PoolExtension`, and the row and candidate types their signatures name). `kano-proxy-api` is the standalone binary. `build_router` accepts instance-local routes, an authenticated API-key request policy and an optional pool extension, all passed at composition time and carried per request, so two routers built from the same source never see each other's. The policy wraps all API-key routes, including group mounts; editions decide which operations to meter.
 
 `apps/web/src/core.ts` exports `createWebApp`, `createAppRouter`, the authenticated API client, and extension types. Routes and sidebar items are passed when constructing the app. Extension route titles use `meta.title`; core routes retain catalog-backed `meta.titleKey`. The web source currently requires its documented `@` alias to point to the core web `src` directory in the composing Vite/TypeScript config.
 

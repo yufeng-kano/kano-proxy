@@ -15,7 +15,7 @@ Real upstream traffic is real money. **Never** debug, reproduce, bisect, or benc
 ## Commands
 
 ```bash
-cd apps/server && cargo test --workspace   # the core crate and the server binary
+cd apps/api && cargo test --workspace   # the core crate and the server binary
 cd apps/cli    && cargo test               # kano-proxy CLI
 cd apps/web    && pnpm install && pnpm test
 ```

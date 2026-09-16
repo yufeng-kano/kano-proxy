@@ -10,11 +10,11 @@ The admin UI is a client-rendered SPA behind a login wall; search engines and li
 
 | Path | Role |
 |------|------|
-| `apps/docs/` | VitePress project; pnpm workspace member `docs` |
+| `apps/docs/` | VitePress project; installs and builds on its own |
 | `apps/docs/.vitepress/site.ts` | `defineDocsConfig(edition)`: `base: "/docs/"`, locales, sidebar, local search, sitemap, plus whatever an edition appends (§ Editions) |
-| `apps/docs/.vitepress/config.ts` | The standalone site: `defineDocsConfig()` with nothing added |
+| `apps/docs/.vitepress/config.ts` | The standalone site: `defineDocsConfig()` plus `srcDir: "pages"` |
 | `apps/docs/.vitepress/theme/` | Default theme plus the origin fill (below) |
-| `apps/docs/*.md`, `apps/docs/zh-TW/*.md` | English (root) and Traditional Chinese content, one file per page in each tree |
+| `apps/docs/pages/*.md`, `apps/docs/pages/zh-TW/*.md` | English (root) and Traditional Chinese content, one file per page in each tree |
 | `apps/docs/.vitepress/dist/` | Build output (gitignored, like every `dist/`) |
 | `apps/docs/.vitepress/cache/` | Dev cache (gitignored) |
 

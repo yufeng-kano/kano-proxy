@@ -9,7 +9,7 @@
 	handle @api {
 		# Model streams and the agent tunnel are long-lived: never buffer the response,
 		# and a ten-minute idle gap is normal on a quiet stream.
-		reverse_proxy server:8787 {
+		reverse_proxy api:8787 {
 			flush_interval -1
 			transport http {
 				read_timeout 30m
