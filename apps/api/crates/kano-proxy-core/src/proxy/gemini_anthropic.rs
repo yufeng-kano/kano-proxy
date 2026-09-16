@@ -113,6 +113,32 @@ fn base64_image_part(source: Option<&Value>) -> Option<Value> {
     Some(json!({ "inlineData": { "mimeType": media_type, "data": data } }))
 }
 
+/// Google's documented placeholder for a `functionCall` whose real
+/// `thoughtSignature` is gone (docs: "Thought signatures"). Gemini 3 rejects an
+/// unsigned call outright; the placeholder skips validation at the cost of that
+/// turn's chain of thought — a degraded round beats a conversation that can
+/// never be continued.
+pub const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+/// The Gemini API's other documented placeholder; accepted on replay so a client
+/// that already uses it is not stripped.
+const CONTEXT_ENGINEERING_SIGNATURE: &str = "context_engineering_is_the_way_to_go";
+
+/// Whether a replayed `thinking.signature` can be Gemini's own `thoughtSignature`.
+/// Gemini signs with a long standard-base64 blob; a model group that fails over
+/// to another provider hands the client signatures in that provider's shape
+/// (UUIDs, prefixed envelopes) which Gemini then rejects as
+/// `Corrupted thought signature`. The check is a shape test, not a proof: a
+/// foreign signature that also happens to be long base64 still passes.
+fn is_plausible_gemini_signature(signature: &str) -> bool {
+    if signature == SKIP_THOUGHT_SIGNATURE || signature == CONTEXT_ENGINEERING_SIGNATURE {
+        return true;
+    }
+    signature.len() >= 32
+        && signature
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+}
+
 fn blocks_to_parts(content: Option<&Value>) -> Vec<Value> {
     match content {
         Some(Value::String(s)) => {
@@ -144,8 +170,15 @@ fn blocks_to_parts(content: Option<&Value>) -> Vec<Value> {
                         // itself emits signature-only thought parts (no text), so a
                         // replayed block whose text is empty but whose signature is set
                         // still counts.
-                        let signature =
-                            block.get("signature").and_then(Value::as_str).unwrap_or("");
+                        // A signature another provider minted is dropped here: the
+                        // text stays as an unsigned thought part, a signature-only
+                        // block becomes nothing, and the functionCall it was meant
+                        // for gets the placeholder below instead of a 400.
+                        let signature = block
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .filter(|s| is_plausible_gemini_signature(s))
+                            .unwrap_or("");
                         if !thinking_text.is_empty() || !signature.is_empty() {
                             let mut part = Map::new();
                             part.insert("text".into(), json!(thinking_text));
@@ -375,6 +408,8 @@ pub fn anthropic_to_gemini_request(
     // tool_use id → name, so a later `tool_result` can be named for Gemini.
     let mut call_names: HashMap<String, String> = HashMap::new();
 
+    let thinking = resolve_gemini_thinking(body)?;
+
     let empty = Vec::new();
     let messages = body.get("messages").and_then(Value::as_array).unwrap_or(&empty);
     for message in messages {
@@ -409,10 +444,12 @@ pub fn anthropic_to_gemini_request(
                 // call turn replays as [thought, thought(sig), text, tool_use].
                 // Never reach past an earlier call — its signature is its own.
                 let mut carrier: Option<usize> = None;
+                let mut follows_a_call = false;
                 if raw_parts[index].get("thoughtSignature").is_none() {
                     for back in (0..index).rev() {
                         let candidate = &raw_parts[back];
                         if candidate.get("functionCall").is_some_and(truthy) {
+                            follows_a_call = true;
                             break;
                         }
                         let signed = candidate
@@ -441,6 +478,14 @@ pub fn anthropic_to_gemini_request(
                         dropped[at] = true;
                     } else if let Some(part) = raw_parts[at].as_object_mut() {
                         part.shift_remove("thoughtSignature");
+                    }
+                } else if !follows_a_call && thinking.mode != GeminiThinkingMode::Disabled {
+                    // The turn's first call has nothing to sign it — the client
+                    // never replayed thinking, or the signature was foreign and
+                    // dropped above. Gemini only signs the first of parallel calls,
+                    // so a later one stays bare exactly as Gemini returned it.
+                    if let Some(part) = raw_parts[index].as_object_mut() {
+                        part.insert("thoughtSignature".into(), json!(SKIP_THOUGHT_SIGNATURE));
                     }
                 }
                 let call = &raw_parts[index]["functionCall"];
@@ -505,7 +550,6 @@ pub fn anthropic_to_gemini_request(
         let kept: Vec<Value> = stop.iter().filter(|s| s.is_string()).cloned().collect();
         generation_config.insert("stopSequences".into(), Value::Array(kept));
     }
-    let thinking = resolve_gemini_thinking(body)?;
     generation_config.insert("thinkingConfig".into(), thinking.thinking_config.clone());
 
     let system_parts = system_to_parts(body.get("system"));
@@ -1118,6 +1162,11 @@ mod tests {
     use super::*;
     use futures::StreamExt;
 
+    /// A signature in the shape Gemini actually mints: long, standard base64.
+    fn sig(tag: &str) -> String {
+        format!("{:A<40}", tag.replace('-', ""))
+    }
+
     fn request(body: Value) -> Value {
         anthropic_to_gemini_request(&body).expect("valid request").request
     }
@@ -1282,7 +1331,10 @@ mod tests {
         );
         assert_eq!(
             out["contents"][1],
-            json!({ "role": "model", "parts": [{ "functionCall": { "id": "toolu_boot", "name": "read_file", "args": { "path": "a.md" } } }] })
+            json!({ "role": "model", "parts": [{
+                "functionCall": { "id": "toolu_boot", "name": "read_file", "args": { "path": "a.md" } },
+                "thoughtSignature": SKIP_THOUGHT_SIGNATURE
+            }] })
         );
         assert_eq!(out["contents"][2]["role"], "user");
         assert_eq!(out["contents"].as_array().unwrap().len(), 3);
@@ -1299,7 +1351,10 @@ mod tests {
         }));
         assert_eq!(
             out["contents"][1]["parts"],
-            json!([{ "functionCall": { "id": "toolu_1", "name": "get_weather", "args": { "city": "Taipei" } } }])
+            json!([{
+                "functionCall": { "id": "toolu_1", "name": "get_weather", "args": { "city": "Taipei" } },
+                "thoughtSignature": SKIP_THOUGHT_SIGNATURE
+            }])
         );
         assert_eq!(
             out["contents"][2]["parts"],
@@ -1335,12 +1390,12 @@ mod tests {
         let out = request(json!({
             "messages": [
                 { "role": "user", "content": "hi" },
-                { "role": "assistant", "content": [{ "type": "thinking", "thinking": "", "signature": "sig-1" }] }
+                { "role": "assistant", "content": [{ "type": "thinking", "thinking": "", "signature": sig("sig-1") }] }
             ]
         }));
         assert_eq!(
             out["contents"][1]["parts"],
-            json!([{ "text": "", "thought": true, "thoughtSignature": "sig-1" }])
+            json!([{ "text": "", "thought": true, "thoughtSignature": sig("sig-1") }])
         );
     }
 
@@ -1350,7 +1405,7 @@ mod tests {
             "messages": [
                 { "role": "user", "content": "search" },
                 { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "", "signature": "sig-fc" },
+                    { "type": "thinking", "thinking": "", "signature": sig("sig-fc") },
                     { "type": "tool_use", "id": "toolu_1", "name": "search", "input": { "q": "x" } }
                 ] },
                 { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }] }
@@ -1360,7 +1415,7 @@ mod tests {
             out["contents"][1]["parts"],
             json!([{
                 "functionCall": { "id": "toolu_1", "name": "search", "args": { "q": "x" } },
-                "thoughtSignature": "sig-fc"
+                "thoughtSignature": sig("sig-fc")
             }])
         );
     }
@@ -1369,7 +1424,7 @@ mod tests {
     fn moves_a_textual_thinking_signature_to_a_following_tool_call() {
         let out = request(json!({
             "messages": [{ "role": "assistant", "content": [
-                { "type": "thinking", "thinking": "reasoning", "signature": "sig-thought" },
+                { "type": "thinking", "thinking": "reasoning", "signature": sig("sig-thought") },
                 { "type": "tool_use", "id": "toolu_1", "name": "search", "input": {} }
             ] }]
         }));
@@ -1378,7 +1433,7 @@ mod tests {
             out["contents"][1]["parts"],
             json!([
                 { "text": "reasoning", "thought": true },
-                { "functionCall": { "id": "toolu_1", "name": "search", "args": {} }, "thoughtSignature": "sig-thought" }
+                { "functionCall": { "id": "toolu_1", "name": "search", "args": {} }, "thoughtSignature": sig("sig-thought") }
             ])
         );
     }
@@ -1392,7 +1447,7 @@ mod tests {
                 { "role": "user", "content": "send it" },
                 { "role": "assistant", "content": [
                     { "type": "thinking", "thinking": "plan" },
-                    { "type": "thinking", "thinking": "", "signature": "sig-call" },
+                    { "type": "thinking", "thinking": "", "signature": sig("sig-call") },
                     { "type": "text", "text": "Sending now." },
                     { "type": "tool_use", "id": "toolu_1", "name": "send_message", "input": {} }
                 ] }
@@ -1403,7 +1458,7 @@ mod tests {
             json!([
                 { "text": "plan", "thought": true },
                 { "text": "Sending now." },
-                { "functionCall": { "id": "toolu_1", "name": "send_message", "args": {} }, "thoughtSignature": "sig-call" }
+                { "functionCall": { "id": "toolu_1", "name": "send_message", "args": {} }, "thoughtSignature": sig("sig-call") }
             ])
         );
     }
@@ -1414,7 +1469,7 @@ mod tests {
             "messages": [
                 { "role": "user", "content": "run both" },
                 { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "", "signature": "sig-first" },
+                    { "type": "thinking", "thinking": "", "signature": sig("sig-first") },
                     { "type": "tool_use", "id": "toolu_1", "name": "a", "input": {} },
                     { "type": "text", "text": "and" },
                     { "type": "tool_use", "id": "toolu_2", "name": "b", "input": {} }
@@ -1424,10 +1479,85 @@ mod tests {
         assert_eq!(
             out["contents"][1]["parts"],
             json!([
-                { "functionCall": { "id": "toolu_1", "name": "a", "args": {} }, "thoughtSignature": "sig-first" },
+                { "functionCall": { "id": "toolu_1", "name": "a", "args": {} }, "thoughtSignature": sig("sig-first") },
                 { "text": "and" },
                 { "functionCall": { "id": "toolu_2", "name": "b", "args": {} } }
             ])
+        );
+    }
+
+    #[test]
+    fn drops_a_foreign_signature_and_placeholders_the_call() {
+        // What a model group hands back after failing over to a non-Gemini
+        // target: a UUID where Gemini expects its own base64 blob. Replaying it
+        // verbatim fails the turn with `Corrupted thought signature`.
+        let out = request(json!({
+            "messages": [
+                { "role": "user", "content": "log it" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "plan", "signature": "8c02fbf7-92c3-4bd3-964c-983210454fc7" },
+                    { "type": "tool_use", "id": "call_00_abc", "name": "insert", "input": { "row": 1 } }
+                ] },
+                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "call_00_abc", "content": "ok" }] }
+            ]
+        }));
+        assert_eq!(
+            out["contents"][1]["parts"],
+            json!([
+                { "text": "plan", "thought": true },
+                {
+                    "functionCall": { "id": "call_00_abc", "name": "insert", "args": { "row": 1 } },
+                    "thoughtSignature": SKIP_THOUGHT_SIGNATURE
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn drops_a_signature_only_block_whose_signature_is_foreign() {
+        let out = request(json!({
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "", "signature": "8c02fbf7-92c3-4bd3-964c-983210454fc7" },
+                    { "type": "text", "text": "hello" }
+                ] }
+            ]
+        }));
+        assert_eq!(out["contents"][1]["parts"], json!([{ "text": "hello" }]));
+    }
+
+    #[test]
+    fn keeps_googles_own_placeholder_signature() {
+        let out = request(json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "", "signature": "context_engineering_is_the_way_to_go" },
+                    { "type": "tool_use", "id": "toolu_1", "name": "a", "input": {} }
+                ] }
+            ]
+        }));
+        assert_eq!(
+            out["contents"][1]["parts"][0]["thoughtSignature"],
+            json!("context_engineering_is_the_way_to_go")
+        );
+    }
+
+    #[test]
+    fn leaves_an_unsigned_call_bare_when_thinking_is_disabled() {
+        let out = request(json!({
+            "thinking": { "type": "disabled" },
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "toolu_1", "name": "a", "input": {} }
+                ] }
+            ]
+        }));
+        assert_eq!(
+            out["contents"][1]["parts"],
+            json!([{ "functionCall": { "id": "toolu_1", "name": "a", "args": {} } }])
         );
     }
 
@@ -1439,9 +1569,9 @@ mod tests {
             "messages": [
                 { "role": "user", "content": "run both" },
                 { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "reasoning", "signature": "sig-1" },
+                    { "type": "thinking", "thinking": "reasoning", "signature": sig("sig-1") },
                     { "type": "tool_use", "id": "toolu_1", "name": "Bash", "input": { "command": "ls" } },
-                    { "type": "thinking", "thinking": "", "signature": "sig-2" },
+                    { "type": "thinking", "thinking": "", "signature": sig("sig-2") },
                     { "type": "tool_use", "id": "toolu_2", "name": "Bash", "input": { "command": "pwd" } }
                 ] },
                 { "role": "user", "content": [
@@ -1454,8 +1584,8 @@ mod tests {
             out["contents"][1]["parts"],
             json!([
                 { "text": "reasoning", "thought": true },
-                { "functionCall": { "id": "toolu_1", "name": "Bash", "args": { "command": "ls" } }, "thoughtSignature": "sig-1" },
-                { "functionCall": { "id": "toolu_2", "name": "Bash", "args": { "command": "pwd" } }, "thoughtSignature": "sig-2" }
+                { "functionCall": { "id": "toolu_1", "name": "Bash", "args": { "command": "ls" } }, "thoughtSignature": sig("sig-1") },
+                { "functionCall": { "id": "toolu_2", "name": "Bash", "args": { "command": "pwd" } }, "thoughtSignature": sig("sig-2") }
             ])
         );
     }
@@ -1477,7 +1607,7 @@ mod tests {
     fn round_trips_a_thinking_block_with_its_signature() {
         let out = request(json!({
             "messages": [{ "role": "assistant", "content": [
-                { "type": "thinking", "thinking": "hmm", "signature": "sig-abc" },
+                { "type": "thinking", "thinking": "hmm", "signature": sig("sig-abc") },
                 { "type": "text", "text": "done" }
             ] }]
         }));
@@ -1485,7 +1615,7 @@ mod tests {
         assert_eq!(
             out["contents"][1]["parts"],
             json!([
-                { "text": "hmm", "thought": true, "thoughtSignature": "sig-abc" },
+                { "text": "hmm", "thought": true, "thoughtSignature": sig("sig-abc") },
                 { "text": "done" }
             ])
         );
