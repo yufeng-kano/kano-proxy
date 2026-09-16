@@ -144,18 +144,21 @@ curl https://<your-domain>/openai/v1/chat/completions \
 
 ## Self-Hosting & Development
 
-Built on Cloudflare serverless architecture (Workers + Pages + D1 + KV).
+`main` runs on Cloudflare (Workers + Pages + D1 + KV). The `rust` branch moves the server to a Rust binary with PostgreSQL, run with docker compose; see [docs/rust-server.md](./docs/rust-server.md).
+
+Each app installs and builds on its own — there is no repository-wide package manifest.
 
 ```bash
-# Clone & install dependencies
-pnpm install
+# the server and the CLI
+cargo test --workspace
+cd apps/cli && cargo test
 
-# Run tests and type checks
-pnpm test
-pnpm typecheck
+# the web app and the docs site
+cd apps/web  && pnpm install && pnpm typecheck && pnpm build
+cd apps/docs && pnpm install && pnpm build
 ```
 
-Detailed deployment instructions, Cloudflare setup, and local development guides are available in [docs/deployment.md](./docs/deployment.md).
+Deployment instructions and local development guides are in [docs/deployment.md](./docs/deployment.md) for the Cloudflare edition and [docs/rust-server.md](./docs/rust-server.md) for the Rust one.
 
 ---
 

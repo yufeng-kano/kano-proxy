@@ -16,12 +16,14 @@ Real upstream traffic is real money. **Never** debug, reproduce, bisect, or benc
 ## Commands
 
 ```bash
-pnpm test
-pnpm --filter api test
-pnpm --filter api test:watch
-cd apps/relay && deno task test   # egress relay (Deno — not part of pnpm test)
-cd apps/cli && cargo test         # kano-proxy CLI (Rust — not part of pnpm test)
+cargo test --workspace            # the core crate and the server
+cd apps/cli   && cargo test       # kano-proxy CLI
+cd apps/web   && pnpm install && pnpm test
+cd apps/api   && pnpm install && pnpm test   # the TypeScript Worker, on main
+cd apps/relay && deno task test              # egress relay (Deno)
 ```
+
+Every app carries its own manifest and lockfile, so each one installs where it lives; there is no repository-wide `pnpm test`.
 
 The AgentTunnel protocol ([cli.md](./cli.md)) is tested at protocol level: the DO's multiplexer core is a plain module driven with in-memory frames, and the Rust CLI's protocol/state modules carry their own `cargo test` unit tests. A local LLM is free, but the suite still never assumes one is running.
 

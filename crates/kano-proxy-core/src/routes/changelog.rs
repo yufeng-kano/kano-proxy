@@ -28,14 +28,13 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/", get(changelog))
 }
 
-/// The running version, read from the repository's root `package.json` — the same file the
-/// TypeScript route imported its `version` from, so both editions report one number.
+/// The running version, read from the repository's `VERSION` file. It sits at the root in a
+/// plain form because no one language owns it, and every edition reports the one number.
 static CURRENT_VERSION: Lazy<String> = Lazy::new(|| {
-    const PACKAGE_JSON: &str = include_str!("../../../../package.json");
-    serde_json::from_str::<Value>(PACKAGE_JSON)
-        .ok()
-        .and_then(|v| v.get("version").and_then(Value::as_str).map(str::to_string))
-        .expect("the root package.json carries a version")
+    const VERSION_FILE: &str = include_str!("../../../../VERSION");
+    let version = VERSION_FILE.trim();
+    assert!(!version.is_empty(), "the VERSION file carries a version");
+    version.to_string()
 });
 
 pub fn current_version() -> &'static str {
