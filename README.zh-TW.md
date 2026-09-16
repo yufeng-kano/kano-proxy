@@ -11,6 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Rust-server-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/PostgreSQL-storage-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/Docker_Compose-self--hosted-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose" />
   <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
   <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Anthropic API" />
   <img src="https://img.shields.io/badge/隱私-零對話日誌-059669?style=flat-square" alt="隱私" />
@@ -19,9 +20,9 @@
 
 ---
 
-**Kano Proxy** 是一套專為開發者與編程代理（Coding Agents）打造的高效能多租戶代理系統。你可以輕鬆綁定個人的 AI 訂閱帳號（Claude Code、ChatGPT Codex、SuperGrok、Google AI Pro/Ultra），建立具備自動容錯移轉（Failover）的多帳號池，並透過標準的 OpenAI 與 Anthropic API 端點呼叫所有模型。
+**Kano Proxy** 是一套自架、多租戶的代理系統，專為開發者與編程代理（Coding Agents）打造。綁定你的 AI 訂閱帳號（Claude Code、ChatGPT Codex、SuperGrok、Google AI Pro/Ultra）、串接任何相容 OpenAI / Anthropic 的第三方端點，或把自己電腦上跑的本地 LLM 也接進來，全部匯集成具備自動容錯移轉（Failover）的帳號池，再透過標準的 OpenAI 與 Anthropic API 呼叫。
 
-上游 OAuth 憑證僅保留在伺服器端，客戶端僅需使用系統核發的專屬 API Key，安全無虞。
+一支 Rust 伺服器加一個 PostgreSQL，用 docker compose 跑在自己掌控的機器上。上游 OAuth 憑證僅保留在伺服器端，客戶端只需使用系統核發的專屬 API Key。
 
 > **想直接使用？**
 > 線上託管版本已上線：[kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com)。
@@ -30,12 +31,14 @@
 
 ## 核心特色
 
-- **在任意 Coding Agent 自由混用模型** — 打破工具與供應商綁定！直接在 **Claude Code 裡跑 GPT 與 Gemini**，或在 **Cursor 與 Cline 裡跑 Claude Opus 與 Grok**。雙向協議即時轉譯，完整支援 Tool Calling。
-- **多帳號池與自動切換** — 每個模型供應商可綁定多個帳號。遇到 Rate Limit (429/403) 時，系統自動移轉至下一個可用帳號。
-- **模型群組與自訂端點** — 支援自訂模型別名（如 `fast-code` 跨模型容錯備援）及串接任何相容 OpenAI / Anthropic 的第三方 API。
-- **視覺化用量儀表板** — 乾淨優雅的 Web 介面，即時掌握各帳號 5 小時及每週剩餘額度百分比。
-- **隱私至上設計** — 預設絕不記錄、儲存任何對話提示詞（Prompts）或生成內容。
-- **專為 Coding Agent 最佳化** — 零緩衝 SSE 即時串流、完整 Tool Calling / Function Calling、Vision 圖片輸入、音訊輸入、思考推理深度（Reasoning Effort）及 Anthropic 提示詞快取（Prompt Caching）透傳。
+- **在任意 Coding Agent 自由混用模型** — 直接在 **Claude Code 裡跑 GPT 與 Gemini**，或在 **Cursor、Cline、Codex CLI 裡跑 Claude 與 Grok**。Chat Completions、Responses API 與 Anthropic Messages 三種協議雙向即時轉譯，工具不再被單一供應商綁死。
+- **多帳號池與自動切換** — 每個供應商可綁定多個帳號。遇到 Rate Limit（429/403）時，系統暫時停用該帳號並自動移轉至下一個可用帳號。
+- **模型群組即虛擬端點** — 每個群組有自己的 Base URL（`/g/<slug>/openai/v1`、`/g/<slug>/anthropic`），群組內的模型名稱展開成有序的 `provider/model` 目標清單：客戶端模型對應與跨供應商容錯，一個機制搞定。
+- **自帶端點** — 註冊任何相容 OpenAI / Anthropic 的 API（Base URL + Key），它就和內建供應商一樣可在兩種協議上使用。
+- **本地 LLM 不需公開網址** — `kano-proxy` CLI 主動對外建立 WebSocket 連線，把你電腦上的 Ollama、LM Studio、vLLM 或 llama.cpp 變成正式的供應商。不需 cloudflared、ngrok 或開通連接埠。
+- **用量儀表板與花費上限** — 即時掌握各帳號 5 小時與每週額度，檢視每次請求的估算費用，並可替每把 API Key 設定每日 / 每週 / 每月的美元上限。
+- **隱私至上設計** — 預設絕不記錄、儲存任何提示詞（Prompts）或生成內容。
+- **專為 Coding Agent 最佳化** — 零緩衝 SSE 即時串流並支援中途取消、Tool Calling、Vision 圖片輸入、音訊輸入與語音轉文字、思考推理深度（Reasoning Effort）對應及 Anthropic 提示詞快取（Prompt Caching）透傳。
 
 ---
 
@@ -46,9 +49,9 @@
 </p>
 
 1. **登入**：透過 Google 帳號登入 Web 管理介面。
-2. **綁定**：授權綁定你的訂閱帳號（Claude Code、Codex、Grok、Antigravity）。
+2. **綁定**：授權綁定訂閱帳號（Claude Code、Codex、Grok、Antigravity）、新增自訂端點，或用 CLI 接上本地 LLM。
 3. **建立金鑰**：產生專屬的 Kano API Key（`sk-kano-proxy-...`）。
-4. **設定工具**：將 Cursor、Claude Code、Cline、CC Switch、Aider 或任何 SDK 指向 Kano Proxy 即可開始使用。
+4. **設定工具**：將 Claude Code、Codex CLI、Cursor、Cline、Aider 或任何 SDK 指向 Kano Proxy 即可開始使用。
 
 ---
 
@@ -60,8 +63,9 @@
 |---|---|---|
 | **OpenAI 相容** | `https://<your-domain>/openai/v1` | Codex CLI, Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
 | **Anthropic Messages** | `https://<your-domain>/anthropic` | Claude Code CLI, Anthropic SDK, Claude 格式工具 |
+| **模型群組** | `https://<your-domain>/g/<slug>/openai/v1` · `/g/<slug>/anthropic` | 同上，改用群組內定義的模型名稱 |
 
-OpenAI 相容端點同時提供 **Chat Completions**（`/chat/completions`）與 **Responses API**（`/responses`），後者就是 Codex CLI 使用的協議。Codex 模型在此原生透傳到你的 ChatGPT 訂閱，其他供應商由 proxy 即時轉換。
+OpenAI 相容端點同時提供 **Chat Completions**（`/chat/completions`）、**Responses API**（`/responses`，Codex CLI 使用的協議）、`/models` 與 `/audio/transcriptions`。Codex 模型在此原生透傳到你的 ChatGPT 訂閱，其他供應商由 proxy 即時轉換。
 
 ### 2. 身份驗證
 
@@ -78,7 +82,8 @@ Authorization: Bearer sk-kano-proxy-...
 - `codex/gpt-5.6-sol`
 - `grok/grok-4.5`
 - `antigravity/gemini-3-flash`
-- `<custom-slug>/<model-name>`
+- `<custom-slug>/<model-name>`：自訂端點
+- `<cli-slug>/<local-model>`：透過 CLI 接入的本地 LLM
 
 ---
 
@@ -129,6 +134,21 @@ curl https://<your-domain>/openai/v1/chat/completions \
   }'
 ```
 
+### 把本地 Ollama 接進 proxy
+
+安裝 CLI（Homebrew、Scoop 或安裝腳本），讓這台機器登入一次，註冊本地端點，然後讓通道持續運行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
+# 或：brew install yufeng-kano/tap/kano-proxy
+
+kano-proxy init     # 開啟瀏覽器授權此裝置，貼回一次性代碼
+kano-proxy add      # slug、openai|anthropic、http://localhost:11434/v1
+kano-proxy start    # 每個已註冊的供應商一條對外 WebSocket
+```
+
+本地模型隨即以 `<slug>/<model>` 出現在上述所有端點，也能當作模型群組的目標。細節見 [docs/cli.md](./docs/cli.md)。
+
 ---
 
 ## 支援的供應商
@@ -140,27 +160,30 @@ curl https://<your-domain>/openai/v1/chat/completions \
 | <img src="https://img.shields.io/badge/xAI_Grok-000000?style=flat-square&logo=x&logoColor=white" alt="Grok" height="20" /> | xAI SuperGrok OAuth | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
 | <img src="https://img.shields.io/badge/Google_Antigravity-4285F4?style=flat-square&logo=google&logoColor=white" alt="Antigravity" height="20" /> | Google AI Pro / Ultra (CloudCode API) | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
 | <img src="https://img.shields.io/badge/Custom_Endpoints-6366F1?style=flat-square&logo=fastapi&logoColor=white" alt="Custom Endpoints" height="20" /> | 任何相容 OpenAI / Anthropic 的 API | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
+| <img src="https://img.shields.io/badge/Local_LLMs_(CLI)-0891B2?style=flat-square&logo=ollama&logoColor=white" alt="Local LLMs" height="20" /> | 你電腦上的 Ollama、LM Studio、vLLM、llama.cpp，透過 `kano-proxy` CLI 通道 | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
 
 ---
 
 ## 本地開發與部署
 
-一支 Rust server 加一個 PostgreSQL，用 docker compose 跑在自己的機器上。
+四個容器各司其職：PostgreSQL、API 伺服器、Web 靜態站（管理介面加公開的 `/docs/` 文件站）、負責 TLS 與路由的 Caddy。
 
 ```bash
 git clone https://github.com/yufeng-kano/kano-proxy.git
 cd kano-proxy
-cp .env.example .env     # 填好設定
+cp .env.example .env     # 填好網域、Google OAuth client 與密鑰
 docker compose up -d --build
 ```
+
+把網域 DNS 指到這台機器並開放 80、443 連接埠。Caddy 會在第一次請求時取得憑證，伺服器啟動時自動套用資料庫遷移。若已有自己的反向代理，拿掉 `caddy` 服務、依部署文件自行把 API 路徑轉到伺服器即可。
 
 每個 app 各自安裝、各自建置，專案根目錄沒有共用的套件設定檔。
 
 ```bash
-cd apps/api && cargo test --workspace
-cd apps/cli    && cargo test
-cd apps/web    && pnpm install && pnpm typecheck && pnpm build
-cd apps/docs   && pnpm install && pnpm build
+cd apps/api  && cargo test --workspace
+cd apps/cli  && cargo test
+cd apps/web  && pnpm install && pnpm typecheck && pnpm build
+cd apps/docs && pnpm install && pnpm build
 ```
 
 設定、憑證、資料庫遷移與發版流程請參閱 [docs/deployment.md](./docs/deployment.md)，架構說明在 [docs/rust-server.md](./docs/rust-server.md)。
@@ -169,10 +192,12 @@ cd apps/docs   && pnpm install && pnpm build
 
 ## 完整文件
 
-- [系統架構與產品規格](./docs/product.md)
+- [產品目標與模型命名](./docs/product.md)
 - [API 參考與協議映射](./docs/api.md)
 - [身份認證與帳號池機制](./docs/auth.md)
-- [供應商適配與容錯策略](./docs/providers.md)
+- [供應商、路由與容錯策略](./docs/providers.md)
+- [CLI 與本地 LLM 通道](./docs/cli.md)
+- [部署](./docs/deployment.md)
 - [文件總覽導覽](./docs/index.md)
 
 ---
