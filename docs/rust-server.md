@@ -1,6 +1,6 @@
 # Rust server
 
-The server is a Rust binary and a PostgreSQL database, run with docker compose on a machine the operator controls. Operator decision, 2026-09-15; it replaced a TypeScript Cloudflare Worker, and this document is the rationale the stack rule requires for a primary language and runtime change.
+The server is a Rust binary and a PostgreSQL database, run with docker compose on a machine the operator controls. Operator decision, 2026-09-15; it replaced a TypeScript Cloudflare Worker, and this document is the rationale the stack rule requires for a primary language and runtime change. The edition it replaced is kept on the `serverless` branch.
 
 ## Why
 

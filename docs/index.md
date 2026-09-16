@@ -1,6 +1,6 @@
 # kano-proxy documentation
 
-Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropic Messages APIs, with per-user OAuth pools for Claude Code / Codex / Grok / Antigravity. Self-hosted: one Rust server and a PostgreSQL database, run with docker compose.
+Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropic Messages APIs, with per-user OAuth pools for Claude Code / Codex / Grok / Antigravity. Self-hosted: one Rust server and a PostgreSQL database, run with docker compose. The Cloudflare Workers edition this replaced is kept on the `serverless` branch.
 
 ## Docs map
 
