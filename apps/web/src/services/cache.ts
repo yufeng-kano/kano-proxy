@@ -312,6 +312,25 @@ export function writeCustomProvidersCache(
 }
 
 /**
+ * Drops the model-groups and models caches for one user without touching the
+ * rest. Used after a custom endpoint's prefix is renamed: the server rewrote
+ * the group targets and the catalog ids, so a cache-first paint of either page
+ * would show the old prefix until the TTL ran out (docs/admin-ui.md § Providers
+ * page).
+ */
+export function invalidateModelCaches(userId: string | null | undefined): void {
+  if (!userId) return
+  for (const store of dataStores()) {
+    try {
+      store.removeItem(modelsKey(userId))
+      store.removeItem(modelGroupsKey(userId))
+    } catch {
+      /* */
+    }
+  }
+}
+
+/**
  * Model groups cache. Names and targets only — a group is user config, and
  * the response carries nothing secret to keep off disk.
  */

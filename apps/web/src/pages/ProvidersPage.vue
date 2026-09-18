@@ -41,6 +41,7 @@ import {
   unpauseAccount,
   unpauseCustomProvider,
 } from "@/services/api"
+import { invalidateModelCaches } from "@/services/cache"
 import { getProvidersPrefs, setProvidersPrefs } from "@/services/prefs"
 import {
   DEFAULT_ROUTING_STRATEGY,
@@ -365,7 +366,10 @@ function closeCustomDialog() {
   editingCustomProvider.value = null
 }
 
-async function onCustomProviderSaved() {
+async function onCustomProviderSaved(detail?: { slugChanged?: boolean }) {
+  // A renamed prefix changed the group targets and catalog ids server-side;
+  // the other pages must re-read rather than paint their cache.
+  if (detail?.slugChanged) invalidateModelCaches(user.value?.id)
   await customProviders.load({ refresh: true })
 }
 

@@ -312,6 +312,8 @@ export async function updateCustomProvider(
   id: string,
   body: {
     name?: string
+    /** A differing value renames the model prefix (docs/auth.md § Custom endpoint keys). */
+    slug?: string
     base_url?: string
     api_key?: string
     count_tokens_url?: string

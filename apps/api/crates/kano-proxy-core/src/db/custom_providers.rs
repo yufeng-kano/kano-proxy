@@ -200,6 +200,125 @@ pub async fn update_custom_provider_fields(
     Ok(())
 }
 
+/// What `rename_custom_provider_slug` rewrote besides the provider row itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SlugRenameOutcome {
+    /// `upstream_accounts` rows moved under the new slug.
+    pub accounts: u64,
+    /// Group targets whose `<slug>/` prefix was rewritten.
+    pub group_targets: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlugRename {
+    Renamed(SlugRenameOutcome),
+    /// The new slug belongs to another of the user's custom or CLI providers.
+    Taken,
+    NotFound,
+}
+
+/// Renames a custom provider's model prefix and everything keyed by it in one transaction:
+/// `upstream_accounts.provider`, `provider_settings.provider` (an orphaned row already under the
+/// new slug is dropped first, as `0013` did) and every `<old>/<model>` target in the user's model
+/// groups, pins kept. `request_logs.provider` is history and stays. The cross-table uniqueness
+/// guard rides in the UPDATE and the `(user_id, slug)` unique index backs it under a race, so a
+/// concurrent create for the same slug surfaces as `Taken`, never as a half-applied rename
+/// (docs/providers.md § Custom endpoints).
+pub async fn rename_custom_provider_slug(
+    db: &PgPool,
+    user_id: &str,
+    id: &str,
+    new_slug: &str,
+) -> Result<SlugRename, sqlx::Error> {
+    let ts = now_iso();
+    let mut tx = db.begin().await?;
+    let old_slug: Option<String> =
+        sqlx::query_scalar("SELECT slug FROM custom_providers WHERE id = $1 AND user_id = $2 FOR UPDATE")
+            .bind(id)
+            .bind(user_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(old_slug) = old_slug else { return Ok(SlugRename::NotFound) };
+    if old_slug == new_slug {
+        return Ok(SlugRename::Renamed(SlugRenameOutcome::default()));
+    }
+
+    let renamed = sqlx::query(
+        "UPDATE custom_providers SET slug = $1, updated_at = $2
+         WHERE id = $3 AND user_id = $4
+           AND NOT EXISTS (SELECT 1 FROM custom_providers WHERE user_id = $4 AND slug = $1 AND id <> $3)
+           AND NOT EXISTS (SELECT 1 FROM cli_providers WHERE user_id = $4 AND slug = $1)",
+    )
+    .bind(new_slug)
+    .bind(&ts)
+    .bind(id)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await;
+    let renamed = match renamed {
+        Ok(r) => r.rows_affected(),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => return Ok(SlugRename::Taken),
+        Err(e) => return Err(e),
+    };
+    if renamed == 0 {
+        return Ok(SlugRename::Taken);
+    }
+
+    let accounts =
+        sqlx::query("UPDATE upstream_accounts SET provider = $1, updated_at = $2 WHERE user_id = $3 AND provider = $4")
+            .bind(new_slug)
+            .bind(&ts)
+            .bind(user_id)
+            .bind(&old_slug)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+    sqlx::query("DELETE FROM provider_settings WHERE user_id = $1 AND provider = $2")
+        .bind(user_id)
+        .bind(new_slug)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE provider_settings SET provider = $1, updated_at = $2 WHERE user_id = $3 AND provider = $4")
+        .bind(new_slug)
+        .bind(&ts)
+        .bind(user_id)
+        .bind(&old_slug)
+        .execute(&mut *tx)
+        .await?;
+
+    let prefix = format!("{old_slug}/");
+    let mut group_targets = 0u64;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, targets_json FROM model_group_models WHERE user_id = $1")
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await?;
+    for (model_id, targets_json) in rows {
+        let mut targets = super::model_groups::parse_group_targets(Some(&targets_json));
+        let mut changed = 0u64;
+        for target in &mut targets {
+            if let Some(rest) = target.model.strip_prefix(&prefix) {
+                target.model = format!("{new_slug}/{rest}");
+                changed += 1;
+            }
+        }
+        if changed == 0 {
+            continue;
+        }
+        sqlx::query("UPDATE model_group_models SET targets_json = $1, updated_at = $2 WHERE id = $3")
+            .bind(serde_json::to_string(&targets).expect("targets serialize"))
+            .bind(&ts)
+            .bind(&model_id)
+            .execute(&mut *tx)
+            .await?;
+        group_targets += changed;
+    }
+
+    tx.commit().await?;
+    Ok(SlugRename::Renamed(SlugRenameOutcome { accounts, group_targets }))
+}
+
 pub async fn delete_custom_provider(db: &PgPool, user_id: &str, id: &str) -> Result<bool, sqlx::Error> {
     let r = sqlx::query("DELETE FROM custom_providers WHERE id = $1 AND user_id = $2")
         .bind(id)
@@ -263,6 +382,64 @@ mod tests {
 
         assert!(!delete_custom_provider(&pool, "someone-else", &row.id).await.unwrap());
         assert!(delete_custom_provider(&pool, &user.id, &row.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_rename_moves_every_row_keyed_by_the_slug_and_refuses_taken_slugs() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let user = insert_user(&pool, "rename@example.com").await;
+        let other = insert_user(&pool, "other@example.com").await;
+        let row = insert_custom_provider(&pool, input(&user.id, "mine")).await.unwrap().unwrap();
+        insert_custom_provider(&pool, input(&user.id, "second")).await.unwrap().unwrap();
+        // The same slug under another user never collides.
+        insert_custom_provider(&pool, input(&other.id, "fresh")).await.unwrap().unwrap();
+        let account = crate::db::test_support::insert_account(&pool, &user.id, "mine", &Default::default()).await;
+        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "mine", "ordered").await.unwrap();
+        // An orphaned settings row under the target slug must not block the rename.
+        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "fresh", "ordered").await.unwrap();
+        let group = crate::db::model_groups::insert_model_group(&pool, &user.id, "g", "g", Some("ordered")).await.unwrap();
+        sqlx::query(
+            "INSERT INTO model_group_models (id, user_id, group_id, name, targets_json, created_at, updated_at)
+             VALUES ('mgm_1', $1, $2, 'm', $3, 'now', 'now')",
+        )
+        .bind(&user.id)
+        .bind(&group.id)
+        .bind(r#"["mine/gpt-4o",{"model":"mine/gpt-4o","account_id":"acc_x"},"grok/grok-4","minex/other"]"#)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(rename_custom_provider_slug(&pool, &user.id, &row.id, "second").await.unwrap(), SlugRename::Taken);
+        assert_eq!(rename_custom_provider_slug(&pool, &user.id, "cprov_missing", "fresh").await.unwrap(), SlugRename::NotFound);
+        assert_eq!(
+            rename_custom_provider_slug(&pool, &user.id, &row.id, "fresh").await.unwrap(),
+            SlugRename::Renamed(SlugRenameOutcome { accounts: 1, group_targets: 2 })
+        );
+
+        assert_eq!(get_custom_provider_by_slug(&pool, &user.id, "fresh").await.unwrap().unwrap().id, row.id);
+        assert!(get_custom_provider_by_slug(&pool, &user.id, "mine").await.unwrap().is_none());
+        let moved = crate::db::accounts::list_accounts(&pool, &user.id, "fresh").await.unwrap();
+        assert_eq!(moved.iter().map(|a| a.id.as_str()).collect::<Vec<_>>(), vec![account.id.as_str()]);
+        assert!(crate::db::accounts::list_accounts(&pool, &user.id, "mine").await.unwrap().is_empty());
+        let settings: Vec<String> =
+            sqlx::query_scalar("SELECT provider FROM provider_settings WHERE user_id = $1 ORDER BY provider")
+                .bind(&user.id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(settings, vec!["fresh".to_string()]);
+        let targets: String = sqlx::query_scalar("SELECT targets_json FROM model_group_models WHERE id = 'mgm_1'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let targets = crate::db::model_groups::parse_group_targets(Some(&targets));
+        assert_eq!(
+            targets.iter().map(|t| (t.model.as_str(), t.account_id.as_deref())).collect::<Vec<_>>(),
+            vec![("fresh/gpt-4o", None), ("fresh/gpt-4o", Some("acc_x")), ("grok/grok-4", None), ("minex/other", None)],
+            "only the exact `mine/` prefix is rewritten, pins are kept"
+        );
+        // The other user's provider under the old target slug is untouched.
+        assert!(get_custom_provider_by_slug(&pool, &other.id, "fresh").await.unwrap().is_some());
     }
 
     #[tokio::test]

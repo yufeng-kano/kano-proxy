@@ -346,7 +346,25 @@ export const en = {
   "custom.dialog.slug": "Model prefix",
   "custom.dialog.slugPlaceholder": "my-endpoint",
   "custom.dialog.slugHint": "Call models as {example}",
-  "custom.dialog.slugLocked": "Can't be changed later",
+  "custom.dialog.slugEditHint":
+    "Call models as {example}. Changing it renames the prefix everywhere — you'll confirm first.",
+  // The confirmation step a changed prefix opens before anything is sent
+  // (docs/admin-ui.md § Providers page). It states what the server will
+  // rewrite and what it cannot: the clients still calling the old prefix.
+  "custom.rename.title": "Change model prefix?",
+  "custom.rename.change": "{from} becomes {to}",
+  "custom.rename.clients":
+    "Requests using the old prefix fail as an invalid model from the next request on. Update every client that calls it.",
+  "custom.rename.groupsLoading": "Checking your groups…",
+  "custom.rename.groupsNone": "No group targets use this prefix.",
+  "custom.rename.groups_one": "{count} group target is rewritten to the new prefix:",
+  "custom.rename.groups_other": "{count} group targets are rewritten to the new prefix:",
+  "custom.rename.groupsUnknown":
+    "Couldn't load your groups. Any group target using this prefix is still rewritten.",
+  "custom.rename.groupTargets_one": "{count} target",
+  "custom.rename.groupTargets_other": "{count} targets",
+  "custom.rename.back": "Back",
+  "custom.rename.confirm": "Rename prefix",
   "custom.dialog.baseUrl": "Base URL",
   "custom.dialog.baseUrlHint": "Requests go to {url}",
   "custom.dialog.apiKey": "API key",
@@ -374,6 +392,7 @@ export const en = {
   "custom.dialog.submitEdit": "Save changes",
   "custom.error.name": "Enter a name",
   "custom.error.slug": "Enter a model prefix",
+  "custom.error.slugTaken": "That prefix is already used by another of your endpoints",
   "custom.error.slugFormat":
     "Use lowercase letters, numbers, and hyphens, starting and ending with a letter or number",
   "custom.error.baseUrl": "Enter a base URL",

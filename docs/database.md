@@ -80,7 +80,7 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 |--------|------|-------|
 | id | TEXT PK | |
 | user_id | TEXT FK | `ON DELETE CASCADE` |
-| slug | TEXT | immutable after creation; unique per user |
+| slug | TEXT | unique per user; renameable through `PUT /api/custom-providers/:id`, which rewrites `upstream_accounts.provider`, `provider_settings.provider` and the user's group targets in the same transaction ([providers.md](./providers.md) § Custom endpoints) |
 | name | TEXT | display name |
 | format | TEXT | `openai` \| `anthropic`; immutable after creation |
 | base_url | TEXT | validated (https, no credentials/query/fragment, not localhost/private/loopback/own-host) and trailing-slash-stripped on save |
@@ -95,7 +95,7 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 `UNIQUE(user_id, slug)`. No `status` column here either — same computed-from-bench convention as `upstream_accounts`, over that provider's account row(s).
 
-**Slug reservation vs. existing rows.** When a slug later becomes a builtin provider id, reserving it only blocks *new* creates — an already-stored custom provider under that slug would be shadowed by the builtin lookup and become unreachable. `0013_rename_custom_antigravity_slug.sql` is the pattern: a data migration renames the stored slug (`antigravity` → `antigravity-custom`) and rewrites everything keyed by it in the same step (`upstream_accounts.provider`, `provider_settings.provider`, `model_groups.targets_json` prefixes). A user who already owns the target slug falls through to `antigravity-custom-2`, then `-3` — static passes because the targets_json rewrite is a string replace that must know the exact replacement. Each pass first deletes an *orphaned* `provider_settings` row under its target name (deleting a custom provider leaves that row behind as inert data, and it would collide with the `(user_id, provider)` primary key on rename). `request_logs.provider` is left as history.
+**Slug reservation vs. existing rows.** When a slug later becomes a builtin provider id, reserving it only blocks *new* creates — an already-stored custom provider under that slug would be shadowed by the builtin lookup and become unreachable. `0013_rename_custom_antigravity_slug.sql` is the pattern: a data migration renames the stored slug (`antigravity` → `antigravity-custom`) and rewrites everything keyed by it in the same step (`upstream_accounts.provider`, `provider_settings.provider`, `model_groups.targets_json` prefixes). A user who already owns the target slug falls through to `antigravity-custom-2`, then `-3` — static passes because the targets_json rewrite is a string replace that must know the exact replacement. Each pass first deletes an *orphaned* `provider_settings` row under its target name (deleting a custom provider leaves that row behind as inert data, and it would collide with the `(user_id, provider)` primary key on rename). `request_logs.provider` is left as history. The runtime slug rename (`db::custom_providers::rename_custom_provider_slug`) follows the same rewrite set, per user and in one transaction.
 
 ### `cli_devices`
 

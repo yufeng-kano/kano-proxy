@@ -22,8 +22,8 @@ use crate::db::accounts::{
 use crate::db::cli::{count_cli_providers, get_cli_provider_by_slug};
 use crate::db::custom_providers::{
     count_custom_providers, delete_custom_provider, get_custom_provider_by_id, get_custom_provider_by_slug,
-    insert_custom_provider, list_custom_providers, reorder_custom_providers, update_custom_provider_fields,
-    CustomProviderPatch, CustomProviderRow, NewCustomProvider,
+    insert_custom_provider, list_custom_providers, rename_custom_provider_slug, reorder_custom_providers,
+    update_custom_provider_fields, CustomProviderPatch, CustomProviderRow, NewCustomProvider, SlugRename,
 };
 use crate::pool::bench::{bench_until_from_row, clear_bench};
 use crate::pool::StoredCredential;
@@ -351,8 +351,17 @@ async fn update(
     };
     let Some(Value::Object(body)) = parse_body(&body) else { return invalid_json() };
 
-    if body.get("slug").is_some_and(|v| v.as_str() != Some(existing.slug.as_str())) {
-        return bad_request("slug is immutable");
+    // A differing slug is a model-prefix rename (docs/providers.md § Custom endpoints): same
+    // shape and reserved-word rules as create; uniqueness is checked inside the rename itself.
+    let mut new_slug: Option<String> = None;
+    if let Some(value) = body.get("slug") {
+        let slug = value.as_str().unwrap_or("").trim().to_lowercase();
+        if slug != existing.slug {
+            if let Some(err) = crate::utils::custom_provider::validate_slug(&slug) {
+                return bad_request(&err);
+            }
+            new_slug = Some(slug);
+        }
     }
     if body.get("format").is_some_and(|v| v.as_str() != Some(existing.format.as_str())) {
         return bad_request("format is immutable");
@@ -428,6 +437,20 @@ async fn update(
         api_key = Some(value.to_string());
     }
 
+    // The rename goes first: it is the one write that can be refused after validation (409),
+    // and everything below addresses the account rows by the slug they end up under.
+    if let Some(slug) = &new_slug {
+        match rename_custom_provider_slug(state.pool(), &session.user.id, &id, slug).await {
+            Ok(SlugRename::Renamed(_)) => {}
+            Ok(SlugRename::Taken) => {
+                return error(StatusCode::CONFLICT, &format!("slug \"{slug}\" is already in use"));
+            }
+            Ok(SlugRename::NotFound) => return not_found(),
+            Err(_) => return internal_error(),
+        }
+    }
+    let slug = new_slug.as_deref().unwrap_or(&existing.slug);
+
     if update_custom_provider_fields(
         state.pool(),
         &id,
@@ -449,7 +472,7 @@ async fn update(
         if state.config().token_encryption_key.is_none() {
             return error(StatusCode::INTERNAL_SERVER_ERROR, "TOKEN_ENCRYPTION_KEY not configured");
         }
-        let Ok(rows) = list_accounts(state.pool(), &session.user.id, &existing.slug).await else {
+        let Ok(rows) = list_accounts(state.pool(), &session.user.id, slug).await else {
             return internal_error();
         };
         let credential = StoredCredential { access_token: api_key.clone(), ..Default::default() };
@@ -470,7 +493,7 @@ async fn update(
                 state.pool(),
                 NewAccount {
                     user_id: &session.user.id,
-                    provider: &existing.slug,
+                    provider: slug,
                     encrypted_payload: &encrypted,
                     label: Some(name.as_deref().unwrap_or(&existing.name)),
                     external_account_id: None,
@@ -1073,7 +1096,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slug_and_format_are_immutable_and_a_bad_base_url_is_refused() {
+    async fn format_is_immutable_and_a_bad_base_url_or_slug_is_refused() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool.clone(), MockTransport::new());
         let (_, cookie) = signed_in(&state, "user_1@example.com").await;
@@ -1081,9 +1104,12 @@ mod tests {
         let uri = format!("/api/custom-providers/{id}");
 
         for bad in [
-            json!({ "slug": "different-slug" }),
             json!({ "format": "anthropic" }),
             json!({ "base_url": "https://127.0.0.1/v1" }),
+            json!({ "slug": "grok" }),
+            json!({ "slug": "a" }),
+            json!({ "slug": "Bad Slug" }),
+            json!({ "slug": 7 }),
         ] {
             let res = call(&state, request("PUT", &uri, Some(&cookie), Some(bad.clone()))).await;
             assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{bad} should be refused");
@@ -1096,6 +1122,133 @@ mod tests {
         )
         .await;
         assert_eq!(same.status(), StatusCode::OK);
+        assert_eq!(body_json(same).await["slug"], "my-endpoint");
+    }
+
+    #[tokio::test]
+    async fn renaming_the_slug_moves_the_key_the_pool_settings_and_the_group_targets() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let provider = created(&state, &cookie, json!({})).await;
+        let id = provider["id"].as_str().unwrap().to_string();
+        let account_id = provider["account_id"].as_str().unwrap().to_string();
+        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "my-endpoint", "ordered").await.unwrap();
+        // An orphaned settings row under the target slug must not block the rename.
+        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "renamed-endpoint", "ordered").await.unwrap();
+        let group = call(
+            &state,
+            request(
+                "POST",
+                "/api/model-groups",
+                Some(&cookie),
+                Some(json!({
+                    "name": "Mixed",
+                    "slug": "mixed",
+                    "models": [{
+                        "name": "gpt-4o",
+                        "targets": [
+                            "my-endpoint/gpt-4o",
+                            { "model": "my-endpoint/gpt-4o", "account_id": account_id },
+                            "grok/grok-4.5",
+                        ],
+                    }],
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(group.status(), StatusCode::CREATED);
+
+        let res = call(
+            &state,
+            request(
+                "PUT",
+                &format!("/api/custom-providers/{id}"),
+                Some(&cookie),
+                Some(json!({ "slug": " Renamed-Endpoint ", "name": "Renamed", "api_key": "sk-new-key-after-rename" })),
+            ),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = body_json(res).await;
+        assert_eq!(json["slug"], "renamed-endpoint");
+        assert_eq!(json["name"], "Renamed");
+        assert_eq!(json["account_id"], account_id, "the key row moves, it is not recreated");
+        assert_eq!(json["key_mask"], mask_api_key("sk-new-key-after-rename"));
+
+        assert!(stored_accounts(&pool, &user.id, "my-endpoint").await.is_empty());
+        let moved = stored_accounts(&pool, &user.id, "renamed-endpoint").await;
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].id, account_id);
+        let settings: Vec<String> =
+            sqlx::query_scalar("SELECT provider FROM provider_settings WHERE user_id = $1 ORDER BY provider")
+                .bind(&user.id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(settings, vec!["renamed-endpoint".to_string()]);
+
+        let groups = body_json(call(&state, request("GET", "/api/model-groups", Some(&cookie), None)).await).await;
+        let targets = &groups["groups"][0]["models"][0]["targets"];
+        assert_eq!(targets[0]["model"], "renamed-endpoint/gpt-4o");
+        assert_eq!(targets[1]["model"], "renamed-endpoint/gpt-4o");
+        assert_eq!(targets[1]["account_id"], account_id, "a pinned target keeps its pin");
+        assert_eq!(targets[2]["model"], "grok/grok-4.5", "other providers' targets are untouched");
+        assert_eq!(
+            groups["groups"][0]["models"][0]["routing"]["targets"][1]["reason"],
+            Value::Null,
+            "the pinned target still resolves under the new prefix"
+        );
+
+        // The old prefix is free again and the new one is what the list reports.
+        let listed = listed(&state, &cookie).await;
+        assert_eq!(listed["providers"][0]["slug"], "renamed-endpoint");
+        let reused = create_provider(&state, &cookie, json!({ "slug": "my-endpoint", "name": "Reused" })).await;
+        assert_eq!(reused.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn a_rename_onto_a_taken_slug_is_a_conflict_that_changes_nothing() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let (_, other_cookie) = signed_in(&state, "user_2@example.com").await;
+        let id = created(&state, &cookie, json!({})).await["id"].as_str().unwrap().to_string();
+        created(&state, &cookie, json!({ "slug": "second-endpoint", "name": "Second" })).await;
+        crate::db::cli::insert_cli_provider(
+            &pool,
+            crate::db::cli::NewCliProvider {
+                user_id: &user.id,
+                device_id: None,
+                slug: "cli-endpoint",
+                name: "cli",
+                format: "openai",
+                models_json: None,
+                model_filter_json: None,
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        created(&state, &other_cookie, json!({ "slug": "theirs", "name": "Theirs" })).await;
+        let uri = format!("/api/custom-providers/{id}");
+
+        for taken in ["second-endpoint", "cli-endpoint"] {
+            let res =
+                call(&state, request("PUT", &uri, Some(&cookie), Some(json!({ "slug": taken, "name": "Changed" })))).await;
+            assert_eq!(res.status(), StatusCode::CONFLICT, "{taken} should be refused");
+            let stored = get_custom_provider_by_id(&pool, &user.id, &id).await.unwrap().unwrap();
+            assert_eq!(stored.slug, "my-endpoint");
+            assert_eq!(stored.name, "My Endpoint", "a refused rename applies none of the other fields");
+        }
+
+        // Another user's slug is a different namespace.
+        let res = call(&state, request("PUT", &uri, Some(&cookie), Some(json!({ "slug": "theirs" })))).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_json(res).await["slug"], "theirs");
+        // ...and the owner cannot rename someone else's provider at all.
+        let res = call(&state, request("PUT", &uri, Some(&other_cookie), Some(json!({ "slug": "mine-now" })))).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
     // ------------------------------------------------------------- count_tokens_url

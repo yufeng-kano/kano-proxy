@@ -2,10 +2,13 @@
 /**
  * Add or edit a user-defined OpenAI-/Anthropic-compatible endpoint.
  *
- * Two things here are contracts, not styling: `format` and `slug` are
- * immutable once saved (server-side too), and a blank API key on edit means
- * "keep the stored one" — the key is never pre-filled or echoed back
- * (docs/admin-ui.md § Providers page).
+ * Three things here are contracts, not styling: `format` is immutable once
+ * saved (server-side too); a blank API key on edit means "keep the stored one"
+ * — the key is never pre-filled or echoed back; and a changed `slug` on edit
+ * never saves directly — it swaps the dialog to a confirmation step first,
+ * because the server rewrites every group target under the old prefix and
+ * clients calling it break from the next request (docs/admin-ui.md
+ * § Providers page, docs/providers.md § Custom endpoints).
  *
  * The base-URL hint is a live preview of the endpoint the request will
  * actually reach, matching providers.md's literal-concatenation rule, so a
@@ -15,12 +18,19 @@
  */
 import { computed, reactive, ref } from "vue"
 import { useI18n } from "@/i18n"
-import { createCustomProvider, testCustomProvider, updateCustomProvider } from "@/services/api"
+import {
+  ApiError,
+  createCustomProvider,
+  listModelGroups,
+  testCustomProvider,
+  updateCustomProvider,
+} from "@/services/api"
 import type {
   CustomProvider,
   CustomProviderFormat,
   CustomProviderModelsMode,
   CustomProviderTestResult,
+  ModelGroup,
 } from "@/types"
 import AppButton from "./ui/AppButton.vue"
 import Badge from "./ui/Badge.vue"
@@ -35,7 +45,7 @@ const props = defineProps<{
   provider?: CustomProvider | null
 }>()
 
-const emit = defineEmits<{ close: []; saved: [] }>()
+const emit = defineEmits<{ close: []; saved: [detail: { slugChanged: boolean }] }>()
 
 const { t } = useI18n()
 
@@ -57,6 +67,17 @@ const form = reactive({
 const manualModelsText = ref(props.provider?.manual_models?.join("\n") ?? "")
 
 const slugTouched = ref(false)
+/**
+ * `form` is the endpoint form; `confirm` is the rename confirmation a changed
+ * prefix opens on Save. One dialog with two faces rather than a second modal:
+ * a nested modal would fight this one's focus trap, and Back must return to
+ * the form with everything typed still there.
+ */
+const step = ref<"form" | "confirm">("form")
+/** Group models whose targets carry the old prefix, read live when the confirm step opens. */
+const affectedGroups = ref<{ id: string; name: string; targets: number }[] | null>(null)
+const affectedLoading = ref(false)
+const affectedFailed = ref(false)
 const saving = ref(false)
 const testing = ref(false)
 const error = ref<string | null>(null)
@@ -95,6 +116,47 @@ function onNameInput(value: string) {
 function onSlugInput(value: string) {
   slugTouched.value = true
   form.slug = value.toLowerCase()
+}
+
+/** On edit, the prefix the server currently has — what a rename is measured against. */
+const savedSlug = computed(() => props.provider?.slug ?? "")
+const slugChanged = computed(() => isEdit.value && form.slug.trim() !== savedSlug.value)
+const affectedTargetCount = computed(() =>
+  (affectedGroups.value ?? []).reduce((sum, g) => sum + g.targets, 0),
+)
+
+/**
+ * Which of the user's groups the server will rewrite — the same rule the
+ * server applies (an exact `<slug>/` prefix on a target's model id), read from
+ * the live list so the confirmation states facts, not a guess. A failed read
+ * still lets the rename proceed; the copy then says the list is unknown.
+ */
+async function loadAffectedGroups(oldSlug: string) {
+  affectedLoading.value = true
+  affectedFailed.value = false
+  affectedGroups.value = null
+  try {
+    const groups: ModelGroup[] = await listModelGroups()
+    const prefix = `${oldSlug}/`
+    affectedGroups.value = groups
+      .map((g) => ({
+        id: g.id,
+        name: g.name,
+        targets: g.models.reduce(
+          (sum, m) => sum + m.targets.filter((t) => t.model.startsWith(prefix)).length,
+          0,
+        ),
+      }))
+      .filter((g) => g.targets > 0)
+  } catch {
+    affectedFailed.value = true
+  } finally {
+    affectedLoading.value = false
+  }
+}
+
+function backToForm() {
+  step.value = "form"
 }
 
 function onFormatChange(value: string | number) {
@@ -162,11 +224,9 @@ const testHeadline = computed(() => {
 
 function validate(): string | null {
   if (!form.name.trim()) return t("custom.error.name")
-  if (!isEdit.value) {
-    const slug = form.slug.trim()
-    if (!slug) return t("custom.error.slug")
-    if (!SLUG_RE.test(slug)) return t("custom.error.slugFormat")
-  }
+  const slug = form.slug.trim()
+  if (!slug) return t("custom.error.slug")
+  if (!SLUG_RE.test(slug)) return t("custom.error.slugFormat")
   const baseUrl = form.base_url.trim()
   if (!baseUrl) return t("custom.error.baseUrl")
   try {
@@ -223,11 +283,20 @@ async function submit() {
     return
   }
 
+  // A changed prefix is confirmed before it is sent; the confirm step's own
+  // button comes back here with `confirmed` set.
+  if (slugChanged.value && step.value === "form") {
+    step.value = "confirm"
+    void loadAffectedGroups(savedSlug.value)
+    return
+  }
+
   saving.value = true
   try {
     if (isEdit.value && props.provider) {
       const body: Parameters<typeof updateCustomProvider>[1] = {
         name: form.name.trim(),
+        slug: form.slug.trim(),
         base_url: form.base_url.trim(),
         models_mode: form.models_mode,
         manual_models: form.models_mode === "manual" ? manualModelsList.value : undefined,
@@ -238,6 +307,9 @@ async function submit() {
       // field is always sent and an empty string is what clears a stored value.
       if (showCountTokensUrl.value) body.count_tokens_url = form.count_tokens_url.trim()
       await updateCustomProvider(props.provider.id, body)
+      emit("saved", { slugChanged: slugChanged.value })
+      emit("close")
+      return
     } else {
       await createCustomProvider({
         name: form.name.trim(),
@@ -254,10 +326,17 @@ async function submit() {
         manual_models: form.models_mode === "manual" ? manualModelsList.value : undefined,
       })
     }
-    emit("saved")
+    emit("saved", { slugChanged: false })
     emit("close")
-  } catch {
-    error.value = t("custom.error.save")
+  } catch (e) {
+    // The one server refusal the user can act on from here: the new prefix is
+    // taken. It belongs on the form, next to the field, not on the confirmation.
+    if (e instanceof ApiError && e.status === 409) {
+      step.value = "form"
+      error.value = t("custom.error.slugTaken")
+    } else {
+      error.value = t("custom.error.save")
+    }
   } finally {
     saving.value = false
   }
@@ -267,10 +346,48 @@ async function submit() {
 <template>
   <Modal
     size="md"
-    :title="isEdit ? t('custom.dialog.editTitle') : t('custom.dialog.addTitle')"
+    :title="
+      step === 'confirm'
+        ? t('custom.rename.title')
+        : isEdit
+          ? t('custom.dialog.editTitle')
+          : t('custom.dialog.addTitle')
+    "
     @close="emit('close')"
   >
-    <div class="body">
+    <!-- The confirmation a changed prefix opens: what changes, what the server
+         rewrites (read live, never guessed), and what only the user can fix —
+         the clients still sending the old prefix. -->
+    <div v-if="step === 'confirm'" class="body">
+      <p class="rename-change">
+        <code>{{ savedSlug }}/*</code>
+        <span aria-hidden="true">→</span>
+        <code>{{ form.slug.trim() }}/*</code>
+        <span class="sr-only">{{
+          t("custom.rename.change", { from: `${savedSlug}/*`, to: `${form.slug.trim()}/*` })
+        }}</span>
+      </p>
+      <Banner tone="warn">{{ t("custom.rename.clients") }}</Banner>
+      <div class="rename-groups" aria-live="polite">
+        <p v-if="affectedLoading" class="field-hint">{{ t("custom.rename.groupsLoading") }}</p>
+        <p v-else-if="affectedFailed" class="field-hint">{{ t("custom.rename.groupsUnknown") }}</p>
+        <p v-else-if="!affectedGroups?.length" class="field-hint">
+          {{ t("custom.rename.groupsNone") }}
+        </p>
+        <template v-else>
+          <p class="field-hint">{{ t("custom.rename.groups", { count: affectedTargetCount }) }}</p>
+          <ul class="rename-list">
+            <li v-for="group in affectedGroups" :key="group.id">
+              <span class="rename-group">{{ group.name }}</span>
+              <span class="field-hint">{{ t("custom.rename.groupTargets", { count: group.targets }) }}</span>
+            </li>
+          </ul>
+        </template>
+      </div>
+      <Banner v-if="error" tone="error">{{ error }}</Banner>
+    </div>
+
+    <div v-else class="body">
       <div class="field">
         <span class="field-label">{{ t("custom.dialog.format") }}</span>
         <!-- Immutable once saved, so on edit there is nothing to toggle: the
@@ -304,7 +421,7 @@ async function submit() {
         :label="t('custom.dialog.slug')"
         :hint="
           isEdit
-            ? t('custom.dialog.slugLocked')
+            ? t('custom.dialog.slugEditHint', { example: slugPreview })
             : t('custom.dialog.slugHint', { example: slugPreview })
         "
       >
@@ -312,7 +429,6 @@ async function submit() {
           :id="field.id"
           :model-value="form.slug"
           mono
-          :disabled="isEdit"
           :placeholder="t('custom.dialog.slugPlaceholder')"
           :described-by="field.describedBy"
           @update:model-value="onSlugInput"
@@ -429,12 +545,22 @@ async function submit() {
     </div>
 
     <template #footer>
-      <AppButton variant="ghost" :disabled="saving" @click="emit('close')">
-        {{ t("action.cancel") }}
-      </AppButton>
-      <AppButton variant="primary" :loading="saving" :disabled="testing" @click="submit">
-        {{ isEdit ? t("custom.dialog.submitEdit") : t("custom.dialog.submitAdd") }}
-      </AppButton>
+      <template v-if="step === 'confirm'">
+        <AppButton variant="ghost" :disabled="saving" @click="backToForm">
+          {{ t("custom.rename.back") }}
+        </AppButton>
+        <AppButton variant="primary" :loading="saving" @click="submit">
+          {{ t("custom.rename.confirm") }}
+        </AppButton>
+      </template>
+      <template v-else>
+        <AppButton variant="ghost" :disabled="saving" @click="emit('close')">
+          {{ t("action.cancel") }}
+        </AppButton>
+        <AppButton variant="primary" :loading="saving" :disabled="testing" @click="submit">
+          {{ isEdit ? t("custom.dialog.submitEdit") : t("custom.dialog.submitAdd") }}
+        </AppButton>
+      </template>
     </template>
   </Modal>
 </template>
@@ -527,6 +653,52 @@ async function submit() {
 .mode-hint {
   color: var(--muted);
   font-size: var(--text-xs);
+}
+
+/* The rename's before/after, in the same mono the slug field uses. */
+.rename-change {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.rename-change code {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.rename-groups {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.rename-list {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rename-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+
+.rename-group {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .test {
