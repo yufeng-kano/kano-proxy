@@ -52,7 +52,9 @@ tower-http = { version = "0.6", features = ["fs", "trace", "cors", "set-header"]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+# Thin LTO with the default codegen units, so the last stage compiles in parallel. The server
+# spends its time waiting on upstreams and the database; fat LTO with one codegen unit bought
+# no measurable speed and made a full build take several times longer.
 [profile.release]
 strip = true
-lto = true
-codegen-units = 1
+lto = "thin"

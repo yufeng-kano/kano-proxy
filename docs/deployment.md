@@ -104,6 +104,8 @@ docker compose up -d --build
 
 The server migrates on the way up. Read the release notes before updating across a schema change, and take a database backup first.
 
+The API image keeps cargo's registry and `target` in BuildKit cache mounts, so an update recompiles the workspace crates rather than every dependency. The cache lives in the build host's BuildKit store, not in the image; the first build on a host fills it. It only grows, so prune it occasionally, and whenever a stale artifact is suspected: `docker builder prune --filter type=exec.cachemount`.
+
 ## Releases
 
 A published `vX.Y.Z` Release is the product's release. It does not deploy anything by itself: this repository builds and verifies, and operators update their own instances. Tags must match the `version` in `apps/api/crates/kano-proxy-core/Cargo.toml`, bumped, committed and pushed before tagging; the default bump is minor.
