@@ -128,6 +128,7 @@ The endpoints themselves are undocumented and may change or be closed without no
 | POST | `/api/providers/:provider/login` |
 | POST | `/api/providers/:provider/login/:id/complete` |
 | GET | `/api/providers/:provider/login/:id` |
+| PUT | `/api/providers/:provider/accounts/order` |
 | POST | `/api/providers/:provider/accounts/:id/promote` |
 | POST | `/api/providers/:provider/accounts/:id/unpause` |
 | PATCH | `/api/providers/:provider/accounts/:id` |
@@ -136,6 +137,8 @@ The endpoints themselves are undocumented and may change or be closed without no
 | GET | `/api/providers/:provider/usage?refresh=` |
 
 `:provider` ∈ `claude-code` | `codex` | `grok` | `antigravity`. `accounts/import` is a manual credential-ingest route (bootstrapping / tests) — same shape as a completed OAuth login, but the caller supplies `access_token` (and optional `refresh_token` / `expires_at` / `account_id` / `email` / `label`) directly instead of running the OAuth dance.
+
+`PUT /api/providers/:provider/accounts/order` rewrites the pool's order: body `{ids: string[]}` listing **every** row `GET …/accounts` returned for that provider — the caller's own and, in a cloud edition, the ones shared with them — exactly once, first routed first. Anything else (a missing, duplicate, unknown or foreign id) is `400` and writes nothing. Priorities are renumbered `n..1`: own rows on `upstream_accounts.priority` in one transaction, shared rows through the pool extension's `setSharedPriority`, in the caller's pool only. `409` when a share was withdrawn between the read and the write; reload and retry. `POST …/:id/promote` remains for API clients (it lifts one row above the pool's maximum); the admin UI orders through this route only.
 
 `PATCH /api/providers/:provider/accounts/:id` renames an account: body `{custom_label: string | null}`, trimmed, max 64 chars, `null`/`""` clears it and falls back to the upstream identity. It touches **only** `custom_label` — never tokens, priority, or the upstream-synced `label` (see [database.md](./database.md)) — and returns `{ok: true, custom_label}`. 404 when the id is not the caller's — `403 {"error":"forbidden"}` instead when it is a row *shared with* the caller by a cloud edition's pool extension ([cloud-edition.md](./cloud-edition.md) § Pool extension), which also applies to unpause and delete. Promote is the exception: on a shared id it delegates to the extension's `setSharedPriority`, reordering the row inside the caller's own merged pool (`{ok: true}`, or 404 if the extension refuses).
 

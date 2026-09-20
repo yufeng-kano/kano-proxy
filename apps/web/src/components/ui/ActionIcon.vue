@@ -21,13 +21,13 @@ defineProps<{
     | "expand"
     | "plus"
     | "play"
-    | "star"
     | "arrow-up"
     | "arrow-down"
     | "chevron-left"
     | "chevron-right"
     | "grip"
     | "close"
+    | "trash"
 }>()
 </script>
 
@@ -81,12 +81,6 @@ defineProps<{
       <path d="M5.25 3.5L11.75 8 5.25 12.5z" />
     </template>
 
-    <!-- Star: make this the primary account — the one requests route through
-         first. The mark for "the one of these that gets used". -->
-    <template v-else-if="name === 'star'">
-      <path d="M8 2L9.85 5.76 14 6.36 11 9.28 11.71 13.41 8 11.46 4.29 13.41 5 9.28 2 6.36 6.15 5.76z" />
-    </template>
-
     <!-- Arrow up / down: move a row one position within its list. -->
     <template v-else-if="name === 'arrow-up'">
       <path d="M8 12.5V3.5" />
@@ -116,6 +110,16 @@ defineProps<{
          draws its own, at its own size). -->
     <template v-else-if="name === 'close'">
       <path d="M4 4l8 8M12 4l-8 8" />
+    </template>
+
+    <!-- Trash: remove this row for good. Always drawn in the danger tone and
+         always behind a confirmation — the glyph names the action, the tone
+         says it destroys something. -->
+    <template v-else-if="name === 'trash'">
+      <path d="M2.75 4.25h10.5" />
+      <path d="M6.25 4.25V2.75h3.5v1.5" />
+      <path d="M4.25 4.25l.6 8.5a1 1 0 0 0 1 .95h4.3a1 1 0 0 0 1-.95l.6-8.5" />
+      <path d="M6.75 7v4M9.25 7v4" />
     </template>
 
     <!-- Check: the confirmation the copy swaps to. -->

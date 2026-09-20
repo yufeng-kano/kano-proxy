@@ -7,7 +7,7 @@
  * actions. Those are gated by `editing`, which the *section* owns (docs/admin-ui.md
  * § Providers page) — one toggle in the card header opens every row at once,
  * rather than each row carrying a pencil that restates the same affordance. A
- * resting row is identity and usage only, so Remove is never one accidental
+ * resting row is identity and usage only, so the trash is never one accidental
  * click away. The status dot always ships its text label (§ Accessibility floor).
  */
 import { computed } from "vue"
@@ -23,7 +23,7 @@ import type { ProviderAccount } from "@/types"
 const props = defineProps<{
   account: ProviderAccount
   /**
-   * First in the pool's priority order — the row `Make primary` promotes to.
+   * First in the pool's priority order — where Move up ends.
    * Deliberately not `status === 'active'`: a limited or paused primary is
    * still the primary, and that is exactly when the operator needs to see that
    * the pool's first choice is not where traffic is going (docs/admin-ui.md
@@ -33,13 +33,18 @@ const props = defineProps<{
   busy?: boolean
   /** The section's gate — the row's actions render only while this is on. */
   editing?: boolean
+  /** The pool has 2+ rows; with one there is no order to change. */
+  reorderable?: boolean
+  canMoveUp?: boolean
+  canMoveDown?: boolean
   /** Only read to explain a permanently empty usage area; identity is provider-agnostic. */
   provider?: string
 }>()
 
 const emit = defineEmits<{
   resume: []
-  promote: []
+  moveUp: []
+  moveDown: []
   /** Carries the upstream identity: the dialog shows what a blank name falls back to. */
   rename: [identity: string]
   remove: []
@@ -89,9 +94,9 @@ const renamed = computed(() => !!props.account.custom_label)
  * A row the viewer borrows from another user rather than owns
  * (docs/admin-ui.md § Providers page). It arrives with no usage surface at
  * all — no windows, no probe error, no upstream identity blob — and the only
- * mutation a borrower may make on it is Primary, which reorders it inside
- * their own pool; Rename, Resume and Remove are the owner's alone and answer
- * 403, so they are not rendered here.
+ * mutation a borrower may make on it is Move up / down, which reorders it
+ * inside their own pool; Rename, Resume and Remove are the owner's alone and
+ * answer 403, so they are not rendered here.
  */
 const share = computed(() => props.account.share ?? null)
 
@@ -176,9 +181,9 @@ const creditsText = computed(() => {
         <span v-if="renamed && !share" class="upstream" :title="identity">{{ identity }}</span>
         <div class="tags">
           <StatusDot :status="account.status" />
-          <!-- The badge closes the loop on the "Make primary" button: the word
-               the user pressed is the word they get back. The dot beside it
-               answers the other question — where requests go right now. -->
+          <!-- The badge marks the top of the order the move arrows edit. The
+               dot beside it answers the other question — where requests go
+               right now. -->
           <Badge v-if="primary" tone="accent">
             {{ t("providers.account.primary") }}
           </Badge>
@@ -193,13 +198,34 @@ const creditsText = computed(() => {
       </div>
 
       <!-- The blank space at the row's right edge, filled only while the
-           section's gate is open. Icons but for Remove (docs/admin-ui.md
-           § Providers page): each glyph's words live in `label`, which is both
-           the accessible name and the tooltip, and each name carries the
-           account — several rows offer the same three actions. Remove keeps its
-           word in the danger tone: re-binding an account means walking the
-           whole OAuth flow again, so it is never a glyph to hover over. -->
+           section's gate is open. All icons (docs/admin-ui.md § Providers
+           page): each glyph's words live in `label`, which is both the
+           accessible name and the tooltip, and each name carries the account —
+           several rows offer the same actions. Remove is the trash in the
+           danger tone, last in the row, and confirms before it deletes. -->
       <div v-if="editing" class="actions">
+        <template v-if="reorderable">
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('providers.account.moveUp', { name: displayName })"
+            :disabled="busy || !canMoveUp"
+            @click="emit('moveUp')"
+          >
+            <template #icon><ActionIcon name="arrow-up" /></template>
+          </AppButton>
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('providers.account.moveDown', { name: displayName })"
+            :disabled="busy || !canMoveDown"
+            @click="emit('moveDown')"
+          >
+            <template #icon><ActionIcon name="arrow-down" /></template>
+          </AppButton>
+        </template>
         <AppButton
           v-if="account.status === 'benched' && !share"
           icon-only
@@ -210,17 +236,6 @@ const creditsText = computed(() => {
           @click="emit('resume')"
         >
           <template #icon><ActionIcon name="play" /></template>
-        </AppButton>
-        <AppButton
-          v-if="!primary"
-          icon-only
-          size="sm"
-          variant="ghost"
-          :label="t('providers.account.promote', { name: displayName })"
-          :disabled="busy"
-          @click="emit('promote')"
-        >
-          <template #icon><ActionIcon name="star" /></template>
         </AppButton>
         <AppButton
           v-if="!share"
@@ -235,22 +250,24 @@ const creditsText = computed(() => {
         </AppButton>
         <AppButton
           v-if="!share"
+          icon-only
           size="sm"
           variant="danger"
           :label="t('providers.account.remove', { name: displayName })"
           :disabled="busy"
           @click="emit('remove')"
         >
-          {{ t("action.remove") }}
+          <template #icon><ActionIcon name="trash" /></template>
         </AppButton>
       </div>
     </div>
 
-    <!-- A shared row never shows the owner's upstream windows or probe
-         errors — those are the owner's, on the owner's own page, and nothing
-         here ever asks upstream about someone else's account. What it may
-         show are the bars the edition hands it: the borrower's own allowance
-         on this row. Without any, the usage area is simply absent. -->
+    <!-- A shared row never reads the owner's usage surface itself — no probe
+         error, and nothing here ever asks upstream about someone else's
+         account. What it shows are the bars the edition hands it: the
+         borrower's own allowance on this row, plus the account's stored
+         windows where its owner chose to show them. Without any, the usage
+         area is simply absent. -->
     <div v-if="share && windows.length" class="windows">
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
     </div>
@@ -302,8 +319,8 @@ const creditsText = computed(() => {
   gap: var(--space-2);
   min-width: 0;
   /* Grows past its content but may shrink to nothing before the actions wrap —
-     a long email must ellipsize, not push Remove off the row. The basis is the
-     wrap threshold, not spacing: it has to clear four icon buttons plus the
+     a long email must ellipsize, not push the trash off the row. The basis is
+     the wrap threshold, not spacing: it has to clear five icon buttons plus the
      gutters at 360px, or the flex line breaks and the actions drop below. */
   flex: 1 1 120px;
 }

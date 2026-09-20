@@ -429,6 +429,23 @@ pub async fn promote_account(db: &PgPool, user_id: &str, account_id: &str) -> Re
     Ok(true)
 }
 
+/// Writes one priority per own row in a single transaction, so a reorder lands whole or not at
+/// all. Rows that are not the user's are left alone.
+pub async fn set_account_priorities(db: &PgPool, user_id: &str, priorities: &[(String, i32)]) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    let now = now_iso();
+    for (account_id, priority) in priorities {
+        sqlx::query("UPDATE upstream_accounts SET priority = $1, updated_at = $2 WHERE id = $3 AND user_id = $4")
+            .bind(priority)
+            .bind(&now)
+            .bind(account_id)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await
+}
+
 pub async fn remove_account(db: &PgPool, user_id: &str, account_id: &str) -> Result<bool, sqlx::Error> {
     let r = sqlx::query("DELETE FROM upstream_accounts WHERE id = $1 AND user_id = $2")
         .bind(account_id)

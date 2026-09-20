@@ -213,14 +213,13 @@ export const en = {
   // One gate per section, so its name is the section's — not a row's.
   "providers.section.edit": "Edit {section}",
   "providers.section.doneEditing": "Done editing {section}",
-  // Accessible names for the row's actions. Resume, promote and rename are
-  // glyphs, so these are the only words they have — name and tooltip both.
-  // Remove is the one with visible text (`action.remove`), which its name
-  // repeats verbatim.
+  // Accessible names for the row's actions. Every one is a glyph, so these are
+  // the only words they have — name and tooltip both.
   "providers.account.resume": "Resume {name}",
-  "providers.account.promote": "Make {name} primary",
-  // The badge on the account requests route through first — the same word the
-  // promote name ends on, so the control and the badge state one fact.
+  "providers.account.moveUp": "Move {name} up",
+  "providers.account.moveDown": "Move {name} down",
+  // The badge on the account requests route through first — the top of the
+  // order the move arrows edit.
   "providers.account.primary": "Primary",
   "providers.account.rename": "Rename {name}",
   "providers.account.remove": "Remove {name}",
@@ -245,7 +244,7 @@ export const en = {
   "providers.empty.body": "Connect one to start routing {provider} models.",
   "providers.error.load": "Couldn't load {provider} accounts",
   "providers.error.resume": "Couldn't resume the account",
-  "providers.error.promote": "Couldn't change the primary account",
+  "providers.error.reorder": "Couldn't save the new order",
   "providers.error.remove": "Couldn't remove the account",
   "providers.error.rename": "Couldn't rename the account",
   "providers.error.strategy": "Couldn't change the routing strategy",
@@ -308,9 +307,9 @@ export const en = {
 
   // --- Custom endpoints ---------------------------------------------------
   "custom.add": "Add endpoint",
-  // Accessible names for the row's actions. Resume and Edit are glyphs, so
-  // these are their only words; Test and Remove keep visible text, which their
-  // names repeat verbatim.
+  // Accessible names for the row's actions. Resume, Edit and Remove are glyphs,
+  // so these are their only words; Test keeps visible text, which its name
+  // repeats verbatim.
   "custom.resumeEndpoint": "Resume {name}",
   "custom.testEndpoint": "Test {name}",
   "custom.editEndpoint": "Edit {name}",

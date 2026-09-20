@@ -303,13 +303,14 @@ function modelsCell(provider: CliProvider): string {
               <template #icon><ActionIcon name="edit" /></template>
             </AppButton>
             <AppButton
+              icon-only
               size="sm"
               variant="danger"
               :label="t('cli.providers.removeName', { name: row.name })"
               :loading="busyId === row.id"
               @click="onRemove(row)"
             >
-              {{ t("action.remove") }}
+              <template #icon><ActionIcon name="trash" /></template>
             </AppButton>
           </div>
         </template>

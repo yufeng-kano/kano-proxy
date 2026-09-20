@@ -35,7 +35,7 @@ import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import {
   deleteCustomProvider,
-  promoteAccount,
+  reorderAccounts,
   removeAccount,
   setProviderStrategy,
   unpauseAccount,
@@ -276,14 +276,38 @@ async function onResume(provider: ProviderId, id: string) {
   }
 }
 
-async function onPromote(provider: ProviderId, id: string) {
-  busyId.value = id
+/**
+ * Moves one account a single position in its pool. The list the server returns
+ * is already the router's merged order (own and shared rows), so the new order
+ * is that list with two neighbours swapped, written whole. The reload reads the
+ * stored order back without forcing a usage probe — a move changes no usage.
+ */
+const accountOrderAnnouncement = ref("")
+
+async function onMove(provider: ProviderId, from: number, to: number) {
+  const list = byProvider[provider].data?.accounts
+  if (!list || to < 0 || to >= list.length) return
+  const moved = list[from]
+  const ids = list.map((a) => a.id)
+  ids.splice(from, 1)
+  ids.splice(to, 0, moved.id)
+
+  busyId.value = moved.id
   actionError.value = null
   try {
-    await promoteAccount(provider, id)
-    await loadProvider(provider, { refresh: true })
+    await reorderAccounts(provider, ids)
+    await loadProvider(provider, { forceNetwork: true })
+    const after = byProvider[provider].data?.accounts ?? []
+    accountOrderAnnouncement.value = t("custom.reorder.moved", {
+      name: moved.custom_label || moved.label || moved.id,
+      position: after.findIndex((a) => a.id === moved.id) + 1,
+      total: after.length,
+    })
   } catch {
-    actionError.value = t("providers.error.promote")
+    actionError.value = t("providers.error.reorder")
+    accountOrderAnnouncement.value = ""
+    // The pool may have changed under the list this move was computed from.
+    await loadProvider(provider, { forceNetwork: true })
   } finally {
     busyId.value = null
   }
@@ -527,6 +551,13 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       role="tabpanel"
       :aria-label="activeLabel"
     >
+      <!-- One live region for every builtin section, outside the cards so it
+           survives their lists rerendering: the new position is the only
+           feedback a move gives a screen-reader user. -->
+      <span class="sr-only" role="status" aria-live="polite">
+        {{ accountOrderAnnouncement }}
+      </span>
+
       <AppCard v-for="pid in visibleProviders" :key="pid" :title="t(NAME_KEY[pid])">
         <template #actions>
           <!-- Section-level config, so it appears with the section's other
@@ -612,8 +643,12 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               :primary="i === 0"
               :busy="busyId === account.id"
               :editing="isEditing(pid)"
+              :reorderable="byProvider[pid].data!.accounts.length >= 2"
+              :can-move-up="i > 0"
+              :can-move-down="i < byProvider[pid].data!.accounts.length - 1"
               @resume="onResume(pid, account.id)"
-              @promote="onPromote(pid, account.id)"
+              @move-up="onMove(pid, i, i - 1)"
+              @move-down="onMove(pid, i, i + 1)"
               @rename="renaming = { provider: pid, account, identity: $event }"
               @remove="onRemove(pid, account.id)"
             />

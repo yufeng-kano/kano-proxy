@@ -158,10 +158,10 @@ async function runTest() {
       <!-- The blank space at the row's right edge, filled only while the
            section's gate is open. Iconography like the account rows above, and
            `label` carries the endpoint name for the accessible name since
-           several rows offer the same actions. Two keep their word: Remove,
-           because deleting the endpoint deletes its stored key, and Test,
-           because no glyph says "send a probe request" without a hover (a play
-           triangle already means Resume on this very row). -->
+           several rows offer the same actions. Remove is the trash in the
+           danger tone and confirms first. Test keeps its word, because no
+           glyph says "send a probe request" without a hover (a play triangle
+           already means Resume on this very row). -->
       <div v-if="editing" class="actions">
         <template v-if="reorderable">
           <AppButton
@@ -216,13 +216,14 @@ async function runTest() {
           <template #icon><ActionIcon name="edit" /></template>
         </AppButton>
         <AppButton
+          icon-only
           size="sm"
           variant="danger"
           :label="t('custom.removeEndpoint', { name: provider.name })"
           :disabled="busy || testing"
           @click="emit('remove')"
         >
-          {{ t("action.remove") }}
+          <template #icon><ActionIcon name="trash" /></template>
         </AppButton>
       </div>
     </div>

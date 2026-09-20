@@ -13,7 +13,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -28,7 +28,8 @@ use crate::auth::session::SessionUser;
 use crate::crypto::token_crypto::encrypt_json;
 use crate::db::accounts::{
     acquire_usage_lock, get_account, insert_account, is_usage_fresh, iso_from_ms, list_accounts, parse_iso_ms,
-    promote_account, read_usage_snapshot, remove_account, set_account_custom_label, AccountRow, NewAccount,
+    promote_account, read_usage_snapshot, remove_account, set_account_custom_label, set_account_priorities, AccountRow,
+    NewAccount,
 };
 use crate::db::oauth_states::{
     delete_expired_states, delete_state, get_provider_state, insert_provider_state, list_provider_states,
@@ -66,6 +67,7 @@ pub fn routes() -> Router<AppState> {
         .route("/{provider}", patch(set_strategy))
         .route("/{provider}/accounts", get(list_accounts_route))
         .route("/{provider}/accounts/import", post(import_account))
+        .route("/{provider}/accounts/order", put(reorder))
         .route("/{provider}/accounts/{id}", patch(patch_account).delete(delete_account))
         .route("/{provider}/accounts/{id}/promote", post(promote))
         .route("/{provider}/accounts/{id}/unpause", post(unpause))
@@ -545,6 +547,60 @@ async fn promote(
         Ok(false) => error(StatusCode::NOT_FOUND, "not found"),
         Err(_) => internal_error(),
     }
+}
+
+// ------------------------------------------------------- PUT /:provider/accounts/order
+
+/// Rewrites the viewer's whole pool order for one provider: body `{ids}` lists **every** row of
+/// the merged pool — own and borrowed — exactly once, first routed first. Own rows take their
+/// new value on `upstream_accounts.priority`; a borrowed row is ordered through
+/// `set_shared_priority`, inside the viewer's pool only, never the owner's (docs/cloud-edition.md
+/// § "Pool extension"). Priorities are renumbered `n..1`, so a later bind (`MAX + 1`) still
+/// lands on top.
+async fn reorder(
+    State(state): State<AppState>,
+    session: SessionUser,
+    Path(provider): Path<String>,
+    body: Bytes,
+) -> Response {
+    let Some(provider) = ProviderId::parse(&provider) else { return invalid_provider() };
+    let user_id = &session.user.id;
+    let ids: Option<Vec<String>> = object_body(&body)
+        .get("ids")
+        .and_then(Value::as_array)
+        .and_then(|list| list.iter().map(|v| v.as_str().map(str::to_string)).collect());
+    let Some(ids) = ids else { return error(StatusCode::BAD_REQUEST, "ids must be an array of account ids") };
+
+    let Ok(own) = list_accounts(state.pool(), user_id, provider.as_str()).await else {
+        return internal_error();
+    };
+    let shared = shared_accounts(&state, user_id, Some(provider), ListSharedOptions::default()).await;
+    let mut expected: Vec<&str> =
+        own.iter().map(|a| a.id.as_str()).chain(shared.iter().map(|s| s.account.id.as_str())).collect();
+    let mut sent: Vec<&str> = ids.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    sent.sort_unstable();
+    if expected != sent {
+        return error(StatusCode::BAD_REQUEST, "ids must list every account of this pool exactly once");
+    }
+
+    let total = ids.len() as i32;
+    let ranked = || ids.iter().enumerate().map(|(i, id)| (id, total - i as i32));
+    let own_priorities: Vec<(String, i32)> =
+        ranked().filter(|(id, _)| own.iter().any(|a| &a.id == *id)).map(|(id, p)| (id.clone(), p)).collect();
+    if set_account_priorities(state.pool(), user_id, &own_priorities).await.is_err() {
+        return internal_error();
+    }
+    for (id, priority) in ranked().filter(|(id, _)| shared.iter().any(|s| &s.account.id == *id)) {
+        let Some(ext) = state.pool_extension() else { return internal_error() };
+        match ext.set_shared_priority(&state, user_id, id, priority).await {
+            Ok(true) => {}
+            // The share was withdrawn between the read above and this write.
+            Ok(false) => return error(StatusCode::CONFLICT, "the pool changed; reload and try again"),
+            Err(_) => return internal_error(),
+        }
+    }
+    Json(json!({ "ok": true })).into_response()
 }
 
 // ------------------------------------------------ POST /:provider/accounts/:id/unpause
@@ -2616,6 +2672,54 @@ mod tests {
 
         let res = call(&state, request("POST", "/api/providers/grok/accounts/shared_1/promote", Some(&cookie), None)).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ------------------------------------------------------ PUT /:provider/accounts/order
+
+    #[tokio::test]
+    async fn reorder_renumbers_own_rows_and_orders_a_borrowed_row_through_the_extension() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let ext = borrowing_extension(true);
+        let recorder = ext.clone();
+        let state = state_with_extension(pool.clone(), MockTransport::new(), ext);
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "own_1", "grok", 9, account_meta("one@example.com")).await;
+        seed_account(&pool, &user.id, "own_2", "grok", 4, account_meta("two@example.com")).await;
+
+        let body = json!({ "ids": ["own_2", "shared_1", "own_1"] });
+        let res = call(&state, request("PUT", "/api/providers/grok/accounts/order", Some(&cookie), Some(body))).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let own: Vec<(String, i32)> =
+            list_accounts(&pool, &user.id, "grok").await.unwrap().into_iter().map(|r| (r.id, r.priority)).collect();
+        assert_eq!(own, vec![("own_2".to_string(), 3), ("own_1".to_string(), 1)]);
+        // The borrowed row takes the slot between them, in the viewer's pool only.
+        assert!(recorder.calls.lock().unwrap().iter().any(|(name, viewer, priority)| {
+            name == "set_shared_priority:shared_1" && viewer == &user.id && *priority == 2
+        }));
+    }
+
+    #[tokio::test]
+    async fn reorder_refuses_a_list_that_is_not_the_whole_pool_and_writes_nothing() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = state_with_extension(pool.clone(), MockTransport::new(), borrowing_extension(true));
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let (other, _) = signed_in(&state, "user_3@example.com").await;
+        seed_account(&pool, &user.id, "own_1", "grok", 9, account_meta("one@example.com")).await;
+        seed_account(&pool, &other.id, "theirs", "grok", 5, account_meta("theirs@example.com")).await;
+
+        for ids in [
+            json!(["own_1"]),                         // the borrowed row is missing
+            json!(["own_1", "shared_1", "own_1"]),    // a duplicate
+            json!(["own_1", "shared_1", "theirs"]),   // someone else's row
+            json!("own_1"),
+        ] {
+            let res =
+                call(&state, request("PUT", "/api/providers/grok/accounts/order", Some(&cookie), Some(json!({ "ids": ids })))).await;
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(stored_row(&pool, &user.id, "own_1").await.priority, 9);
+        assert_eq!(stored_row(&pool, &other.id, "theirs").await.priority, 5);
     }
 
     #[tokio::test]

@@ -52,7 +52,7 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`.
 | external_account_id | TEXT | nullable; upstream account id when known (e.g. codex's ChatGPT account id) |
 | label | TEXT | email or display, **synced from upstream** on every accounts read — not user-editable |
 | custom_label | TEXT | nullable; the operator's own name for this account. Wins over `label` for display and is **never** overwritten by the upstream sync (`0005_account_custom_label.sql`) |
-| priority | INTEGER | higher = preferred; promote bumps |
+| priority | INTEGER | higher = preferred; promote bumps, a reorder renumbers the pool `n..1` |
 | encrypted_payload | TEXT | AES-GCM blob: tokens + provider fields. For a custom provider this is just `{access_token: <api key>}` |
 | account_meta_json | TEXT | email, plan, non-secret. For a custom provider: `{key_mask: "sk-abc…f3a2"}` (see [providers.md](./providers.md)) |
 | usage_snapshot_json | TEXT | nullable; last successful usage read — `{windows, error, stale, edgeBlocked}` (`0006_account_usage_cache.sql`) |

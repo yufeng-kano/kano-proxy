@@ -176,6 +176,17 @@ const bindings = computed(() => {
   background: var(--danger-bg);
 }
 
+/* Icon-only stays ghost-weight (docs/admin-ui.md § Component primitives): the
+   danger tone is carried by the glyph, not by a bordered square around it. */
+.btn-danger.btn-icon {
+  background: transparent;
+  border-color: transparent;
+}
+
+.btn-danger.btn-icon:hover {
+  background: var(--danger-bg);
+}
+
 .btn-spinner {
   flex-shrink: 0;
 }

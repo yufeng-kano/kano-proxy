@@ -199,14 +199,18 @@ export async function setProviderStrategy(
   return data.strategy
 }
 
-export async function promoteAccount(
+/**
+ * Writes the pool's whole order, first routed first (docs/auth.md). `ids` must
+ * list every row the accounts read returned — own and shared — exactly once.
+ */
+export async function reorderAccounts(
   provider: ProviderId,
-  id: string,
+  ids: string[],
 ): Promise<void> {
-  await request<{ ok: boolean }>(
-    `/api/providers/${provider}/accounts/${encodeURIComponent(id)}/promote`,
-    { method: "POST" },
-  )
+  await request<{ ok: boolean }>(`/api/providers/${provider}/accounts/order`, {
+    method: "PUT",
+    body: JSON.stringify({ ids }),
+  })
 }
 
 /** Clears the KV bench so the account is eligible again. Not a lock. */
