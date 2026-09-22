@@ -235,7 +235,7 @@ async fn run_socket(
             {
                 Ok(models) if last_sent.as_ref() != Some(&models) => {
                     let frame = encode_control(&ControlFrame::Models { models: models.clone() });
-                    if models_tx.send(Message::Text(frame.into())).await.is_err() {
+                    if models_tx.send(Message::Text(frame)).await.is_err() {
                         break;
                     }
                     eprintln!("[{}] reported {} models", models_provider.slug, models.len());
@@ -378,7 +378,7 @@ async fn spawn_request(
     // already enforced it (docs/cli.md § Wire protocol).
     if !is_allowed_path(&provider.format, &path) {
         let _ = out
-            .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() }).into()))
+            .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() })))
             .await;
         return;
     }
@@ -386,7 +386,7 @@ async fn spawn_request(
         // Should not happen — the DO caps in-flight at the same bound — but
         // refuse locally rather than queueing.
         let _ = out
-            .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() }).into()))
+            .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() })))
             .await;
         return;
     };
@@ -441,7 +441,7 @@ async fn spawn_request(
                     headers.insert("content-type".to_string(), ct.to_string());
                 }
                 let frame = encode_control(&ControlFrame::Res { id, status, headers });
-                if out.send(Message::Text(frame.into())).await.is_err() {
+                if out.send(Message::Text(frame)).await.is_err() {
                     return;
                 }
                 let mut body = res.bytes_stream();
@@ -450,7 +450,7 @@ async fn spawn_request(
                         Ok(bytes) => {
                             for part in bytes.chunks(MAX_CHUNK_BYTES) {
                                 let frame = encode_binary(id, BODY_KIND_RESPONSE, part);
-                                if out.send(Message::Binary(frame.into())).await.is_err() {
+                                if out.send(Message::Binary(frame)).await.is_err() {
                                     return;
                                 }
                             }
@@ -458,7 +458,7 @@ async fn spawn_request(
                         Err(_) => {
                             let _ = out
                                 .send(Message::Text(
-                                    encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() }).into(),
+                                    encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() }),
                                 ))
                                 .await;
                             registry_for_task.lock().await.remove(&id);
@@ -466,7 +466,7 @@ async fn spawn_request(
                         }
                     }
                 }
-                let _ = out.send(Message::Text(encode_control(&ControlFrame::ResEnd { id }).into())).await;
+                let _ = out.send(Message::Text(encode_control(&ControlFrame::ResEnd { id }))).await;
                 eprintln!("[{slug}] #{id} {method} {path} -> {status} ({}ms)", started.elapsed().as_millis());
             }
             Err(e) => {
@@ -478,7 +478,7 @@ async fn spawn_request(
                     "aborted"
                 };
                 let _ = out
-                    .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: reason.into() }).into()))
+                    .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: reason.into() })))
                     .await;
                 eprintln!("[{slug}] #{id} {method} {path} -> local {reason} ({}ms)", started.elapsed().as_millis());
             }

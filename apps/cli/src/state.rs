@@ -202,9 +202,11 @@ mod tests {
     fn roundtrips_state() {
         let dir = std::env::temp_dir().join(format!("kano-proxy-test-{}", std::process::id()));
         let file = StateFile::new(dir.join("state.json"));
-        let mut state = State::default();
-        state.base_url = "https://proxy.example.com".into();
-        state.refresh_token = Some("kpr_x".into());
+        let mut state = State {
+            base_url: "https://proxy.example.com".into(),
+            refresh_token: Some("kpr_x".into()),
+            ..Default::default()
+        };
         state.providers.push(ProviderState {
             id: "cliprov_1".into(),
             slug: "my-mac".into(),

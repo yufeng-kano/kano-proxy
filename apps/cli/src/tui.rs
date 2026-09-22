@@ -168,28 +168,45 @@ pub fn input_secret(title: &str, label: &str) -> Result<String> {
     }
 }
 
-/// Single choice from a short fixed list (e.g. API type).
-pub fn choose(title: &str, options: &[&str]) -> Result<usize> {
+/// Single choice from a short fixed list (e.g. API type), with explanatory
+/// lines between the title and the list — what the choice means, so the user
+/// never has to guess from a bare identifier (docs/cli.md § Command surface).
+pub fn choose(title: &str, note: &[&str], options: &[&str]) -> Result<usize> {
     let mut screen = Screen::open()?;
     let mut state = ListState::default();
     state.select(Some(0));
+    let note_text = note.join("\n");
     loop {
         screen.terminal.draw(|f| {
-            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Min(3), Constraint::Length(1)])
-                .split(f.area());
+            let width = f.area().width.max(1) as usize;
+            let note_height: u16 = if note.is_empty() {
+                0
+            } else {
+                note.iter().map(|l| l.chars().count().div_ceil(width).max(1) as u16).sum::<u16>() + 1
+            };
+            let chunks = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(note_height),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
             f.render_widget(
                 Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)),
                 chunks[0],
             );
+            if !note.is_empty() {
+                f.render_widget(Paragraph::new(note_text.as_str()).wrap(Wrap { trim: false }), chunks[1]);
+            }
             let items: Vec<ListItem> = options.iter().map(|o| ListItem::new(*o)).collect();
             let list = List::new(items)
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("› ");
-            f.render_stateful_widget(list, chunks[1], &mut state);
+            f.render_stateful_widget(list, chunks[2], &mut state);
             f.render_widget(
                 Paragraph::new("↑/↓ move · Enter accepts · Esc cancels")
                     .style(Style::default().add_modifier(Modifier::DIM)),
-                chunks[2],
+                chunks[3],
             );
         })?;
         if let Event::Key(key) = event::read()? {

@@ -215,6 +215,30 @@ fn parse_format(raw: &str) -> Result<String> {
     }
 }
 
+/// What the `add` screen shows for an `openai` target: the `/v1` base, so the
+/// CLI's allowlisted suffixes (`/chat/completions`, `/models`) join onto it.
+const OPENAI_DEFAULT_TARGET: &str = "http://localhost:11434/v1";
+const OPENAI_TARGET_NOTE: [&str; 7] = [
+    "Enter the server's OpenAI-compatible base URL, ending in /v1.",
+    "The CLI appends /chat/completions and /models to it.",
+    "",
+    "  Ollama      http://localhost:11434/v1",
+    "  LM Studio   http://localhost:1234/v1",
+    "  vLLM        http://localhost:8000/v1",
+    "  llama.cpp   http://localhost:8080/v1",
+];
+
+/// What the `add` screen shows for an `anthropic` target: the origin only —
+/// the CLI appends `/v1/messages` and `/v1/models` itself.
+const ANTHROPIC_DEFAULT_TARGET: &str = "http://localhost:11434";
+const ANTHROPIC_TARGET_NOTE: [&str; 5] = [
+    "Enter the server's origin only — no /v1 on the end.",
+    "The CLI appends /v1/messages and /v1/models to it.",
+    "",
+    "  Ollama      http://localhost:11434",
+    "  llama.cpp   http://localhost:8080",
+];
+
 fn normalize_target(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
     // A real URL parse, not string inspection: shapes like "http://:11434/v1"
@@ -225,7 +249,7 @@ fn normalize_target(raw: &str) -> Result<String> {
     if !matches!(url.scheme(), "http" | "https") {
         bail!("target must start with http:// or https:// (e.g. http://localhost:11434/v1)");
     }
-    if url.host_str().map_or(true, str::is_empty) {
+    if url.host_str().is_none_or(str::is_empty) {
         bail!("target is missing a host (e.g. http://localhost:11434/v1)");
     }
     Ok(trimmed.to_string())
@@ -253,12 +277,26 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
         tui::require_tty()?;
         let title = "kano-proxy add — register a local endpoint";
         let slug = tui::input(title, "Slug", &default_slug(&state.providers))?;
-        let format = match tui::choose(title, &["openai", "anthropic"])? {
+        // The choice names the HTTP API the local server speaks, and the
+        // target prompt that follows is written for that API alone: its own
+        // shape rule, its own default, and copy-pasteable examples for the
+        // usual local servers — the user should never have to work out
+        // whether "/v1" belongs on the end (docs/cli.md § Command surface).
+        let format_note = ["Which HTTP API does the local server speak?", ""];
+        let format_options = [
+            "openai     — OpenAI-compatible chat API   (Ollama, LM Studio, vLLM, llama.cpp, …)",
+            "anthropic  — Anthropic Messages API       (Ollama, llama.cpp, …)",
+        ];
+        let format = match tui::choose(title, &format_note, &format_options)? {
             1 => "anthropic".to_string(),
             _ => "openai".to_string(),
         };
-        let default_target = if format == "anthropic" { "http://localhost:11434" } else { "http://localhost:11434/v1" };
-        let target = normalize_target(&tui::input(title, "Target base URL (include /v1 for openai)", default_target)?)?;
+        let (target_note, default_target): (&[&str], &str) = if format == "anthropic" {
+            (&ANTHROPIC_TARGET_NOTE, ANTHROPIC_DEFAULT_TARGET)
+        } else {
+            (&OPENAI_TARGET_NOTE, OPENAI_DEFAULT_TARGET)
+        };
+        let target = normalize_target(&tui::input_with_note(title, target_note, "Target base URL", default_target)?)?;
         let key = tui::input_secret(title, "Local API key (Enter for none)")?;
         let target_key = if key.is_empty() { None } else { Some(key) };
 
@@ -376,7 +414,7 @@ pub async fn cmd_list(file: &StateFile) -> Result<()> {
     let access = tokens.get(false).await?;
     let remote = api::list_providers(&state.base_url, &access).await?;
 
-    println!("{:<20} {:<10} {:<32} {:<11} {:>6}  {}", "SLUG", "FORMAT", "TARGET", "STATE", "MODELS", "LAST REPORT");
+    println!("{:<20} {:<10} {:<32} {:<11} {:>6}  LAST REPORT", "SLUG", "FORMAT", "TARGET", "STATE", "MODELS");
     for p in &state.providers {
         let item = remote.iter().find(|r| r.id == p.id);
         let (conn, count, updated) = match item {
@@ -538,6 +576,23 @@ mod tests {
         assert!(normalize_target("http://:11434/v1").is_err());
         assert!(normalize_target("http://user@/v1").is_err());
         assert!(normalize_target("http://?x").is_err());
+    }
+
+    #[test]
+    fn add_screen_examples_are_valid_targets_of_the_right_shape() {
+        for note in [&OPENAI_TARGET_NOTE[..], &ANTHROPIC_TARGET_NOTE[..]] {
+            let openai = std::ptr::eq(note.as_ptr(), OPENAI_TARGET_NOTE.as_ptr());
+            let examples: Vec<&str> = note.iter().filter_map(|l| l.split_whitespace().last()).filter(|w| w.starts_with("http")).collect();
+            assert!(!examples.is_empty());
+            for ex in examples {
+                assert_eq!(normalize_target(ex).unwrap(), ex);
+                assert_eq!(ex.ends_with("/v1"), openai, "{ex}");
+            }
+        }
+        assert!(OPENAI_TARGET_NOTE.contains(&"  Ollama      http://localhost:11434/v1"));
+        assert_eq!(normalize_target(OPENAI_DEFAULT_TARGET).unwrap(), OPENAI_DEFAULT_TARGET);
+        assert_eq!(normalize_target(ANTHROPIC_DEFAULT_TARGET).unwrap(), ANTHROPIC_DEFAULT_TARGET);
+        assert!(OPENAI_DEFAULT_TARGET.ends_with("/v1") && !ANTHROPIC_DEFAULT_TARGET.ends_with("/v1"));
     }
 
     #[test]
