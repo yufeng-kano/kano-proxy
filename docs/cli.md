@@ -128,7 +128,9 @@ Interactive **ratatui** screens are the default for `init` and `add`; every comm
 
 **`kano-proxy init`** — sign this device in (once per machine).
 
-- TUI: prompts base URL + device name → calls `login/start` → opens the browser (URL also printed, for SSH) → prompts for the code shown on the authorize page → completes login, persists device credentials. The base URL must be `https://` except for loopback hosts — cleartext to a routable origin would hand the whole rotating token family to an on-path observer.
+- TUI: prompts base URL + device name → calls `login/start` → opens the browser → prompts for the code shown on the authorize page → completes login, persists device credentials. The base URL must be `https://` except for loopback hosts — cleartext to a routable origin would hand the whole rotating token family to an on-path observer.
+- **Default server (operator decision 2026-09-22): the hosted edition, `https://kano-proxy.yuufeng.com`**, compiled into the CLI as `DEFAULT_BASE_URL`. The Server prompt is pre-filled with it (or with the state file's `base_url` when one exists, or `--base-url`), so a hosted-edition user presses Enter; a self-hoster types their own origin, exactly as `gh` defaults to github.com. The web UI's install card shows `kano-proxy init --base-url <this instance's origin>` so every instance teaches its own address (§ Web UI).
+- **The authorize URL is rendered inside the code screen itself**, not only printed before it. Every ratatui screen runs on the terminal's alternate screen, so anything printed to stdout/stderr before the code prompt is hidden while the prompt is up — which is exactly when the user needs the URL. The screen shows the URL above the input; the CLI also prints it before opening the browser (for logs and `--no-tui`), and claims to have opened a browser only when it plausibly could (a spawned `xdg-open` with no display is not a browser).
 - `--no-tui`, two phases sharing the pending request via the state file:
   ```console
   $ kano-proxy init --no-tui --base-url https://proxy.example.com --device-name box1
@@ -166,9 +168,10 @@ Interactive **ratatui** screens are the default for `init` and `add`; every comm
 ```console
 # 1. Install (any channel from § Distribution):  brew install yufeng-kano/tap/kano-proxy
 $ kano-proxy init
-  Server: https://proxy.example.com
+  Server [https://kano-proxy.yuufeng.com]: ⏎   (self-hosters type their own origin)
   Device name [my-mac]: ⏎
-  → opening https://proxy.example.com/cli/authorize?request=…  (sign in with Google, press Approve)
+  → approve this device at: https://kano-proxy.yuufeng.com/cli/authorize?request=…  (sign in with Google, press Approve)
+  Approve this device at: https://kano-proxy.yuufeng.com/cli/authorize?request=…   ← shown on the code screen too
   Code shown in browser: XXXX-XXXX
   ✓ device "my-mac" signed in
 $ kano-proxy add
@@ -209,7 +212,7 @@ No dedicated page and no sidebar nav item — CLI surfaces live inside the exist
 
 | Surface | Content |
 |---|---|
-| Providers page (`/providers`), **All** and **CLI** tabs | Two datasets, two cards per the house style: **CLI devices** (name, last seen, created — row action: revoke) and **CLI providers** (slug, format, connection state chip, model count + last report time, registered-from device — row actions: rename display name, delete). No create flows here — creation is the CLI's job; when both are empty, one card shows the `kano-proxy init` one-liner and a Releases link. |
+| Providers page (`/providers`), **All** and **CLI** tabs | Two datasets, two cards per the house style: **CLI devices** (name, last seen, created — row action: revoke) and **CLI providers** (slug, format, connection state chip, model count + last report time, registered-from device — row actions: rename display name, delete). No create flows here — creation is the CLI's job; when both are empty, one card shows the install one-liners, `kano-proxy init --base-url <this instance's origin>` (the browser's `location.origin`, so every instance teaches its own address — the CLI's compiled-in default is the hosted edition) and a Releases link. |
 | `/cli/authorize?request=…` | Approve view for a pending login, rendered as a **bare page outside the shell** — blank page, one centered card: device name + Approve/Deny; on approve, displays the one-time code. Session required (redirects through login like any admin page). |
 
 `/cli` is a permanent redirect to `/providers`. The Models page and group-target pickers include CLI providers like any other provider (ids are `<slug>/<model>`). Detailed layout rules: [admin-ui.md](./admin-ui.md) § CLI sections, § CLI authorize view.

@@ -67,15 +67,41 @@ pub fn default_slug(existing: &[ProviderState]) -> String {
     base
 }
 
+/// The hosted edition — what the Server prompt offers when this machine has
+/// no state file yet (docs/cli.md § Command surface, operator decision
+/// 2026-09-22). Self-hosters type their own origin over it, or pass
+/// `--base-url`; the web UI's install card shows each instance's own.
+pub const DEFAULT_BASE_URL: &str = "https://kano-proxy.yuufeng.com";
+
+/// What the Server prompt is pre-filled with: an explicit flag, else the
+/// origin this state file already knows (a `--no-tui` first phase, or a file
+/// whose credentials were revoked and cleared), else the hosted edition.
+pub fn server_prompt_default<'a>(flag: Option<&'a str>, state_base_url: &'a str) -> &'a str {
+    match flag {
+        Some(f) if !f.trim().is_empty() => f,
+        _ if !state_base_url.trim().is_empty() => state_base_url,
+        _ => DEFAULT_BASE_URL,
+    }
+}
+
+/// Best-effort browser launch. Says it opened one only when that is
+/// plausible: on Linux/BSD a spawned `xdg-open` with no display session
+/// "succeeds" and opens nothing, which over SSH misleads the user into
+/// waiting for a page that never appears — the URL is printed regardless.
 fn open_browser(url: &str) {
     #[cfg(target_os = "macos")]
     let opened = std::process::Command::new("open").arg(url).spawn().is_ok();
     #[cfg(target_os = "windows")]
     let opened = std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn().is_ok();
     #[cfg(all(unix, not(target_os = "macos")))]
-    let opened = std::process::Command::new("xdg-open").arg(url).spawn().is_ok();
+    let opened = {
+        let has_display = ["DISPLAY", "WAYLAND_DISPLAY"]
+            .iter()
+            .any(|v| std::env::var_os(v).is_some_and(|d| !d.is_empty()));
+        has_display && std::process::Command::new("xdg-open").arg(url).spawn().is_ok()
+    };
     if opened {
-        eprintln!("→ opening {url}");
+        eprintln!("→ opening it in your browser");
     }
 }
 
@@ -138,21 +164,27 @@ pub async fn cmd_init(file: &StateFile, args: InitArgs) -> Result<()> {
     }
 
     tui::require_tty()?;
+    let title = "kano-proxy init — sign this device in";
     let base = api::normalize_base_url(&tui::input(
-        "kano-proxy init — sign this device in",
+        title,
         "Server",
-        args.base_url.as_deref().unwrap_or(&state.base_url),
+        server_prompt_default(args.base_url.as_deref(), &state.base_url),
     )?)?;
-    let device_name = tui::input(
-        "kano-proxy init — sign this device in",
-        "Device name",
-        args.device_name.as_deref().unwrap_or(&hostname()),
-    )?;
+    let device_name = tui::input(title, "Device name", args.device_name.as_deref().unwrap_or(&hostname()))?;
     let start = api::login_start(&base, &device_name).await?;
-    // Always printed, for SSH — the browser may be on another machine.
+    // Printed for the scrollback, and drawn on the code screen below: the
+    // screens run on the alternate screen, so this line is hidden while the
+    // code prompt is up — over SSH the browser is on another machine and the
+    // URL is the only way through (docs/cli.md § Command surface).
     eprintln!("→ approve this device at: {}", start.verify_url);
     open_browser(&start.verify_url);
-    let code = tui::input("kano-proxy init — sign this device in", "Code shown in browser", "")?;
+    let note = [
+        "Sign in with Google and press Approve at:",
+        start.verify_url.as_str(),
+        "",
+        "Then paste the one-time code the page shows.",
+    ];
+    let code = tui::input_with_note(title, &note, "Code shown in browser", "")?;
     let done = api::login_complete(&base, &start.request_id, &code).await?;
     state.base_url = base;
     state.device_id = Some(done.device_id);
@@ -506,5 +538,18 @@ mod tests {
         assert!(normalize_target("http://:11434/v1").is_err());
         assert!(normalize_target("http://user@/v1").is_err());
         assert!(normalize_target("http://?x").is_err());
+    }
+
+    #[test]
+    fn server_prompt_prefers_flag_then_state_then_hosted_default() {
+        assert_eq!(server_prompt_default(Some("https://a.example"), "https://b.example"), "https://a.example");
+        assert_eq!(server_prompt_default(None, "https://b.example"), "https://b.example");
+        assert_eq!(server_prompt_default(Some("  "), ""), DEFAULT_BASE_URL);
+        assert_eq!(server_prompt_default(None, ""), DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn hosted_default_passes_the_cli_s_own_base_url_rules() {
+        assert_eq!(api::normalize_base_url(DEFAULT_BASE_URL).unwrap(), DEFAULT_BASE_URL);
     }
 }

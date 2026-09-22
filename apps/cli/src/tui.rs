@@ -13,7 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 
 pub fn require_tty() -> Result<()> {
@@ -52,26 +52,51 @@ fn is_cancel(code: KeyCode, modifiers: KeyModifiers) -> bool {
 /// One-line text input. Enter accepts (falling back to `default` when blank),
 /// Esc / Ctrl-C cancels the whole command.
 pub fn input(title: &str, label: &str, default: &str) -> Result<String> {
+    input_with_note(title, &[], label, default)
+}
+
+/// `input` with a block of lines rendered between the title and the field.
+/// The screens run on the terminal's alternate screen, so anything printed
+/// *before* a screen opens is invisible while it is up — the authorize URL
+/// `init` needs the user to visit has to be drawn on the code screen itself
+/// (docs/cli.md § Command surface). Long lines wrap rather than clip.
+pub fn input_with_note(title: &str, note: &[&str], label: &str, default: &str) -> Result<String> {
     let mut screen = Screen::open()?;
     let mut value = String::new();
+    // Wrapped note height: worst case each line wraps to ceil(len / width).
+    let note_text = note.join("\n");
     loop {
         let default_hint = if default.is_empty() { String::new() } else { format!(" [{default}]") };
         screen.terminal.draw(|f| {
-            let chunks = Layout::vertical([Constraint::Length(3), Constraint::Length(3), Constraint::Min(0)])
-                .split(f.area());
+            let width = f.area().width.max(1) as usize;
+            let note_height: u16 = if note.is_empty() {
+                0
+            } else {
+                note.iter().map(|l| l.chars().count().div_ceil(width).max(1) as u16).sum::<u16>() + 1
+            };
+            let chunks = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(note_height),
+                Constraint::Length(3),
+                Constraint::Min(0),
+            ])
+            .split(f.area());
             f.render_widget(
                 Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)),
                 chunks[0],
             );
+            if !note.is_empty() {
+                f.render_widget(Paragraph::new(note_text.as_str()).wrap(Wrap { trim: false }), chunks[1]);
+            }
             let line = Line::from(vec![
                 Span::styled(format!("{label}{default_hint}: "), Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(value.clone()),
                 Span::styled("▏", Style::default().add_modifier(Modifier::SLOW_BLINK)),
             ]);
-            f.render_widget(Paragraph::new(line), chunks[1]);
+            f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), chunks[2]);
             f.render_widget(
                 Paragraph::new("Enter accepts · Esc cancels").style(Style::default().add_modifier(Modifier::DIM)),
-                chunks[2],
+                chunks[3],
             );
         })?;
         if let Event::Key(key) = event::read()? {

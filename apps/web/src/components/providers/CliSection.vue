@@ -30,12 +30,15 @@ import type { CliDevice, CliProvider } from "@/types"
 /**
  * Wire identifiers, not copy (docs/i18n.md): the install commands and the
  * Releases URL are the same for every instance — instances never host
- * binaries themselves (docs/cli.md § Distribution).
+ * binaries themselves (docs/cli.md § Distribution). The init command carries
+ * this instance's own origin: the CLI's compiled-in default is the hosted
+ * edition, so a self-hosted instance has to teach its address here
+ * (docs/admin-ui.md § CLI sections).
  */
 const INSTALL_BREW = "brew install yufeng-kano/tap/kano-proxy"
 const INSTALL_SCRIPT =
   "curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh"
-const INIT_COMMAND = "kano-proxy init"
+const INIT_COMMAND = `kano-proxy init --base-url ${window.location.origin}`
 const RELEASES_URL = "https://github.com/yufeng-kano/kano-proxy/releases"
 
 const { t, format } = useI18n()
