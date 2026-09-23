@@ -53,7 +53,7 @@ const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/respons
 /// The Codex TUI identity every `/codex/responses` call advertises; the version tracks
 /// [`CODEX_CLIENT_VERSION`] (asserted in this module's tests).
 pub const CODEX_USER_AGENT: &str =
-    "codex-tui/0.153.4 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.153.4)";
+    "codex-tui/0.156.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.156.0)";
 pub const CODEX_ORIGINATOR: &str = "codex-tui";
 
 /// OpenAI's documented `prompt_cache_key` ceiling; over it is a hard 400.

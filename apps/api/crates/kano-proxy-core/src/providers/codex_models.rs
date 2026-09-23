@@ -21,8 +21,8 @@ pub const CODEX_MODELS_ENDPOINT: &str = concat!("https://chatgpt.com/backend-api
 /// The one Codex CLI version every chatgpt.com call advertises. `/codex/models` filters its
 /// catalog by `client_version` — an old pin silently hides models the account can already
 /// use, so bump this when a new model fails to appear. Track npm `@openai/codex` latest.
-pub const CODEX_CLIENT_VERSION: &str = "0.153.4";
-pub const CODEX_USER_AGENT: &str = "codex_cli_rs/0.153.4 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9";
+pub const CODEX_CLIENT_VERSION: &str = "0.156.0";
+pub const CODEX_USER_AGENT: &str = "codex_cli_rs/0.156.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9";
 
 /// Public catalog mirrors, tried in order when the live endpoint is bot-walled.
 pub const CODEX_MODEL_MIRROR_URLS: [&str; 2] = [

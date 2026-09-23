@@ -17,7 +17,7 @@ use crate::AppState;
 use super::codex_models::CODEX_CLIENT_VERSION;
 use super::types::UsageWindow;
 
-pub const CODEX_CLI_UA: &str = "codex_cli_rs/0.153.4";
+pub const CODEX_CLI_UA: &str = "codex_cli_rs/0.156.0";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

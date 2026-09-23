@@ -37,9 +37,9 @@ const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 /// CLI that owns these tokens; a real client's own values are forwarded when it sends them —
 /// these are only the fallback for surfaces with no client headers to relay.
 pub const CLAUDE_CLIENT_FINGERPRINT: [(&str, &str); 5] = [
-    ("user-agent", "claude-cli/2.1.257 (external, cli)"),
-    ("x-stainless-package-version", "0.74.0"),
-    ("x-stainless-runtime-version", "v24.3.0"),
+    ("user-agent", "claude-cli/2.1.280 (external, cli)"),
+    ("x-stainless-package-version", "0.112.1"),
+    ("x-stainless-runtime-version", "v26.3.0"),
     ("x-stainless-os", "MacOS"),
     ("x-stainless-arch", "arm64"),
 ];
