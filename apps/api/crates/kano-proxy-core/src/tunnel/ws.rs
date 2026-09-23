@@ -1,7 +1,7 @@
 //! The WebSocket half of the tunnel, as an axum upgrade handler.
 //!
 //! The route (`GET /agent/v1/connect/:providerId`) authenticates first: it
-//! verifies the access token, checks the device is not revoked and checks the
+//! verifies the access token, checks the device still exists (revoking deletes it) and checks the
 //! provider row belongs to the token's user, then hands the verified facts here
 //! as [`ConnectParams`]. This layer never sees or validates tokens, exactly as
 //! the Durable Object never did (docs/cli.md § Wire protocol).

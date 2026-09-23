@@ -24,7 +24,7 @@ import Modal from "@/components/ui/Modal.vue"
 import TextInput from "@/components/ui/TextInput.vue"
 import { useCli } from "@/composables/useCli"
 import { useI18n } from "@/i18n"
-import { deleteCliProvider, renameCliProvider, revokeCliDevice } from "@/services/api"
+import { deleteCliProvider, renameCliDevice, renameCliProvider, revokeCliDevice } from "@/services/api"
 import type { CliDevice, CliProvider } from "@/types"
 
 /**
@@ -49,7 +49,9 @@ const editingDevices = ref(false)
 const editingProviders = ref(false)
 const busyId = ref<string | null>(null)
 
-const renaming = ref<CliProvider | null>(null)
+/** One rename dialog for both datasets — a device and a provider each own a display name. */
+type RenameTarget = { kind: "device" | "provider"; id: string; name: string }
+const renaming = ref<RenameTarget | null>(null)
 const renameValue = ref("")
 const renameSaving = ref(false)
 
@@ -64,7 +66,7 @@ const deviceColumns = computed<Column<CliDevice>[]>(() => [
   { key: "lastSeen", header: t("cli.devices.column.lastSeen") },
   { key: "created", header: t("cli.devices.column.created"), hideOnMobile: true },
   ...(editingDevices.value
-    ? [{ key: "actions", header: "", srHeader: t("action.edit"), align: "end" as const, width: "96px" }]
+    ? [{ key: "actions", header: "", srHeader: t("action.edit"), align: "end" as const, width: "148px" }]
     : []),
 ])
 
@@ -92,23 +94,24 @@ async function onRevoke(device: CliDevice) {
   }
 }
 
-function openRename(provider: CliProvider) {
-  renaming.value = provider
-  renameValue.value = provider.name
+function openRename(kind: RenameTarget["kind"], row: CliDevice | CliProvider) {
+  renaming.value = { kind, id: row.id, name: row.name }
+  renameValue.value = row.name
 }
 
 async function saveRename() {
-  const provider = renaming.value
+  const target = renaming.value
   const name = renameValue.value.trim()
-  if (!provider || !name) return
+  if (!target || !name) return
   renameSaving.value = true
   error.value = null
   try {
-    await renameCliProvider(provider.id, name)
+    if (target.kind === "device") await renameCliDevice(target.id, name)
+    else await renameCliProvider(target.id, name)
     renaming.value = null
     await load({ refresh: true })
   } catch {
-    error.value = t("cli.error.rename")
+    error.value = t(target.kind === "device" ? "cli.error.renameDevice" : "cli.error.rename")
   } finally {
     renameSaving.value = false
   }
@@ -200,7 +203,6 @@ function modelsCell(provider: CliProvider): string {
       >
         <template #cell-name="{ row }">
           <span class="name">{{ row.name }}</span>
-          <Badge v-if="row.revoked_at" tone="danger">{{ t("cli.devices.revoked") }}</Badge>
         </template>
         <template #cell-lastSeen="{ row }">
           <span v-if="row.last_seen_at" :title="format.dateTime(row.last_seen_at)">
@@ -213,18 +215,28 @@ function modelsCell(provider: CliProvider): string {
         </template>
         <template #cell-actions="{ row }">
           <!-- Revoke keeps its word: it destroys a sign-in the operator
-               would have to redo on the machine itself. A revoked row has
-               nothing left to act on. -->
-          <AppButton
-            v-if="!row.revoked_at"
-            size="sm"
-            variant="danger"
-            :label="t('cli.devices.revokeName', { name: row.name })"
-            :loading="busyId === row.id"
-            @click="onRevoke(row)"
-          >
-            {{ t("cli.devices.revoke") }}
-          </AppButton>
+               would have to redo on the machine itself, and the row goes
+               with it. -->
+          <div class="row-actions">
+            <AppButton
+              icon-only
+              size="sm"
+              variant="ghost"
+              :label="t('cli.devices.renameName', { name: row.name })"
+              @click="openRename('device', row)"
+            >
+              <template #icon><ActionIcon name="edit" /></template>
+            </AppButton>
+            <AppButton
+              size="sm"
+              variant="danger"
+              :label="t('cli.devices.revokeName', { name: row.name })"
+              :loading="busyId === row.id"
+              @click="onRevoke(row)"
+            >
+              {{ t("cli.devices.revoke") }}
+            </AppButton>
+          </div>
         </template>
       </DataTable>
     </AppCard>
@@ -301,7 +313,7 @@ function modelsCell(provider: CliProvider): string {
               size="sm"
               variant="ghost"
               :label="t('cli.providers.renameName', { name: row.name })"
-              @click="openRename(row)"
+              @click="openRename('provider', row)"
             >
               <template #icon><ActionIcon name="edit" /></template>
             </AppButton>
@@ -321,7 +333,11 @@ function modelsCell(provider: CliProvider): string {
     </AppCard>
   </template>
 
-  <Modal v-if="renaming" :title="t('cli.rename.title')" @close="renaming = null">
+  <Modal
+    v-if="renaming"
+    :title="renaming.kind === 'device' ? t('cli.rename.deviceTitle') : t('cli.rename.title')"
+    @close="renaming = null"
+  >
     <form class="rename-form" @submit.prevent="saveRename">
       <FormField v-slot="field" :label="t('cli.rename.label')">
         <TextInput

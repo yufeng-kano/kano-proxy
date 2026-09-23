@@ -25,7 +25,7 @@ use crate::db::cli::{
     count_cli_devices, count_cli_providers, delete_cli_provider, find_cli_device_by_prev_refresh_hash,
     find_cli_device_by_refresh_hash, get_cli_device, get_cli_provider_by_id, get_cli_provider_by_slug,
     get_login_request, insert_cli_device, insert_cli_provider, insert_login_request, mark_login_request_used,
-    record_login_code_attempt, rotate_cli_device_refresh_token, touch_cli_device_last_seen, CliDeviceRow,
+    record_login_code_attempt, revoke_cli_device, rotate_cli_device_refresh_token, touch_cli_device_last_seen, CliDeviceRow,
     NewCliProvider, MAX_CLI_DEVICES_PER_USER, MAX_LOGIN_CODE_ATTEMPTS,
 };
 use crate::db::custom_providers::{count_custom_providers, get_custom_provider_by_slug, MAX_CUSTOM_PROVIDERS_PER_USER};
@@ -198,9 +198,6 @@ async fn token(State(state): State<AppState>, body: bytes::Bytes) -> Response {
         return internal_error();
     };
     if let Some(device) = device {
-        if device.revoked_at.is_some() {
-            return error(StatusCode::UNAUTHORIZED, "device_revoked");
-        }
         let next = new_refresh_token();
         let rotated =
             rotate_cli_device_refresh_token(state.pool(), &device.id, &presented_hash, &sha256_hex_str(&next)).await;
@@ -220,19 +217,13 @@ async fn token(State(state): State<AppState>, body: bytes::Bytes) -> Response {
         .into_response();
     }
 
-    // A superseded token is treated as theft: revoke the whole device family
-    // (docs/cli.md § Device auth). A token matching nothing is a plain 401.
+    // A superseded token is treated as theft: revoke (delete) the whole device
+    // family (docs/cli.md § Device auth). A token matching nothing is a plain 401.
     let Ok(stale) = find_cli_device_by_prev_refresh_hash(state.pool(), &presented_hash).await else {
         return internal_error();
     };
-    if let Some(stale) = stale.filter(|d| d.revoked_at.is_none()) {
-        if sqlx::query("UPDATE cli_devices SET revoked_at = $1 WHERE id = $2")
-            .bind(crate::ids::now_iso())
-            .bind(&stale.id)
-            .execute(state.pool())
-            .await
-            .is_err()
-        {
+    if let Some(stale) = stale {
+        if revoke_cli_device(state.pool(), &stale.user_id, &stale.id).await.is_err() {
             return internal_error();
         }
         tracing::warn!(device_id = %stale.id, "refresh-token reuse revoked device");
@@ -241,7 +232,7 @@ async fn token(State(state): State<AppState>, body: bytes::Bytes) -> Response {
     error(StatusCode::UNAUTHORIZED, "invalid refresh token")
 }
 
-/// Bearer access token → claims + non-revoked device row, or `None` (the caller
+/// Bearer access token → claims + live (unrevoked, so still stored) device row, or `None` (the caller
 /// answers 401).
 struct DeviceAuth {
     claims: CliTokenClaims,
@@ -257,7 +248,7 @@ async fn authenticate_device(state: &AppState, headers: &HeaderMap) -> Option<De
     }
     let claims = verify_access_token(secret, value.trim(), state.now_ms())?;
     let device = get_cli_device(state.pool(), &claims.device_id).await.ok().flatten()?;
-    if device.user_id != claims.user_id || device.revoked_at.is_some() {
+    if device.user_id != claims.user_id {
         return None;
     }
     Some(DeviceAuth { claims, device })
@@ -734,7 +725,7 @@ mod tests {
         let reuse = send(&state, json_req("POST", "/agent/v1/token", Some(refresh()), &[])).await;
         assert_eq!(reuse.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(body_json(reuse).await["error"], "device_revoked");
-        assert!(list_cli_devices(state.pool(), &user.id).await.unwrap()[0].revoked_at.is_some());
+        assert!(list_cli_devices(state.pool(), &user.id).await.unwrap().is_empty(), "the device is deleted");
     }
 
     #[tokio::test]
@@ -746,7 +737,7 @@ mod tests {
         let response =
             send(&state, json_req("POST", "/agent/v1/token", Some(json!({ "refresh_token": "kpr_garbage" })), &[])).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-        assert!(list_cli_devices(state.pool(), &user.id).await.unwrap()[0].revoked_at.is_none());
+        assert_eq!(list_cli_devices(state.pool(), &user.id).await.unwrap().len(), 1, "the device is kept");
     }
 
     #[tokio::test]

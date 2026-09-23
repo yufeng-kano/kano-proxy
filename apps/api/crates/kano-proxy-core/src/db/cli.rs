@@ -19,7 +19,6 @@ pub struct CliDeviceRow {
     pub refresh_token_prev_hash: Option<String>,
     pub last_seen_at: Option<String>,
     pub created_at: String,
-    pub revoked_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
@@ -169,8 +168,8 @@ pub async fn insert_cli_device(
     let id = new_id("clidev");
     let ts = now_iso();
     sqlx::query(
-        "INSERT INTO cli_devices (id, user_id, name, refresh_token_hash, refresh_token_prev_hash, last_seen_at, created_at, revoked_at)
-         VALUES ($1, $2, $3, $4, NULL, NULL, $5, NULL)",
+        "INSERT INTO cli_devices (id, user_id, name, refresh_token_hash, refresh_token_prev_hash, last_seen_at, created_at)
+         VALUES ($1, $2, $3, $4, NULL, NULL, $5)",
     )
     .bind(&id)
     .bind(user_id)
@@ -187,7 +186,6 @@ pub async fn insert_cli_device(
         refresh_token_prev_hash: None,
         last_seen_at: None,
         created_at: ts,
-        revoked_at: None,
     })
 }
 
@@ -202,9 +200,8 @@ pub async fn get_cli_device(db: &PgPool, id: &str) -> Result<Option<CliDeviceRow
     sqlx::query_as::<_, CliDeviceRow>("SELECT * FROM cli_devices WHERE id = $1").bind(id).fetch_optional(db).await
 }
 
-/// Quota counts only live devices — a user who revoked 20 over time is not locked out forever.
 pub async fn count_cli_devices(db: &PgPool, user_id: &str) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM cli_devices WHERE user_id = $1 AND revoked_at IS NULL")
+    sqlx::query_scalar("SELECT COUNT(*) FROM cli_devices WHERE user_id = $1")
         .bind(user_id)
         .fetch_one(db)
         .await
@@ -238,7 +235,7 @@ pub async fn rotate_cli_device_refresh_token(
     let r = sqlx::query(
         "UPDATE cli_devices
          SET refresh_token_prev_hash = refresh_token_hash, refresh_token_hash = $1, last_seen_at = $2
-         WHERE id = $3 AND refresh_token_hash = $4 AND revoked_at IS NULL",
+         WHERE id = $3 AND refresh_token_hash = $4",
     )
     .bind(new_hash)
     .bind(now_iso())
@@ -249,10 +246,21 @@ pub async fn rotate_cli_device_refresh_token(
     Ok(r.rows_affected() > 0)
 }
 
-/// Idempotent — a second revoke changes nothing.
+/// Revoking deletes the row: its refresh token then matches nothing, and nothing of a
+/// revoked device is kept (docs/cli.md § Device auth). A second revoke changes nothing.
 pub async fn revoke_cli_device(db: &PgPool, user_id: &str, device_id: &str) -> Result<bool, sqlx::Error> {
-    let r = sqlx::query("UPDATE cli_devices SET revoked_at = $1 WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL")
-        .bind(now_iso())
+    let r = sqlx::query("DELETE FROM cli_devices WHERE id = $1 AND user_id = $2")
+        .bind(device_id)
+        .bind(user_id)
+        .execute(db)
+        .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Scoped to `user_id` — a device is only ever renamed by its owner.
+pub async fn rename_cli_device(db: &PgPool, user_id: &str, device_id: &str, name: &str) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("UPDATE cli_devices SET name = $1 WHERE id = $2 AND user_id = $3")
+        .bind(name)
         .bind(device_id)
         .bind(user_id)
         .execute(db)
@@ -493,11 +501,15 @@ mod tests {
         assert_eq!(find_cli_device_by_prev_refresh_hash(&pool, "hash-1").await.unwrap().unwrap().id, device.id);
         assert!(get_cli_device(&pool, &device.id).await.unwrap().unwrap().last_seen_at.is_some());
         touch_cli_device_last_seen(&pool, &device.id).await.unwrap();
+        assert!(!rename_cli_device(&pool, "someone-else", &device.id, "hijack").await.unwrap());
+        assert!(rename_cli_device(&pool, &user.id, &device.id, "studio").await.unwrap());
+        assert_eq!(get_cli_device(&pool, &device.id).await.unwrap().unwrap().name, "studio");
 
         assert!(revoke_cli_device(&pool, &user.id, &device.id).await.unwrap());
         assert!(!revoke_cli_device(&pool, &user.id, &device.id).await.unwrap(), "revoke is idempotent");
         assert_eq!(count_cli_devices(&pool, &user.id).await.unwrap(), 0, "revoked devices free the quota");
-        assert_eq!(list_cli_devices(&pool, &user.id).await.unwrap().len(), 1);
+        assert!(list_cli_devices(&pool, &user.id).await.unwrap().is_empty(), "a revoked device is not kept");
+        assert!(find_cli_device_by_refresh_hash(&pool, "hash-2").await.unwrap().is_none());
         assert!(!rotate_cli_device_refresh_token(&pool, &device.id, "hash-2", "hash-4").await.unwrap(), "revoked cannot rotate");
     }
 

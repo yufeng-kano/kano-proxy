@@ -181,7 +181,6 @@ export type CliDevice = {
   name: string
   last_seen_at: string | null
   created_at: string
-  revoked_at: string | null
 }
 
 /** One local endpoint registered by `kano-proxy add` (docs/cli.md). */

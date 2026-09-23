@@ -37,14 +37,14 @@ Three new tables (`0015_cli_providers.sql`; full column notes in [database.md](.
 
 | Table | Columns (essentials) |
 |---|---|
-| `cli_devices` | `id`, `user_id`, `name` (1–64 chars), `refresh_token_hash`, `refresh_token_prev_hash` (superseded-token theft detection — see Device auth below), `last_seen_at`, `created_at`, `revoked_at` |
+| `cli_devices` | `id`, `user_id`, `name` (1–64 chars), `refresh_token_hash`, `refresh_token_prev_hash` (superseded-token theft detection — see Device auth below), `last_seen_at`, `created_at` — revoking deletes the row, so every stored device is live |
 | `cli_login_requests` | `id`, `device_name`, `code_hash`, `user_id` (NULL until approved), `expires_at`, `approved_at`, `used_at`, `attempts`, `created_at` |
 | `cli_providers` | `id`, `user_id`, `device_id` (nullable — informational "registered from"), `slug`, `name`, `format` (`openai` \| `anthropic`), `models_json` (last agent report), `models_updated_at`, `model_filter_json` (nullable expose-whitelist), `sort_order`, `created_at`, `updated_at` |
 
 - **Slug rules:** identical to custom providers (lowercase 2–32, `^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$`, same reserved list), **immutable**, and unique per user **across both** `custom_providers` and `cli_providers` — both create paths check the other table, because both kinds resolve from the same `<slug>/<model>` position.
 - **Format immutable** after creation, same as custom (delete-and-recreate).
 - **Pool internals:** each CLI provider still gets one `upstream_accounts` row (`provider = slug`, empty credential). This is an implementation detail, not a user-facing "account": it is where the existing bench/unpause/routing-facts machinery keeps its state, so `facts.ts` / `feedback.ts` / group targets need no parallel bookkeeping. The row is created and deleted with the provider and never shown as an account on the CLI page; its one UI appearance is as the Groups picker's pin handle, exactly like a custom endpoint's key row ([admin-ui.md](./admin-ui.md) § Groups page).
-- **Caps:** CLI providers count into the same 20-per-user provider budget as custom providers (shared cap across both tables, and the cross-table slug guard rides inside each INSERT so racing creates cannot both land); ≤ 20 **active** (non-revoked) devices per user — revoked rows stay listed as history and never spend the quota.
+- **Caps:** CLI providers count into the same 20-per-user provider budget as custom providers (shared cap across both tables, and the cross-table slug guard rides inside each INSERT so racing creates cannot both land); ≤ 20 devices per user — a revoked device is deleted, so it neither stays listed nor spends the quota.
 - **The target URL is not stored server-side.** Where the local server lives (`http://localhost:11434/v1`) and its optional local API key are CLI state on the device — the server has no business knowing them and could not use them anyway.
 
 ## Device auth — login once, rotate forever
@@ -60,8 +60,8 @@ No permanent secrets on disk. The CLI holds a **rotating refresh token**; everyt
 **Tokens:**
 
 - **Access token:** stateless, HMAC-signed with a dedicated `CLI_TOKEN_SECRET` (same signing pattern as the session cookie), claims `{user_id, device_id, exp}`, TTL **1 h**. Verified without a database read.
-- **Refresh token:** random 32 bytes, stored hashed on the device row, **rotates on every use**: `POST /agent/v1/token` `{refresh_token}` → new refresh + new access. Presenting a superseded refresh token is treated as theft: the device is revoked (family revocation). Detection needs one generation of history, so the row keeps the previous token's hash too (`refresh_token_prev_hash`) — a presented token matching *that* column is the superseded one and revokes the device; a token matching neither column is a plain `401` (garbage proves nothing about this device). The rotation write is a conditional `UPDATE … WHERE refresh_token_hash = ?` so two concurrent presentations of the same token cannot both win. The CLI persists the new refresh token to its state file *before* discarding the old one, and serializes refreshes across its own processes with a lock file beside the state file.
-- **Revocation:** the web UI's CLI page revokes a device (`revoked_at`). Effect: next refresh fails (≤ 1 h), next connect fails (immediately — connect does one device-row check), and live sockets die at access-token expiry because the registry schedules a close at `exp` with code `4003 token_expired`. The CLI treats `4003` as "refresh, then reconnect" — invisible when the device is healthy, terminal when it is revoked.
+- **Refresh token:** random 32 bytes, stored hashed on the device row, **rotates on every use**: `POST /agent/v1/token` `{refresh_token}` → new refresh + new access. Presenting a superseded refresh token is treated as theft: the device is revoked, i.e. deleted (family revocation). Detection needs one generation of history, so the row keeps the previous token's hash too (`refresh_token_prev_hash`) — a presented token matching *that* column is the superseded one and revokes the device; a token matching neither column is a plain `401` (garbage proves nothing about this device). The rotation write is a conditional `UPDATE … WHERE refresh_token_hash = ?` so two concurrent presentations of the same token cannot both win. The CLI persists the new refresh token to its state file *before* discarding the old one, and serializes refreshes across its own processes with a lock file beside the state file.
+- **Revocation:** the web UI's CLI page revokes a device by deleting its row — nothing of a revoked device is kept, and its providers stay (showing no device) until removed. Effect: next refresh fails (≤ 1 h), next connect fails (immediately — connect does one device-row check), and live sockets die at access-token expiry because the registry schedules a close at `exp` with code `4003 token_expired`. The CLI treats `4003` as "refresh, then reconnect" — invisible when the device is healthy, terminal when it is revoked.
 
 ## The tunnel registry
 
@@ -71,7 +71,7 @@ No permanent secrets on disk. The CLI holds a **rotating refresh token**; everyt
 
 ## Wire protocol (v1)
 
-Established on `GET /agent/v1/connect/:providerId` (WebSocket upgrade, `Authorization: Bearer <access token>`). The **server** verifies the token signature and expiry, checks the device is not revoked, and checks the provider row belongs to the token's user, then hands the upgrade to the registry with the verified facts (user id, provider id, slug, token `exp`) — the registry never validates tokens itself. On accept it sends `{"t":"hello","proto":1,"slug":"<slug>"}`; a CLI that receives a `proto` it does not speak must disconnect and tell the user to upgrade.
+Established on `GET /agent/v1/connect/:providerId` (WebSocket upgrade, `Authorization: Bearer <access token>`). The **server** verifies the token signature and expiry, checks the device row still exists (revoking deletes it), and checks the provider row belongs to the token's user, then hands the upgrade to the registry with the verified facts (user id, provider id, slug, token `exp`) — the registry never validates tokens itself. On accept it sends `{"t":"hello","proto":1,"slug":"<slug>"}`; a CLI that receives a `proto` it does not speak must disconnect and tell the user to upgrade.
 
 Control frames are JSON text; body bytes are binary frames `[u32 request id][u8 kind][chunk]` (kind `0` = request body, `1` = response body) — binary framing avoids base64 inflation on SSE chunks.
 
@@ -204,7 +204,7 @@ $ kano-proxy start
 | `POST /agent/v1/providers` | Bearer access | Create (slug, format, optional expose filter / initial models) |
 | `DELETE /agent/v1/providers/:id` | Bearer access | Delete + force-close socket |
 
-`/agent/v1/*` is its own namespace beside `/api/*` (session) and the LLM surfaces: token-authenticated, permissive CORS unnecessary (no browser callers), never session-authenticated. The session-side management routes the web UI uses (`/api/cli/*` — devices, revoke, providers, rename, delete, login-request read/approve/deny) are listed in [auth.md](./auth.md) § CLI devices and providers.
+`/agent/v1/*` is its own namespace beside `/api/*` (session) and the LLM surfaces: token-authenticated, permissive CORS unnecessary (no browser callers), never session-authenticated. The session-side management routes the web UI uses (`/api/cli/*` — devices, device rename, revoke, providers, rename, delete, login-request read/approve/deny) are listed in [auth.md](./auth.md) § CLI devices and providers.
 
 ## Web UI
 
@@ -212,7 +212,7 @@ No dedicated page and no sidebar nav item — CLI surfaces live inside the exist
 
 | Surface | Content |
 |---|---|
-| Providers page (`/providers`), **All** and **CLI** tabs | Two datasets, two cards per the house style: **CLI devices** (name, last seen, created — row action: revoke) and **CLI providers** (slug, format, connection state chip, model count + last report time, registered-from device — row actions: rename display name, delete). No create flows here — creation is the CLI's job; when both are empty, one card shows the install one-liners, `kano-proxy init --base-url <this instance's origin>` (the browser's `location.origin`, so every instance teaches its own address — the CLI's compiled-in default is the hosted edition) and a Releases link. |
+| Providers page (`/providers`), **All** and **CLI** tabs | Two datasets, two cards per the house style: **CLI devices** (name, last seen, created — row actions: rename, revoke) and **CLI providers** (slug, format, connection state chip, model count + last report time, registered-from device — row actions: rename display name, delete). No create flows here — creation is the CLI's job; when both are empty, one card shows the install one-liners, `kano-proxy init --base-url <this instance's origin>` (the browser's `location.origin`, so every instance teaches its own address — the CLI's compiled-in default is the hosted edition) and a Releases link. |
 | `/cli/authorize?request=…` | Approve view for a pending login, rendered as a **bare page outside the shell** — blank page, one centered card: device name + Approve/Deny; on approve, displays the one-time code. Session required (redirects through login like any admin page). |
 
 `/cli` is a permanent redirect to `/providers`. The Models page and group-target pickers include CLI providers like any other provider (ids are `<slug>/<model>`). Detailed layout rules: [admin-ui.md](./admin-ui.md) § CLI sections, § CLI authorize view.

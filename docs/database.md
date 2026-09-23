@@ -110,7 +110,6 @@ One machine that ran `kano-proxy init` (contract: [cli.md](./cli.md)). Added in 
 | refresh_token_prev_hash | TEXT | nullable; hash of the immediately superseded token. A refresh presenting a token that matches **this** column is reuse-as-theft and revokes the device ([cli.md](./cli.md) § Device auth); a token matching neither column is a plain 401 |
 | last_seen_at | TEXT | nullable; bumped on token rotation and tunnel connect |
 | created_at | TEXT | |
-| revoked_at | TEXT | nullable; set by the web UI's revoke — refresh and connect refuse once set, live sockets die at access-token expiry |
 
 ### `cli_login_requests`
 
@@ -148,7 +147,7 @@ One local endpoint registered by `kano-proxy add` (contract: [cli.md](./cli.md))
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
-`UNIQUE(user_id, slug)` — and the cross-table half of the shared namespace is enforced inside the INSERT itself (`… SELECT … WHERE NOT EXISTS (custom_providers row)`, mirrored on the custom create), so concurrent creates cannot race past a check-then-insert. CLI providers count into the same 20-per-user cap as custom providers (shared across both tables); ≤ 20 active devices per user (revoked rows do not count).
+`UNIQUE(user_id, slug)` — and the cross-table half of the shared namespace is enforced inside the INSERT itself (`… SELECT … WHERE NOT EXISTS (custom_providers row)`, mirrored on the custom create), so concurrent creates cannot race past a check-then-insert. CLI providers count into the same 20-per-user cap as custom providers (shared across both tables); ≤ 20 devices per user. Revoking deletes the device row (`0002_cli_devices_delete_on_revoke` dropped the old `revoked_at` column and the rows it marked), so refresh and connect find nothing and live sockets die at access-token expiry.
 
 ### `model_groups`
 

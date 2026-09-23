@@ -541,11 +541,11 @@ export const en = {
   "cli.devices.column.name": "Name",
   "cli.devices.column.lastSeen": "Last seen",
   "cli.devices.column.created": "Created",
-  "cli.devices.revoked": "Revoked",
   "cli.devices.revoke": "Revoke",
   "cli.devices.revokeName": "Revoke {name}",
+  "cli.devices.renameName": "Rename {name}",
   "cli.devices.revokeConfirm":
-    "Revoke \"{name}\"? It stops connecting within the hour and can only come back by signing in again.",
+    "Revoke \"{name}\"? It is removed, stops connecting within the hour and can only come back by signing in again.",
   "cli.providers.title": "CLI providers",
   "cli.providers.column.provider": "Provider",
   "cli.providers.column.state": "State",
@@ -563,6 +563,7 @@ export const en = {
   "cli.providers.empty.title": "No CLI providers yet",
   "cli.providers.empty.body": "Register a local endpoint with kano-proxy add, then run kano-proxy start.",
   "cli.rename.title": "Rename provider",
+  "cli.rename.deviceTitle": "Rename device",
   "cli.rename.label": "Display name",
   "cli.empty.title": "Bring your local models",
   "cli.empty.body":
@@ -573,6 +574,7 @@ export const en = {
   "cli.error.load": "Couldn't load your CLI devices",
   "cli.error.revoke": "Couldn't revoke the device",
   "cli.error.rename": "Couldn't rename the provider",
+  "cli.error.renameDevice": "Couldn't rename the device",
   "cli.error.remove": "Couldn't remove the provider",
   // --- CLI authorize view --------------------------------------------------
   "cli.authorize.title": "Authorize CLI device",

@@ -42,6 +42,11 @@ pub fn skip_without_db() {
 /// `None` means the server is unreachable (never a hidden failure of the migrations
 /// themselves, which still panic).
 pub async fn test_pool() -> Option<PgPool> {
+    test_pool_at(crate::db::CORE_MIGRATIONS).await
+}
+
+/// The same, stopped at an earlier core history — the schema an upgrade test starts from.
+pub async fn test_pool_at(migrations: &[crate::db::Migration]) -> Option<PgPool> {
     // A short connect timeout, so a machine with no Postgres skips in seconds instead of
     // waiting out the pool's default acquire timeout once per test.
     let admin = match sqlx::postgres::PgPoolOptions::new()
@@ -75,7 +80,7 @@ pub async fn test_pool() -> Option<PgPool> {
         .connect(&url)
         .await
         .expect("connect to the fresh test database");
-    crate::db::migrate(&pool, crate::db::CORE_MIGRATIONS_TABLE, crate::db::CORE_MIGRATIONS)
+    crate::db::migrate(&pool, crate::db::CORE_MIGRATIONS_TABLE, migrations)
         .await
         .expect("core migrations apply");
     Some(pool)

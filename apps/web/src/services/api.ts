@@ -383,10 +383,18 @@ export async function listCliDevices(): Promise<CliDevice[]> {
   return data.devices
 }
 
-/** Idempotent. Live tunnels die at access-token expiry (docs/cli.md). */
+/** Display name only — the sign-in and its providers are untouched. */
+export async function renameCliDevice(id: string, name: string): Promise<void> {
+  await request<{ ok: boolean }>(`/api/cli/devices/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name }),
+  })
+}
+
+/** Deletes the device; idempotent. Live tunnels die at access-token expiry (docs/cli.md). */
 export async function revokeCliDevice(id: string): Promise<void> {
-  await request<{ ok: boolean }>(`/api/cli/devices/${encodeURIComponent(id)}/revoke`, {
-    method: "POST",
+  await request<{ ok: boolean }>(`/api/cli/devices/${encodeURIComponent(id)}`, {
+    method: "DELETE",
   })
 }
 

@@ -110,7 +110,7 @@ pub async fn list_cli_provider_items(state: &AppState, user_id: &str) -> Result<
     }
     // One query for every device name rather than one per provider — a provider's
     // device_id always belongs to the same user, so the user's device list covers
-    // them all (revoked included).
+    // them all; a revoked (deleted) device leaves `device_name` null.
     let device_names: HashMap<String, String> = list_cli_devices(state.pool(), user_id)
         .await?
         .into_iter()

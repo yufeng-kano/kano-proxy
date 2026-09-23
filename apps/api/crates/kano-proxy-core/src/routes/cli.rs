@@ -15,7 +15,7 @@ use crate::crypto::cli_tokens::{new_pairing_code, sha256_hex_str};
 use crate::db::accounts::{list_accounts, update_account_identity, AccountIdentity};
 use crate::db::cli::{
     approve_login_request, delete_login_request, get_cli_provider_by_id, get_login_request, list_cli_devices,
-    rename_cli_provider, revoke_cli_device, CliLoginRequestRow,
+    rename_cli_device, rename_cli_provider, revoke_cli_device, CliLoginRequestRow,
 };
 use crate::utils::custom_provider::validate_name;
 use crate::AppState;
@@ -25,7 +25,7 @@ use super::cli_shared::{list_cli_provider_items, remove_cli_provider};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/devices", get(list_devices))
-        .route("/devices/{id}/revoke", post(revoke_device))
+        .route("/devices/{id}", axum::routing::patch(rename_device).delete(revoke_device))
         .route("/providers", get(list_providers))
         .route("/providers/{id}", axum::routing::patch(rename_provider).delete(delete_provider))
         .route("/login-requests/{id}", get(read_login_request))
@@ -57,22 +57,36 @@ async fn list_devices(State(state): State<AppState>, session: SessionUser) -> Re
                 "name": row.name,
                 "last_seen_at": row.last_seen_at,
                 "created_at": row.created_at,
-                "revoked_at": row.revoked_at,
             })
         })
         .collect();
     Json(json!({ "devices": devices })).into_response()
 }
 
-/// Idempotent: revoking an already-revoked device is still ok. The 404 is only for a
-/// device that is not the caller's at all.
-async fn revoke_device(State(state): State<AppState>, session: SessionUser, Path(id): Path<String>) -> Response {
-    let Ok(rows) = list_cli_devices(state.pool(), &session.user.id).await else {
-        return internal_error();
+/// Display name only — the refresh token and the providers it registered stay.
+async fn rename_device(
+    State(state): State<AppState>,
+    session: SessionUser,
+    Path(id): Path<String>,
+    body: bytes::Bytes,
+) -> Response {
+    let Ok(body) = serde_json::from_slice::<Value>(&body) else {
+        return error(StatusCode::BAD_REQUEST, "invalid JSON");
     };
-    if !rows.iter().any(|row| row.id == id) {
-        return not_found();
+    let name = body.get("name").and_then(Value::as_str).map(str::trim).unwrap_or("");
+    if let Some(message) = validate_name(name) {
+        return error(StatusCode::BAD_REQUEST, &message);
     }
+    match rename_cli_device(state.pool(), &session.user.id, &id, name).await {
+        Ok(true) => Json(json!({ "ok": true, "name": name })).into_response(),
+        Ok(false) => not_found(),
+        Err(_) => internal_error(),
+    }
+}
+
+/// Revoke deletes the device row. Idempotent: a device that is already gone —
+/// or was never the caller's — is still ok, and nothing about it leaks.
+async fn revoke_device(State(state): State<AppState>, session: SessionUser, Path(id): Path<String>) -> Response {
     if revoke_cli_device(state.pool(), &session.user.id, &id).await.is_err() {
         return internal_error();
     }
@@ -290,26 +304,49 @@ mod tests {
         assert_eq!(json["devices"].as_array().unwrap().len(), 1);
         assert_eq!(json["devices"][0]["id"], device.id);
         assert_eq!(json["devices"][0]["name"], "my-mac");
-        assert_eq!(json["devices"][0]["revoked_at"], Value::Null);
+        assert!(json["devices"][0].get("revoked_at").is_none());
     }
 
     #[tokio::test]
-    async fn revokes_idempotently_and_never_a_foreign_device() {
+    async fn revoke_deletes_the_device_and_never_a_foreign_one() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool, MockTransport::new());
         let user = insert_user(state.pool(), "owner@example.com").await;
         let other = insert_user(state.pool(), "other@example.com").await;
         let device = insert_cli_device(state.pool(), &user.id, "my-mac", "hash").await.unwrap();
-
-        let cookie = cookie_for(&state, &user.id).await;
-        let uri = format!("/api/cli/devices/{}/revoke", device.id);
-        assert_eq!(send(&state, request("POST", &uri, &cookie, None)).await.status(), StatusCode::OK);
-        assert!(list_cli_devices(state.pool(), &user.id).await.unwrap()[0].revoked_at.is_some());
-        // Second revoke stays ok.
-        assert_eq!(send(&state, request("POST", &uri, &cookie, None)).await.status(), StatusCode::OK);
+        let uri = format!("/api/cli/devices/{}", device.id);
 
         let foreign = cookie_for(&state, &other.id).await;
-        assert_eq!(send(&state, request("POST", &uri, &foreign, None)).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(send(&state, request("DELETE", &uri, &foreign, None)).await.status(), StatusCode::OK);
+        assert_eq!(list_cli_devices(state.pool(), &user.id).await.unwrap().len(), 1, "a foreign revoke deletes nothing");
+
+        let cookie = cookie_for(&state, &user.id).await;
+        assert_eq!(send(&state, request("DELETE", &uri, &cookie, None)).await.status(), StatusCode::OK);
+        assert!(list_cli_devices(state.pool(), &user.id).await.unwrap().is_empty(), "revoke keeps no row");
+        // Second revoke stays ok.
+        assert_eq!(send(&state, request("DELETE", &uri, &cookie, None)).await.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn renames_only_the_callers_device() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "renamer@example.com").await;
+        let other = insert_user(state.pool(), "intruder@example.com").await;
+        let device = insert_cli_device(state.pool(), &user.id, "my-mac", "hash").await.unwrap();
+        let uri = format!("/api/cli/devices/{}", device.id);
+        let body = || Some(serde_json::json!({ "name": "  Studio box  " }));
+
+        let foreign = cookie_for(&state, &other.id).await;
+        assert_eq!(send(&state, request("PATCH", &uri, &foreign, body())).await.status(), StatusCode::NOT_FOUND);
+
+        let cookie = cookie_for(&state, &user.id).await;
+        let response = send(&state, request("PATCH", &uri, &cookie, body())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(list_cli_devices(state.pool(), &user.id).await.unwrap()[0].name, "Studio box");
+
+        let blank = send(&state, request("PATCH", &uri, &cookie, Some(serde_json::json!({ "name": " " })))).await;
+        assert_eq!(blank.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -431,7 +468,8 @@ mod tests {
         let state = test_state(pool, MockTransport::new());
         for (method, uri) in [
             ("GET", "/api/cli/devices"),
-            ("POST", "/api/cli/devices/clidev_1/revoke"),
+            ("PATCH", "/api/cli/devices/clidev_1"),
+            ("DELETE", "/api/cli/devices/clidev_1"),
             ("GET", "/api/cli/providers"),
             ("PATCH", "/api/cli/providers/cliprov_1"),
             ("DELETE", "/api/cli/providers/cliprov_1"),

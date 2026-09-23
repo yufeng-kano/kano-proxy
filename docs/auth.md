@@ -177,8 +177,9 @@ The CLI-provider subsystem ([cli.md](./cli.md)) has two auth surfaces:
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/cli/devices` | The user's devices: `{id, name, last_seen_at, created_at, revoked_at}` |
-| POST | `/api/cli/devices/:id/revoke` | Sets `revoked_at` (idempotent). Next refresh fails; live sockets die at access-token expiry ([cli.md](./cli.md)) |
+| GET | `/api/cli/devices` | The user's devices: `{id, name, last_seen_at, created_at}` |
+| PATCH | `/api/cli/devices/:id` | Rename the device (`{name}`, 1–64 chars); 404 when it is not the caller's |
+| DELETE | `/api/cli/devices/:id` | Revoke: deletes the device row (idempotent — an absent or foreign id is still ok and deletes nothing). Next refresh fails; live sockets die at access-token expiry ([cli.md](./cli.md)) |
 | GET | `/api/cli/providers` | The user's CLI providers + live connection state (read from the tunnel registry): `{id, slug, name, format, connected, account_id, models, model_filter, models_updated_at, device_name, …}` — `account_id` is the internal pool-state row the Groups picker pins to ([admin-ui.md](./admin-ui.md) § Groups page) |
 | PATCH | `/api/cli/providers/:id` | Rename display name — body `{name}` (1–64 chars). Slug/format immutable |
 | DELETE | `/api/cli/providers/:id` | Delete the provider + its internal account row, force-close any live socket |
