@@ -879,10 +879,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn faults_too_large_when_the_request_body_passes_the_32_mib_cap() {
+    async fn faults_too_large_when_the_request_body_passes_the_cap() {
         let socket = RecordingSocket::new();
         let mux = mux_with(socket.clone());
-        let chunks = futures::stream::iter((0..5).map(|_| Ok(Bytes::from(vec![0u8; 8 * 1024 * 1024]))));
+        let chunk = Bytes::from(vec![0u8; 64 * 1024 * 1024]);
+        let count = REQUEST_BODY_LIMIT_BYTES / chunk.len() + 1;
+        let chunks = futures::stream::iter((0..count).map(move |_| Ok(chunk.clone())));
         let fault = expect_fault(mux
             .open_request(post("/audio/transcriptions", Some(Box::pin(chunks))))
             .await);

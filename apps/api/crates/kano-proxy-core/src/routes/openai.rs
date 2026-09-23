@@ -557,7 +557,7 @@ pub fn llm_cors() -> tower_http::cors::CorsLayer {
 /// middleware (which also runs the edition's request policy) and permissive CORS — the order
 /// `application.ts` composes.
 /// Largest request body the LLM surfaces buffer (docs/api.md § Errors, "Request body limit").
-pub const LLM_REQUEST_BODY_LIMIT: usize = 64 * 1024 * 1024;
+pub const LLM_REQUEST_BODY_LIMIT: usize = 512 * 1024 * 1024;
 
 pub fn llm_routes(state: &AppState) -> Router<AppState> {
     Router::new()

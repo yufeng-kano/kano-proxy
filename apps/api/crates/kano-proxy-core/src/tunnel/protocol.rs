@@ -20,7 +20,7 @@ pub const MAX_INFLIGHT: usize = 4;
 /// Per-request response buffer — an honest bound in lieu of credit-based flow control.
 pub const RESPONSE_BUFFER_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 /// Per-request request-body ceiling; the mirror of the response-side buffer.
-pub const REQUEST_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+pub const REQUEST_BODY_LIMIT_BYTES: usize = 512 * 1024 * 1024;
 /// First `res` frame must arrive within this of `req_end`.
 pub const FIRST_RES_TIMEOUT_MS: u64 = 120_000;
 
