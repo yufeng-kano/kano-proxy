@@ -511,6 +511,8 @@ mod tests {
             .unwrap();
         let response = f.router().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-kano-upstream-provider"], "claude-code");
+        assert_eq!(response.headers()["x-kano-upstream-model"], "claude-opus-5");
         assert_eq!(body_json(response).await["content"][0]["text"], "hello");
 
         let calls = f.mock.requests();

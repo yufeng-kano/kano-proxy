@@ -301,7 +301,7 @@ Every model group ([providers.md](./providers.md) § Model groups) is its own vi
 - **Unknown slug → `404`** (surface-shaped error envelope): the endpoint does not exist. Unknown `model` on a known slug → `400 invalid_model`, same envelope as the shared base but the message points at the group's configured model names.
 - **The group is a closed mapping table:** `model` must exactly match one of the group's model names — including a name that happens to look like `provider/model` only if the group defines that literal string. There is no fallthrough to the shared base's `provider/model` resolution.
 - **`GET …/models`** (both shapes) lists exactly that group's model names, `owned_by`/section label `group`, regardless of current target usability.
-- Everything after resolution — dispatch, failover, streaming, errors, count_tokens per-provider behavior — follows the expanded target's provider exactly as if the client had sent that `provider/model` on the shared base. Response/stream `model` fields echo the name the client sent. `request_logs` stores the expanded canonical id plus `group_name` = `<slug>/<model name>` ([database.md](./database.md)).
+- Everything after resolution — dispatch, failover, streaming, errors, count_tokens per-provider behavior — follows the expanded target's provider exactly as if the client had sent that `provider/model` on the shared base. Response/stream `model` fields echo the name the client sent; a non-stream response names the expanded target in `x-kano-upstream-provider` / `x-kano-upstream-model` (§ Served upstream headers). `request_logs` stores the expanded canonical id plus `group_name` = `<slug>/<model name>` ([database.md](./database.md)).
 
 ## Model routing
 
@@ -318,6 +318,19 @@ Every model group ([providers.md](./providers.md) § Model groups) is its own vi
 7. No provider match at all (not a builtin id, not one of the caller's custom slugs) → `400 invalid_model`.
 
 A group-expanded request is indistinguishable from a direct one past resolution: the resolved provider's own rules (reasoning ceiling, prompt cache, betas, loop guard, `count_tokens` support) all follow the **target**, not the group. Client-visible `model` fields echo the group model name the client sent; `request_logs` stores the expanded canonical id plus `group_name` ([database.md](./database.md)).
+
+## Served upstream headers
+
+Every **non-stream** response that reached an upstream attempt carries two response headers naming the candidate that produced it — the same pair the row's `request_logs.provider` / `model` store, never the group alias the client addressed:
+
+| Header | Value | Examples |
+|--------|-------|----------|
+| `x-kano-upstream-provider` | The builtin provider id, or the custom / CLI provider slug | `claude-code`, `antigravity`, `mygw` |
+| `x-kano-upstream-model` | The bare upstream model id sent to that provider — the part after the first `/` of the canonical `provider/model` | `claude-opus-5`, `gemini-3-flash` |
+
+They are set on both surfaces — `/openai/v1/chat/completions`, `/openai/v1/responses`, `/openai/v1/audio/transcriptions`, `/anthropic/v1/messages`, `/anthropic/v1/messages/count_tokens` — and on their `/g/<slug>/…` mounts, on success **and** on an upstream error passed through (an upstream `400` still says which target rejected the request). They are absent when no upstream attempt happened — `400 invalid_model`, `400 no_upstream_account`, `503 upstream_unavailable`, `429 spend_limit_exceeded` and the other pre-dispatch or synthesized failures — and absent on `stream: true` responses, whose headers are committed before the candidate walk runs (§ Eager streaming commit): a streamed response cannot name its target after the fact.
+
+Why: a model group fails over between targets transparently (§ Model routing, [providers.md](./providers.md) § Model groups) and its response bodies echo the group model name, so nothing in the body says which upstream answered. State that only verifies on one upstream — Anthropic `thinking.signature`, Gemini `thoughtSignature` — must not be replayed to another. A client that keys its stored signatures on these headers drops the foreign ones itself, instead of paying a `400` plus a retry on every turn after a switch (measured 2026-09-29: a group that fell back from Claude Code to Antigravity for two turns had every later Claude Code request rejected once, until those turns left the client's context).
 
 ## `reasoning_effort`
 
@@ -468,6 +481,8 @@ Auth failures (missing/invalid API key) are envelope-shaped per **surface**, mat
 **Request body limit.** The LLM surfaces (`/openai/v1`, `/anthropic`, `/g`) accept request bodies up to **512 MiB**, then answer `413` before authentication or dispatch. The body is buffered and parsed whole, so the limit bounds per-request memory; it sits above OpenAI's 50 MB request payload ceiling for image inputs, so the proxy never refuses a body its upstreams would take. Without an explicit limit the HTTP framework's 2 MiB extractor default applied, which a Codex turn carrying pasted logs or screenshots passes routinely. An upstream's own `413` is a different failure and follows the table above.
 
 **`x-should-retry` marker.** Claude Code's gateway protocol reads this response header to override its retry classification. The proxy sets `x-should-retry: false` on failures where a retry can never help — `400 no_upstream_account`, `400 invalid_model`, `400 loop_detected`, `400 unsupported_modality`, `400 unsupported_field`, `413 request_too_large`, `429 spend_limit_exceeded` — so the client doesn't burn its ~10-attempt retry budget on them, and `x-should-retry: true` on the synthesized `503 upstream_unavailable` (transient by construction). Other statuses carry no marker and keep the client's default classification. A streaming response has already committed HTTP 200 and cannot add this header; its terminal event carries `request_too_large` instead of the generic retryable `upstream_error` code.
+
+**Upstream identity on errors.** An error passed through from an upstream keeps the `x-kano-upstream-provider` / `x-kano-upstream-model` headers of the target that produced it (§ Served upstream headers); synthesized errors — everything in the table above except the pass-through row — carry neither.
 
 Authenticated pre-dispatch failures (invalid model, no upstream account, loop-guard trip) are all logged as one `request_logs` row via `waitUntil`, same as a real dispatch; unauthenticated 401s are never logged — see [logging.md](./logging.md).
 

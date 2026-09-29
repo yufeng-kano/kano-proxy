@@ -432,6 +432,8 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         // Audio passes every upstream header through, unlike the chat transports.
         assert_eq!(res.headers().get("x-request-id").unwrap(), "abc");
+        assert_eq!(res.headers()["x-kano-upstream-provider"], "custom-audio");
+        assert_eq!(res.headers()["x-kano-upstream-model"], "whisper-1");
         let text = body_text(res).await;
         assert!(text.contains("hello"), "{text}");
         let rows = wait_for_logs(&state, 1).await;

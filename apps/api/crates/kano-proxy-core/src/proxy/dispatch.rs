@@ -109,6 +109,28 @@ fn with_header(mut res: Response, name: HeaderName, value: &str) -> Response {
     res
 }
 
+/// Which upstream produced a non-stream response (docs/api.md § Served upstream headers): the
+/// candidate's provider id or custom slug, and its bare upstream model id — the same pair the
+/// row's `provider`/`model` store, never the group alias the client addressed. A stream has
+/// already committed its headers before the walk runs, so it can never carry them.
+pub const UPSTREAM_PROVIDER_HEADER: &str = "x-kano-upstream-provider";
+pub const UPSTREAM_MODEL_HEADER: &str = "x-kano-upstream-model";
+
+pub fn with_upstream_headers(res: Response, candidate: &RoutingCandidate) -> Response {
+    let res = with_header(res, HeaderName::from_static(UPSTREAM_PROVIDER_HEADER), &candidate.provider);
+    with_header(res, HeaderName::from_static(UPSTREAM_MODEL_HEADER), &candidate.upstream_model)
+}
+
+/// Carries the served-upstream pair from a dispatched response onto one rebuilt from its body
+/// (the Responses surface converts the Chat Completions object it got back).
+pub fn copy_upstream_headers(from: &HeaderMap, to: &mut HeaderMap) {
+    for name in [UPSTREAM_PROVIDER_HEADER, UPSTREAM_MODEL_HEADER] {
+        if let Some(value) = from.get(name) {
+            to.insert(HeaderName::from_static(name), value.clone());
+        }
+    }
+}
+
 /// Shared "pool unavailable" 503 for both surfaces, with `Retry-After` attached whenever the
 /// earliest bench/limit expiry across the candidates is known (docs/api.md § Errors).
 fn upstream_unavailable_response(body: &Value, until_ms: Option<i64>) -> Response {
@@ -557,8 +579,9 @@ pub async fn dispatch_non_stream_with(
             json_response(StatusCode::BAD_GATEWAY, &t.wire.upstream_error_body())
         }
         WalkOutcome::Response { candidate, response, lease } => {
+            let served = candidate.clone();
             let d = Delivery { candidate, response, latency_ms: now_ms() - started, lease, started_at_ms: started };
-            delivery.deliver(cx, &t, d).await
+            with_upstream_headers(delivery.deliver(cx, &t, d).await, &served)
         }
     }
 }

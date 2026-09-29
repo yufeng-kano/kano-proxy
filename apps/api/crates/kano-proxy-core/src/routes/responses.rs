@@ -20,7 +20,7 @@ use crate::http::errors::ApiError;
 use crate::logging::request_log::LogEntry;
 use crate::providers::types::ChatCompletionRequest;
 use crate::proxy::dispatch::{
-    canonical_model_id, dispatch_chat_completions, is_event_stream, ChatDispatchOptions,
+    canonical_model_id, copy_upstream_headers, dispatch_chat_completions, is_event_stream, ChatDispatchOptions,
 };
 use crate::proxy::request_json::read_proxy_json;
 use crate::proxy::responses_openai::{
@@ -238,9 +238,11 @@ pub async fn handle_responses(
                 response = response.header(name, value.clone());
             }
         }
-        return response.body(Body::from(bytes)).expect("response builds");
+        let mut response = response.body(Body::from(bytes)).expect("response builds");
+        copy_upstream_headers(&upstream_headers, response.headers_mut());
+        return response;
     }
-    match serde_json::from_slice::<Value>(&bytes) {
+    let mut response = match serde_json::from_slice::<Value>(&bytes) {
         Ok(json) => Json(openai_to_responses_object(&json, &out_opts)).into_response(),
         Err(_) => {
             let content_type = upstream_headers
@@ -253,7 +255,9 @@ pub async fn handle_responses(
                 .body(Body::from(bytes))
                 .expect("response builds")
         }
-    }
+    };
+    copy_upstream_headers(&upstream_headers, response.headers_mut());
+    response
 }
 
 #[cfg(test)]
@@ -427,6 +431,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-kano-upstream-provider"], "mygw");
+        assert_eq!(response.headers()["x-kano-upstream-model"], "local-model");
         let json = body_json(response).await;
         assert_eq!(json["object"], "response");
         assert_eq!(json["status"], "completed");

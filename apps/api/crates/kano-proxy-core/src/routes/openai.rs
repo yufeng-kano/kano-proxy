@@ -689,6 +689,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_upstream_error_passed_through_still_names_the_upstream_that_produced_it() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        f.mock.respond_json(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "message": "Corrupted thought signature.", "type": "invalid_request_error" } }),
+        );
+
+        let response = f
+            .router()
+            .oneshot(f.post(
+                "/openai/v1/chat/completions",
+                json!({ "model": "mygw/local-model", "messages": [{ "role": "user", "content": "hi" }] }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.headers()["x-kano-upstream-provider"], "mygw");
+        assert_eq!(response.headers()["x-kano-upstream-model"], "local-model");
+    }
+
+    #[tokio::test]
     async fn an_unresolvable_model_is_400_invalid_model_marked_unretryable_and_logged() {
         let Some(f) = fixture().await else { return skip_without_db() };
 
@@ -699,6 +721,9 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(response.headers()["x-should-retry"], "false");
+        // Nothing upstream was attempted, so nothing upstream is named.
+        assert!(response.headers().get("x-kano-upstream-provider").is_none());
+        assert!(response.headers().get("x-kano-upstream-model").is_none());
         let json = body_json(response).await;
         assert_eq!(json["error"]["code"], "invalid_model");
         assert_eq!(json["error"]["message"], super::CHAT_MODEL_EXAMPLE);
@@ -752,6 +777,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        // The client learns the expanded target too, never the alias it sent.
+        assert_eq!(response.headers()["x-kano-upstream-provider"], "mygw");
+        assert_eq!(response.headers()["x-kano-upstream-model"], "local-model");
         // The row stores the expanded canonical target plus the group alias.
         let rows = f.logs(3).await;
         let dispatched = rows.iter().find(|r| r["status_code"] == 200).expect("a dispatched row");
