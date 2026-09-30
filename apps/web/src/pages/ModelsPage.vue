@@ -15,8 +15,8 @@
  * (docs/admin-ui.md § Models page, § Anti-scroll rules).
  *
  * Groups are built from whatever the response lists, not from a fixed set: the
- * three builtins in their declared order, then one group per custom endpoint,
- * then — defensively — any section belonging to neither, so a stale cache right
+ * builtins in their declared order, then one group per custom endpoint, then
+ * one per CLI provider, then — defensively — any section belonging to none, so a stale cache right
  * after an endpoint was deleted still renders its models instead of dropping
  * them silently. Model groups are absent by design (v4): each is its own
  * endpoint with its own /models (docs/api.md § Group endpoints).
@@ -35,6 +35,7 @@ import SectionNav from "@/components/ui/SectionNav.vue"
 import type { SectionItem } from "@/components/ui/SectionNav.vue"
 import TextInput from "@/components/ui/TextInput.vue"
 import { useAuth } from "@/composables/useAuth"
+import { useCli } from "@/composables/useCli"
 import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
@@ -76,6 +77,7 @@ type ModelGroup = {
 const { t } = useI18n()
 const { user } = useAuth()
 const customProviders = useCustomProviders()
+const cli = useCli()
 
 /**
  * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
@@ -163,7 +165,26 @@ const groups = computed<ModelGroup[]>(() => {
     })
   }
 
-  // 3. Defensively, a prefix matching neither a builtin nor a known endpoint
+  // 3. One group per CLI provider (docs/cli.md), named by its current display
+  // name so a rename on the Providers page shows here too.
+  for (const cp of cli.state.providers ?? []) {
+    if (seen.has(cp.slug)) continue
+    seen.add(cp.slug)
+    out.push({
+      key: cp.slug,
+      name: cp.name,
+      blurb: `${cp.slug}/*`,
+      formatBadge:
+        cp.format === "anthropic"
+          ? t("custom.dialog.formatAnthropic")
+          : t("custom.dialog.formatOpenAI"),
+      models: byPrefix.get(cp.slug) ?? [],
+      error: metaFor(cp.slug)?.error ?? null,
+      emptyKind: "generic",
+    })
+  }
+
+  // 4. Defensively, a prefix matching neither a builtin nor a known endpoint
   // (a stale cache right after a deletion) so its models still render. Model
   // groups no longer appear in this catalog at all (v4 — each group is its
   // own endpoint; see docs/api.md § Group endpoints).
@@ -286,6 +307,7 @@ async function load(opts?: { force?: boolean }) {
   const uid = user.value?.id ?? null
   error.value = null
   customProviders.setUserId(uid)
+  cli.setUserId(uid)
 
   if (!opts?.force) {
     const cached = readModelsCache(uid)
@@ -294,6 +316,7 @@ async function load(opts?: { force?: boolean }) {
       loading.value = false
       if (isModelsCacheFresh(uid, CACHE_TTL_MS)) {
         void customProviders.load()
+        void cli.load()
         return
       }
     }
@@ -304,6 +327,7 @@ async function load(opts?: { force?: boolean }) {
     const [res] = await Promise.all([
       listModels({ refresh: !!opts?.force }),
       customProviders.load({ refresh: !!opts?.force }),
+      cli.load({ refresh: !!opts?.force }),
     ])
     applyResponse(res)
     writeModelsCache(uid, res)
