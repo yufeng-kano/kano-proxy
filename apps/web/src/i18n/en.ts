@@ -431,10 +431,16 @@ export const en = {
   // --- Groups -------------------------------------------------------------
   "groups.title": "Groups",
   "groups.create": "Create group",
-  "groups.column.name": "Name",
-  "groups.column.endpoint": "Endpoint",
-  "groups.column.models": "Models",
-  "groups.column.updated": "Updated",
+  "groups.count_one": "{count} group",
+  "groups.count_other": "{count} groups",
+  // The list row's warning dot, spelled out — on its title and for screen
+  // readers, so the dot is never the only thing saying it.
+  "groups.issues_one": "{count} target limited",
+  "groups.issues_other": "{count} targets limited",
+  "groups.updated": "Updated {when}",
+  "groups.back": "All groups",
+  "groups.column.model": "Model",
+  "groups.column.route": "Route · failover order",
   // Accessible names for the row controls: several rows offer the same two
   // words, so the subject goes in the name. Each contains the visible label
   // verbatim (WCAG 2.5.3) — the copied value itself, and "Edit".
