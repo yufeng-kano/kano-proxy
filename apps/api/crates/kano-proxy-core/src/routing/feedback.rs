@@ -7,6 +7,7 @@
 //! | 401/403 (auth), 402 (billing) | bench 300s |
 //! | 429 (rate limit) | bench until the upstream reset when derivable — reset headers, else the earliest exhausted window's `resets_at`, else 300s; capped at 7 days |
 //! | 520/522/524 (upstream edge failed/timed out before first byte) | request-local exclusion; the third fresh strike benches 30s |
+//! | 529 (upstream overloaded) | no bench; one same-account retry, then request-local exclusion while another candidate remains, else passthrough |
 //! | anything else non-2xx | no bench — passthrough / in-stream error, unchanged |
 //!
 //! Bench outcomes and edge-timeout exclusions both continue to the next candidate; dispatch
@@ -23,6 +24,7 @@ const MAX_COOLDOWN_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 const AUTH_BILLING_STATUSES: [u16; 3] = [401, 402, 403];
 const EDGE_TIMEOUT_STATUSES: [u16; 3] = [520, 522, 524];
+const OVERLOADED_STATUS: u16 = 529;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Penalty {
@@ -32,6 +34,11 @@ pub struct Penalty {
 /// 520/522/524 always fail over, but only record a persistent strike.
 pub fn is_edge_timeout_status(status: u16) -> bool {
     EDGE_TIMEOUT_STATUSES.contains(&status)
+}
+
+/// 529 is fleet-wide overload: never a bench, but the walk moves on when it has somewhere to go.
+pub fn is_overloaded_status(status: u16) -> bool {
+    status == OVERLOADED_STATUS
 }
 
 fn clamp_cooldown(ms: i64) -> i64 {
@@ -178,6 +185,14 @@ mod tests {
         }
         assert!(!is_edge_timeout_status(500));
         assert!(!is_edge_timeout_status(429));
+    }
+
+    #[test]
+    fn overload_is_not_a_bench_status() {
+        assert!(is_overloaded_status(529));
+        assert!(!is_overloaded_status(503));
+        assert!(penalty_for_outcome(529, &HeaderMap::new(), &account_row("a", "grok"), now()).is_none());
+        assert!(!is_bench_status(529));
     }
 
     #[test]

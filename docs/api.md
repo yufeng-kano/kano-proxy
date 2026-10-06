@@ -488,7 +488,7 @@ Authenticated pre-dispatch failures (invalid model, no upstream account, loop-gu
 
 ## Rate limits
 
-No platform per-request rate limit. Upstream rate limits apply; the pool benches on 401/402/403/429 (300s, or for 429 until the upstream reset when derivable) and briefly (30s) on upstream edge-timeout statuses 520/522/524; a `529` is never benched but gets one same-account retry before any bytes are piped; an account whose usage snapshot shows an exhausted window is skipped until that window resets ([providers.md](./providers.md) § Routing module). A key with a configured **spend limit** gets 429 `spend_limit_exceeded` once its window's estimated spend reaches the ceiling — see [pricing.md](./pricing.md). The check is pre-dispatch and never counts a 429'd request itself as spend.
+No platform per-request rate limit. Upstream rate limits apply; the pool benches on 401/402/403/429 (300s, or for 429 until the upstream reset when derivable) and briefly (30s) on upstream edge-timeout statuses 520/522/524; a `529` is never benched but gets one same-account retry before any bytes are piped, and a repeat `529` moves on to the next candidate when there is one; an account whose usage snapshot shows an exhausted window is skipped until that window resets ([providers.md](./providers.md) § Routing module). A key with a configured **spend limit** gets 429 `spend_limit_exceeded` once its window's estimated spend reaches the ceiling — see [pricing.md](./pricing.md). The check is pre-dispatch and never counts a 429'd request itself as spend.
 
 ## Changelog (admin)
 

@@ -1648,6 +1648,34 @@ pub(crate) mod tests {
         assert_eq!(logs(&state).await[0].upstream_status, Some(529));
     }
 
+    #[tokio::test]
+    async fn a_repeat_529_moves_on_to_the_next_candidate_without_benching() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "overload-next@example.com").await;
+        seed_accounts(state.pool(), &user.id, "grok", &["acc_1", "acc_2"]).await;
+        let adapter = ScriptedAdapter::new(
+            "grok",
+            vec![
+                Reply::Text(StatusCode::from_u16(529).unwrap(), "overloaded"),
+                Reply::Text(StatusCode::from_u16(529).unwrap(), "overloaded"),
+                Reply::Json(
+                    StatusCode::OK,
+                    json!({ "choices": [{ "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" }] }),
+                ),
+            ],
+        );
+        let res = dispatch_chat_completions(
+            &state,
+            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(adapter.calls(), ["acc_1", "acc_1", "acc_2"]);
+        assert!(!is_benched(state.pool(), &user.id, "acc_1", now_ms()).await.unwrap());
+        assert_eq!(logs(&state).await[0].upstream_status, Some(200));
+    }
+
     // -------------------------------------------------------------------------------
     // Exhaustion and terminal errors
     // -------------------------------------------------------------------------------

@@ -27,7 +27,7 @@ use crate::providers::{DynAdapter, ProviderId};
 use crate::routing::candidates::{pool_candidates, PoolTarget};
 use crate::routing::facts::{candidate_facts_list, earliest_unusable_until};
 use crate::routing::feedback::{
-    agent_fault_verdict, is_edge_timeout_status, penalty_for_outcome, EDGE_TIMEOUT_COOLDOWN_MS,
+    agent_fault_verdict, is_edge_timeout_status, is_overloaded_status, penalty_for_outcome, EDGE_TIMEOUT_COOLDOWN_MS,
 };
 use crate::routing::strategy::{normalize_strategy, order_candidates};
 use crate::routing::types::{RoutingCandidate, StrategyContext};
@@ -478,6 +478,15 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
         }
 
         let status = response.status().as_u16();
+        // A 529 that survived the same-account retry says nothing about this account, so it is
+        // never benched — but another candidate may sit on a different fleet entirely, so the
+        // walk moves on while it has somewhere to go. The last candidate's 529 passes through
+        // so a one-account pool keeps the honest upstream status.
+        if is_overloaded_status(status) && ordered[idx..].iter().any(|later| opts.caller.supports(later)) {
+            settle_lease(lease.as_deref(), LeaseOutcome::Released).await;
+            drop(response);
+            continue;
+        }
         let headers = response.headers().clone();
         if should_fail_over_for_response(cx, &candidate, status, &headers).await {
             // Benched / edge-timed-out / retried: this attempt produced nothing.

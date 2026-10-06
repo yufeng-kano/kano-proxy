@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "kano-proxy-core"
-version = "4.11.0"
+version = "4.12.0"
 dependencies = [
  "aes-gcm",
  "anyhow",

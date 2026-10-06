@@ -1,6 +1,6 @@
 [package]
 name = "kano-proxy-core"
-version = "4.11.0" # the product version the changelog reports; bump with the vX.Y.Z tag
+version = "4.12.0" # the product version the changelog reports; bump with the vX.Y.Z tag
 description = "kano-proxy server core: configuration, storage, crypto, HTTP composition (docs/rust-server.md)"
 edition.workspace = true
 rust-version.workspace = true
