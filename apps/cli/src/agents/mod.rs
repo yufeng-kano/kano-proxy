@@ -130,6 +130,10 @@ pub fn home_dir() -> PathBuf {
 pub struct Current<'a> {
     pub doc: Option<&'a Doc>,
     pub group: Option<&'a Group>,
+    /// The agent is set up against this proxy now: the group exists and the config points
+    /// at its endpoint. When false there is nothing to compare a draft against — saving
+    /// would change everything.
+    pub configured: bool,
 }
 
 impl Current<'_> {
@@ -145,14 +149,6 @@ impl Current<'_> {
             .map(|m| m.targets.iter().map(|t| t.model.clone()).filter(|t| t != own).collect())
             .unwrap_or_default()
     }
-}
-
-/// One pass of an agent's pickers — kept so the review screen can send the user back into
-/// the flow with every answer intact.
-#[derive(Debug, Clone)]
-pub enum Picks {
-    Claude(claude_code::Picks),
-    Codex(codex::Picks),
 }
 
 /// What `setup` will do, computed before anything is written — printed as-is by `--dry-run`.
@@ -322,57 +318,36 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
     let current_doc = Doc::load(kind.doc_kind(), &path)?;
     let groups = api::list_groups(&base_url, &access).await?;
     let existing: Option<&Group> = groups.iter().find(|g| g.slug == kind.group_slug());
-    let current = Current { doc: Some(&current_doc), group: existing };
+    let base_field = match kind {
+        AgentKind::ClaudeCode => "env.ANTHROPIC_BASE_URL",
+        AgentKind::Codex => "model_providers.kano.base_url",
+    };
+    let configured = existing.is_some()
+        && current_doc.get(base_field).and_then(|v| v.as_str().map(str::to_string)) == Some(kind.group_base(&base_url));
+    let current = Current { doc: Some(&current_doc), group: existing, configured };
     let previous = state.agents.get(kind.id()).cloned();
     let device_name = state.device_name.as_deref().unwrap_or("device");
 
-    // Pick, then review the whole plan; Esc on the review goes back into the pickers with
-    // every answer kept, Enter goes ahead. `--no-tui` and `--dry-run` skip the review.
-    let mut resume: Option<Picks> = None;
-    let (plan, models) = loop {
-        let picks = match kind {
-            AgentKind::ClaudeCode => Picks::Claude(claude_code::collect_picks(
-                &args,
-                &catalog,
-                &current,
-                match &resume {
-                    Some(Picks::Claude(p)) => Some(p),
-                    _ => None,
-                },
-            )?),
-            AgentKind::Codex => Picks::Codex(codex::collect_picks(
-                &args,
-                &catalog,
-                &current,
-                match &resume {
-                    Some(Picks::Codex(p)) => Some(p),
-                    _ => None,
-                },
-            )?),
-        };
-        let plan = match &picks {
-            Picks::Claude(p) => claude_code::plan_from(&base_url, &catalog, p),
-            Picks::Codex(p) => codex::plan_from(&base_url, &catalog, p),
-        };
-        // What the group will hold after the merge — what the review shows and what is sent.
-        let models = merge_with_existing(plan.group_models.clone(), existing.map(|g| g.models.as_slice()).unwrap_or(&[]));
-        if args.dry_run || args.no_tui {
-            break (plan, models);
-        }
-        let lines = review_lines(kind, &plan, &models, existing.is_some(), &current_doc, previous.as_ref(), device_name, &path);
-        match tui::review(&format!("kano-proxy agent setup {} — review", kind.id()), &lines, "writes all of this")? {
-            Nav::Next(()) => break (plan, models),
-            Nav::Back => resume = Some(picks),
-        }
+    // The root page (or the flags) — nothing below this line runs until the user saved.
+    let plan = match kind {
+        AgentKind::ClaudeCode => claude_code::plan_from(&base_url, &catalog, &claude_code::collect_picks(&args, &catalog, &current)?),
+        AgentKind::Codex => codex::plan_from(&base_url, &catalog, &codex::collect_picks(&args, &catalog, &current)?),
     };
-
+    // What the group will hold after the merge — what is printed and what is sent.
+    let models = merge_with_existing(plan.group_models.clone(), existing.map(|g| g.models.as_slice()).unwrap_or(&[]));
+    let lines = review_lines(kind, &plan, &models, existing.is_some(), &current_doc, previous.as_ref(), device_name, &path);
     if args.dry_run {
         println!("dry run — nothing is written, minted or changed\n");
-        for line in review_lines(kind, &plan, &models, existing.is_some(), &current_doc, previous.as_ref(), device_name, &path) {
+        for line in lines {
             println!("{line}");
         }
         return Ok(());
     }
+    // A record in the scrollback of exactly what is being written.
+    for line in lines {
+        println!("{line}");
+    }
+    println!();
 
     // 1. The group — looked up by slug so a rerun updates instead of duplicating.
     let group = match existing {
@@ -634,7 +609,7 @@ pub async fn cmd_restore(file: &StateFile, kind: AgentKind, args: RestoreArgs) -
         }
     } else if !args.force {
         tui::require_tty()?;
-        if tui::review(&format!("kano-proxy agent restore {}", kind.id()), &lines, "restores all of this")? == Nav::Back {
+        if tui::review(&format!("kano-proxy agent restore {}", kind.id()), &lines, "restores all of this")? != Nav::Next(()) {
             return Err(tui::cancelled());
         }
     }

@@ -31,9 +31,12 @@ fn default_for(ids: &[String], family: &str) -> usize {
     ids.iter().position(|id| id.to_lowercase().contains(family)).unwrap_or(0)
 }
 
-/// `resume`: the answers from a previous pass — set when the review screen sent the user
-/// back, so the flow re-enters at its last step with every answer intact.
-pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current, resume: Option<&Picks>) -> Result<Picks> {
+/// The interactive root page (docs/cli.md § Navigation): one row per slot model and per
+/// slot's fallbacks, starting from what is in place — the model the config holds for the
+/// slot (when the catalog still has it) else the family default, and the fallbacks the
+/// group holds. Enter edits a row into the draft; Tab saves the draft; Esc twice exits,
+/// asking first when the draft differs from what is set up now.
+pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current) -> Result<Picks> {
     let kind = AgentKind::ClaudeCode;
     let ids = provider_ids(catalog, kind.provider());
     if ids.is_empty() {
@@ -57,88 +60,88 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
     tui::require_tty()?;
     let title = "kano-proxy agent setup claude-code";
     let options: Vec<&str> = ids.iter().map(String::as_str).collect();
-    // Start from what is in place: the slot the config holds now (when it is still in the
-    // catalog), else the family default; the fallbacks the group holds now. Six steps —
-    // model then fallbacks per slot; Esc re-enters the previous step with its answer.
+    let own = |i: usize| format!("claude-code/{}", ids[i]);
     let defaults: Vec<usize> = SLOTS.iter().map(|(_, family, _)| default_for(&ids, family)).collect();
     let mut chosen: Vec<usize> = SLOTS
         .iter()
         .zip(&defaults)
         .map(|((_, _, field), &default)| current.field(field).and_then(|v| ids.iter().position(|i| *i == v)).unwrap_or(default))
         .collect();
-    let mut fallbacks: Vec<Vec<String>> =
-        chosen.iter().map(|&i| current.fallbacks(&ids[i], &format!("claude-code/{}", ids[i]))).collect();
-    let mut step = 0usize;
-    if let Some(prev) = resume {
-        for (slot, (id, fb)) in prev.slots.iter().enumerate() {
-            if let Some(i) = ids.iter().position(|x| x == id) {
-                chosen[slot] = i;
-                fallbacks[slot] = fb.clone();
-            }
-        }
-        step = SLOTS.len() * 2 - 1;
-    }
-    // A step with nothing to ask (no fallback candidates) is skipped in whichever
-    // direction the user is moving, so Esc never lands on an invisible step.
-    let mut backward = resume.is_some();
-    while step < SLOTS.len() * 2 {
-        let slot = step / 2;
-        let (label, _, _) = SLOTS[slot];
-        if step.is_multiple_of(2) {
-            let note = [
-                &*format!("Which model should Claude Code's {label} slot resolve to?"),
-                "The group serves this name as-is, so Claude Code sees a real Claude id.",
-            ];
-            match tui::choose_default(title, &note, &options, defaults[slot], chosen[slot])? {
-                Nav::Next(i) => {
-                    if i != chosen[slot] {
-                        chosen[slot] = i;
-                        fallbacks[slot] = current.fallbacks(&ids[i], &format!("claude-code/{}", ids[i]));
+    let mut fallbacks: Vec<Vec<String>> = chosen.iter().map(|&i| current.fallbacks(&ids[i], &own(i))).collect();
+    // What is set up now — the draft is compared against it. None: not set up on this
+    // machine yet, so saving would change everything.
+    let baseline = current.configured.then(|| (chosen.clone(), fallbacks.clone()));
+    let fb_text = |fb: &[String]| if fb.is_empty() { "none".to_string() } else { fb.join(", ") };
+    let mut cursor = 0usize;
+    loop {
+        let picks = || Picks { slots: chosen.iter().zip(&fallbacks).map(|(&i, fb)| (ids[i].clone(), fb.clone())).collect() };
+        let mut rows = Vec::new();
+        let mut changes = Vec::new();
+        for (slot, (label, _, _)) in SLOTS.iter().enumerate() {
+            let model_changed = baseline.as_ref().is_some_and(|b| b.0[slot] != chosen[slot]);
+            let fb_changed = baseline.as_ref().is_some_and(|b| b.1[slot] != fallbacks[slot]);
+            rows.push(tui::RootRow { label: format!("{label} model"), value: ids[chosen[slot]].clone(), changed: model_changed });
+            rows.push(tui::RootRow { label: format!("{label} fallbacks"), value: fb_text(&fallbacks[slot]), changed: fb_changed });
+            match &baseline {
+                Some(b) => {
+                    if model_changed {
+                        changes.push(format!("  {label} model: {} → {}", ids[b.0[slot]], ids[chosen[slot]]));
                     }
-                    backward = false;
-                    step += 1;
+                    if fb_changed {
+                        changes.push(format!("  {label} fallbacks: {} → {}", fb_text(&b.1[slot]), fb_text(&fallbacks[slot])));
+                    }
                 }
-                Nav::Back => {
-                    backward = true;
-                    step = step.saturating_sub(1);
+                None => changes.push(format!("  {label}: {} (fallbacks: {})", ids[chosen[slot]], fb_text(&fallbacks[slot]))),
+            }
+        }
+        if baseline.is_none() {
+            changes.insert(0, "Claude Code is not set up on this machine — saving sets it up with:".into());
+        }
+        let status = match (&baseline, changes.len()) {
+            (None, _) => "Not set up on this machine yet — Tab sets it up with these choices".to_string(),
+            (Some(_), 0) => "No changes — this is what is set up now".to_string(),
+            (Some(_), n) => format!("{n} unsaved change{} — Tab saves", if n == 1 { "" } else { "s" }),
+        };
+        let note = ["The group serves these names as-is, so Claude Code sees real Claude ids."];
+        let (action, at) = tui::root(title, &note, &rows, cursor, &status)?;
+        cursor = at;
+        match action {
+            tui::RootAction::Save => return Ok(picks()),
+            tui::RootAction::Exit => {
+                if tui::exit_decision(title, &changes)? {
+                    return Ok(picks());
                 }
             }
-        } else {
-            let id = &ids[chosen[slot]];
-            let own = format!("claude-code/{id}");
-            let candidates = fallback_candidates(catalog, &own);
-            if candidates.is_empty() {
-                fallbacks[slot].clear();
-                if backward {
-                    step -= 1;
+            tui::RootAction::Edit(row) => {
+                let slot = row / 2;
+                let (label, _, _) = SLOTS[slot];
+                if row.is_multiple_of(2) {
+                    let note = [&*format!("Which model should Claude Code's {label} slot resolve to?")];
+                    if let Nav::Next(i) = tui::choose_default(title, &note, &options, defaults[slot], chosen[slot])? {
+                        if i != chosen[slot] {
+                            chosen[slot] = i;
+                            // The group's fallbacks for that name, if it has any.
+                            fallbacks[slot] = current.fallbacks(&ids[i], &own(i));
+                        }
+                    }
                 } else {
-                    step += 1;
-                }
-                continue;
-            }
-            let note = [
-                &*format!("Fallbacks for {label} ({id}) — tried in order when claude-code is benched or out of quota."),
-                "Space toggles, Enter with nothing toggled means no fallback.",
-            ];
-            match tui::pick_many(title, &note, Some(&own), &candidates, &fallbacks[slot])? {
-                Nav::Next(picked) => {
-                    fallbacks[slot] = picked;
-                    backward = false;
-                    step += 1;
-                }
-                Nav::Back => {
-                    backward = true;
-                    step -= 1;
+                    let candidates = fallback_candidates(catalog, &own(chosen[slot]));
+                    let note = [
+                        &*format!("Fallbacks for {label} ({}) — tried in order when claude-code is benched or out of quota.", ids[chosen[slot]]),
+                        "Space toggles · Enter applies to the draft (nothing is saved until Tab on the main page).",
+                    ];
+                    if let Nav::Next(picked) = tui::pick_many(title, &note, Some(&own(chosen[slot])), &candidates, &fallbacks[slot])? {
+                        fallbacks[slot] = picked;
+                    }
                 }
             }
         }
     }
-    Ok(Picks { slots: chosen.iter().zip(fallbacks).map(|(&i, fb)| (ids[i].clone(), fb)).collect() })
 }
 
 #[cfg(test)]
 pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs, current: &Current) -> Result<Plan> {
-    Ok(plan_from(base_url, catalog, &collect_picks(args, catalog, current, None)?))
+    Ok(plan_from(base_url, catalog, &collect_picks(args, catalog, current)?))
 }
 
 pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Plan {
@@ -169,7 +172,7 @@ pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Pla
 mod tests {
     use super::*;
 
-    const NONE: Current<'static> = Current { doc: None, group: None };
+    const NONE: Current<'static> = Current { doc: None, group: None, configured: false };
 
     fn catalog() -> Vec<CatalogModel> {
         ["claude-code/claude-opus-5", "claude-code/claude-sonnet-5", "claude-code/claude-haiku-4-5", "codex/gpt-5.6-sol"]

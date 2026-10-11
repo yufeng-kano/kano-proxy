@@ -3,10 +3,14 @@
 //! flags (same code path underneath, different input source), so these
 //! screens are strictly input collectors — no network, no state writes.
 //!
-//! Navigation is the same on every screen: **Esc goes back one step**, and
-//! **Esc pressed twice in a row quits** the command (`cancelled`). A flow is a
-//! sequence of steps that each return [`Nav`]; the flow re-enters the previous
-//! step with the answer it had, so going back is editing, not starting over.
+//! Editing flows (`agent setup`, `tunnel add`) are built like an editor, not a
+//! wizard (docs/cli.md § Navigation): a **root page** lists every item with its
+//! value; Enter opens an item's page, where Enter applies the change *to the
+//! draft* and Esc goes back without it. Nothing reaches the server or a config
+//! file until **Tab on the root page** saves the whole draft. **Esc twice on the
+//! root page** exits — and when saving would change something, it first asks
+//! `Save changes? Y / N / Esc`, the way nano asks before closing a modified
+//! buffer. `login` is a short wizard: Esc steps back, Esc twice exits.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,11 +44,41 @@ pub fn cancelled() -> anyhow::Error {
     Cancelled(None).into()
 }
 
-/// What a screen hands back: the answer, or "go back one step".
+/// What a screen hands back: the answer, "go back" (the screen's edit is dropped), or
+/// "exit" (Esc pressed twice in a row).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Nav<T> {
     Next(T),
     Back,
+    Exit,
+}
+
+/// The root page's outcome.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RootAction {
+    /// Open the item at this row.
+    Edit(usize),
+    /// Tab: save the whole draft.
+    Save,
+    /// Esc twice: leave (the flow asks about unsaved changes first).
+    Exit,
+}
+
+/// The answer to `Save changes?`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SaveChoice {
+    Yes,
+    No,
+    /// Esc: back to the root page, nothing decided.
+    Cancel,
+}
+
+/// One row of a root page.
+pub struct RootRow {
+    pub label: String,
+    pub value: String,
+    /// Differs from what is in place now — marked so the draft's edits are visible.
+    pub changed: bool,
 }
 
 pub fn require_tty() -> Result<()> {
@@ -83,11 +117,12 @@ static ESC_ARMED: AtomicBool = AtomicBool::new(false);
 /// What a key press means before the screen looks at it.
 enum Key {
     Back,
+    Exit,
     Other(KeyCode),
 }
 
-/// Reads one key press. Ctrl-C quits at once; Esc quits when the previous key
-/// was also Esc, otherwise it means "back".
+/// Reads one key press. Ctrl-C quits at once, unconditionally; Esc means "exit" when
+/// the previous key was also Esc, otherwise "back".
 fn read_key() -> Result<Key> {
     loop {
         if let Event::Key(key) = event::read()? {
@@ -99,7 +134,8 @@ fn read_key() -> Result<Key> {
             }
             if key.code == KeyCode::Esc {
                 if ESC_ARMED.swap(true, Ordering::SeqCst) {
-                    return Err(cancelled());
+                    ESC_ARMED.store(false, Ordering::SeqCst);
+                    return Ok(Key::Exit);
                 }
                 return Ok(Key::Back);
             }
@@ -114,9 +150,9 @@ fn read_key() -> Result<Key> {
 /// is the only visible response to the first Esc.
 fn nav_hint() -> &'static str {
     if ESC_ARMED.load(Ordering::SeqCst) {
-        "Press Esc again to quit · any other key continues"
+        "Press Esc again to exit · any other key continues"
     } else {
-        "Esc back · Esc twice quits"
+        "Esc back · Esc twice exits"
     }
 }
 
@@ -169,6 +205,7 @@ pub fn input_with_note(title: &str, note: &[&str], label: &str, default: &str, i
         })?;
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
+            Key::Exit => return Ok(Nav::Exit),
             Key::Other(KeyCode::Enter) => {
                 let v = if value.trim().is_empty() { default.to_string() } else { value.trim().to_string() };
                 if !v.is_empty() {
@@ -204,6 +241,7 @@ pub fn input_secret(title: &str, label: &str, initial: &str) -> Result<Nav<Strin
         })?;
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
+            Key::Exit => return Ok(Nav::Exit),
             Key::Other(KeyCode::Enter) => return Ok(Nav::Next(value.trim().to_string())),
             Key::Other(KeyCode::Backspace) => {
                 value.pop();
@@ -281,6 +319,7 @@ fn choose_at(title: &str, note: &[&str], options: &[&str], default: Option<usize
         let selected = state.selected().unwrap_or(0);
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
+            Key::Exit => return Ok(Nav::Exit),
             Key::Other(KeyCode::Enter) => return Ok(Nav::Next(selected)),
             Key::Other(KeyCode::Up) | Key::Other(KeyCode::Char('k')) => state.select(Some(selected.saturating_sub(1))),
             Key::Other(KeyCode::Down) | Key::Other(KeyCode::Char('j')) => {
@@ -335,6 +374,7 @@ pub fn pick_models(title: &str, models: &[String], preselected: &[String]) -> Re
         let cursor = state.selected().unwrap_or(0).min(row_count.saturating_sub(1));
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
+            Key::Exit => return Ok(Nav::Exit),
             Key::Other(KeyCode::Enter) => {
                 if cursor == 0 {
                     return Ok(Nav::Next(None));
@@ -442,6 +482,7 @@ pub fn pick_many(title: &str, note: &[&str], primary: Option<&str>, items: &[Str
         let cursor = state.selected().unwrap_or(0).min(visible.len().saturating_sub(1));
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
+            Key::Exit => return Ok(Nav::Exit),
             Key::Other(KeyCode::Enter) => {
                 return Ok(Nav::Next(items.iter().enumerate().filter(|(i, _)| selected[*i]).map(|(_, m)| m.clone()).collect()));
             }
@@ -505,6 +546,7 @@ pub fn review(title: &str, lines: &[String], go: &str) -> Result<Nav<()>> {
         })?;
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
+            Key::Exit => return Ok(Nav::Exit),
             Key::Other(KeyCode::Enter) => return Ok(Nav::Next(())),
             Key::Other(KeyCode::Up) | Key::Other(KeyCode::Char('k')) => scroll = scroll.min(max_scroll).saturating_sub(1),
             Key::Other(KeyCode::Down) | Key::Other(KeyCode::Char('j')) => scroll = (scroll + 1).min(max_scroll),
@@ -512,6 +554,132 @@ pub fn review(title: &str, lines: &[String], go: &str) -> Result<Nav<()>> {
             Key::Other(KeyCode::PageDown) => scroll = (scroll + 10).min(max_scroll),
             Key::Other(_) => {}
         }
+    }
+}
+
+/// The root page of an editing flow: every item with its value, edited items marked.
+/// Enter opens an item, Tab saves the whole draft, Esc twice exits. `status` is the line
+/// under the list that says whether the draft differs from what is in place.
+pub fn root(title: &str, note: &[&str], rows: &[RootRow], cursor: usize, status: &str) -> Result<(RootAction, usize)> {
+    let mut screen = Screen::open()?;
+    let mut state = ListState::default();
+    state.select(Some(cursor.min(rows.len().saturating_sub(1))));
+    let note_text = note.join("\n");
+    let label_width = rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
+    loop {
+        screen.terminal.draw(|f| {
+            let width = f.area().width.max(1) as usize;
+            let chunks = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(note_height(note, width)),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+            f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
+            if !note.is_empty() {
+                f.render_widget(Paragraph::new(note_text.as_str()).wrap(Wrap { trim: false }), chunks[1]);
+            }
+            let items: Vec<ListItem> = rows
+                .iter()
+                .map(|r| {
+                    let mark = if r.changed { "* " } else { "  " };
+                    let mut spans = vec![
+                        Span::raw(mark),
+                        Span::styled(format!("{:<label_width$}", r.label), Style::default().add_modifier(Modifier::BOLD)),
+                        Span::raw("   "),
+                        Span::raw(r.value.clone()),
+                    ];
+                    if r.changed {
+                        spans.push(Span::styled("  (changed)", Style::default().add_modifier(Modifier::DIM)));
+                    }
+                    ListItem::new(Line::from(spans))
+                })
+                .collect();
+            let list = List::new(items)
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                .highlight_symbol("› ");
+            f.render_stateful_widget(list, chunks[2], &mut state);
+            f.render_widget(Paragraph::new(status).style(Style::default().add_modifier(Modifier::BOLD)), chunks[3]);
+            let nav = if ESC_ARMED.load(Ordering::SeqCst) {
+                "Press Esc again to exit · any other key continues"
+            } else {
+                "Esc twice exits"
+            };
+            f.render_widget(dim(&format!("↑/↓ move · Enter edits · Tab saves all · {nav}")), chunks[4]);
+        })?;
+        let selected = state.selected().unwrap_or(0);
+        match read_key()? {
+            // The first Esc only arms the exit — there is no page above this one.
+            Key::Back => {}
+            Key::Exit => return Ok((RootAction::Exit, selected)),
+            Key::Other(KeyCode::Tab) => return Ok((RootAction::Save, selected)),
+            Key::Other(KeyCode::Enter) => return Ok((RootAction::Edit(selected), selected)),
+            Key::Other(KeyCode::Up) | Key::Other(KeyCode::Char('k')) => state.select(Some(selected.saturating_sub(1))),
+            Key::Other(KeyCode::Down) | Key::Other(KeyCode::Char('j')) => {
+                state.select(Some((selected + 1).min(rows.len().saturating_sub(1))))
+            }
+            Key::Other(_) => {}
+        }
+    }
+}
+
+/// nano's question on closing a modified buffer: the unsaved changes, then
+/// `Save changes?` with Y, N, or Esc to go back to editing.
+pub fn save_prompt(title: &str, changes: &[String]) -> Result<SaveChoice> {
+    let mut screen = Screen::open()?;
+    let text = changes.join("\n");
+    loop {
+        screen.terminal.draw(|f| {
+            let chunks = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+            f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
+            f.render_widget(Paragraph::new("Unsaved changes:").style(Style::default().add_modifier(Modifier::BOLD)), chunks[1]);
+            f.render_widget(Paragraph::new(text.as_str()).wrap(Wrap { trim: false }), chunks[2]);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Save changes? ", Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+                    Span::raw("  "),
+                    Span::styled(" Y ", Style::default().add_modifier(Modifier::REVERSED)),
+                    Span::raw(" Yes   "),
+                    Span::styled(" N ", Style::default().add_modifier(Modifier::REVERSED)),
+                    Span::raw(" No   "),
+                    Span::styled(" Esc ", Style::default().add_modifier(Modifier::REVERSED)),
+                    Span::raw(" Cancel"),
+                ])),
+                chunks[3],
+            );
+            f.render_widget(dim("Y saves and exits · N exits without saving · Esc goes back to editing"), chunks[4]);
+        })?;
+        match read_key()? {
+            Key::Back | Key::Exit => {
+                ESC_ARMED.store(false, Ordering::SeqCst);
+                return Ok(SaveChoice::Cancel);
+            }
+            Key::Other(KeyCode::Char('y')) | Key::Other(KeyCode::Char('Y')) => return Ok(SaveChoice::Yes),
+            Key::Other(KeyCode::Char('n')) | Key::Other(KeyCode::Char('N')) => return Ok(SaveChoice::No),
+            Key::Other(_) => {}
+        }
+    }
+}
+
+/// The root-page loop's exit decision: nothing to save → leave; otherwise ask. `Ok(true)`
+/// means save, `Ok(false)` means stay on the root page; "No" is the cancellation.
+pub fn exit_decision(title: &str, changes: &[String]) -> Result<bool> {
+    if changes.is_empty() {
+        return Err(cancelled());
+    }
+    match save_prompt(title, changes)? {
+        SaveChoice::Yes => Ok(true),
+        SaveChoice::No => Err(cancelled()),
+        SaveChoice::Cancel => Ok(false),
     }
 }
 
@@ -533,11 +701,20 @@ mod tests {
     }
 
     #[test]
-    fn the_footer_says_when_the_next_esc_quits() {
+    fn the_footer_says_when_the_next_esc_exits() {
         ESC_ARMED.store(false, Ordering::SeqCst);
-        assert_eq!(nav_hint(), "Esc back · Esc twice quits");
+        assert_eq!(nav_hint(), "Esc back · Esc twice exits");
         ESC_ARMED.store(true, Ordering::SeqCst);
-        assert!(nav_hint().starts_with("Press Esc again to quit"));
+        assert!(nav_hint().starts_with("Press Esc again to exit"));
         ESC_ARMED.store(false, Ordering::SeqCst);
+    }
+
+    /// Leaving a root page with nothing that saving would change never asks — it just
+    /// exits, as nano closes an unmodified buffer without a question.
+    #[test]
+    fn exiting_without_changes_does_not_ask() {
+        let e = exit_decision("t", &[]).unwrap_err();
+        assert!(e.is::<Cancelled>());
+        assert_eq!(e.to_string(), "Cancelled — nothing was changed.");
     }
 }

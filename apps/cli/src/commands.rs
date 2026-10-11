@@ -191,6 +191,7 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
                     step = 1;
                 }
                 Nav::Back => {}
+                Nav::Exit => return Err(tui::cancelled()),
             },
             1 => match tui::input_with_note(title, &[], "Device name", args.device_name.as_deref().unwrap_or(&hostname()), &device_name)? {
                 Nav::Next(v) => {
@@ -199,6 +200,7 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
                     step = 2;
                 }
                 Nav::Back => step = 0,
+                Nav::Exit => return Err(tui::cancelled()),
             },
             _ => {
                 let request = match &start {
@@ -223,6 +225,7 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
                 match tui::input_with_note(title, &note, "Code shown in browser", "", "")? {
                     Nav::Next(code) => break (server.clone(), device_name.clone(), start.take().expect("a request"), code),
                     Nav::Back => step = 1,
+                    Nav::Exit => return Err(tui::cancelled()),
                 }
             }
         }
@@ -321,135 +324,7 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
         (slug, format, target, args.target_key, expose, Vec::new())
     } else {
         tui::require_tty()?;
-        let title = "kano-proxy tunnel add — register a local endpoint";
-        // The choice names the HTTP API the local server speaks, and the
-        // target prompt that follows is written for that API alone: its own
-        // shape rule, its own default, and copy-pasteable examples for the
-        // usual local servers — the user should never have to work out
-        // whether "/v1" belongs on the end (docs/cli.md § Command surface).
-        let format_note = ["Which HTTP API does the local server speak?", ""];
-        let format_options = [
-            "openai     — OpenAI-compatible chat API   (Ollama, LM Studio, vLLM, llama.cpp, …)",
-            "anthropic  — Anthropic Messages API       (Ollama, llama.cpp, …)",
-        ];
-        // Five steps and a review; Esc re-enters the previous one with its answer (tui.rs).
-        let mut slug = String::new();
-        let mut format_index = 0usize;
-        let mut target = String::new();
-        let mut key = String::new();
-        let mut expose: Vec<String> = Vec::new();
-        let mut picked: Option<AddAnswers> = None;
-        let mut step = 0usize;
-        loop {
-            match step {
-                0 => match tui::input_with_note(title, &[], "Slug", &default_slug(&state.providers), &slug)? {
-                    Nav::Next(v) => {
-                        slug = v;
-                        step = 1;
-                    }
-                    Nav::Back => {}
-                },
-                1 => match tui::choose(title, &format_note, &format_options, format_index)? {
-                    Nav::Next(i) => {
-                        format_index = i;
-                        step = 2;
-                    }
-                    Nav::Back => step = 0,
-                },
-                2 => {
-                    let (target_note, default_target): (&[&str], &str) = if format_index == 1 {
-                        (&ANTHROPIC_TARGET_NOTE, ANTHROPIC_DEFAULT_TARGET)
-                    } else {
-                        (&OPENAI_TARGET_NOTE, OPENAI_DEFAULT_TARGET)
-                    };
-                    match tui::input_with_note(title, target_note, "Target base URL", default_target, &target)? {
-                        Nav::Next(v) => {
-                            target = normalize_target(&v)?;
-                            step = 3;
-                        }
-                        Nav::Back => step = 1,
-                    }
-                }
-                3 => match tui::input_secret(title, "Local API key (Enter for none)", &key)? {
-                    Nav::Next(v) => {
-                        key = v;
-                        step = 4;
-                    }
-                    Nav::Back => step = 2,
-                },
-                4 => {
-                    let format = if format_index == 1 { "anthropic".to_string() } else { "openai".to_string() };
-                    let target_key = if key.is_empty() { None } else { Some(key.clone()) };
-                    match api::probe_local_models(&format, &target, target_key.as_deref()).await {
-                        Ok(models) if !models.is_empty() => {
-                            eprintln!("✓ found {} models", models.len());
-                            match tui::pick_models(&format!("{title} — expose which models?"), &models, &expose)? {
-                                // "All models (follow local server)": store no filter, so
-                                // models added locally later appear automatically.
-                                Nav::Next(None) => {
-                                    expose.clear();
-                                    picked = Some((slug.clone(), format, target.clone(), target_key, Vec::new(), Vec::new()));
-                                    step = 5;
-                                }
-                                Nav::Next(Some(subset)) => {
-                                    expose = subset.clone();
-                                    picked = Some((slug.clone(), format, target.clone(), target_key, subset, Vec::new()));
-                                    step = 5;
-                                }
-                                Nav::Back => step = 3,
-                            }
-                        }
-                        _ => {
-                            // A target that is not running yet must not block registration:
-                            // ask for ids by hand; the first connect overwrites with truth.
-                            let typed = expose.join(",");
-                            match tui::input_with_note(
-                                title,
-                                &[],
-                                "Couldn't reach the target — model ids, comma-separated (Enter for none)",
-                                "-",
-                                &typed,
-                            )? {
-                                Nav::Next(manual) => {
-                                    let initial: Vec<String> = if manual == "-" {
-                                        Vec::new()
-                                    } else {
-                                        manual.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-                                    };
-                                    expose = initial.clone();
-                                    picked = Some((slug.clone(), format, target.clone(), target_key, Vec::new(), initial));
-                                    step = 5;
-                                }
-                                Nav::Back => step = 3,
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    let (slug, format, target, target_key, subset, initial) = picked.clone().expect("set by the step before");
-                    let models = if !subset.is_empty() {
-                        format!("only {}", subset.join(", "))
-                    } else if !initial.is_empty() {
-                        format!("{} (typed by hand; the first connect reports the real list)", initial.join(", "))
-                    } else {
-                        "all — follows the local server".to_string()
-                    };
-                    let lines = vec![
-                        format!("Register \"{slug}\" on {}:", state.base_url),
-                        format!("  API        {format}"),
-                        format!("  Target     {target}"),
-                        format!("  Local key  {}", if target_key.is_some() { "set (kept on this device only)" } else { "none" }),
-                        format!("  Models     {models}"),
-                        String::new(),
-                        format!("Callable as {slug}/<model> once `kano-proxy tunnel start` runs."),
-                    ];
-                    match tui::review(title, &lines, "registers it")? {
-                        Nav::Next(()) => break (slug, format, target, target_key, subset, initial),
-                        Nav::Back => step = 4,
-                    }
-                }
-            }
-        }
+        add_root(&state).await?
     };
 
     let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
@@ -468,6 +343,148 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
     })?;
     eprintln!("✓ registered \"{}\" — run `kano-proxy tunnel start` to bring it online", created.slug);
     Ok(())
+}
+
+/// `tunnel add`'s root page (docs/cli.md § Navigation): every answer on one page,
+/// each opened with Enter and applied to the draft with Enter; Tab on this page
+/// registers the endpoint, Esc twice leaves — after asking, since registering
+/// would create something on the server.
+async fn add_root(state: &State) -> Result<AddAnswers> {
+    let title = "kano-proxy tunnel add — register a local endpoint";
+    // The choice names the HTTP API the local server speaks, and the target page is
+    // written for that API alone: its own shape rule, its own default, and
+    // copy-pasteable examples for the usual local servers — the user should never
+    // have to work out whether "/v1" belongs on the end (docs/cli.md § Command surface).
+    let format_note = ["Which HTTP API does the local server speak?", ""];
+    let format_options = [
+        "openai     — OpenAI-compatible chat API   (Ollama, LM Studio, vLLM, llama.cpp, …)",
+        "anthropic  — Anthropic Messages API       (Ollama, llama.cpp, …)",
+    ];
+    let default_target = |format: usize| if format == 1 { ANTHROPIC_DEFAULT_TARGET } else { OPENAI_DEFAULT_TARGET };
+
+    let mut slug = default_slug(&state.providers);
+    let mut format = 0usize;
+    let mut target = OPENAI_DEFAULT_TARGET.to_string();
+    let mut key = String::new();
+    // expose = a whitelist picked from the probed list; initial = ids typed by hand when
+    // the target could not be reached. Both empty = all models, follow the local server.
+    let mut expose: Vec<String> = Vec::new();
+    let mut initial: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    let mut notice: Option<String> = None;
+
+    let answers = |slug: &str, format: usize, target: &str, key: &str, expose: &[String], initial: &[String]| -> AddAnswers {
+        (
+            slug.to_string(),
+            if format == 1 { "anthropic" } else { "openai" }.to_string(),
+            target.to_string(),
+            (!key.is_empty()).then(|| key.to_string()),
+            expose.to_vec(),
+            initial.to_vec(),
+        )
+    };
+    let models_text = |expose: &[String], initial: &[String]| {
+        if !expose.is_empty() {
+            format!("only {}", expose.join(", "))
+        } else if !initial.is_empty() {
+            format!("{} (typed by hand — the first connect reports the real list)", initial.join(", "))
+        } else {
+            "all — follows the local server".to_string()
+        }
+    };
+
+    loop {
+        let api_name = if format == 1 { "anthropic" } else { "openai" };
+        let rows = vec![
+            tui::RootRow { label: "Slug".into(), value: format!("{slug}   (models are called {slug}/<model>)"), changed: false },
+            tui::RootRow { label: "API".into(), value: api_name.into(), changed: false },
+            tui::RootRow { label: "Target".into(), value: target.clone(), changed: false },
+            tui::RootRow {
+                label: "Local API key".into(),
+                value: if key.is_empty() { "none".into() } else { "set (kept on this device only)".into() },
+                changed: false,
+            },
+            tui::RootRow { label: "Models".into(), value: models_text(&expose, &initial), changed: false },
+        ];
+        let status = notice.take().unwrap_or_else(|| format!("Not registered yet — Tab registers \"{slug}\" on {}", state.base_url));
+        let (action, at) = tui::root(title, &[], &rows, cursor, &status)?;
+        cursor = at;
+        match action {
+            tui::RootAction::Save => return Ok(answers(&slug, format, &target, &key, &expose, &initial)),
+            tui::RootAction::Exit => {
+                let changes = vec![
+                    format!("Register \"{slug}\" ({api_name}) on {}", state.base_url),
+                    format!("  Target  {target}"),
+                    format!("  Models  {}", models_text(&expose, &initial)),
+                ];
+                if tui::exit_decision(title, &changes)? {
+                    return Ok(answers(&slug, format, &target, &key, &expose, &initial));
+                }
+            }
+            tui::RootAction::Edit(0) => {
+                if let Nav::Next(v) = tui::input_with_note(title, &[], "Slug", &default_slug(&state.providers), &slug)? {
+                    slug = v;
+                }
+            }
+            tui::RootAction::Edit(1) => {
+                if let Nav::Next(i) = tui::choose(title, &format_note, &format_options, format)? {
+                    // A target still at the old API's default follows the new API's default.
+                    if i != format && target == default_target(format) {
+                        target = default_target(i).to_string();
+                    }
+                    format = i;
+                }
+            }
+            tui::RootAction::Edit(2) => {
+                let note: &[&str] = if format == 1 { &ANTHROPIC_TARGET_NOTE } else { &OPENAI_TARGET_NOTE };
+                if let Nav::Next(v) = tui::input_with_note(title, note, "Target base URL", default_target(format), &target)? {
+                    match normalize_target(&v) {
+                        Ok(v) => target = v,
+                        Err(e) => notice = Some(format!("Target not changed: {e}")),
+                    }
+                }
+            }
+            tui::RootAction::Edit(3) => {
+                if let Nav::Next(v) = tui::input_secret(title, "Local API key (Enter for none)", &key)? {
+                    key = v;
+                }
+            }
+            tui::RootAction::Edit(_) => {
+                let target_key = (!key.is_empty()).then(|| key.clone());
+                match api::probe_local_models(api_name, &target, target_key.as_deref()).await {
+                    Ok(models) if !models.is_empty() => {
+                        match tui::pick_models(&format!("{title} — expose which models?"), &models, &expose)? {
+                            // "All models (follow local server)": store no filter, so models
+                            // added locally later appear automatically.
+                            Nav::Next(None) => {
+                                expose.clear();
+                                initial.clear();
+                            }
+                            Nav::Next(Some(subset)) => {
+                                expose = subset;
+                                initial.clear();
+                            }
+                            _ => {}
+                        }
+                    }
+                    _ => {
+                        // A target that is not running yet must not block registration:
+                        // ids by hand, which the first connect overwrites with the truth.
+                        let typed = initial.join(",");
+                        let note = [&*format!("Couldn't reach {target} — type model ids, or Enter on \"-\" for none."), ""];
+                        if let Nav::Next(manual) = tui::input_with_note(title, &note, "Model ids, comma-separated", "-", &typed)? {
+                            expose.clear();
+                            initial = if manual == "-" {
+                                Vec::new()
+                            } else {
+                                manual.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

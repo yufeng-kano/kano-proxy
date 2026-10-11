@@ -33,8 +33,11 @@ pub struct CatalogPlan {
     pub models: Vec<Value>,
 }
 
-/// `resume`: the answers from a previous pass (the review screen sent the user back).
-pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current, resume: Option<&Picks>) -> Result<Picks> {
+/// The interactive root page (docs/cli.md § Navigation): model, reasoning effort and
+/// fallbacks, starting from the config's `model` / `model_reasoning_effort` and the
+/// group's fallbacks. Enter edits a row into the draft; Tab saves; Esc twice exits,
+/// asking first when the draft differs from what is set up now.
+pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current) -> Result<Picks> {
     let kind = AgentKind::Codex;
     let ids = provider_ids(catalog, kind.provider());
     if ids.is_empty() {
@@ -61,86 +64,89 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
     tui::require_tty()?;
     let title = "kano-proxy agent setup codex";
     let options: Vec<&str> = ids.iter().map(String::as_str).collect();
-    // Start from what is in place: the config's model and effort when still valid, the
-    // group's fallbacks. Three steps; Esc re-enters the previous one with its answer.
+    let own = |i: usize| format!("codex/{}", ids[i]);
     let default_effort = EFFORTS.iter().position(|e| *e == DEFAULT_EFFORT).unwrap_or(0);
     let mut model = current.field("model").and_then(|v| ids.iter().position(|i| *i == v)).unwrap_or(0);
     let mut effort = current
         .field("model_reasoning_effort")
         .and_then(|v| EFFORTS.iter().position(|e| *e == v))
         .unwrap_or(default_effort);
-    let mut fallbacks = current.fallbacks(&ids[model], &format!("codex/{}", ids[model]));
-    let mut step = 0usize;
-    if let Some(prev) = resume {
-        if let Some(i) = ids.iter().position(|x| *x == prev.model) {
-            model = i;
-        }
-        if let Some(i) = EFFORTS.iter().position(|e| *e == prev.effort) {
-            effort = i;
-        }
-        fallbacks = prev.fallbacks.clone();
-        step = 2;
-    }
-    let mut backward = resume.is_some();
+    let mut fallbacks = current.fallbacks(&ids[model], &own(model));
+    let baseline = current.configured.then(|| (model, effort, fallbacks.clone()));
+    let fb_text = |fb: &[String]| if fb.is_empty() { "none".to_string() } else { fb.join(", ") };
+    let mut cursor = 0usize;
     loop {
-        match step {
-            0 => {
-                let note = ["Which model should Codex start with? /model inside Codex switches later.", "The group serves this name as-is, so Codex's own catalog metadata lines up."];
-                match tui::choose_default(title, &note, &options, 0, model)? {
-                    Nav::Next(i) => {
-                        if i != model {
-                            model = i;
-                            fallbacks = current.fallbacks(&ids[i], &format!("codex/{}", ids[i]));
-                        }
-                        backward = false;
-                        step = 1;
-                    }
-                    Nav::Back => {}
+        let picks = || Picks { model: ids[model].clone(), effort: EFFORTS[effort].to_string(), fallbacks: fallbacks.clone() };
+        let changed = |i: usize| match &baseline {
+            Some(b) => [b.0 != model, b.1 != effort, b.2 != fallbacks][i],
+            None => false,
+        };
+        let rows = vec![
+            tui::RootRow { label: "Model".into(), value: ids[model].clone(), changed: changed(0) },
+            tui::RootRow { label: "Reasoning effort".into(), value: EFFORTS[effort].into(), changed: changed(1) },
+            tui::RootRow { label: "Fallbacks".into(), value: fb_text(&fallbacks), changed: changed(2) },
+        ];
+        let changes: Vec<String> = match &baseline {
+            Some(b) => {
+                let mut c = Vec::new();
+                if changed(0) {
+                    c.push(format!("  Model: {} → {}", ids[b.0], ids[model]));
+                }
+                if changed(1) {
+                    c.push(format!("  Reasoning effort: {} → {}", EFFORTS[b.1], EFFORTS[effort]));
+                }
+                if changed(2) {
+                    c.push(format!("  Fallbacks: {} → {}", fb_text(&b.2), fb_text(&fallbacks)));
+                }
+                c
+            }
+            None => vec![
+                "The Codex CLI is not set up on this machine — saving sets it up with:".into(),
+                format!("  Model: {}  effort: {}  fallbacks: {}", ids[model], EFFORTS[effort], fb_text(&fallbacks)),
+            ],
+        };
+        let status = match (&baseline, changes.len()) {
+            (None, _) => "Not set up on this machine yet — Tab sets it up with these choices".to_string(),
+            (Some(_), 0) => "No changes — this is what is set up now".to_string(),
+            (Some(_), n) => format!("{n} unsaved change{} — Tab saves", if n == 1 { "" } else { "s" }),
+        };
+        let note = ["The group serves these names as-is, so Codex's own catalog metadata lines up."];
+        let (action, at) = tui::root(title, &note, &rows, cursor, &status)?;
+        cursor = at;
+        match action {
+            tui::RootAction::Save => return Ok(picks()),
+            tui::RootAction::Exit => {
+                if tui::exit_decision(title, &changes)? {
+                    return Ok(picks());
                 }
             }
-            1 => {
+            tui::RootAction::Edit(0) => {
+                let note = ["Which model should Codex start with? /model inside Codex switches later."];
+                if let Nav::Next(i) = tui::choose_default(title, &note, &options, 0, model)? {
+                    if i != model {
+                        model = i;
+                        fallbacks = current.fallbacks(&ids[i], &own(i));
+                    }
+                }
+            }
+            tui::RootAction::Edit(1) => {
                 let note = ["Default reasoning effort (the proxy accepts these four; Codex's /model changes it later)."];
-                match tui::choose_default(title, &note, &EFFORTS, default_effort, effort)? {
-                    Nav::Next(i) => {
-                        effort = i;
-                        backward = false;
-                        step = 2;
-                    }
-                    Nav::Back => {
-                        backward = true;
-                        step = 0;
-                    }
+                if let Nav::Next(i) = tui::choose_default(title, &note, &EFFORTS, default_effort, effort)? {
+                    effort = i;
                 }
             }
-            _ => {
-                let own = format!("codex/{}", ids[model]);
-                let candidates = fallback_candidates(catalog, &own);
-                if candidates.is_empty() {
-                    fallbacks.clear();
-                    if backward {
-                        step = 1;
-                        continue;
-                    }
-                    break;
-                }
+            tui::RootAction::Edit(_) => {
+                let candidates = fallback_candidates(catalog, &own(model));
                 let note = [
                     &*format!("Fallbacks for {} — tried in order when codex is benched or out of quota.", ids[model]),
-                    "Space toggles, Enter with nothing toggled means no fallback.",
+                    "Space toggles · Enter applies to the draft (nothing is saved until Tab on the main page).",
                 ];
-                match tui::pick_many(title, &note, Some(&own), &candidates, &fallbacks)? {
-                    Nav::Next(picked) => {
-                        fallbacks = picked;
-                        break;
-                    }
-                    Nav::Back => {
-                        backward = true;
-                        step = 1;
-                    }
+                if let Nav::Next(picked) = tui::pick_many(title, &note, Some(&own(model)), &candidates, &fallbacks)? {
+                    fallbacks = picked;
                 }
             }
         }
     }
-    Ok(Picks { model: ids[model].clone(), effort: EFFORTS[effort].to_string(), fallbacks })
 }
 
 pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Plan {
@@ -231,7 +237,7 @@ pub fn write_catalog(plan: &CatalogPlan) -> Result<()> {
 mod tests {
     use super::*;
 
-    const NONE: Current<'static> = Current { doc: None, group: None };
+    const NONE: Current<'static> = Current { doc: None, group: None, configured: false };
 
     fn catalog() -> Vec<CatalogModel> {
         ["codex/gpt-5.6-sol", "codex/gpt-6-astra", "claude-code/claude-opus-5"]
@@ -258,14 +264,14 @@ mod tests {
 
     #[test]
     fn picks_validate_against_the_catalog_and_the_effort_ladder() {
-        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5"]), &catalog(), &NONE, None).unwrap();
+        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5"]), &catalog(), &NONE).unwrap();
         assert_eq!((p.model.as_str(), p.effort.as_str()), ("gpt-5.6-sol", "high"));
         assert_eq!(p.fallbacks, ["claude-code/claude-opus-5"]);
-        assert!(collect_picks(&args("o3", None, &[]), &catalog(), &NONE, None).is_err());
-        assert!(collect_picks(&args("gpt-5.6-sol", Some("minimal"), &[]), &catalog(), &NONE, None).is_err());
-        assert!(collect_picks(&args("gpt-5.6-sol", None, &["grok/grok-4.5"]), &catalog(), &NONE, None).is_err());
+        assert!(collect_picks(&args("o3", None, &[]), &catalog(), &NONE).is_err());
+        assert!(collect_picks(&args("gpt-5.6-sol", Some("minimal"), &[]), &catalog(), &NONE).is_err());
+        assert!(collect_picks(&args("gpt-5.6-sol", None, &["grok/grok-4.5"]), &catalog(), &NONE).is_err());
         let no_codex: Vec<CatalogModel> = catalog().into_iter().filter(|m| m.provider != "codex").collect();
-        assert!(collect_picks(&args("gpt-5.6-sol", None, &[]), &no_codex, &NONE, None).unwrap_err().to_string().contains("no codex models"));
+        assert!(collect_picks(&args("gpt-5.6-sol", None, &[]), &no_codex, &NONE).unwrap_err().to_string().contains("no codex models"));
     }
 
     #[test]
