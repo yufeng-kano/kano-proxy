@@ -35,6 +35,7 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         name: "0002_cli_devices_delete_on_revoke",
         sql: include_str!("../../migrations/0002_cli_devices_delete_on_revoke.sql"),
     },
+    Migration { name: "0003_api_keys_device", sql: include_str!("../../migrations/0003_api_keys_device.sql") },
 ];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -130,7 +131,7 @@ mod tests {
         .expect("existing provider");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0002_cli_devices_delete_on_revoke"]);
+        assert_eq!(applied, ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device"]);
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM cli_devices").fetch_all(&pool).await.unwrap();
         assert_eq!(ids, ["clidev_live"]);
         let live = crate::db::cli::get_cli_device(&pool, "clidev_live").await.unwrap().expect("the row type reads");
@@ -141,6 +142,49 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_devices").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
+        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+    }
+
+    /// Upgrading a deployed 0002 schema: existing keys keep every column and read as
+    /// web-created (`device_id` NULL), the new foreign key validates, a device deletion reaches
+    /// only the keys it minted, and nothing is pending afterwards.
+    #[tokio::test]
+    async fn upgrading_to_0003_keeps_existing_keys_and_adds_the_device_link() {
+        let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..2]).await else { return skip_without_db() };
+        let user = insert_user(&pool, "upgrade3@example.com").await;
+        sqlx::query(
+            "INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, created_at, spend_limit, spend_limit_interval, spend_limit_include_oauth)
+             VALUES ('key_old', $1, 'Production', 'sk-kano-proxy-abcdef', 'hash_old', '2026-09-01T00:00:00.000Z', 12.5, 'weekly', 0)",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("existing key");
+        sqlx::query(
+            "INSERT INTO cli_devices (id, user_id, name, refresh_token_hash, created_at)
+             VALUES ('clidev_a', $1, 'a', 'h1', '2026-09-01T00:00:00.000Z')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("existing device");
+
+        let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
+        assert_eq!(applied, ["0003_api_keys_device"]);
+        let old = crate::db::keys::list_keys(&pool, &user.id).await.unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!((old[0].name.as_str(), old[0].spend_limit, old[0].spend_limit_interval.as_str()), ("Production", Some(12.5), "weekly"));
+        assert_eq!(old[0].device_id, None);
+
+        let minted = crate::db::keys::create_key_for_device(&pool, &user.id, Some("clidev_a"), "agent@a", None).await.unwrap();
+        assert!(sqlx::query("UPDATE api_keys SET device_id = 'clidev_missing' WHERE id = $1")
+            .bind(&minted.row.id)
+            .execute(&pool)
+            .await
+            .is_err(), "the foreign key validates");
+        sqlx::query("DELETE FROM cli_devices WHERE id = 'clidev_a'").execute(&pool).await.unwrap();
+        let left: Vec<String> = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id = $1").bind(&user.id).fetch_all(&pool).await.unwrap();
+        assert_eq!(left, ["key_old"], "only the minted key followed its device");
         assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
     }
 }

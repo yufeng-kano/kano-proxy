@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::api;
 use crate::protocol::{
     decode_binary, encode_binary, encode_control, is_allowed_path, parse_control, ControlFrame,
-    AGENT_PROTO, BODY_KIND_REQUEST, BODY_KIND_RESPONSE, CLOSE_REPLACED, CLOSE_TOKEN_EXPIRED,
+    TUNNEL_PROTO, BODY_KIND_REQUEST, BODY_KIND_RESPONSE, CLOSE_REPLACED, CLOSE_TOKEN_EXPIRED,
     MAX_CHUNK_BYTES,
 };
 use crate::state::{ProviderState, StateFile};
@@ -166,7 +166,7 @@ async fn run_socket(
         .base_url
         .replacen("https://", "wss://", 1)
         .replacen("http://", "ws://", 1);
-    let url = format!("{}/agent/v1/connect/{}", ws_base, provider.id);
+    let url = format!("{}/cli/v1/connect/{}", ws_base, provider.id);
     let mut request = url.clone().into_client_request().context("bad connect URL")?;
     request
         .headers_mut()
@@ -297,9 +297,9 @@ async fn read_loop(
                 let Some(frame) = parse_control(&text) else { continue };
                 match frame {
                     ControlFrame::Hello { proto, slug } => {
-                        if proto != AGENT_PROTO {
+                        if proto != TUNNEL_PROTO {
                             return Err(anyhow!(
-                                "server speaks protocol {proto}, this CLI speaks {AGENT_PROTO} — upgrade with `kano-proxy update`"
+                                "server speaks protocol {proto}, this CLI speaks {TUNNEL_PROTO} — upgrade with `kano-proxy update`"
                             ));
                         }
                         eprintln!("[{}] connected (proto {proto})", slug);

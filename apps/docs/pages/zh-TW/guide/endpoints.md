@@ -20,7 +20,7 @@ description: Kano Proxy 的 base URL、驗證標頭、provider/model id、模型
 
 ## 驗證
 
-把 Keys 頁面的金鑰放進以下任一標頭，兩個端點都接受。
+把 Access 頁面的金鑰放進以下任一標頭，兩個端點都接受。
 
 ```http
 Authorization: Bearer <your-api-key>

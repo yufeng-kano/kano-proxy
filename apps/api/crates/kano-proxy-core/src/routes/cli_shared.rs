@@ -1,6 +1,6 @@
 //! Helpers shared by the CLI's session routes and its agent surface (docs/cli.md).
 //!
-//! Shared between the token-authenticated `/agent/v1` surface ([`super::agent`])
+//! Shared between the token-authenticated `/cli/v1` surface ([`super::cli_v1`])
 //! and the session-authenticated `/api/cli` surface ([`super::cli`]): the provider
 //! list item (with the tunnel's connection read-through) and the delete path both
 //! exist on both surfaces.

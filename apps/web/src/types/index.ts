@@ -105,6 +105,10 @@ export type ApiKey = {
   spend_limit_include_oauth: boolean
   /** Estimated USD spent in the current window — GET /api/keys only; null when unreadable. */
   window_spend?: number | null
+  /** The CLI device that minted the key (docs/cli.md § Keys and groups); null for a key created here. */
+  device_id?: string | null
+  /** That device's current name — GET /api/keys only, resolved at read time. */
+  device_name?: string | null
 }
 
 export type CreatedKey = ApiKey & {
@@ -181,6 +185,8 @@ export type CliDevice = {
   name: string
   last_seen_at: string | null
   created_at: string
+  /** API keys the device minted that still exist — revoked with the device. */
+  key_count: number
 }
 
 /** One local endpoint registered by `kano-proxy add` (docs/cli.md). */

@@ -13,7 +13,7 @@ import { useI18n, type MessageKey } from "@/i18n"
  */
 // /cli/authorize carries its request id in the query, which lastPath does not
 // keep — a restore onto the bare path could only show "request missing".
-const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli", "/cli/authorize"])
+const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli", "/cli/authorize", "/keys"])
 
 export interface RouterOptions {
   /** `false` leaves `/changelog` out, so it falls through to the catch-all (ShellOptions.changelog). */
@@ -81,10 +81,12 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
         meta: { bare: true, titleKey: "cli.authorize.title" },
       },
       {
-        path: "/keys",
-        name: "keys",
-        component: () => import("@/pages/KeysPage.vue"),
-        meta: { titleKey: "nav.keys" },
+        // Keys, CLI devices and the connection details — the user's
+        // credentials in one place (docs/admin-ui.md § Access page).
+        path: "/access",
+        name: "access",
+        component: () => import("@/pages/AccessPage.vue"),
+        meta: { titleKey: "nav.access" },
       },
       {
         path: "/models",
@@ -107,8 +109,10 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
       // must land on the renamed page, not fall through the catch-all.
       { path: "/dashboard", redirect: "/overview" },
       { path: "/accounts", redirect: "/providers" },
-      // The CLI page merged into Providers (docs/admin-ui.md § CLI sections).
+      // The CLI page merged into Providers (docs/admin-ui.md § CLI section).
       { path: "/cli", redirect: "/providers" },
+      // API keys became the Access page once CLI devices moved in beside them.
+      { path: "/keys", redirect: "/access" },
       {
         path: "/:pathMatch(.*)*",
         redirect: "/overview",

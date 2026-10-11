@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Create / edit an API key (docs/admin-ui.md § Keys page).
+ * Create / edit an API key (docs/admin-ui.md § Access page).
  *
  * Create runs in two steps inside one dialog: the form (name + optional
  * spend limit), then — after the POST — a done step showing the plaintext in

@@ -18,12 +18,12 @@ kano-proxy/
             db/          # pool, migration runner, one module per table
             crypto/      # credential encryption, key hashing, session signing
             auth/        # sessions, Google OIDC, API keys, provider OAuth
-            routes/      # every HTTP surface: the LLM bases, the admin API, /agent/v1
+            routes/      # every HTTP surface: the LLM bases, the admin API, /cli/v1
             proxy/       # protocol conversion, SSE handling, dispatch and the candidate walk
             providers/   # claude-code, codex, grok, antigravity, and the two BYO adapters
             routing/     # candidates -> facts -> strategy -> feedback: who to try, in what order
             pool/        # bench, promote, credential persistence, the pool-extension contract
-            tunnel/      # the in-process registry and WebSocket half of the agent tunnel
+            tunnel/      # the in-process registry and WebSocket half of the CLI tunnel
             catalog/     # the model list for one user's bound providers
             pricing/     # per-request cost estimation
             logging/     # request log rows and token usage capture

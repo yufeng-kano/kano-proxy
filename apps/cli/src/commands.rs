@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
 
+use crate::agents::{self, AgentKind, RestoreArgs};
 use crate::api;
 use crate::state::{PendingLogin, ProviderState, State, StateFile};
 use crate::tui;
@@ -13,16 +14,8 @@ use crate::tunnel::{self, TokenCache};
 
 pub const EXIT_AUTH_REJECTED: i32 = 2;
 
-/// Every state write goes through here: re-read and save while holding the
-/// same lock token refreshes use, so a concurrent command (or its refresh
-/// rotation) can never be clobbered by a stale snapshot — the failure mode
-/// that resurrects a superseded refresh token and trips the server's
-/// reuse-as-theft revocation.
 fn mutate_state(file: &StateFile, f: impl FnOnce(&mut State)) -> Result<()> {
-    let _lock = file.acquire_lock()?;
-    let mut state = file.load()?;
-    f(&mut state);
-    file.save(&state)
+    file.mutate(f)
 }
 
 fn hostname() -> String {
@@ -135,14 +128,13 @@ pub async fn cmd_init(file: &StateFile, args: InitArgs) -> Result<()> {
         return Ok(());
     }
 
-    // Re-running on an initialized state file refuses with a hint — revoke and
-    // re-init deliberately, not by accident (docs/cli.md).
+    // Re-running on an initialized state file refuses with a hint — sign out
+    // deliberately, not by accident (docs/cli.md).
     if state.signed_in() {
         bail!(
-            "this device is already signed in as \"{}\" against {} — revoke it on the web UI's CLI page (or delete {}) before running init again",
+            "this device is already signed in as \"{}\" against {} — run `kano-proxy logout` first",
             state.device_name.as_deref().unwrap_or("?"),
             state.base_url,
-            file.path.display()
         );
     }
 
@@ -342,7 +334,7 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
             expose,
         })
     })?;
-    eprintln!("✓ registered \"{}\" — run `kano-proxy start` to bring it online", created.slug);
+    eprintln!("✓ registered \"{}\" — run `kano-proxy tunnel start` to bring it online", created.slug);
     Ok(())
 }
 
@@ -372,7 +364,7 @@ pub async fn cmd_attach(
     let item = remote
         .iter()
         .find(|r| r.slug == slug)
-        .with_context(|| format!("no provider \"{slug}\" on the server — register a new one with `kano-proxy add`"))?;
+        .with_context(|| format!("no provider \"{slug}\" on the server — register a new one with `kano-proxy tunnel add`"))?;
 
     let provider = ProviderState {
         id: item.id.clone(),
@@ -383,7 +375,7 @@ pub async fn cmd_attach(
         expose: Vec::new(),
     };
     mutate_state(file, |state| state.providers.push(provider))?;
-    eprintln!("✓ attached \"{slug}\" — run `kano-proxy start` to serve it from this device");
+    eprintln!("✓ attached \"{slug}\" — run `kano-proxy tunnel start` to serve it from this device");
     Ok(())
 }
 
@@ -469,6 +461,51 @@ pub async fn cmd_status(file: &StateFile) -> Result<()> {
             std::process::exit(EXIT_AUTH_REJECTED);
         }
     }
+    println!();
+    agents::print_rows(&state);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// logout
+
+/// The reverse of `init` (docs/cli.md § Command surface): restore every agent
+/// this device set up, revoke the device (its keys go with it), forget the
+/// sign-in. A server that already forgot the device does not block the local
+/// cleanup.
+pub async fn cmd_logout(file: &StateFile, no_tui: bool, force: bool, remove_group: bool) -> Result<()> {
+    let state = file.load()?;
+    if !state.signed_in() && state.agents.is_empty() {
+        bail!("this device is not signed in");
+    }
+    let managed: Vec<AgentKind> = AgentKind::ALL.iter().copied().filter(|k| state.agents.contains_key(k.id())).collect();
+    for kind in managed {
+        eprintln!("→ restoring {}", kind.label());
+        agents::cmd_restore(
+            file,
+            kind,
+            RestoreArgs { no_tui, dry_run: false, full: false, force, backup: None, remove_group },
+        )
+        .await?;
+    }
+    if state.signed_in() {
+        let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
+        match tokens.get(false).await {
+            Ok(access) => match api::delete_device(&state.base_url, &access).await? {
+                true => eprintln!("✓ device \"{}\" revoked", state.device_name.as_deref().unwrap_or("?")),
+                false => eprintln!("· the server had already revoked this device"),
+            },
+            Err(_) => eprintln!("· the server no longer accepts this device — it was revoked already"),
+        }
+    }
+    mutate_state(file, |s| {
+        s.device_id = None;
+        s.device_name = None;
+        s.refresh_token = None;
+        s.pending_login = None;
+        s.providers.clear();
+    })?;
+    eprintln!("✓ signed out — {} keeps only the server address", file.path.display());
     Ok(())
 }
 
@@ -479,7 +516,7 @@ pub async fn cmd_start(file: StateFile, concurrency: usize) -> Result<()> {
     let state = file.load()?;
     api::require_signed_in(&state)?;
     if state.providers.is_empty() {
-        bail!("no providers registered — run `kano-proxy add` first");
+        bail!("no providers registered — run `kano-proxy tunnel add` first");
     }
     // A raise above the server's cap is refused (docs/cli.md).
     if !(1..=4).contains(&concurrency) {

@@ -142,12 +142,12 @@ Install the CLI (Homebrew, Scoop or the install script), sign the machine in onc
 curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
 # or: brew install yufeng-kano/tap/kano-proxy
 
-kano-proxy init     # opens the browser, you approve the device, paste the code
-kano-proxy add      # slug, openai|anthropic, http://localhost:11434/v1
-kano-proxy start    # one outbound WebSocket per registered provider
+kano-proxy init          # opens the browser, you approve the device, paste the code
+kano-proxy tunnel add    # slug, openai|anthropic, http://localhost:11434/v1
+kano-proxy tunnel start  # one outbound WebSocket per registered provider
 ```
 
-The local models now answer as `<slug>/<model>` on every base URL above and can be targets in a model group. Details in [docs/cli.md](./docs/cli.md).
+The local models now answer as `<slug>/<model>` on every base URL above and can be targets in a model group. The same CLI points Claude Code or the Codex CLI at your proxy — `kano-proxy agent setup claude-code` / `codex` — and undoes it with `agent restore`. Details in [docs/cli.md](./docs/cli.md).
 
 ---
 

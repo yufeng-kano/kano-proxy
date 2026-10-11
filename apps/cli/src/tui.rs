@@ -328,3 +328,154 @@ pub fn pick_models(title: &str, models: &[String]) -> Result<Option<Vec<String>>
         }
     }
 }
+
+/// `choose` with the cursor starting on `default` — the `agent setup` slot
+/// pickers pre-select the id whose name matches the slot's family, so the
+/// common case is Enter, Enter, Enter.
+pub fn choose_default(title: &str, note: &[&str], options: &[&str], default: usize) -> Result<usize> {
+    choose_at(title, note, options, default.min(options.len().saturating_sub(1)))
+}
+
+fn choose_at(title: &str, note: &[&str], options: &[&str], start: usize) -> Result<usize> {
+    let mut screen = Screen::open()?;
+    let mut state = ListState::default();
+    state.select(Some(start));
+    let note_text = note.join("\n");
+    loop {
+        screen.terminal.draw(|f| {
+            let width = f.area().width.max(1) as usize;
+            let note_height: u16 = if note.is_empty() {
+                0
+            } else {
+                note.iter().map(|l| l.chars().count().div_ceil(width).max(1) as u16).sum::<u16>() + 1
+            };
+            let chunks = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(note_height),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+            f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
+            if !note.is_empty() {
+                f.render_widget(Paragraph::new(note_text.as_str()).wrap(Wrap { trim: false }), chunks[1]);
+            }
+            let items: Vec<ListItem> = options.iter().map(|o| ListItem::new(*o)).collect();
+            let list = List::new(items)
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                .highlight_symbol("› ");
+            f.render_stateful_widget(list, chunks[2], &mut state);
+            f.render_widget(
+                Paragraph::new("↑/↓ move · Enter accepts · Esc cancels").style(Style::default().add_modifier(Modifier::DIM)),
+                chunks[3],
+            );
+        })?;
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if is_cancel(key.code, key.modifiers) {
+                bail!("cancelled");
+            }
+            let selected = state.selected().unwrap_or(0);
+            match key.code {
+                KeyCode::Enter => return Ok(selected),
+                KeyCode::Up | KeyCode::Char('k') => state.select(Some(selected.saturating_sub(1))),
+                KeyCode::Down | KeyCode::Char('j') => state.select(Some((selected + 1).min(options.len().saturating_sub(1)))),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Searchable multi-select with no "all" row: Space toggles, Enter accepts the
+/// toggled set (possibly empty — "no fallbacks" is a normal answer). Used for
+/// `agent setup`'s fallback targets.
+pub fn pick_many(title: &str, note: &[&str], items: &[String]) -> Result<Vec<String>> {
+    let mut screen = Screen::open()?;
+    let mut query = String::new();
+    let mut selected: Vec<bool> = vec![false; items.len()];
+    let mut state = ListState::default();
+    state.select(Some(0));
+    let note_text = note.join("\n");
+    loop {
+        let visible: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| query.is_empty() || m.to_lowercase().contains(&query.to_lowercase()))
+            .map(|(i, _)| i)
+            .collect();
+        screen.terminal.draw(|f| {
+            let width = f.area().width.max(1) as usize;
+            let note_height: u16 = if note.is_empty() {
+                0
+            } else {
+                note.iter().map(|l| l.chars().count().div_ceil(width).max(1) as u16).sum::<u16>() + 1
+            };
+            let chunks = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Length(note_height),
+                Constraint::Length(2),
+                Constraint::Min(3),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+            f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
+            if !note.is_empty() {
+                f.render_widget(Paragraph::new(note_text.as_str()).wrap(Wrap { trim: false }), chunks[1]);
+            }
+            f.render_widget(Paragraph::new(format!("Search: {query}▏")), chunks[2]);
+            let rows: Vec<ListItem> = visible
+                .iter()
+                .map(|&i| ListItem::new(format!("{}{}", if selected[i] { "[x] " } else { "[ ] " }, items[i])))
+                .collect();
+            let list = List::new(rows)
+                .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+                .highlight_symbol("› ");
+            f.render_stateful_widget(list, chunks[3], &mut state);
+            f.render_widget(
+                Paragraph::new("↑/↓ move · Space toggles · Enter accepts the toggled set · type to search · Esc cancels")
+                    .style(Style::default().add_modifier(Modifier::DIM)),
+                chunks[4],
+            );
+        })?;
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if is_cancel(key.code, key.modifiers) {
+                bail!("cancelled");
+            }
+            let cursor = state.selected().unwrap_or(0).min(visible.len().saturating_sub(1));
+            match key.code {
+                KeyCode::Enter => {
+                    return Ok(items.iter().enumerate().filter(|(i, _)| selected[*i]).map(|(_, m)| m.clone()).collect());
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(&idx) = visible.get(cursor) {
+                        selected[idx] = !selected[idx];
+                    }
+                }
+                KeyCode::Up => state.select(Some(cursor.saturating_sub(1))),
+                KeyCode::Down => state.select(Some((cursor + 1).min(visible.len().saturating_sub(1)))),
+                KeyCode::Backspace => {
+                    query.pop();
+                    state.select(Some(0));
+                }
+                KeyCode::Char(c) => {
+                    query.push(c);
+                    state.select(Some(0));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// A yes/no screen with the lines that justify the question above it — what
+/// `agent restore --full` and the drift check show before overwriting anything
+/// the user may have edited by hand. `false` is the safe row and the default.
+pub fn confirm(title: &str, lines: &[&str], yes: &str) -> Result<bool> {
+    let options = ["No — leave it as it is", yes];
+    Ok(choose_at(title, lines, &options, 0)? == 1)
+}

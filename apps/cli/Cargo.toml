@@ -2,10 +2,10 @@
 # product SemVer (root package.json / the vX.Y.Z tag) — bump together.
 [package]
 name = "kano-proxy"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2021"
 license = "MIT"
-description = "Official kano-proxy CLI: expose local LLM servers as providers over the agent tunnel"
+description = "Official kano-proxy CLI: tunnel local LLM servers in as providers, and point Claude Code or the Codex CLI at the proxy"
 repository = "https://github.com/yufeng-kano/kano-proxy"
 
 [dependencies]
@@ -17,11 +17,12 @@ futures-util = "0.3"
 ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.10"
 tar = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "io-util", "fs", "process"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+toml_edit = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]

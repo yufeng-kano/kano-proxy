@@ -125,29 +125,29 @@ pub fn penalty_for_outcome(status: u16, headers: &HeaderMap, account: &AccountRo
 }
 
 /// Agent-tunnel fault classification (docs/cli.md § Failover semantics): a response carrying
-/// `x-agent-fault` never reached the local server, so it must degrade the route, never account
+/// `x-tunnel-fault` never reached the local server, so it must degrade the route, never account
 /// state — every fault fails over; only `offline` benches the provider's internal account row,
 /// for 60s, so a group under traffic is not paying a tunnel round-trip per request while a
-/// laptop is closed. A response marked `x-agent-upstream` is a real local answer and takes the
+/// laptop is closed. A response marked `x-tunnel-upstream` is a real local answer and takes the
 /// normal penalty table above.
-pub const AGENT_FAULT_HEADER: &str = "x-agent-fault";
-pub const AGENT_UPSTREAM_MARKER_HEADER: &str = "x-agent-upstream";
-pub const AGENT_OFFLINE_COOLDOWN_MS: i64 = 60_000;
+pub const TUNNEL_FAULT_HEADER: &str = "x-tunnel-fault";
+pub const TUNNEL_UPSTREAM_MARKER_HEADER: &str = "x-tunnel-upstream";
+pub const TUNNEL_OFFLINE_COOLDOWN_MS: i64 = 60_000;
 
 /// Present only for a fault; `failover` is implicit (every verdict fails over).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AgentFaultVerdict {
+pub struct TunnelFaultVerdict {
     pub bench_ms: Option<i64>,
     pub reason: String,
 }
 
-pub fn agent_fault_verdict(headers: &HeaderMap) -> Option<AgentFaultVerdict> {
-    if headers.contains_key(AGENT_UPSTREAM_MARKER_HEADER) {
+pub fn agent_fault_verdict(headers: &HeaderMap) -> Option<TunnelFaultVerdict> {
+    if headers.contains_key(TUNNEL_UPSTREAM_MARKER_HEADER) {
         return None;
     }
-    let reason = headers.get(AGENT_FAULT_HEADER)?.to_str().ok().filter(|s| !s.is_empty())?.to_string();
-    let bench_ms = (reason == "offline").then_some(AGENT_OFFLINE_COOLDOWN_MS);
-    Some(AgentFaultVerdict { bench_ms, reason })
+    let reason = headers.get(TUNNEL_FAULT_HEADER)?.to_str().ok().filter(|s| !s.is_empty())?.to_string();
+    let bench_ms = (reason == "offline").then_some(TUNNEL_OFFLINE_COOLDOWN_MS);
+    Some(TunnelFaultVerdict { bench_ms, reason })
 }
 
 /// Same status set [`penalty_for_outcome`] benches on — kept for call sites that only need the
@@ -284,16 +284,16 @@ mod tests {
     fn agent_faults_fail_over_and_only_offline_benches() {
         assert_eq!(agent_fault_verdict(&HeaderMap::new()), None);
         assert_eq!(
-            agent_fault_verdict(&headers(&[(AGENT_FAULT_HEADER, "offline")])),
-            Some(AgentFaultVerdict { bench_ms: Some(AGENT_OFFLINE_COOLDOWN_MS), reason: "offline".into() })
+            agent_fault_verdict(&headers(&[(TUNNEL_FAULT_HEADER, "offline")])),
+            Some(TunnelFaultVerdict { bench_ms: Some(TUNNEL_OFFLINE_COOLDOWN_MS), reason: "offline".into() })
         );
         assert_eq!(
-            agent_fault_verdict(&headers(&[(AGENT_FAULT_HEADER, "timeout")])),
-            Some(AgentFaultVerdict { bench_ms: None, reason: "timeout".into() })
+            agent_fault_verdict(&headers(&[(TUNNEL_FAULT_HEADER, "timeout")])),
+            Some(TunnelFaultVerdict { bench_ms: None, reason: "timeout".into() })
         );
         // A real local answer is never a fault, whatever else the headers say.
         assert_eq!(
-            agent_fault_verdict(&headers(&[(AGENT_UPSTREAM_MARKER_HEADER, "1"), (AGENT_FAULT_HEADER, "offline")])),
+            agent_fault_verdict(&headers(&[(TUNNEL_UPSTREAM_MARKER_HEADER, "1"), (TUNNEL_FAULT_HEADER, "offline")])),
             None
         );
     }

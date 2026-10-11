@@ -24,7 +24,7 @@ Database-backed tests read `KANO_TEST_DATABASE_URL` (a throwaway PostgreSQL; CI 
 
 Every app carries its own manifest and lockfile, so each one installs where it lives; there is no repository-wide `pnpm test`.
 
-The agent tunnel protocol ([cli.md](./cli.md)) is tested at protocol level: the multiplexer is driven with in-memory frames, an end-to-end test drives a real WebSocket client against the registry, and the CLI's protocol and state modules carry their own unit tests. A local LLM is free, but the suite still never assumes one is running.
+The CLI tunnel protocol ([cli.md](./cli.md)) is tested at protocol level: the multiplexer is driven with in-memory frames, an end-to-end test drives a real WebSocket client against the registry, and the CLI's protocol and state modules carry their own unit tests. A local LLM is free, but the suite still never assumes one is running.
 
 ## Coding-agent smoke (manual)
 

@@ -148,7 +148,7 @@ export type TranslateOptions = Interpolations & {
  * The one message lookup in the app.
  *
  * ```ts
- * t("keys.title")
+ * t("access.title")
  * t("keys.created", { name })
  * t("models.count", { count: models.length })
  * ```

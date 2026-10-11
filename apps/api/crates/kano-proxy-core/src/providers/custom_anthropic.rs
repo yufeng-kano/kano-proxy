@@ -190,7 +190,7 @@ impl ProviderAdapter for CustomAnthropicAdapter {
         let bytes = res.bytes().await.map_err(|e| AdapterError::Other(e.into()))?;
         if !status.is_success() {
             // Full headers, not just content-type: a CLI provider's tunnel fault marker
-            // (x-agent-fault / x-agent-upstream) must survive this rebuild or dispatch can
+            // (x-tunnel-fault / x-tunnel-upstream) must survive this rebuild or dispatch can
             // neither fail over nor bench (docs/cli.md).
             return Ok(rebuild(status, headers, bytes));
         }
@@ -506,7 +506,7 @@ mod tests {
         let transport = MockTransport::new();
         transport.expect(|_| {
             let mut headers = HeaderMap::new();
-            headers.insert("x-agent-fault", http::HeaderValue::from_static("offline"));
+            headers.insert("x-tunnel-fault", http::HeaderValue::from_static("offline"));
             headers.insert("content-type", http::HeaderValue::from_static("application/json"));
             Ok(crate::upstream::UpstreamResponse::from_bytes(
                 StatusCode::BAD_GATEWAY,
@@ -520,7 +520,7 @@ mod tests {
             .await
             .expect("chat completions");
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(res.headers().get("x-agent-fault").unwrap(), "offline");
+        assert_eq!(res.headers().get("x-tunnel-fault").unwrap(), "offline");
     }
 
     #[tokio::test]

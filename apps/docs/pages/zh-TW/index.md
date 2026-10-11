@@ -29,6 +29,6 @@ features:
 | OpenAI 相容 | `https://<your-domain>/openai/v1` |
 | Anthropic Messages | `https://<your-domain>/anthropic` |
 
-驗證用 Keys 頁面產生的 API key，放在 `Authorization: Bearer <your-api-key>` 或 `x-api-key: <your-api-key>` 都可以。模型 id 是 `provider/model` 格式，例如 `claude-code/claude-opus-5`。完整清單在 Models 頁面，或呼叫 `GET https://<your-domain>/openai/v1/models`。
+驗證用 Access 頁面產生的 API key，放在 `Authorization: Bearer <your-api-key>` 或 `x-api-key: <your-api-key>` 都可以。模型 id 是 `provider/model` 格式，例如 `claude-code/claude-opus-5`。完整清單在 Models 頁面，或呼叫 `GET https://<your-domain>/openai/v1/models`。
 
 下一步：[開始使用](/zh-TW/guide/getting-started)。

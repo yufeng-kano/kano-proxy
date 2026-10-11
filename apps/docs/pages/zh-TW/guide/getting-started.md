@@ -21,7 +21,7 @@ description: 登入、連接供應商、建立 API key，然後透過 Kano Proxy
 
 ## 3. 建立 API key
 
-進入 **Keys** 建立一把。金鑰以 `sk-kano-proxy-` 開頭，只會顯示一次，出現時就複製下來。可以建多把，一個工具一把，之後隨時撤銷。Keys 頁面也會顯示你這個站的正確 base URL。
+進入 **Access** 建立一把。金鑰以 `sk-kano-proxy-` 開頭，只會顯示一次，出現時就複製下來。可以建多把，一個工具一把，之後隨時撤銷。Keys 頁面也會顯示你這個站的正確 base URL。
 
 ## 4. 送出請求
 

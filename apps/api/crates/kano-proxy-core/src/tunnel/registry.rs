@@ -19,7 +19,7 @@ use super::mux::{
     agent_fault_response, MuxSocket, ModelsReportHook, OpenRequest, OutFrame, SocketClosed, TunnelFault, TunnelMux,
 };
 use super::protocol::{
-    encode_control_frame, is_allowed_path, AgentFaultReason, CliProviderFormat, ControlFrame, AGENT_PROTO,
+    encode_control_frame, is_allowed_path, TunnelFaultReason, CliProviderFormat, ControlFrame, TUNNEL_PROTO,
     CLOSE_REPLACED, CLOSE_RETRY, CLOSE_TOKEN_EXPIRED, FIRST_RES_TIMEOUT_MS,
 };
 use crate::upstream::transport::{ByteStream, TransportError, UpstreamRequest, UpstreamTransport};
@@ -69,7 +69,7 @@ pub struct TunnelStatus {
 
 impl TunnelStatus {
     fn offline() -> Self {
-        Self { connected: false, proto: AGENT_PROTO, slug: None, format: None, inflight: 0, connected_at_ms: None }
+        Self { connected: false, proto: TUNNEL_PROTO, slug: None, format: None, inflight: 0, connected_at_ms: None }
     }
 }
 
@@ -205,7 +205,7 @@ impl TunnelRegistry {
         };
         if let Some(old) = replaced {
             old.cancel_expiry();
-            old.mux.abort_all(AgentFaultReason::Replaced);
+            old.mux.abort_all(TunnelFaultReason::Replaced);
             old.send_close(CLOSE_REPLACED, "replaced");
         }
 
@@ -222,7 +222,7 @@ impl TunnelRegistry {
         *connection.expiry_timer.lock().expect("tunnel lock") = Some(timer);
 
         let _ = connection.send_text(encode_control_frame(&ControlFrame::Hello {
-            proto: AGENT_PROTO,
+            proto: TUNNEL_PROTO,
             slug: params.slug.clone(),
         }));
 
@@ -241,7 +241,7 @@ impl TunnelRegistry {
     pub fn disconnect(&self, connection: &Arc<Connection>) {
         self.take_if_current(connection);
         connection.cancel_expiry();
-        connection.mux.abort_all(AgentFaultReason::Offline);
+        connection.mux.abort_all(TunnelFaultReason::Offline);
     }
 
     /// The models-report write failed: close retryably so the reconnect
@@ -268,9 +268,9 @@ impl TunnelRegistry {
         connection.cancel_expiry();
         // Token expiry is a revocation, not a takeover: open requests see `offline`.
         connection.mux.abort_all(if code == CLOSE_TOKEN_EXPIRED {
-            AgentFaultReason::Offline
+            TunnelFaultReason::Offline
         } else {
-            AgentFaultReason::Replaced
+            TunnelFaultReason::Replaced
         });
         connection.send_close(code, reason);
     }
@@ -295,7 +295,7 @@ impl TunnelRegistry {
             None => TunnelStatus::offline(),
             Some(connection) => TunnelStatus {
                 connected: true,
-                proto: AGENT_PROTO,
+                proto: TUNNEL_PROTO,
                 slug: Some(connection.params.slug.clone()),
                 format: Some(connection.params.format),
                 inflight: connection.mux.inflight_count(),
@@ -312,8 +312,8 @@ impl TunnelRegistry {
     }
 
     /// Proxies one client request down the provider's tunnel. `Ok` is the local
-    /// server's answer marked `x-agent-upstream: 1`; `Err` is a tunnel fault
-    /// (502 `x-agent-fault: …`) — the tri-state guard of docs/cli.md.
+    /// server's answer marked `x-tunnel-upstream: 1`; `Err` is a tunnel fault
+    /// (502 `x-tunnel-fault: …`) — the tri-state guard of docs/cli.md.
     pub async fn proxy(
         &self,
         provider_id: &str,
@@ -324,10 +324,10 @@ impl TunnelRegistry {
     ) -> Result<UpstreamResponse, TunnelFault> {
         let connection = { self.inner.connections.lock().expect("tunnel lock").get(provider_id).cloned() };
         let Some(connection) = connection else {
-            return Err(TunnelFault::new(AgentFaultReason::Offline));
+            return Err(TunnelFault::new(TunnelFaultReason::Offline));
         };
         if !is_allowed_path(connection.params.format, path) {
-            return Err(TunnelFault::new(AgentFaultReason::Protocol));
+            return Err(TunnelFault::new(TunnelFaultReason::Protocol));
         }
         let forwarded = FORWARDED_REQUEST_HEADERS
             .iter()
@@ -408,7 +408,7 @@ impl UpstreamTransport for AgentTransport {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use crate::tunnel::mux::{MuxMessage, AGENT_FAULT_HEADER, AGENT_UPSTREAM_HEADER};
+    use crate::tunnel::mux::{MuxMessage, TUNNEL_FAULT_HEADER, TUNNEL_UPSTREAM_HEADER};
     use crate::tunnel::protocol::{encode_binary_frame, BODY_KIND_RESPONSE};
     use serde_json::{json, Value};
 
@@ -487,7 +487,7 @@ mod tests {
         assert_eq!(hello, vec![json!({"t":"hello","proto":1,"slug":"my-mac"})]);
         let status = registry.status("p1");
         assert!(status.connected);
-        assert_eq!(status.proto, AGENT_PROTO);
+        assert_eq!(status.proto, TUNNEL_PROTO);
         assert_eq!(status.slug.as_deref(), Some("my-mac"));
         assert_eq!(registry.connected_provider_ids(), vec!["p1".to_string()]);
         registry.disconnect(&conn);
@@ -518,7 +518,7 @@ mod tests {
 
         let (_second, mut second_rx) = registry.connect(params("p1", 60_000));
         assert_eq!(closes(&drain(&mut first_rx)), vec![(CLOSE_REPLACED, "replaced")]);
-        assert_eq!(pending.await.unwrap(), Some(AgentFaultReason::Replaced));
+        assert_eq!(pending.await.unwrap(), Some(TunnelFaultReason::Replaced));
         assert_eq!(controls(&drain(&mut second_rx), "hello").len(), 1);
         // The replaced socket's late close must not evict its successor.
         registry.disconnect(&first);
@@ -575,7 +575,7 @@ mod tests {
             .await
             .err()
             .map(|f| f.reason);
-        assert_eq!(fault, Some(AgentFaultReason::Offline));
+        assert_eq!(fault, Some(TunnelFaultReason::Offline));
     }
 
     #[tokio::test]
@@ -587,7 +587,7 @@ mod tests {
             .await
             .err()
             .map(|f| f.reason);
-        assert_eq!(fault, Some(AgentFaultReason::Protocol));
+        assert_eq!(fault, Some(TunnelFaultReason::Protocol));
     }
 
     #[tokio::test]
@@ -629,7 +629,7 @@ mod tests {
 
         let response = proxying.await.unwrap().expect("a response");
         assert_eq!(response.status, http::StatusCode::OK);
-        assert_eq!(response.headers.get(AGENT_UPSTREAM_HEADER).unwrap(), "1");
+        assert_eq!(response.headers.get(TUNNEL_UPSTREAM_HEADER).unwrap(), "1");
         assert_eq!(response.json_value().await.unwrap(), json!({"ok":true}));
     }
 
@@ -642,7 +642,7 @@ mod tests {
             .await
             .expect("the agent transport never errors");
         assert_eq!(response.status, http::StatusCode::BAD_GATEWAY);
-        assert_eq!(response.headers.get(AGENT_FAULT_HEADER).unwrap(), "offline");
+        assert_eq!(response.headers.get(TUNNEL_FAULT_HEADER).unwrap(), "offline");
         assert_eq!(response.json_value().await.unwrap(), json!({"error":{"type":"agent_fault","reason":"offline"}}));
     }
 
@@ -697,7 +697,7 @@ mod tests {
         };
         tokio::time::sleep(Duration::from_millis(20)).await;
         registry.disconnect(&conn);
-        assert_eq!(proxying.await.unwrap(), Some(AgentFaultReason::Offline));
+        assert_eq!(proxying.await.unwrap(), Some(TunnelFaultReason::Offline));
     }
 
     #[tokio::test]
@@ -718,7 +718,7 @@ mod tests {
             .await
             .err()
             .map(|f| f.reason);
-        assert_eq!(fault, Some(AgentFaultReason::Timeout));
+        assert_eq!(fault, Some(TunnelFaultReason::Timeout));
     }
 
     #[test]
@@ -759,6 +759,6 @@ mod tests {
             .collect();
         assert_eq!(sizes, vec![1024 * 1024, 1_500_000 - 1024 * 1024, 4]);
         conn.mux().handle_message(MuxMessage::Text(json!({"t":"res_err","id":1,"reason":"timeout"}).to_string())).await;
-        assert_eq!(proxying.await.unwrap(), Some(AgentFaultReason::Timeout));
+        assert_eq!(proxying.await.unwrap(), Some(TunnelFaultReason::Timeout));
     }
 }

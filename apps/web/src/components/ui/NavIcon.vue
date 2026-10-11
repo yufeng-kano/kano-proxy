@@ -10,7 +10,7 @@
  * Always decorative — every nav item ships a text label beside it.
  */
 defineProps<{
-  name: "overview" | "logs" | "providers" | "models" | "groups" | "keys" | "docs" | "changelog"
+  name: "overview" | "logs" | "providers" | "models" | "groups" | "access" | "docs" | "changelog"
 }>()
 </script>
 
@@ -61,8 +61,8 @@ defineProps<{
       <path d="M8 8v2.5A1.5 1.5 0 009.5 12H14" />
     </template>
 
-    <!-- Keys -->
-    <template v-else-if="name === 'keys'">
+    <!-- Access: a key, the credential the page is about -->
+    <template v-else-if="name === 'access'">
       <circle cx="5.25" cy="10.75" r="2.75" />
       <path d="M7.25 8.75L13 3M11 5l1.5 1.5M9.5 6.5L11 8" />
     </template>

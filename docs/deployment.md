@@ -13,7 +13,7 @@ docker compose up -d --build
 
 Point `DOMAIN`'s DNS at the machine and open port 80 and 443 to it. Caddy gets a certificate on first request. The server applies its migrations at start, so an empty database is ready by the time it listens.
 
-If you already run a reverse proxy, delete the `caddy` service and send `/api/*`, `/openai/*`, `/anthropic/*`, `/g/*`, `/agent/*` and `/health` to the server on `:8787` and everything else to the web app on `:80`. Do not buffer responses and allow long idle gaps: model streams and the agent tunnel are long-lived connections.
+If you already run a reverse proxy, delete the `caddy` service and send `/api/*`, `/openai/*`, `/anthropic/*`, `/g/*`, `/cli/v1/*`, `/agent/*` and `/health` to the server on `:8787` and everything else to the web app on `:80` (`/agent/*` only answers the CLI-upgrade `410` and can be dropped with the next major release — [cli.md](./cli.md) § Server routes; `/cli/authorize` is a page of the web app and must stay with it, which the `/cli/v1/` prefix leaves alone). Do not buffer responses and allow long idle gaps: model streams and the CLI tunnel are long-lived connections.
 
 ## Domains
 

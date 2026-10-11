@@ -32,7 +32,7 @@ async fn run(registry: TunnelRegistry, params: ConnectParams, socket: WebSocket)
     // Ends the writer when the read side stopped first (client close or error).
     connection.send_close(1000, "closed");
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer).await;
-    tracing::debug!(provider_id, "agent tunnel socket closed");
+    tracing::debug!(provider_id, "CLI tunnel socket closed");
 }
 
 async fn write_loop(mut sink: futures::stream::SplitSink<WebSocket, Message>, mut commands: CommandReceiver) {
@@ -111,7 +111,7 @@ mod tests {
 
     use super::*;
     use crate::tunnel::protocol::{
-        encode_binary_frame, AgentFaultReason, CliProviderFormat, BODY_KIND_REQUEST, BODY_KIND_RESPONSE,
+        encode_binary_frame, TunnelFaultReason, CliProviderFormat, BODY_KIND_REQUEST, BODY_KIND_RESPONSE,
         CLOSE_REPLACED, CLOSE_RETRY, CLOSE_TOKEN_EXPIRED, MAX_CHUNK_BYTES, MAX_INFLIGHT,
     };
     use crate::tunnel::registry::{ConnectObserver, ModelsSink, TunnelRegistry};
@@ -260,7 +260,7 @@ mod tests {
 
         let response = proxying.await.unwrap().expect("the local server's answer");
         assert_eq!(response.status, http::StatusCode::OK);
-        assert_eq!(response.headers.get(crate::tunnel::mux::AGENT_UPSTREAM_HEADER).unwrap(), "1");
+        assert_eq!(response.headers.get(crate::tunnel::mux::TUNNEL_UPSTREAM_HEADER).unwrap(), "1");
         assert_eq!(response.content_type(), Some("text/event-stream"));
         assert_eq!(response.text().await.unwrap(), "data: one\n\ndata: two\n\n");
     }
@@ -283,7 +283,7 @@ mod tests {
             .await
             .err()
             .map(|f| f.reason);
-        assert_eq!(fault, Some(AgentFaultReason::Busy));
+        assert_eq!(fault, Some(TunnelFaultReason::Busy));
         for handle in open {
             handle.abort();
         }
@@ -300,7 +300,7 @@ mod tests {
         let req = next_control(&mut client).await;
         let id = req["id"].as_u64().unwrap();
         assert_eq!(next_control(&mut client).await, json!({"t":"req_end","id":id}));
-        assert_eq!(proxying.await.unwrap().err().map(|f| f.reason), Some(AgentFaultReason::Timeout));
+        assert_eq!(proxying.await.unwrap().err().map(|f| f.reason), Some(TunnelFaultReason::Timeout));
         // The CLI is told to stop working on it.
         assert_eq!(next_control(&mut client).await, json!({"t":"cancel","id":id}));
     }
@@ -380,7 +380,7 @@ mod tests {
         let proxying = proxy(&registry, "p1", "/chat/completions");
         next_control(&mut client).await;
         client.close(None).await.unwrap();
-        assert_eq!(proxying.await.unwrap().err().map(|f| f.reason), Some(AgentFaultReason::Offline));
+        assert_eq!(proxying.await.unwrap().err().map(|f| f.reason), Some(TunnelFaultReason::Offline));
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!registry.is_connected("p1"));
     }

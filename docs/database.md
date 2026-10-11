@@ -39,8 +39,9 @@ Migrations live in `apps/api/crates/kano-proxy-core/migrations/` and are applied
 | spend_limit | REAL | nullable; USD ceiling per window, `NULL` = unlimited ([pricing.md](./pricing.md)) |
 | spend_limit_interval | TEXT | `daily` \| `weekly` \| `monthly` \| `total`; `NOT NULL DEFAULT 'monthly'` |
 | spend_limit_include_oauth | INTEGER | 0/1, `NOT NULL DEFAULT 1`; whether builtin-provider (subscription OAuth) traffic counts toward the limit |
+| device_id | TEXT FK | nullable; the `cli_devices` row that minted the key through `POST /cli/v1/keys` ([cli.md](./cli.md) § Keys and groups), `ON DELETE CASCADE` — revoking the device deletes its keys. `NULL` for keys created in the web UI. Indexed |
 
-Spend-limit columns added in `0004_api_key_spend_limits.sql`.
+Spend-limit columns added in `0004_api_key_spend_limits.sql`; `device_id` in `0003_api_keys_device.sql` (the core's own numbering, after the baseline).
 
 ### `upstream_accounts`
 
@@ -111,6 +112,8 @@ One machine that ran `kano-proxy init` (contract: [cli.md](./cli.md)). Added in 
 | last_seen_at | TEXT | nullable; bumped on token rotation and tunnel connect |
 | created_at | TEXT | |
 
+Deleting a device cascades to `api_keys.device_id` (the keys it minted) and nulls nothing else — `cli_providers.device_id` is informational and keeps its value until the provider is removed.
+
 ### `cli_login_requests`
 
 Pending `kano-proxy init` authorize-then-paste logins ([cli.md](./cli.md) § Device auth). Added in `0015_cli_providers.sql`. Expired rows are purged by the daily retention sweep ([logging.md](./logging.md)).
@@ -130,7 +133,7 @@ Pending `kano-proxy init` authorize-then-paste logins ([cli.md](./cli.md) § Dev
 
 ### `cli_providers`
 
-One local endpoint registered by `kano-proxy add` (contract: [cli.md](./cli.md)). Added in `0015_cli_providers.sql`. Each row also owns one `upstream_accounts` row (`provider = slug`, placeholder credential) — internal routing state only, created and deleted with the provider, never shown as an account. The local target URL and its optional API key are **not stored here** — they are CLI state on the device.
+One local endpoint registered by `kano-proxy tunnel add` (contract: [cli.md](./cli.md)). Added in `0015_cli_providers.sql`. Each row also owns one `upstream_accounts` row (`provider = slug`, placeholder credential) — internal routing state only, created and deleted with the provider, never shown as an account. The local target URL and its optional API key are **not stored here** — they are CLI state on the device.
 
 | Column | Type | Notes |
 |--------|------|-------|

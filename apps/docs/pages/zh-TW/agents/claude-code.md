@@ -1,13 +1,26 @@
 ---
 title: Claude Code
-description: 用 ANTHROPIC_BASE_URL 與 ANTHROPIC_AUTH_TOKEN 把 Claude Code 指向 Kano Proxy，並選擇由哪個 provider/model 回應。
+description: 用一道 CLI 指令，或手動用 ANTHROPIC_BASE_URL 與 ANTHROPIC_AUTH_TOKEN 把 Claude Code 指向 Kano Proxy，並選擇由哪個 provider/model 回應。
 ---
 
 # Claude Code
 
 完整可用。Claude Code 講的是 Anthropic Messages API，proxy 原生支援。回應的不限於 Claude：把模型設成 `codex/`、`grok/` 或 `antigravity/` 開頭的 id，proxy 會轉換請求與串流。
 
-## 設定
+## 用 CLI 一次設好
+
+[kano-proxy CLI](/zh-TW/guide/local-models) 可以替你寫好這份設定：
+
+```console
+$ kano-proxy init                      # 每台機器一次
+$ kano-proxy agent setup claude-code
+```
+
+它會讀取你的帳號實際能用的模型，讓你挑 Opus、Sonnet、Haiku 各對應到哪個模型（可選其他供應商的備援），建立一個名為 `claude-code` 的模型群組、群組裡的模型名稱就是原本的 Claude id，建立一把以這台機器命名的 API key，然後把下面那段 `env` 寫進 `~/.claude/settings.json`，`ANTHROPIC_BASE_URL` 指向群組端點。走群組是有原因的：Claude Code 會依它看到的模型 id 決定開啟哪些功能，而 `/g/claude-code/anthropic` 回的是 `claude-opus-5` 這種真實 id，即使 proxy 實際轉到別的供應商也一樣。
+
+`kano-proxy agent restore claude-code` 會把寫過的欄位還原並撤銷 key；加 `--full` 則用事前備份整檔還原。`kano-proxy agent list` 顯示目前由 CLI 管理的項目。群組會留在 Groups 頁面，隨時可以調整順序或加備援目標。
+
+## 手動設定
 
 在 `~/.claude/settings.json` 加一段 `env`。這裡的值套用到每次啟動，且優先於 shell 環境變數。
 

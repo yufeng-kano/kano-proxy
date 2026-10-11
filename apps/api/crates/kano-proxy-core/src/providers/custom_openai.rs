@@ -40,7 +40,7 @@ pub struct CustomOpenAiAdapter {
     base: String,
     count_tokens_url: Option<String>,
     /// Injected transport for CLI providers (docs/cli.md): same adapter semantics, but the
-    /// request goes down the agent tunnel instead of the network. `None` uses
+    /// request goes down the CLI tunnel instead of the network. `None` uses
     /// `AppState::transport()`, the `fetch` default of the TypeScript constructor.
     transport: Option<Arc<dyn UpstreamTransport>>,
     /// CLI providers drop the live catalog — it is agent-reported, never pulled
@@ -299,7 +299,7 @@ pub(crate) fn into_response(res: UpstreamResponse) -> Response {
 }
 
 /// `new Response(text, { status, headers })` — the rebuild that keeps every upstream header,
-/// so a CLI tunnel's `x-agent-fault` marker survives (docs/cli.md).
+/// so a CLI tunnel's `x-tunnel-fault` marker survives (docs/cli.md).
 pub(crate) fn rebuild(status: StatusCode, headers: HeaderMap, body: Bytes) -> Response {
     let mut builder = Response::builder().status(status);
     if let Some(h) = builder.headers_mut() {

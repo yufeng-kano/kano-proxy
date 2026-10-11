@@ -10,17 +10,17 @@ Vue 3 + Vite + TypeScript, served as static files from the same hostname as the 
 | `/login` | Google sign-in (split brand panel + sign-in panel) |
 | `/overview` | Usage and cache-rate dashboard over `request_logs` |
 | `/logs` | Per-request log explorer over `request_logs` — newest first, cursor-paged |
-| `/providers` | Connected subscription accounts (Claude / Codex / Grok), custom endpoints, and CLI devices + CLI providers ([cli.md](./cli.md)), one section per provider |
+| `/providers` | Connected subscription accounts (Claude / Codex / Grok), custom endpoints, and CLI providers ([cli.md](./cli.md)), one section per provider |
 | `/models` | Searchable catalog of `provider/model` ids, grouped by provider |
 | `/groups` | Model groups: virtual endpoints (`/g/<slug>/…`) whose model names map to ordered `provider/model` targets |
-| `/keys` | Create / revoke API keys, plus the client connection details |
+| `/access` | The user's credentials: API keys (create / edit / revoke), CLI devices (rename / revoke), and the client connection details — three tabs (§ Access page) |
 | `/cli/authorize` | Session-gated approve view the `kano-proxy init` login lands on — a **bare** page outside the shell (§ CLI authorize view) |
 | `/changelog` | Published GitHub Releases, newest first ([changelog.md](./changelog.md)). An edition may leave it out (§ Layout: edition options) |
 | `/docs/` | **Not a route of this app.** Static VitePress site served by Pages from the same build ([docs-site.md](./docs-site.md)); the router never sees it. Linked from the login footer and the sidebar |
 
 Every route carries a `titleKey` (a catalog key) and the router's `afterEach` sets `document.title` to `<page> · <site name>`, so browser tabs and history are readable; the static `<title>` in `index.html` is only the pre-boot value. Every path except `/docs/*` and `/login` is served with `X-Robots-Tag: noindex` from `apps/web/public/_headers` ([docs-site.md](./docs-site.md) § SEO).
 
-`/dashboard`, `/accounts`, and `/cli` are kept as permanent redirects to `/overview`, `/providers`, and `/providers` — a bookmark or a persisted last-route from an older build must not 404 into the catch-all. There is **no `/cli` page and no CLI nav item**: CLI management lives on the Providers page, and CLI models appear on the Models page like any other provider's.
+`/dashboard`, `/accounts`, `/cli` and `/keys` are kept as permanent redirects to `/overview`, `/providers`, `/providers` and `/access` — a bookmark or a persisted last-route from an older build must not 404 into the catch-all. There is **no `/cli` page and no CLI nav item**: CLI providers live on the Providers page, CLI devices on the Access page (they are credentials), and CLI models appear on the Models page like any other provider's.
 
 ## Design restraint
 
@@ -289,7 +289,7 @@ Custom endpoints (`GET /api/custom-providers` — see [auth.md](./auth.md)):
 
 ## Groups page
 
-Route `/groups`, nav item **Groups** between Models and Keys. Data: `GET /api/model-groups` ([auth.md](./auth.md)), cache-first under `kano-proxy:model-groups:{userId}` with the standard 2 min TTL and logout sweep. Contract: [providers.md](./providers.md) § Model groups — since v4 a group is a **virtual endpoint** (slug + per-group models, each with its own target list), and the page's job is to show, per group, where a client points (the endpoint) and what each of its model names routes to.
+Route `/groups`, nav item **Groups** between Models and Access. Data: `GET /api/model-groups` ([auth.md](./auth.md)), cache-first under `kano-proxy:model-groups:{userId}` with the standard 2 min TTL and logout sweep. Contract: [providers.md](./providers.md) § Model groups — since v4 a group is a **virtual endpoint** (slug + per-group models, each with its own target list), and the page's job is to show, per group, where a client points (the endpoint) and what each of its model names routes to.
 
 - **Master–detail, no card** (redesigned 2026-10-05; the v4 one-card DataTable stacked every model's targets vertically inside one cell, which stopped being scannable past a handful of models). Under the unchanged PageHeader the body fills the rest of the content region **edge to edge**: the page cancels the shell's gutter and bottom padding the same way PageHeader cancels the top, and there is no border, radius or shadow around the body. The page itself never scrolls; each pane scrolls on its own.
   - **Left: group list** (256px; 220px between 768 and 1080px). Transparent on the page `--bg`, a hairline on its right edge. An uppercase "N groups" label, then one full-width row per group: name, then `slug` (mono) · "N models". A `--warn` dot marks a group with any unusable target (routing says `usable: false`, or a pinned account is gone), with a `title` and sr-only text, never color alone. The selected row is a `--surface` fill with a hairline ring (`aria-current`); ↑/↓ move the selection.
@@ -315,13 +315,12 @@ Route `/groups`, nav item **Groups** between Models and Keys. Data: `GET /api/mo
 - **Empty state** explains the job (a dedicated endpoint whose model names route where you decide — map a hard-coded client model name, join the same model across accounts) with a Create group action.
 - **Models page:** the shared catalog no longer carries a `group` section (groups live on their own endpoints and their own page); provider sections stay dynamic with no group special-case left.
 
-## CLI sections (on the Providers page)
+## CLI section (on the Providers page)
 
-No dedicated page and no nav item — the CLI's two datasets are sections of the Providers page, shown on the **All** and **CLI** tabs. Data: `GET /api/cli/devices` + `GET /api/cli/providers` ([auth.md](./auth.md) § CLI devices and providers), cache-first under `kano-proxy:cli:{userId}` with the standard 2 min TTL and logout sweep, loaded and polled together with the page's other sections. Contract: [cli.md](./cli.md) § Web UI.
+No dedicated page and no nav item — CLI providers are a section of the Providers page, shown on the **All** and **CLI** tabs; CLI devices are on the Access page (§ Access page), because a device is a credential, not a provider (operator decision 2026-10-11). Data: `GET /api/cli/providers` ([auth.md](./auth.md) § CLI devices and providers), cache-first under `kano-proxy:cli:{userId}` (one cache for devices and providers, shared with the Access page) with the standard 2 min TTL and logout sweep, loaded and polled together with the page's other sections. Contract: [cli.md](./cli.md) § Web UI.
 
-- **Two datasets, two cards** (they are genuinely separate collections — the card rule in § Design restraint): **CLI devices** (name, last seen, created — row actions behind the section edit gate: **Rename** as the pencil, then **Revoke**, danger tone, confirm-first, keeps its word) and **CLI providers** (slug as a `mono` chip, format badge, connection state — a StatusDot pair `Connected` / `Offline`, never color alone — model count with last report time, registered-from device; row actions: **Rename** as the pencil, **Remove** as the `trash` in the danger tone, confirm-first).
-- **No create flows here** — creation is the CLI's job. When both datasets are empty, one card shows the install one-liners (brew + install script, from the message catalog) and `kano-proxy init --base-url <location.origin>` (this instance's own address, since the CLI's compiled-in default is the hosted edition — [cli.md](./cli.md) § Command surface), and links the GitHub Releases page.
-- Revoking deletes the device, so it leaves the list at once — there is no revoked history to show (operator decision, 2026-09-23).
+- **One card, CLI providers**: slug as a `mono` chip, format badge, connection state — a StatusDot pair `Connected` / `Offline`, never color alone — model count with last report time, registered-from device; row actions behind the section edit gate: **Rename** as the pencil, **Remove** as the `trash` in the danger tone, confirm-first.
+- **No create flow here** — creation is `kano-proxy tunnel add`'s job, and the empty state says so; the install one-liners live with the devices on the Access page, since installing and signing in come before registering anything.
 
 ## CLI authorize view (`/cli/authorize?request=…`)
 
@@ -329,22 +328,32 @@ Session-gated like any admin page (redirects through login), but rendered **outs
 
 - Shows the requesting **device name** and Approve / Deny.
 - On approve (`POST …/approve`) it swaps to the one-time code — a large `CopyField` with the paste-into-the-CLI instruction. The code is shown exactly once; refreshing the page after approval shows the already-approved state, not the code.
-- Deny deletes the request and says so. An expired or unknown request renders its own state with a link into the app (Providers, where the CLI sections live).
+- Deny deletes the request and says so. An expired or unknown request renders its own state with a link into the app (Access, where the devices live).
 
-## Keys page
+## Access page
 
-Two tabs in the sticky header: **Keys** and **Connect** (the client setup details).
+Route `/access`, nav item **Access** (last in the nav; `/keys` redirects here). The page holds the user's credentials — three tabs in the sticky header: **Keys**, **Devices** (CLI devices, [cli.md](./cli.md)) and **Connect** (the client setup details). The rename from API keys (operator decision 2026-10-11): once a CLI device can mint keys, the device is a credential in its own right — a rotating token family — and belongs beside the keys it mints, where both are revoked; a page named after one credential kind could not hold the other.
+
+### Keys tab
 
 Key creation and editing run in a **dialog**, opened from a Create key button in the page header (Keys tab only):
 
 - **Create**: name, optional spend limit (USD; empty = unlimited), reset interval (`daily`/`weekly`/`monthly`/`total`), and an include-OAuth toggle (whether subscription-provider traffic counts — see [pricing.md](./pricing.md)). On success the **same dialog** switches to a done step: the plaintext key in an emphasized copy field with the shown-once warning, dismissed with Done. The list refreshes behind it — no separate banner block above the table; the one place the plaintext ever exists is inside that dialog step.
 - **Edit** (pencil icon, ghost) in a trailing action column at the **far right**: same form minus the key material — rename and adjust the limit fields via `PATCH /api/keys/:id`. Editing never re-shows a key. It sits at the row's end rather than beside the name, because inline it lands at a different x-position on every row (names differ in length), and a column of controls that zigzags is one the eye has to search for on each row.
 - **Revoke lives inside the edit dialog**, as a destructive action in its footer — not as a column. Revoking is rare and irreversible, so it costs one deliberate step (open the key, then confirm) instead of sitting one stray click from every row. It still confirms before firing, and closes the dialog on success.
-- Columns are **Name**, **Key**, **Spend**, **Last used**, then the unlabelled edit column — down from seven. Created is dropped: a key's age answers nothing the last-used column doesn't answer better, and every column removed is width the spend figures get back.
+- Columns are **Name**, **Key**, **Spend**, **Last used**, then the unlabelled edit column — down from seven. Created is dropped: a key's age answers nothing the last-used column doesn't answer better, and every column removed is width the spend figures get back. A key a CLI device minted reads `from <device name>` under its name (one tone under, body size — § Design restraint), from `device_name` on `GET /api/keys`: the link to the device is shown where the key is revoked, and nowhere else is it needed.
 - **Spend** reads `"$3.20 / $50.00"` — spent over the window's ceiling — from `GET /api/keys`' `window_spend`. An unlimited key shows the spend alone (`"$3.20"`) with no denominator and no "No limit" annotation: the absent ceiling *is* the statement, and the extra label was a second thing to read that said nothing new.
 - Spend is **centered under its header** like every numeric column (§ Component primitives), not stranded at the far edge of its track.
 
-**Both tabs' cards fill the content region**, so switching between them does not resize the page. Keys needs the bounded card anyway (sticky header, list scrolling inside it — § Anti-scroll rules); Connect is short and would otherwise hug its content, which made the card jump between two heights on every tab switch. A tab switch changes what is on the surface, never how big the surface is.
+### Devices tab
+
+The CLI devices card, moved here from the Providers page: name, last seen, created, and **Keys** — how many API keys the device minted that still exist (`key_count`). Row actions behind the section edit gate (§ Providers page): **Rename** as the pencil, then **Revoke**, danger tone, confirm-first, and the confirmation names the key count — revoking a device deletes the keys it minted ([cli.md](./cli.md) § Keys and groups), which is exactly the thing the user must know before pressing it. Revoking deletes the device, so it leaves the list at once — there is no revoked history to show (operator decision, 2026-09-23). Data: `GET /api/cli/devices`, through the shared CLI cache (§ CLI section).
+
+**No create flow** — signing in is the CLI's job. When there are no devices the card shows the install one-liners (brew + install script, from the message catalog) and `kano-proxy init --base-url <location.origin>` (this instance's own address, since the CLI's compiled-in default is the hosted edition — [cli.md](./cli.md) § Command surface), and links the GitHub Releases page.
+
+### Connect tab
+
+**Every tab's card fills the content region**, so switching between them does not resize the page. Keys and Devices need the bounded card anyway (sticky header, list scrolling inside it — § Anti-scroll rules); Connect is short and would otherwise hug its content, which made the card jump between two heights on every tab switch. A tab switch changes what is on the surface, never how big the surface is.
 
 Connect shows the base URLs derived from the current deploy host (`VITE_API_ORIGIN` locally, same-origin in production) — not hard-coded:
 

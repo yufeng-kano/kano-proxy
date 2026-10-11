@@ -127,7 +127,7 @@ async function deny() {
                 : t("cli.authorize.missing")
           }}
         </p>
-        <AppButton variant="ghost" to="/providers">{{ t("cli.authorize.goToApp") }}</AppButton>
+        <AppButton variant="ghost" to="/access">{{ t("cli.authorize.goToApp") }}</AppButton>
       </div>
     </AppCard>
   </div>

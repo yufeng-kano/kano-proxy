@@ -1,8 +1,12 @@
-//! `/agent/v1`, the kano-proxy CLI's own
-//! namespace (docs/cli.md § Server routes): device login, refresh-token rotation,
-//! provider CRUD and the WebSocket connect that hands a verified socket to the
-//! tunnel registry. Token-authenticated (never session), no CORS — there are no
-//! browser callers.
+//! `/cli/v1`, the kano-proxy CLI's own namespace (docs/cli.md § Server routes):
+//! device login, refresh-token rotation, provider CRUD, the WebSocket connect
+//! that hands a verified socket to the tunnel registry, and — for `kano-proxy
+//! agent setup` — the key, model-group and catalog routes, which run the session
+//! routes' handler bodies behind the device authenticator. Token-authenticated
+//! (never session), no CORS — there are no browser callers.
+//!
+//! The pre-2.0 `/agent/v1` namespace answers `410` from `legacy_routes` so a 1.x
+//! binary prints why it stopped working.
 
 use std::net::SocketAddr;
 
@@ -20,6 +24,7 @@ use crate::crypto::cli_tokens::{
 };
 use crate::crypto::timing_safe_equal;
 use crate::crypto::token_crypto::encrypt_json;
+use crate::catalog::models::{list_models_for_user, ListModelsOptions};
 use crate::db::accounts::{insert_account, NewAccount};
 use crate::db::cli::{
     count_cli_devices, count_cli_providers, delete_cli_provider, find_cli_device_by_prev_refresh_hash,
@@ -29,6 +34,7 @@ use crate::db::cli::{
     NewCliProvider, MAX_CLI_DEVICES_PER_USER, MAX_LOGIN_CODE_ATTEMPTS,
 };
 use crate::db::custom_providers::{count_custom_providers, get_custom_provider_by_slug, MAX_CUSTOM_PROVIDERS_PER_USER};
+use crate::db::keys::{create_key_for_device, delete_key_for_device};
 use crate::pool::StoredCredential;
 use crate::tunnel::protocol::{validate_models_report, CliProviderFormat};
 use crate::tunnel::registry::ConnectParams;
@@ -36,15 +42,35 @@ use crate::utils::custom_provider::{is_custom_provider_format, validate_name, va
 use crate::AppState;
 
 use super::cli_shared::{list_cli_provider_items, remove_cli_provider};
+use super::keys::key_json;
+use super::model_groups::{create_for_user, list_for_user, remove_for_user, update_for_user};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/login/start", post(login_start))
         .route("/login/complete", post(login_complete))
         .route("/token", post(token))
+        .route("/device", axum::routing::delete(delete_device))
         .route("/providers", get(list_providers).post(create_provider))
         .route("/providers/{id}", axum::routing::delete(delete_provider))
         .route("/connect/{providerId}", get(connect))
+        .route("/models", get(list_models))
+        .route("/keys", post(create_key))
+        .route("/keys/{id}", axum::routing::delete(delete_key))
+        .route("/model-groups", get(list_groups).post(create_group))
+        .route("/model-groups/{id}", axum::routing::put(update_group).delete(delete_group))
+}
+
+/// What a kano-proxy 1.x binary gets on the namespace it was built for: a `410` whose body it
+/// prints verbatim, naming the fix. Not an alias — nothing here serves (docs/cli.md § Server
+/// routes); removed with the next major release.
+pub fn legacy_routes() -> Router<AppState> {
+    Router::new().fallback(|| async {
+        error(
+            StatusCode::GONE,
+            "this kano-proxy CLI release is no longer supported — run `kano-proxy update` (2.0 or newer)",
+        )
+    })
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
@@ -425,6 +451,90 @@ async fn delete_provider(State(state): State<AppState>, headers: HeaderMap, Path
     }
 }
 
+/// `DELETE /device` — `kano-proxy logout`: the device revokes itself. The row goes, and with it
+/// (by cascade) the keys it minted; live sockets die at access-token expiry as for a web-UI
+/// revoke. A device already revoked is a plain 401 — the CLI treats both as "signed out".
+async fn delete_device(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    match revoke_cli_device(state.pool(), &auth.claims.user_id, &auth.device.id).await {
+        Ok(_) => Json(json!({ "ok": true })).into_response(),
+        Err(_) => internal_error(),
+    }
+}
+
+/// `GET /models` — the user's catalog in the `GET /api/models` shape (minus the bases, which
+/// the CLI derives from its own `base_url`). What `agent setup` offers to pick from: the live
+/// list, so an unconnected provider contributes nothing and no id is ever invented.
+async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    let catalog =
+        list_models_for_user(&state, &auth.claims.user_id, ListModelsOptions { available_only: false, force: false }).await;
+    let providers: Vec<Value> = catalog
+        .providers
+        .iter()
+        .map(|p| json!({ "provider": p.provider, "count": p.models.len(), "error": p.error, "cached": p.cached }))
+        .collect();
+    Json(json!({ "object": "list", "data": catalog.models, "providers": providers })).into_response()
+}
+
+/// `POST /keys` — mint an API key for this device (docs/cli.md § Keys and groups). The row is an
+/// ordinary `api_keys` row with `device_id` set; the plaintext is returned once, as on
+/// `POST /api/keys`. No limit fields: those are the Access page's.
+async fn create_key(State(state): State<AppState>, headers: HeaderMap, body: bytes::Bytes) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    let Some(body) = parse_body(&body) else { return invalid_json() };
+    let name = trimmed_str(&body, "name").to_string();
+    if let Some(message) = validate_name(&name) {
+        return error(StatusCode::BAD_REQUEST, &format!("name: {message}"));
+    }
+    match create_key_for_device(state.pool(), &auth.claims.user_id, Some(&auth.device.id), &name, None).await {
+        Ok(created) => {
+            let mut value = key_json(&created.row);
+            value["key"] = Value::String(created.plaintext);
+            (StatusCode::CREATED, Json(value)).into_response()
+        }
+        Err(_) => internal_error(),
+    }
+}
+
+/// `DELETE /keys/:id` — revoke a key **this device** minted; anything else is a 404, so a
+/// device token is never a way to revoke the user's other keys.
+async fn delete_key(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    match delete_key_for_device(state.pool(), &auth.claims.user_id, &auth.device.id, &id).await {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => error(StatusCode::NOT_FOUND, "not found"),
+        Err(_) => internal_error(),
+    }
+}
+
+// The model-group routes are the `/api/model-groups` handler bodies behind the device
+// authenticator: same validation, caps, and response shape (docs/cli.md § Server routes).
+async fn list_groups(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    list_for_user(&state, &auth.claims.user_id).await
+}
+
+async fn create_group(State(state): State<AppState>, headers: HeaderMap, body: bytes::Bytes) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    create_for_user(&state, &auth.claims.user_id, &body).await
+}
+
+async fn update_group(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: bytes::Bytes,
+) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    update_for_user(&state, &auth.claims.user_id, &id, &body).await
+}
+
+async fn delete_group(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
+    let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
+    remove_for_user(&state, &auth.claims.user_id, &id).await
+}
+
 /// `GET /connect/:providerId` — the only WebSocket route. Everything the tunnel
 /// trusts is verified here first: token signature and expiry, a device that is not
 /// revoked, and a provider row belonging to the token's user. The registry never
@@ -520,10 +630,10 @@ mod tests {
         format!("Bearer {}", tokens.access_token)
     }
 
-    /// The full login dance of agent_routes.test.ts: start → session approve →
+    /// The full login dance of the CLI route tests: start → session approve →
     /// complete.
     async fn sign_in_device(state: &AppState, user: &UserRow, device_name: &str) -> Tokens {
-        let start = send(state, json_req("POST", "/agent/v1/login/start", Some(json!({ "device_name": device_name })), &[])).await;
+        let start = send(state, json_req("POST", "/cli/v1/login/start", Some(json!({ "device_name": device_name })), &[])).await;
         assert_eq!(start.status(), StatusCode::OK);
         let start = body_json(start).await;
         let request_id = start["request_id"].as_str().unwrap().to_string();
@@ -549,7 +659,7 @@ mod tests {
 
         let complete = send(
             state,
-            json_req("POST", "/agent/v1/login/complete", Some(json!({ "request_id": request_id, "code": code })), &[]),
+            json_req("POST", "/cli/v1/login/complete", Some(json!({ "request_id": request_id, "code": code })), &[]),
         )
         .await;
         assert_eq!(complete.status(), StatusCode::OK);
@@ -568,7 +678,7 @@ mod tests {
         config.cli_token_secret = None;
         let state = AppState::builder(config, pool).transport(MockTransport::new()).build();
         let response =
-            send(&state, json_req("POST", "/agent/v1/login/start", Some(json!({ "device_name": "box" })), &[])).await;
+            send(&state, json_req("POST", "/cli/v1/login/start", Some(json!({ "device_name": "box" })), &[])).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_login_requests").fetch_one(state.pool()).await.unwrap();
         assert_eq!(rows, 0, "a disabled endpoint accumulates no request rows");
@@ -597,7 +707,7 @@ mod tests {
         let state = test_state(pool, MockTransport::new());
         let user = insert_user(state.pool(), "attempts@example.com").await;
         let start =
-            body_json(send(&state, json_req("POST", "/agent/v1/login/start", Some(json!({ "device_name": "box" })), &[])).await)
+            body_json(send(&state, json_req("POST", "/cli/v1/login/start", Some(json!({ "device_name": "box" })), &[])).await)
                 .await;
         let request_id = start["request_id"].as_str().unwrap().to_string();
         let (_, cookie) = create_session(&state, &user.id, false).await.unwrap();
@@ -610,10 +720,10 @@ mod tests {
 
         let wrong = || json!({ "request_id": request_id, "code": "AAAA-AAAA" });
         for _ in 0..5 {
-            let response = send(&state, json_req("POST", "/agent/v1/login/complete", Some(wrong()), &[])).await;
+            let response = send(&state, json_req("POST", "/cli/v1/login/complete", Some(wrong()), &[])).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
-        let response = send(&state, json_req("POST", "/agent/v1/login/complete", Some(wrong()), &[])).await;
+        let response = send(&state, json_req("POST", "/cli/v1/login/complete", Some(wrong()), &[])).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(body_json(response).await["error"].as_str().unwrap().contains("too many wrong codes"));
     }
@@ -624,7 +734,7 @@ mod tests {
         let state = test_state(pool, MockTransport::new());
         let user = insert_user(state.pool(), "once@example.com").await;
         let start =
-            body_json(send(&state, json_req("POST", "/agent/v1/login/start", Some(json!({ "device_name": "box" })), &[])).await)
+            body_json(send(&state, json_req("POST", "/cli/v1/login/start", Some(json!({ "device_name": "box" })), &[])).await)
                 .await;
         let request_id = start["request_id"].as_str().unwrap().to_string();
         let (_, cookie) = create_session(&state, &user.id, false).await.unwrap();
@@ -638,11 +748,11 @@ mod tests {
 
         let complete = || json!({ "request_id": request_id, "code": code });
         assert_eq!(
-            send(&state, json_req("POST", "/agent/v1/login/complete", Some(complete()), &[])).await.status(),
+            send(&state, json_req("POST", "/cli/v1/login/complete", Some(complete()), &[])).await.status(),
             StatusCode::OK
         );
         assert_eq!(
-            send(&state, json_req("POST", "/agent/v1/login/complete", Some(complete()), &[])).await.status(),
+            send(&state, json_req("POST", "/cli/v1/login/complete", Some(complete()), &[])).await.status(),
             StatusCode::UNAUTHORIZED
         );
     }
@@ -654,17 +764,17 @@ mod tests {
         let ip = [("cf-connecting-ip", "203.0.113.9")];
         for _ in 0..10 {
             let response =
-                send(&state, json_req("POST", "/agent/v1/login/start", Some(json!({ "device_name": "box" })), &ip)).await;
+                send(&state, json_req("POST", "/cli/v1/login/start", Some(json!({ "device_name": "box" })), &ip)).await;
             assert_eq!(response.status(), StatusCode::OK);
         }
         let response =
-            send(&state, json_req("POST", "/agent/v1/login/start", Some(json!({ "device_name": "box" })), &ip)).await;
+            send(&state, json_req("POST", "/cli/v1/login/start", Some(json!({ "device_name": "box" })), &ip)).await;
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
         // The budget is per address: a different client is unaffected.
         let other = [("cf-connecting-ip", "198.51.100.4")];
         let response =
-            send(&state, json_req("POST", "/agent/v1/login/start", Some(json!({ "device_name": "box" })), &other)).await;
+            send(&state, json_req("POST", "/cli/v1/login/start", Some(json!({ "device_name": "box" })), &other)).await;
         assert_eq!(response.status(), StatusCode::OK);
     }
 
@@ -673,7 +783,7 @@ mod tests {
     #[test]
     fn the_client_ip_prefers_the_forwarded_headers() {
         let parts = |headers: Vec<(&str, &str)>| {
-            let mut builder = Request::builder().uri("/agent/v1/login/start");
+            let mut builder = Request::builder().uri("/cli/v1/login/start");
             for (name, value) in headers {
                 builder = builder.header(name, value);
             }
@@ -701,7 +811,7 @@ mod tests {
 
         let response = send(
             &state,
-            json_req("POST", "/agent/v1/token", Some(json!({ "refresh_token": tokens.refresh_token })), &[]),
+            json_req("POST", "/cli/v1/token", Some(json!({ "refresh_token": tokens.refresh_token })), &[]),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -720,9 +830,9 @@ mod tests {
         let user = insert_user(state.pool(), "theft@example.com").await;
         let tokens = sign_in_device(&state, &user, "box").await;
         let refresh = || json!({ "refresh_token": tokens.refresh_token });
-        send(&state, json_req("POST", "/agent/v1/token", Some(refresh()), &[])).await;
+        send(&state, json_req("POST", "/cli/v1/token", Some(refresh()), &[])).await;
 
-        let reuse = send(&state, json_req("POST", "/agent/v1/token", Some(refresh()), &[])).await;
+        let reuse = send(&state, json_req("POST", "/cli/v1/token", Some(refresh()), &[])).await;
         assert_eq!(reuse.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(body_json(reuse).await["error"], "device_revoked");
         assert!(list_cli_devices(state.pool(), &user.id).await.unwrap().is_empty(), "the device is deleted");
@@ -735,7 +845,7 @@ mod tests {
         let user = insert_user(state.pool(), "garbage@example.com").await;
         sign_in_device(&state, &user, "box").await;
         let response =
-            send(&state, json_req("POST", "/agent/v1/token", Some(json!({ "refresh_token": "kpr_garbage" })), &[])).await;
+            send(&state, json_req("POST", "/cli/v1/token", Some(json!({ "refresh_token": "kpr_garbage" })), &[])).await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert_eq!(list_cli_devices(state.pool(), &user.id).await.unwrap().len(), 1, "the device is kept");
     }
@@ -749,14 +859,14 @@ mod tests {
         crate::db::cli::revoke_cli_device(state.pool(), &user.id, &tokens.device_id).await.unwrap();
         let response = send(
             &state,
-            json_req("POST", "/agent/v1/token", Some(json!({ "refresh_token": tokens.refresh_token })), &[]),
+            json_req("POST", "/cli/v1/token", Some(json!({ "refresh_token": tokens.refresh_token })), &[]),
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     async fn create(state: &AppState, tokens: &Tokens, body: Value) -> Response {
-        send(state, json_req("POST", "/agent/v1/providers", Some(body), &[("authorization", &auth_headers(tokens))])).await
+        send(state, json_req("POST", "/cli/v1/providers", Some(body), &[("authorization", &auth_headers(tokens))])).await
     }
 
     #[tokio::test]
@@ -895,7 +1005,7 @@ mod tests {
 
         let response = send(
             &state,
-            json_req("GET", "/agent/v1/providers", None, &[("authorization", &auth_headers(&tokens))]),
+            json_req("GET", "/cli/v1/providers", None, &[("authorization", &auth_headers(&tokens))]),
         )
         .await;
         let json = body_json(response).await;
@@ -916,7 +1026,7 @@ mod tests {
 
         let response = send(
             &state,
-            json_req("DELETE", &format!("/agent/v1/providers/{id}"), None, &[("authorization", &auth_headers(&tokens))]),
+            json_req("DELETE", &format!("/cli/v1/providers/{id}"), None, &[("authorization", &auth_headers(&tokens))]),
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -934,18 +1044,18 @@ mod tests {
 
         let response = send(
             &state,
-            json_req("GET", "/agent/v1/providers", None, &[("authorization", &auth_headers(&tokens))]),
+            json_req("GET", "/cli/v1/providers", None, &[("authorization", &auth_headers(&tokens))]),
         )
         .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
-    async fn the_agent_surface_rejects_a_missing_or_garbage_bearer_token() {
+    async fn the_device_surface_rejects_a_missing_or_garbage_bearer_token() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool, MockTransport::new());
         for headers in [vec![], vec![("authorization", "Bearer nonsense")], vec![("authorization", "Basic x")]] {
-            let response = send(&state, json_req("GET", "/agent/v1/providers", None, &headers)).await;
+            let response = send(&state, json_req("GET", "/cli/v1/providers", None, &headers)).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
     }
@@ -961,7 +1071,7 @@ mod tests {
 
         let response = send(
             &state,
-            json_req("GET", &format!("/agent/v1/connect/{id}"), None, &[("authorization", &auth_headers(&tokens))]),
+            json_req("GET", &format!("/cli/v1/connect/{id}"), None, &[("authorization", &auth_headers(&tokens))]),
         )
         .await;
         assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
@@ -992,7 +1102,7 @@ mod tests {
         });
 
         let dial = |provider: &str, bearer: Option<String>| {
-            let mut request = format!("ws://{addr}/agent/v1/connect/{provider}")
+            let mut request = format!("ws://{addr}/cli/v1/connect/{provider}")
                 .into_client_request()
                 .unwrap();
             if let Some(bearer) = bearer {
@@ -1025,5 +1135,175 @@ mod tests {
         let row = get_cli_provider_by_id(state.pool(), &user.id, &provider_id).await.unwrap().unwrap();
         remove_cli_provider(&state, &user.id, &row).await.unwrap();
         assert!(!state.tunnels().is_connected(&provider_id));
+    }
+
+    /// The pre-2.0 namespace is gone, not aliased: every path under it is a `410` whose body a
+    /// 1.x binary prints verbatim before exiting (docs/cli.md § Server routes).
+    #[tokio::test]
+    async fn the_legacy_namespace_answers_410_with_the_upgrade_message() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        for (method, path) in [("POST", "/agent/v1/login/start"), ("POST", "/agent/v1/token"), ("GET", "/agent/v1/providers"), ("GET", "/agent/v1/connect/cliprov_x")] {
+            let response = send(&state, json_req(method, path, Some(json!({})), &[])).await;
+            assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");
+            let body = body_json(response).await;
+            assert!(body["error"].as_str().unwrap().contains("kano-proxy update"), "{body}");
+        }
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_login_requests").fetch_one(state.pool()).await.unwrap();
+        assert_eq!(rows, 0, "the 410 serves nothing");
+    }
+
+    /// `agent setup`'s key: minted with the device id, listed on `/api/keys` with the device's
+    /// name, revocable through the device path only by the device that minted it, and never a
+    /// way to revoke the user's other keys (docs/cli.md § Keys and groups).
+    #[tokio::test]
+    async fn a_device_mints_and_revokes_only_its_own_keys() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "keys@example.com").await;
+        let tokens = sign_in_device(&state, &user, "my-mac").await;
+        let other = sign_in_device(&state, &user, "other-box").await;
+
+        let bad = send(&state, json_req("POST", "/cli/v1/keys", Some(json!({ "name": "" })), &[("authorization", &auth_headers(&tokens))])).await;
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(send(&state, json_req("POST", "/cli/v1/keys", Some(json!({ "name": "x" })), &[])).await.status(), StatusCode::UNAUTHORIZED);
+
+        let minted = send(&state, json_req("POST", "/cli/v1/keys", Some(json!({ "name": "claude-code@my-mac" })), &[("authorization", &auth_headers(&tokens))])).await;
+        assert_eq!(minted.status(), StatusCode::CREATED);
+        let minted = body_json(minted).await;
+        assert!(minted["key"].as_str().unwrap().starts_with("sk-kano-proxy-"), "the plaintext, once");
+        assert_eq!(minted["device_id"], json!(tokens.device_id));
+        assert_eq!(minted["name"], "claude-code@my-mac");
+        let key_id = minted["id"].as_str().unwrap().to_string();
+        // The key is a real client credential.
+        let hashed = crate::db::keys::find_key_by_hash(state.pool(), &crate::crypto::keys::hash_api_key(minted["key"].as_str().unwrap())).await.unwrap();
+        assert_eq!(hashed.unwrap().user_id, user.id);
+
+        // The Access page names the device; a web-created key has none.
+        let manual = crate::db::keys::create_key(state.pool(), &user.id, "manual", None).await.unwrap().row;
+        let (_, cookie) = create_session(&state, &user.id, false).await.unwrap();
+        let cookie = cookie.split(';').next().unwrap().to_string();
+        let listed = body_json(send(&state, json_req("GET", "/api/keys", None, &[("cookie", &cookie), ("origin", "https://app.example.com")])).await).await;
+        let keys = listed["keys"].as_array().unwrap();
+        let find = |id: &str| keys.iter().find(|k| k["id"] == id).unwrap().clone();
+        assert_eq!(find(&key_id)["device_name"], "my-mac");
+        assert_eq!(find(&manual.id)["device_name"], Value::Null);
+        assert_eq!(find(&manual.id)["device_id"], Value::Null);
+        let devices = body_json(send(&state, json_req("GET", "/api/cli/devices", None, &[("cookie", &cookie), ("origin", "https://app.example.com")])).await).await;
+        let mine = devices["devices"].as_array().unwrap().iter().find(|d| d["id"] == tokens.device_id).unwrap().clone();
+        assert_eq!(mine["key_count"], 1);
+
+        // Revocation through the device path is scoped to the minting device.
+        let foreign = send(&state, json_req("DELETE", &format!("/cli/v1/keys/{key_id}"), None, &[("authorization", &auth_headers(&other))])).await;
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        let not_mine = send(&state, json_req("DELETE", &format!("/cli/v1/keys/{}", manual.id), None, &[("authorization", &auth_headers(&tokens))])).await;
+        assert_eq!(not_mine.status(), StatusCode::NOT_FOUND);
+        let own = send(&state, json_req("DELETE", &format!("/cli/v1/keys/{key_id}"), None, &[("authorization", &auth_headers(&tokens))])).await;
+        assert_eq!(own.status(), StatusCode::OK);
+        let left = crate::db::keys::list_keys(state.pool(), &user.id).await.unwrap();
+        assert_eq!(left.iter().map(|k| k.id.as_str()).collect::<Vec<_>>(), vec![manual.id.as_str()]);
+    }
+
+    /// `kano-proxy logout`: the device revokes itself; the keys it minted go with it, its
+    /// tokens stop working, and the user's other device and keys are untouched.
+    #[tokio::test]
+    async fn a_device_revokes_itself_and_its_keys() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "logout@example.com").await;
+        let tokens = sign_in_device(&state, &user, "my-mac").await;
+        let other = sign_in_device(&state, &user, "other-box").await;
+        for (who, name) in [(&tokens, "claude-code@my-mac"), (&tokens, "codex@my-mac"), (&other, "codex@other-box")] {
+            let r = send(&state, json_req("POST", "/cli/v1/keys", Some(json!({ "name": name })), &[("authorization", &auth_headers(who))])).await;
+            assert_eq!(r.status(), StatusCode::CREATED);
+        }
+        let manual = crate::db::keys::create_key(state.pool(), &user.id, "manual", None).await.unwrap().row;
+
+        assert_eq!(send(&state, json_req("DELETE", "/cli/v1/device", None, &[])).await.status(), StatusCode::UNAUTHORIZED);
+        let gone = send(&state, json_req("DELETE", "/cli/v1/device", None, &[("authorization", &auth_headers(&tokens))])).await;
+        assert_eq!(gone.status(), StatusCode::OK);
+        assert_eq!(send(&state, json_req("GET", "/cli/v1/providers", None, &[("authorization", &auth_headers(&tokens))])).await.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(send(&state, json_req("POST", "/cli/v1/token", Some(json!({ "refresh_token": tokens.refresh_token })), &[])).await.status(), StatusCode::UNAUTHORIZED);
+        let mut names: Vec<String> = crate::db::keys::list_keys(state.pool(), &user.id).await.unwrap().into_iter().map(|k| k.name).collect();
+        names.sort();
+        assert_eq!(names, ["codex@other-box", "manual"]);
+        assert!(crate::db::keys::list_keys(state.pool(), &user.id).await.unwrap().iter().any(|k| k.id == manual.id));
+        let devices = list_cli_devices(state.pool(), &user.id).await.unwrap();
+        assert_eq!(devices.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(), vec![other.device_id.as_str()]);
+        // Revoking again is a plain 401 — the device no longer exists to be authenticated.
+        assert_eq!(send(&state, json_req("DELETE", "/cli/v1/device", None, &[("authorization", &auth_headers(&tokens))])).await.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// The model-group routes are the session handlers behind the device authenticator: the
+    /// same validation messages, the same response shape, the same rows the Groups page reads.
+    #[tokio::test]
+    async fn model_groups_through_the_device_namespace_are_the_session_routes() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "groups@example.com").await;
+        let stranger = insert_user(state.pool(), "stranger-groups@example.com").await;
+        let tokens = sign_in_device(&state, &user, "my-mac").await;
+        let theirs = sign_in_device(&state, &stranger, "their-box").await;
+        let auth = [("authorization", auth_headers(&tokens))];
+        let auth: Vec<(&str, &str)> = auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+
+        assert_eq!(send(&state, json_req("GET", "/cli/v1/model-groups", None, &[])).await.status(), StatusCode::UNAUTHORIZED);
+        let invalid = send(&state, json_req("POST", "/cli/v1/model-groups", Some(json!({ "name": "Claude Code", "slug": "Bad Slug", "models": [] })), &auth)).await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+        let body = json!({
+            "name": "Claude Code",
+            "slug": "claude-code",
+            "models": [
+                { "name": "claude-opus-5", "targets": ["claude-code/claude-opus-5", "codex/gpt-5.6-sol"] },
+                { "name": "claude-sonnet-5", "targets": ["claude-code/claude-sonnet-5"] }
+            ]
+        });
+        let created = send(&state, json_req("POST", "/cli/v1/model-groups", Some(body), &auth)).await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = body_json(created).await;
+        let group_id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["slug"], "claude-code");
+        assert_eq!(created["models"][0]["name"], "claude-opus-5");
+        assert_eq!(created["models"][0]["targets"][1]["model"], "codex/gpt-5.6-sol");
+
+        // The same rows the session surface lists.
+        let (_, cookie) = create_session(&state, &user.id, false).await.unwrap();
+        let cookie = cookie.split(';').next().unwrap().to_string();
+        let session_view = body_json(send(&state, json_req("GET", "/api/model-groups", None, &[("cookie", &cookie), ("origin", "https://app.example.com")])).await).await;
+        assert_eq!(session_view["groups"][0]["id"], group_id);
+        let device_view = body_json(send(&state, json_req("GET", "/cli/v1/model-groups", None, &auth)).await).await;
+        assert_eq!(device_view["groups"], session_view["groups"]);
+
+        // A rerun updates by id; a stranger's device never sees the group.
+        let updated = send(&state, json_req("PUT", &format!("/cli/v1/model-groups/{group_id}"), Some(json!({ "models": [{ "name": "claude-opus-5", "targets": ["claude-code/claude-opus-5"] }] })), &auth)).await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        assert_eq!(body_json(updated).await["models"].as_array().unwrap().len(), 1);
+        let foreign = send(&state, json_req("PUT", &format!("/cli/v1/model-groups/{group_id}"), Some(json!({ "name": "hijack" })), &[("authorization", &auth_headers(&theirs))])).await;
+        assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+        assert_eq!(send(&state, json_req("DELETE", &format!("/cli/v1/model-groups/{group_id}"), None, &[("authorization", &auth_headers(&theirs))])).await.status(), StatusCode::NOT_FOUND);
+        assert_eq!(send(&state, json_req("DELETE", &format!("/cli/v1/model-groups/{group_id}"), None, &auth)).await.status(), StatusCode::OK);
+        assert!(body_json(send(&state, json_req("GET", "/cli/v1/model-groups", None, &auth)).await).await["groups"].as_array().unwrap().is_empty());
+    }
+
+    /// `GET /models` is the user's live catalog in the `/api/models` shape: nothing bound means
+    /// nothing listed, and a CLI provider's stored report shows up like anywhere else.
+    #[tokio::test]
+    async fn models_lists_the_callers_catalog() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "catalog@example.com").await;
+        let tokens = sign_in_device(&state, &user, "my-mac").await;
+        assert_eq!(send(&state, json_req("GET", "/cli/v1/models", None, &[])).await.status(), StatusCode::UNAUTHORIZED);
+        let empty = body_json(send(&state, json_req("GET", "/cli/v1/models", None, &[("authorization", &auth_headers(&tokens))])).await).await;
+        assert_eq!(empty["object"], "list");
+        assert!(empty["data"].as_array().unwrap().is_empty(), "no invented models for an account with nothing bound");
+
+        let created = create(&state, &tokens, json!({ "slug": "my-mac", "format": "openai", "initial_models": ["llama3.3:70b"] })).await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let listed = body_json(send(&state, json_req("GET", "/cli/v1/models", None, &[("authorization", &auth_headers(&tokens))])).await).await;
+        let ids: Vec<&str> = listed["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["my-mac/llama3.3:70b"]);
+        assert!(listed["providers"].as_array().unwrap().iter().any(|p| p["provider"] == "my-mac"));
     }
 }

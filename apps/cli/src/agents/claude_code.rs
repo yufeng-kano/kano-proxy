@@ -1,0 +1,166 @@
+//! Claude Code (docs/cli.md § Command surface, the docs site's Claude Code
+//! page): an `env` block in the user-scope `settings.json`, pointed at the
+//! `claude-code` group's Anthropic endpoint. The three default slots are
+//! written explicitly — Claude Code's own family defaults can resolve to a
+//! dated id the group does not define.
+
+use anyhow::{bail, Result};
+use serde_json::{json, Value};
+
+use super::{fallback_candidates, group_models, provider_ids, validate_fallbacks, AgentKind, Plan, SetupArgs, KEY_PLACEHOLDER};
+use crate::api::CatalogModel;
+use crate::tui;
+
+pub const KEY_FIELD: &str = "env.ANTHROPIC_AUTH_TOKEN";
+
+const SLOTS: [(&str, &str, &str); 3] = [
+    ("Opus", "opus", "env.ANTHROPIC_DEFAULT_OPUS_MODEL"),
+    ("Sonnet", "sonnet", "env.ANTHROPIC_DEFAULT_SONNET_MODEL"),
+    ("Haiku", "haiku", "env.ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+];
+
+#[derive(Debug)]
+pub struct Picks {
+    /// Per slot (Opus, Sonnet, Haiku): the bare id and its fallbacks.
+    pub slots: Vec<(String, Vec<String>)>,
+}
+
+/// The first id whose name carries the family word, else the first id — the TUI's
+/// pre-selection and the thing `--no-tui` must spell out.
+fn default_for(ids: &[String], family: &str) -> usize {
+    ids.iter().position(|id| id.to_lowercase().contains(family)).unwrap_or(0)
+}
+
+pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel]) -> Result<Picks> {
+    let kind = AgentKind::ClaudeCode;
+    let ids = provider_ids(catalog, kind.provider());
+    if ids.is_empty() {
+        bail!("your account has no claude-code models — connect a Claude Code subscription on the Providers page first");
+    }
+    let mut slots = Vec::new();
+    if args.no_tui {
+        let fallbacks = validate_fallbacks(catalog, &args.fallback)?;
+        for ((label, _, _), flag) in SLOTS.iter().zip([&args.opus, &args.sonnet, &args.haiku]) {
+            let Some(id) = flag.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+                bail!("--{} <bare id> is required with --no-tui (one of: {})", label.to_lowercase(), ids.join(", "));
+            };
+            if !ids.iter().any(|i| i == id) {
+                bail!("--{} {id}: not a claude-code model in your catalog (one of: {})", label.to_lowercase(), ids.join(", "));
+            }
+            slots.push((id.to_string(), fallbacks.iter().filter(|f| *f != &format!("claude-code/{id}")).cloned().collect()));
+        }
+        return Ok(Picks { slots });
+    }
+
+    tui::require_tty()?;
+    let title = "kano-proxy agent setup claude-code";
+    let options: Vec<&str> = ids.iter().map(String::as_str).collect();
+    for (label, family, _) in SLOTS {
+        let note = [
+            &*format!("Which model should Claude Code's {label} slot resolve to?"),
+            "The group serves this name as-is, so Claude Code sees a real Claude id.",
+        ];
+        let index = tui::choose_default(title, &note, &options, default_for(&ids, family))?;
+        let id = ids[index].clone();
+        let candidates = fallback_candidates(catalog, &format!("claude-code/{id}"));
+        let fallbacks = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            let note = [
+                &*format!("Fallbacks for {label} ({id}) — tried in order when claude-code is benched or out of quota."),
+                "Space toggles, Enter with nothing toggled means no fallback.",
+            ];
+            tui::pick_many(title, &note, &candidates)?
+        };
+        slots.push((id, fallbacks));
+    }
+    Ok(Picks { slots })
+}
+
+pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs) -> Result<Plan> {
+    let kind = AgentKind::ClaudeCode;
+    let picks = collect_picks(args, catalog)?;
+    let ids = provider_ids(catalog, kind.provider());
+    let models = group_models(kind.provider(), &ids, &picks.slots);
+    let base = kind.group_base(base_url);
+    let mut fields: Vec<(String, Value)> = vec![
+        ("env.ANTHROPIC_BASE_URL".into(), json!(base)),
+        (KEY_FIELD.into(), json!(KEY_PLACEHOLDER)),
+        ("env.ANTHROPIC_MODEL".into(), json!(picks.slots[0].0)),
+    ];
+    for ((_, _, field), (id, _)) in SLOTS.iter().zip(&picks.slots) {
+        fields.push(((*field).into(), json!(id)));
+    }
+    let mut summary = vec![format!("Claude Code → {base}")];
+    for ((label, _, _), (id, fallbacks)) in SLOTS.iter().zip(&picks.slots) {
+        summary.push(if fallbacks.is_empty() {
+            format!("{label}: {id}")
+        } else {
+            format!("{label}: {id}  (fallbacks: {})", fallbacks.join(", "))
+        });
+    }
+    Ok(Plan { group_models: models, fields, summary, catalog: None })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn catalog() -> Vec<CatalogModel> {
+        ["claude-code/claude-opus-5", "claude-code/claude-sonnet-5", "claude-code/claude-haiku-4-5", "codex/gpt-5.6-sol"]
+            .iter()
+            .map(|id| {
+                let (p, u) = id.split_once('/').unwrap();
+                CatalogModel { id: id.to_string(), provider: p.into(), upstream: u.into() }
+            })
+            .collect()
+    }
+
+    fn args(opus: &str, sonnet: &str, haiku: &str, fallback: &[&str]) -> SetupArgs {
+        SetupArgs {
+            no_tui: true,
+            dry_run: false,
+            opus: Some(opus.into()),
+            sonnet: Some(sonnet.into()),
+            haiku: Some(haiku.into()),
+            model: None,
+            effort: None,
+            fallback: fallback.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_plan_writes_the_group_endpoint_and_explicit_slots() {
+        let plan = plan("https://p.example", &catalog(), &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &["codex/gpt-5.6-sol"])).unwrap();
+        let get = |f: &str| plan.fields.iter().find(|(k, _)| k == f).map(|(_, v)| v.clone()).unwrap();
+        assert_eq!(get("env.ANTHROPIC_BASE_URL"), json!("https://p.example/g/claude-code/anthropic"));
+        assert_eq!(get("env.ANTHROPIC_AUTH_TOKEN"), json!(KEY_PLACEHOLDER));
+        assert_eq!(get("env.ANTHROPIC_MODEL"), json!("claude-opus-5"));
+        assert_eq!(get("env.ANTHROPIC_DEFAULT_HAIKU_MODEL"), json!("claude-haiku-4-5"));
+        // Bare names, the agent's provider first, the fallback after, every provider id mirrored.
+        assert_eq!(plan.group_models[0].name, "claude-opus-5");
+        assert_eq!(plan.group_models[0].targets.iter().map(|t| t.model.as_str()).collect::<Vec<_>>(), ["claude-code/claude-opus-5", "codex/gpt-5.6-sol"]);
+        assert_eq!(plan.group_models.len(), 3);
+        assert!(plan.group_models.iter().all(|m| !m.name.contains('/')));
+    }
+
+    #[test]
+    fn no_tui_requires_real_ids_and_a_claude_account() {
+        assert!(plan("https://p.example", &catalog(), &args("claude-opus-5", "nope", "claude-haiku-4-5", &[])).is_err());
+        assert!(plan("https://p.example", &catalog(), &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &["grok/grok-4.5"])).is_err());
+        let mut missing = args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &[]);
+        missing.haiku = None;
+        assert!(plan("https://p.example", &catalog(), &missing).is_err());
+        let codex_only: Vec<CatalogModel> = catalog().into_iter().filter(|m| m.provider == "codex").collect();
+        let err = plan("https://p.example", &codex_only, &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &[])).unwrap_err();
+        assert!(err.to_string().contains("no claude-code models"));
+    }
+
+    #[test]
+    fn defaults_follow_the_family_name() {
+        let ids: Vec<String> = ["claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(default_for(&ids, "opus"), 2);
+        assert_eq!(default_for(&ids, "haiku"), 0);
+        assert_eq!(default_for(&ids, "fable"), 0);
+    }
+}

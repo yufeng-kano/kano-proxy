@@ -29,6 +29,6 @@ features:
 | OpenAI-compatible | `https://<your-domain>/openai/v1` |
 | Anthropic Messages | `https://<your-domain>/anthropic` |
 
-Authenticate with an API key from the Keys page, as `Authorization: Bearer <your-api-key>` or `x-api-key: <your-api-key>`. Model ids are `provider/model`, for example `claude-code/claude-opus-5`. The full list is on the Models page and at `GET https://<your-domain>/openai/v1/models`.
+Authenticate with an API key from the Access page, as `Authorization: Bearer <your-api-key>` or `x-api-key: <your-api-key>`. Model ids are `provider/model`, for example `claude-code/claude-opus-5`. The full list is on the Models page and at `GET https://<your-domain>/openai/v1/models`.
 
 Next: [Getting started](/guide/getting-started).

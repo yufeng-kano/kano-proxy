@@ -35,7 +35,7 @@ export const en = {
   "nav.providers": "Providers",
   "nav.models": "Models",
   "nav.groups": "Groups",
-  "nav.keys": "API keys",
+  "nav.access": "Access",
   "nav.changelog": "Changelog",
   "nav.docs": "Documentation",
 
@@ -541,17 +541,20 @@ export const en = {
   "groups.error.delete": "Couldn't delete the group",
 
   // --- API keys -----------------------------------------------------------
-  // --- CLI page (docs/cli.md, docs/admin-ui.md § CLI page) -----------------
+  // --- CLI section + Access › Devices (docs/cli.md, docs/admin-ui.md) ------
   "cli.title": "CLI",
   "cli.devices.title": "CLI devices",
   "cli.devices.column.name": "Name",
   "cli.devices.column.lastSeen": "Last seen",
   "cli.devices.column.created": "Created",
+  "cli.devices.column.keys": "Keys",
   "cli.devices.revoke": "Revoke",
   "cli.devices.revokeName": "Revoke {name}",
   "cli.devices.renameName": "Rename {name}",
   "cli.devices.revokeConfirm":
     "Revoke \"{name}\"? It is removed, stops connecting within the hour and can only come back by signing in again.",
+  "cli.devices.revokeConfirmKeys":
+    "Revoke \"{name}\"? It is removed, stops connecting within the hour and can only come back by signing in again. The {count} API key(s) it created are revoked with it.",
   "cli.providers.title": "CLI providers",
   "cli.providers.column.provider": "Provider",
   "cli.providers.column.state": "State",
@@ -567,7 +570,8 @@ export const en = {
   "cli.providers.removeConfirm":
     "Remove \"{name}\"? Requests to {slug}/… stop resolving immediately.",
   "cli.providers.empty.title": "No CLI providers yet",
-  "cli.providers.empty.body": "Register a local endpoint with kano-proxy add, then run kano-proxy start.",
+  "cli.providers.empty.body":
+    "Register a local endpoint with kano-proxy tunnel add, then run kano-proxy tunnel start. Sign the machine in first from Access › Devices.",
   "cli.rename.title": "Rename provider",
   "cli.rename.deviceTitle": "Rename device",
   "cli.rename.label": "Display name",
@@ -578,6 +582,7 @@ export const en = {
   "cli.empty.thenRun": "Then sign the machine in",
   "cli.empty.releases": "All platforms and checksums are on GitHub Releases",
   "cli.error.load": "Couldn't load your CLI devices",
+  "cli.error.loadProviders": "Couldn't load your CLI providers",
   "cli.error.revoke": "Couldn't revoke the device",
   "cli.error.rename": "Couldn't rename the provider",
   "cli.error.renameDevice": "Couldn't rename the device",
@@ -593,13 +598,16 @@ export const en = {
   "cli.authorize.alreadyApproved": "This request was already approved on another page.",
   "cli.authorize.denied": "Request denied. Nothing was signed in.",
   "cli.authorize.missing": "This sign-in request is unknown or has expired. Run kano-proxy init again to get a fresh link.",
-  "cli.authorize.goToApp": "Go to Providers",
+  "cli.authorize.goToApp": "Go to Access",
   "cli.authorize.error.approve": "Couldn't approve the request",
   "cli.authorize.error.deny": "Couldn't deny the request",
 
-  "keys.title": "API keys",
-  "keys.tab.keys": "Keys",
-  "keys.tab.connect": "Connect",
+  // --- Access page (docs/admin-ui.md § Access page) --------------------------
+  "access.title": "Access",
+  "access.tab.keys": "Keys",
+  "access.tab.devices": "Devices",
+  "access.tab.connect": "Connect",
+  "keys.fromDevice": "from {device}",
   "keys.create": "Create key",
   "keys.namePlaceholder": "Key name",
   "keys.nameLabel": "Name",

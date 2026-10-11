@@ -1,8 +1,9 @@
-//! HTTP client for the /agent/v1 surface (docs/cli.md § Server routes) plus
-//! the local target probes. Never logs tokens or bodies.
+//! HTTP client for the /cli/v1 surface (docs/cli.md § Server routes) plus
+//! the local target probes and the group-endpoint catalog read `agent setup`
+//! verifies with. Never logs tokens, keys or bodies.
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::state::{State, StateFile};
@@ -57,6 +58,43 @@ pub struct CreatedProvider {
     pub slug: String,
 }
 
+/// One row of `GET /cli/v1/models` — the user's live catalog (docs/cli.md § Server routes).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CatalogModel {
+    pub id: String,
+    pub provider: String,
+    pub upstream: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatedKey {
+    pub id: String,
+    pub name: String,
+    /// The plaintext, exactly once. Written into the agent's config and dropped.
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupTarget {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GroupModel {
+    pub name: String,
+    pub targets: Vec<GroupTarget>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Group {
+    pub id: String,
+    pub slug: String,
+    #[serde(default)]
+    pub models: Vec<GroupModel>,
+}
+
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("kano-proxy-cli/", env!("CARGO_PKG_VERSION")))
@@ -93,9 +131,34 @@ async fn post_json<T: for<'de> Deserialize<'de>>(
     serde_json::from_str(&text).with_context(|| format!("unexpected response from {url}"))
 }
 
+async fn send_json<T: for<'de> Deserialize<'de>>(req: reqwest::RequestBuilder, url: &str) -> Result<T> {
+    let res = req.send().await.with_context(|| format!("cannot reach {url}"))?;
+    let status = res.status();
+    let text = res.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(api_error(status, &text));
+    }
+    serde_json::from_str(&text).with_context(|| format!("unexpected response from {url}"))
+}
+
+/// `DELETE` that reports a 404 as `Ok(false)` — "already gone" is a success for every
+/// caller here (a key revoked from the web UI, a group deleted there).
+async fn delete_tolerant(url: &str, access_token: &str) -> Result<bool> {
+    let res = client().delete(url).bearer_auth(access_token).send().await.with_context(|| format!("cannot reach {url}"))?;
+    let status = res.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Ok(false);
+    }
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(api_error(status, &text));
+    }
+    Ok(true)
+}
+
 pub async fn login_start(base_url: &str, device_name: &str) -> Result<LoginStart> {
     post_json(
-        &format!("{base_url}/agent/v1/login/start"),
+        &format!("{base_url}/cli/v1/login/start"),
         json!({ "device_name": device_name }),
         None,
     )
@@ -104,7 +167,7 @@ pub async fn login_start(base_url: &str, device_name: &str) -> Result<LoginStart
 
 pub async fn login_complete(base_url: &str, request_id: &str, code: &str) -> Result<LoginComplete> {
     post_json(
-        &format!("{base_url}/agent/v1/login/complete"),
+        &format!("{base_url}/cli/v1/login/complete"),
         json!({ "request_id": request_id, "code": code }),
         None,
     )
@@ -115,7 +178,7 @@ pub async fn login_complete(base_url: &str, request_id: &str, code: &str) -> Res
 /// that outlived the lock could see a sibling break it, read the old token,
 /// and trip the server's reuse-as-theft revocation.
 async fn rotate_token(base_url: &str, refresh_token: &str) -> Result<TokenPair> {
-    let url = format!("{base_url}/agent/v1/token");
+    let url = format!("{base_url}/cli/v1/token");
     let res = client()
         .post(&url)
         .timeout(std::time::Duration::from_secs(20))
@@ -158,7 +221,7 @@ pub async fn list_providers(base_url: &str, access_token: &str) -> Result<Vec<Pr
     struct Wrapper {
         providers: Vec<ProviderItem>,
     }
-    let url = format!("{base_url}/agent/v1/providers");
+    let url = format!("{base_url}/cli/v1/providers");
     let res = client()
         .get(&url)
         .bearer_auth(access_token)
@@ -189,11 +252,11 @@ pub async fn create_provider(
     if !initial_models.is_empty() {
         body["initial_models"] = json!(initial_models);
     }
-    post_json(&format!("{base_url}/agent/v1/providers"), body, Some(access_token)).await
+    post_json(&format!("{base_url}/cli/v1/providers"), body, Some(access_token)).await
 }
 
 pub async fn delete_provider(base_url: &str, access_token: &str, id: &str) -> Result<()> {
-    let url = format!("{base_url}/agent/v1/providers/{id}");
+    let url = format!("{base_url}/cli/v1/providers/{id}");
     let res = client()
         .delete(&url)
         .bearer_auth(access_token)
@@ -206,6 +269,91 @@ pub async fn delete_provider(base_url: &str, access_token: &str, id: &str) -> Re
         return Err(api_error(status, &text));
     }
     Ok(())
+}
+
+/// `DELETE /cli/v1/device` — the device revokes itself (`kano-proxy logout`). A 401 means
+/// the server already forgot it (revoked from the web UI): `Ok(false)`, nothing to do.
+pub async fn delete_device(base_url: &str, access_token: &str) -> Result<bool> {
+    let url = format!("{base_url}/cli/v1/device");
+    let res = client().delete(&url).bearer_auth(access_token).send().await.with_context(|| format!("cannot reach {url}"))?;
+    let status = res.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Ok(false);
+    }
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(api_error(status, &text));
+    }
+    Ok(true)
+}
+
+/// `GET /cli/v1/models` — what `agent setup` picks from. Live, never invented.
+pub async fn list_models(base_url: &str, access_token: &str) -> Result<Vec<CatalogModel>> {
+    #[derive(Deserialize)]
+    struct Wrapper {
+        #[serde(default)]
+        data: Vec<CatalogModel>,
+    }
+    let url = format!("{base_url}/cli/v1/models");
+    let w: Wrapper = send_json(client().get(&url).bearer_auth(access_token), &url).await?;
+    Ok(w.data)
+}
+
+pub async fn create_key(base_url: &str, access_token: &str, name: &str) -> Result<CreatedKey> {
+    post_json(&format!("{base_url}/cli/v1/keys"), json!({ "name": name }), Some(access_token)).await
+}
+
+/// Revoke a key this device minted. `Ok(false)` when it was already gone.
+pub async fn delete_key(base_url: &str, access_token: &str, id: &str) -> Result<bool> {
+    delete_tolerant(&format!("{base_url}/cli/v1/keys/{id}"), access_token).await
+}
+
+pub async fn list_groups(base_url: &str, access_token: &str) -> Result<Vec<Group>> {
+    #[derive(Deserialize)]
+    struct Wrapper {
+        #[serde(default)]
+        groups: Vec<Group>,
+    }
+    let url = format!("{base_url}/cli/v1/model-groups");
+    let w: Wrapper = send_json(client().get(&url).bearer_auth(access_token), &url).await?;
+    Ok(w.groups)
+}
+
+pub async fn create_group(base_url: &str, access_token: &str, name: &str, slug: &str, models: &[GroupModel]) -> Result<Group> {
+    post_json(
+        &format!("{base_url}/cli/v1/model-groups"),
+        json!({ "name": name, "slug": slug, "models": models }),
+        Some(access_token),
+    )
+    .await
+}
+
+pub async fn update_group_models(base_url: &str, access_token: &str, id: &str, models: &[GroupModel]) -> Result<Group> {
+    let url = format!("{base_url}/cli/v1/model-groups/{id}");
+    send_json(client().put(&url).bearer_auth(access_token).json(&json!({ "models": models })), &url).await
+}
+
+pub async fn delete_group(base_url: &str, access_token: &str, id: &str) -> Result<bool> {
+    delete_tolerant(&format!("{base_url}/cli/v1/model-groups/{id}"), access_token).await
+}
+
+/// The verification read after `agent setup`: the group endpoint's own catalog, with the key
+/// just minted — a catalog read costs nothing upstream and proves the key, the endpoint and
+/// the names line up (docs/cli.md § Command surface). `base` is the group base the agent
+/// will use (`…/g/<slug>/anthropic` or `…/g/<slug>/openai/v1`).
+pub async fn list_group_endpoint_models(group_base: &str, api_key: &str) -> Result<Vec<String>> {
+    let url = if group_base.ends_with("/v1") { format!("{group_base}/models") } else { format!("{group_base}/v1/models") };
+    #[derive(Deserialize)]
+    struct Entry {
+        id: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct List {
+        #[serde(default)]
+        data: Vec<Entry>,
+    }
+    let list: List = send_json(client().get(&url).bearer_auth(api_key).timeout(std::time::Duration::from_secs(20)), &url).await?;
+    Ok(list.data.into_iter().filter_map(|e| e.id).collect())
 }
 
 /// `GET <target>/models` (openai) / `GET <target>/v1/models` (anthropic) →

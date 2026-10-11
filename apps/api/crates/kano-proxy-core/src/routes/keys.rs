@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::session::SessionUser;
 use crate::auth::spend_limit::{is_spend_limit_interval, key_window_spend, SpendKey};
-use crate::db::keys::{create_key, delete_key, list_keys, update_key, ApiKeyRow, SpendLimitFields};
+use crate::db::keys::{create_key, delete_key, list_keys, list_keys_with_devices, update_key, ApiKeyRow, SpendLimitFields};
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -57,9 +57,9 @@ pub fn parse_limit_fields(body: &Map<String, Value>) -> Result<Option<SpendLimit
     Ok(Some(SpendLimitFields { spend_limit, spend_limit_interval: interval, spend_limit_include_oauth: include_oauth }))
 }
 
-/// One key's wire shape — limit fields always present; `window_spend` is added by the list
-/// route. `key_hash` never appears.
-fn key_json(k: &ApiKeyRow) -> Value {
+/// One key's wire shape — limit fields always present; `window_spend` and `device_name` are
+/// added by the list route. `key_hash` never appears.
+pub(crate) fn key_json(k: &ApiKeyRow) -> Value {
     json!({
         "id": k.id,
         "name": k.name,
@@ -69,20 +69,25 @@ fn key_json(k: &ApiKeyRow) -> Value {
         "spend_limit": k.spend_limit,
         "spend_limit_interval": k.spend_limit_interval,
         "spend_limit_include_oauth": k.spend_limit_include_oauth == 1,
+        "device_id": k.device_id,
     })
 }
 
 async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
-    let Ok(keys) = list_keys(state.pool(), &session.user.id).await else {
+    let Ok(keys) = list_keys_with_devices(state.pool(), &session.user.id).await else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     };
     let mut out = Vec::with_capacity(keys.len());
-    for key in &keys {
+    for item in &keys {
+        let key = &item.key;
         // Uncached window sums: the admin list is the surface where "how much has this key
         // spent" must be current, and it is a handful of keys at most.
         let spend = key_window_spend(state.pool(), &SpendKey::from(key), state.now_ms()).await;
         let mut value = key_json(key);
         value["window_spend"] = spend.map(Value::from).unwrap_or(Value::Null);
+        // The minting device's current name, resolved at read time — the Access page shows
+        // the link where keys are revoked (docs/admin-ui.md § Access page).
+        value["device_name"] = item.device_name.clone().map(Value::from).unwrap_or(Value::Null);
         out.push(value);
     }
     Json(json!({ "keys": out })).into_response()

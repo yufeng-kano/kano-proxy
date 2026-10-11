@@ -41,7 +41,7 @@ CLI 會在瀏覽器打開登入頁。在那裡核准這台裝置，再把畫面�
 ## 註冊本機伺服器
 
 ```console
-$ kano-proxy add
+$ kano-proxy tunnel add
   Slug [my-mac]:
   Type: openai
   Target [http://localhost:11434/v1]:
@@ -56,7 +56,7 @@ CLI 會向伺服器要模型清單。保留預設的「All models」，之後新
 ## 啟動 tunnel
 
 ```console
-$ kano-proxy start
+$ kano-proxy tunnel start
   my-mac: connected, 3 models reported
 ```
 
@@ -73,8 +73,11 @@ curl https://<your-domain>/openai/v1/chat/completions \
 
 ## 管理裝置
 
-- `kano-proxy list` 與 `kano-proxy status` 顯示已註冊與連線中的項目。
-- `kano-proxy remove <slug>` 刪除一個供應商。
-- 應用程式的 **Providers** 頁面列出所有裝置，可以撤銷。撤銷的裝置會在一小時內斷線，且無法重連。
+- `kano-proxy tunnel list` 與 `kano-proxy status` 顯示已註冊與連線中的項目。
+- `kano-proxy tunnel remove <slug>` 刪除一個供應商。
+- `kano-proxy logout` 讓這台機器登出：還原 CLI 在這裡設定過的 coding agent、撤銷裝置與該裝置建立的 API key，並清掉本機狀態。
+- 應用程式的 **Access** 頁面列出所有裝置，可以撤銷；撤銷裝置會一併撤銷它建立的 key。撤銷的裝置會在一小時內斷線，且無法重連。**Providers** 頁面列出已註冊的本機端點。
+
+同一支 CLI 也能把 [Claude Code](/zh-TW/agents/claude-code) 與 [Codex CLI](/zh-TW/agents/codex-cli) 接到你的 proxy：`kano-proxy agent setup claude-code`、`kano-proxy agent setup codex`。
 
 CLI 雙向串流不緩衝、網路斷線自動重連、絕不記錄請求內容。

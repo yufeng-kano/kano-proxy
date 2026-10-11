@@ -5,6 +5,7 @@
 //! refreshes across this machine's kano-proxy processes. The file must stay
 //! writable at runtime — refresh rotation persists a new token on every use.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -12,6 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderState {
@@ -26,6 +28,38 @@ pub struct ProviderState {
     pub target_key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub expose: Vec<String>,
+}
+
+/// One managed config field's restore record (docs/cli.md § State file): what was there
+/// before the CLI's first write (`None` = the field was absent) and what the CLI last
+/// wrote — the value drift is measured against.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FieldRecord {
+    pub before: Option<Value>,
+    pub wrote: Value,
+}
+
+/// What `kano-proxy agent setup` did for one agent on this device. Never a plaintext key:
+/// only the key's id and name — the plaintext lives in the agent's config file alone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AgentState {
+    pub key_id: String,
+    pub key_name: String,
+    pub group_id: String,
+    pub group_slug: String,
+    pub config_path: String,
+    /// The whole-file backup taken before the first write ever made to `config_path`.
+    pub backup_path: String,
+    pub written_at: String,
+    #[serde(default)]
+    pub fields: BTreeMap<String, FieldRecord>,
+    /// The Codex model catalog file the CLI wrote, when it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_path: Option<String>,
+    /// Its backup when a catalog file already existed before the first write; `None` means
+    /// the CLI created it and restore deletes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_backup_path: Option<String>,
 }
 
 /// A `--no-tui` init's first phase, waiting for its `--auth-code` second phase.
@@ -50,6 +84,9 @@ pub struct State {
     pub pending_login: Option<PendingLogin>,
     #[serde(default)]
     pub providers: Vec<ProviderState>,
+    /// Keyed by agent id (`claude-code`, `codex`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agents: BTreeMap<String, AgentState>,
 }
 
 impl State {
@@ -79,6 +116,12 @@ pub fn default_state_path() -> PathBuf {
             });
         base.join("kano-proxy").join("state.json")
     }
+}
+
+/// `<state dir>/backups/<agent>/` — beside the state file, mode 0600, never deleted by the
+/// CLI (docs/cli.md § State file).
+pub fn backups_dir(state_path: &Path, agent: &str) -> PathBuf {
+    state_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from(".")).join("backups").join(agent)
 }
 
 pub struct StateFile {
@@ -129,6 +172,17 @@ impl StateFile {
             fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
         }
         Ok(())
+    }
+
+    /// Every state write goes through here: re-read and save while holding the same lock
+    /// token refreshes use, so a concurrent command (or its refresh rotation) can never be
+    /// clobbered by a stale snapshot — the failure mode that resurrects a superseded refresh
+    /// token and trips the server's reuse-as-theft revocation.
+    pub fn mutate(&self, f: impl FnOnce(&mut State)) -> Result<()> {
+        let _lock = self.acquire_lock()?;
+        let mut state = self.load()?;
+        f(&mut state);
+        self.save(&state)
     }
 
     pub fn lock_path(&self) -> PathBuf {

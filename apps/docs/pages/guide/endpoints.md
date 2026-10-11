@@ -20,7 +20,7 @@ Not available: embeddings, image generation, and audio output.
 
 ## Authentication
 
-Send the key from the Keys page in either header. Both work on both bases.
+Send the key from the Access page in either header. Both work on both bases.
 
 ```http
 Authorization: Bearer <your-api-key>

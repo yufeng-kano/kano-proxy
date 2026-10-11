@@ -364,7 +364,7 @@ function coverageNote(row: ModelUsageRow): string | null {
     <AppCard v-if="isEmpty">
       <EmptyState :title="t('overview.empty.title')" :body="t('overview.empty.body')">
         <template #action>
-          <AppButton variant="primary" to="/keys">
+          <AppButton variant="primary" to="/access">
             {{ t("overview.empty.action") }}
           </AppButton>
         </template>

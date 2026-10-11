@@ -5,9 +5,9 @@
 
 {$DOMAIN} {
 	# The API owns these paths; everything else is the web app's.
-	@api path /api/* /openai/* /anthropic/* /g/* /agent/* /health
+	@api path /api/* /openai/* /anthropic/* /g/* /cli/v1/* /agent/* /health
 	handle @api {
-		# Model streams and the agent tunnel are long-lived: never buffer the response,
+		# Model streams and the CLI tunnel are long-lived: never buffer the response,
 		# and a ten-minute idle gap is normal on a quiet stream.
 		reverse_proxy api:8787 {
 			flush_interval -1

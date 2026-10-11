@@ -48,6 +48,7 @@ The callback redirects to the SPA root (`APP_URL/`), not to a specific page: lan
 - Stored as **hash only** (e.g. SHA-256 of full key) + prefix for display (`sk-kano-proxy-xxxx…`).
 - No TTL; delete to revoke.
 - Multiple keys per user.
+- A key minted by the CLI (`POST /cli/v1/keys`, [cli.md](./cli.md) § Keys and groups) carries `device_id`, the `cli_devices` row that minted it — `NULL` for keys created here. The column is `ON DELETE CASCADE`: revoking the device deletes those keys, from the Access page or from `kano-proxy logout`. The device can revoke only its own keys; the Access page revokes any.
 - LLM requests resolve `key → user_id` then use **that user’s** pools only.
 - Optional per-key **spend limit** (`spend_limit` USD + `spend_limit_interval` `daily|weekly|monthly|total` + `spend_limit_include_oauth`): enforced in the API-key auth middleware; at/over the window's estimated spend the LLM surfaces return **429** `spend_limit_exceeded` (Anthropic surface: `rate_limit_error`) before any upstream call. See [pricing.md](./pricing.md).
 
@@ -55,7 +56,7 @@ The callback redirects to the SPA root (`APP_URL/`), not to a specific page: lan
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/keys` | Each key carries its limit fields plus `window_spend` (estimated USD already spent in the current window) |
+| GET | `/api/keys` | Each key carries its limit fields plus `window_spend` (estimated USD already spent in the current window), and `device_id` / `device_name` (the CLI device that minted it, both `null` for a key created here) |
 | POST | `/api/keys` | Body `{name?, spend_limit?, spend_limit_interval?, spend_limit_include_oauth?}`; plaintext key in the response, once |
 | PATCH | `/api/keys/:id` | Update `{name?, spend_limit?, spend_limit_interval?, spend_limit_include_oauth?}`; `spend_limit: null` clears the limit |
 | DELETE | `/api/keys/:id` | Revoke |
@@ -170,16 +171,16 @@ The API key is **never** echoed back on any of these routes — `GET`/`POST`/`PU
 
 The CLI-provider subsystem ([cli.md](./cli.md)) has two auth surfaces:
 
-- **`/agent/v1/*`** — the CLI's own namespace: token-authenticated (device access tokens minted from rotating refresh tokens, HMAC-signed with `CLI_TOKEN_SECRET`), never session-authenticated. Route table and token semantics: [cli.md](./cli.md) § Server routes / § Device auth.
-- **`/api/cli/*`** — session-authenticated management for the web UI's `/cli` page and its authorize view. Same origin-locked CORS as every `/api/*` route.
+- **`/cli/v1/*`** — the CLI's own namespace: token-authenticated (device access tokens minted from rotating refresh tokens, HMAC-signed with `CLI_TOKEN_SECRET`), never session-authenticated. Besides login, tunnel providers and the WebSocket connect it carries the key and model-group routes `kano-proxy agent setup` uses — the session handlers behind a device authenticator, same validation and caps. Route table and token semantics: [cli.md](./cli.md) § Server routes / § Device auth. The pre-2.0 `/agent/v1/*` namespace answers `410 Gone` with an upgrade message until the next major release.
+- **`/api/cli/*`** — session-authenticated management for the web UI: devices on the Access page, providers on the Providers page, and the authorize view. Same origin-locked CORS as every `/api/*` route.
 
 ### Management routes (session required)
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/cli/devices` | The user's devices: `{id, name, last_seen_at, created_at}` |
+| GET | `/api/cli/devices` | The user's devices: `{id, name, last_seen_at, created_at, key_count}` — `key_count` is how many API keys the device minted and still exist, what the revoke confirmation names |
 | PATCH | `/api/cli/devices/:id` | Rename the device (`{name}`, 1–64 chars); 404 when it is not the caller's |
-| DELETE | `/api/cli/devices/:id` | Revoke: deletes the device row (idempotent — an absent or foreign id is still ok and deletes nothing). Next refresh fails; live sockets die at access-token expiry ([cli.md](./cli.md)) |
+| DELETE | `/api/cli/devices/:id` | Revoke: deletes the device row and, by cascade, the API keys it minted (idempotent — an absent or foreign id is still ok and deletes nothing). Next refresh fails; live sockets die at access-token expiry ([cli.md](./cli.md)) |
 | GET | `/api/cli/providers` | The user's CLI providers + live connection state (read from the tunnel registry): `{id, slug, name, format, connected, account_id, models, model_filter, models_updated_at, device_name, …}` — `account_id` is the internal pool-state row the Groups picker pins to ([admin-ui.md](./admin-ui.md) § Groups page) |
 | PATCH | `/api/cli/providers/:id` | Rename display name — body `{name}` (1–64 chars). Slug/format immutable |
 | DELETE | `/api/cli/providers/:id` | Delete the provider + its internal account row, force-close any live socket |

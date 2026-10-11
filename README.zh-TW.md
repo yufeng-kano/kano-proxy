@@ -142,12 +142,12 @@ curl https://<your-domain>/openai/v1/chat/completions \
 curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
 # 或：brew install yufeng-kano/tap/kano-proxy
 
-kano-proxy init     # 開啟瀏覽器授權此裝置，貼回一次性代碼
-kano-proxy add      # slug、openai|anthropic、http://localhost:11434/v1
-kano-proxy start    # 每個已註冊的供應商一條對外 WebSocket
+kano-proxy init          # 開啟瀏覽器授權此裝置，貼回一次性代碼
+kano-proxy tunnel add    # slug、openai|anthropic、http://localhost:11434/v1
+kano-proxy tunnel start  # 每個已註冊的供應商一條對外 WebSocket
 ```
 
-本地模型隨即以 `<slug>/<model>` 出現在上述所有端點，也能當作模型群組的目標。細節見 [docs/cli.md](./docs/cli.md)。
+本地模型隨即以 `<slug>/<model>` 出現在上述所有端點，也能當作模型群組的目標。同一支 CLI 也能把 Claude Code 或 Codex CLI 接到你的 proxy（`kano-proxy agent setup claude-code` / `codex`），並用 `agent restore` 還原。細節見 [docs/cli.md](./docs/cli.md)。
 
 ---
 

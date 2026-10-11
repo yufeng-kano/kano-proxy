@@ -21,6 +21,18 @@ pub struct ApiKeyRow {
     pub spend_limit_interval: String,
     /// 0/1 — whether builtin (subscription OAuth) traffic counts toward the limit.
     pub spend_limit_include_oauth: i32,
+    /// The `cli_devices` row that minted the key through `POST /cli/v1/keys`; `None` for a key
+    /// created in the web UI. Deleting the device deletes the key (docs/cli.md § Keys and groups).
+    pub device_id: Option<String>,
+}
+
+/// A key as the Access page lists it: the row plus the minting device's current name, resolved
+/// at read time (`None` when no device minted it).
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct ApiKeyListRow {
+    #[sqlx(flatten)]
+    pub key: ApiKeyRow,
+    pub device_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,7 +50,7 @@ pub struct CreatedKey {
 pub async fn list_keys(db: &PgPool, user_id: &str) -> Result<Vec<ApiKeyRow>, sqlx::Error> {
     sqlx::query_as::<_, ApiKeyRow>(
         "SELECT id, user_id, name, key_prefix, key_hash, created_at, last_used_at,
-                spend_limit, spend_limit_interval, spend_limit_include_oauth
+                spend_limit, spend_limit_interval, spend_limit_include_oauth, device_id
          FROM api_keys WHERE user_id = $1 ORDER BY created_at DESC",
     )
     .bind(user_id)
@@ -46,9 +58,40 @@ pub async fn list_keys(db: &PgPool, user_id: &str) -> Result<Vec<ApiKeyRow>, sql
     .await
 }
 
+/// `list_keys` with each key's minting device name joined in (docs/auth.md § Client API keys).
+pub async fn list_keys_with_devices(db: &PgPool, user_id: &str) -> Result<Vec<ApiKeyListRow>, sqlx::Error> {
+    sqlx::query_as::<_, ApiKeyListRow>(
+        "SELECT k.id, k.user_id, k.name, k.key_prefix, k.key_hash, k.created_at, k.last_used_at,
+                k.spend_limit, k.spend_limit_interval, k.spend_limit_include_oauth, k.device_id,
+                d.name AS device_name
+         FROM api_keys k LEFT JOIN cli_devices d ON d.id = k.device_id
+         WHERE k.user_id = $1 ORDER BY k.created_at DESC",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await
+}
+
+/// How many keys a device minted that still exist — what the revoke confirmation names.
+pub async fn count_keys_for_device(db: &PgPool, device_id: &str) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE device_id = $1").bind(device_id).fetch_one(db).await
+}
+
 pub async fn create_key(
     db: &PgPool,
     user_id: &str,
+    name: &str,
+    limits: Option<SpendLimitFields>,
+) -> Result<CreatedKey, sqlx::Error> {
+    create_key_for_device(db, user_id, None, name, limits).await
+}
+
+/// A key minted by a CLI device (`POST /cli/v1/keys`): the same row, with `device_id` set so the
+/// device's revocation takes the key with it. No limit fields — those are set on the Access page.
+pub async fn create_key_for_device(
+    db: &PgPool,
+    user_id: &str,
+    device_id: Option<&str>,
     name: &str,
     limits: Option<SpendLimitFields>,
 ) -> Result<CreatedKey, sqlx::Error> {
@@ -64,8 +107,8 @@ pub async fn create_key(
     };
     sqlx::query(
         "INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, created_at, last_used_at,
-                               spend_limit, spend_limit_interval, spend_limit_include_oauth)
-         VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9)",
+                               spend_limit, spend_limit_interval, spend_limit_include_oauth, device_id)
+         VALUES ($1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10)",
     )
     .bind(&id)
     .bind(user_id)
@@ -76,6 +119,7 @@ pub async fn create_key(
     .bind(spend_limit)
     .bind(&interval)
     .bind(include_oauth)
+    .bind(device_id)
     .execute(db)
     .await?;
     Ok(CreatedKey {
@@ -91,6 +135,7 @@ pub async fn create_key(
             spend_limit,
             spend_limit_interval: interval,
             spend_limit_include_oauth: include_oauth,
+            device_id: device_id.map(str::to_string),
         },
     })
 }
@@ -134,6 +179,18 @@ pub async fn delete_key(db: &PgPool, user_id: &str, key_id: &str) -> Result<bool
     let r = sqlx::query("DELETE FROM api_keys WHERE id = $1 AND user_id = $2")
         .bind(key_id)
         .bind(user_id)
+        .execute(db)
+        .await?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Revoke a key **this device minted** (`DELETE /cli/v1/keys/:id`): a key another device or the
+/// web UI created is `false` here, exactly like a foreign user's key.
+pub async fn delete_key_for_device(db: &PgPool, user_id: &str, device_id: &str, key_id: &str) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query("DELETE FROM api_keys WHERE id = $1 AND user_id = $2 AND device_id = $3")
+        .bind(key_id)
+        .bind(user_id)
+        .bind(device_id)
         .execute(db)
         .await?;
     Ok(r.rows_affected() > 0)
@@ -198,6 +255,38 @@ mod tests {
         assert_eq!(list_keys(&pool, &user.id).await.unwrap()[0].name, "renamed");
         assert!(delete_key(&pool, &user.id, &created.row.id).await.unwrap());
         assert!(list_keys(&pool, &user.id).await.unwrap().is_empty());
+    }
+
+    /// A device-minted key names its device on the list, can be revoked only by that device
+    /// through the device path, and dies with the device (docs/cli.md § Keys and groups).
+    #[tokio::test]
+    async fn device_keys_follow_their_device() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let user = insert_user(&pool, "devkeys@example.com").await;
+        let device = crate::db::cli::insert_cli_device(&pool, &user.id, "my-mac", "h1").await.unwrap();
+        let other = crate::db::cli::insert_cli_device(&pool, &user.id, "other-box", "h2").await.unwrap();
+        let minted = create_key_for_device(&pool, &user.id, Some(&device.id), "claude-code@my-mac", None).await.unwrap();
+        let manual = create_key(&pool, &user.id, "manual", None).await.unwrap();
+        assert_eq!(minted.row.device_id.as_deref(), Some(device.id.as_str()));
+        assert_eq!(manual.row.device_id, None);
+
+        let listed = list_keys_with_devices(&pool, &user.id).await.unwrap();
+        let by_id = |id: &str| listed.iter().find(|k| k.key.id == id).unwrap();
+        assert_eq!(by_id(&minted.row.id).device_name.as_deref(), Some("my-mac"));
+        assert_eq!(by_id(&manual.row.id).device_name, None);
+        assert_eq!(count_keys_for_device(&pool, &device.id).await.unwrap(), 1);
+        assert_eq!(count_keys_for_device(&pool, &other.id).await.unwrap(), 0);
+
+        // Only the minting device may delete it through the device path; a manual key never.
+        assert!(!delete_key_for_device(&pool, &user.id, &other.id, &minted.row.id).await.unwrap());
+        assert!(!delete_key_for_device(&pool, &user.id, &device.id, &manual.row.id).await.unwrap());
+        assert_eq!(list_keys(&pool, &user.id).await.unwrap().len(), 2);
+
+        // Revoking the device cascades to its key and nothing else.
+        assert!(crate::db::cli::revoke_cli_device(&pool, &user.id, &device.id).await.unwrap());
+        let left = list_keys(&pool, &user.id).await.unwrap();
+        assert_eq!(left.iter().map(|k| k.id.as_str()).collect::<Vec<_>>(), vec![manual.row.id.as_str()]);
+        assert!(find_key_by_hash(&pool, &minted.row.key_hash).await.unwrap().is_none());
     }
 
     #[tokio::test]

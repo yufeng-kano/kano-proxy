@@ -249,14 +249,14 @@ A custom endpoint is a user-defined *provider*: a slug, a base URL, an API key, 
 - **Catalog:** after the builtin loop, one section per custom provider is appended. `models_mode=manual` returns the stored list directly (never fetches). `models_mode=auto` tries the adapter's `listModels()` with an acquired key, using the **same 1h cache** as built-ins (cache key scoped `user+slug`, reusing the identical cache helpers); on failure — or when there is no usable key to query — it falls back to the stored manual list when non-empty, else an empty list. **Never fabricates a catalog.** Ids are always `slug/<upstream_id>`.
 - **Admin REST:** `/api/custom-providers` — see [auth.md](./auth.md) for the route table and [admin-ui.md](./admin-ui.md) for the UI.
 
-## CLI providers (local LLMs over the agent tunnel)
+## CLI providers (local LLMs over the CLI tunnel)
 
 A **CLI provider** exposes an LLM server on a user's own machine through the official `kano-proxy` CLI and the server's tunnel registry — no public URL. Full contract (data model, device auth, wire protocol, failover markers, distribution): [cli.md](./cli.md). What matters to this document:
 
 - On the routing surface a CLI provider behaves like any provider: model ids are `<slug>/<model>`, it can be a group target, its one internal `upstream_accounts` row participates in bench/facts/feedback unchanged.
 - Slugs share the custom-provider shape and reserved list and are unique per user **across both** `custom_providers` and `cli_providers`; both create paths check the other table. The 20-per-user provider cap is shared across both tables.
 - `routing/candidates` resolves a `model` prefix builtin → custom slug → CLI slug; the CLI branch reuses the custom adapters with an injected transport that goes to the tunnel registry instead of the network (`providers/cli.ts`), so format semantics (`openai` near-passthrough / `anthropic` native passthrough, conversion paths, loop guard, `count_tokens` sentinel) are inherited from the custom adapters.
-- Tunnel faults degrade the **route**, never account state: `x-agent-upstream: 1` means the local server answered (normal penalty table applies to its status); `x-agent-fault: <reason>` + 502 is a tunnel-level failure — `offline` benches the internal account row 60 s, every other fault is a request-local skip; a CLI reconnect clears the bench ([cli.md](./cli.md) § Failover semantics).
+- Tunnel faults degrade the **route**, never account state: `x-tunnel-upstream: 1` means the local server answered (normal penalty table applies to its status); `x-tunnel-fault: <reason>` + 502 is a tunnel-level failure — `offline` benches the internal account row 60 s, every other fault is a request-local skip; a CLI reconnect clears the bench ([cli.md](./cli.md) § Failover semantics).
 - Catalog: one section per CLI provider straight from the stored agent report (`models_json`, filtered by `model_filter_json` at read time) — never fetched, never cached, never fabricated.
 
 ## Model groups (virtual endpoints)

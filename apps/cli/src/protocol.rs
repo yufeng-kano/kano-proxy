@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_PROTO: u32 = 1;
+pub const TUNNEL_PROTO: u32 = 1;
 pub const BODY_KIND_REQUEST: u8 = 0;
 pub const BODY_KIND_RESPONSE: u8 = 1;
 pub const MAX_CHUNK_BYTES: usize = 1024 * 1024;

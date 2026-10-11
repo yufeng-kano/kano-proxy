@@ -181,11 +181,16 @@ async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> Res
 }
 
 async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
-    let user_id = &session.user.id;
+    list_for_user(&state, &session.user.id).await
+}
+
+/// The list body, keyed by user — the session route and `/cli/v1/model-groups` share it
+/// (docs/cli.md § Server routes: one validator, one response shape).
+pub(crate) async fn list_for_user(state: &AppState, user_id: &str) -> Response {
     let Ok(rows) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
     let mut groups = Vec::with_capacity(rows.len());
     for row in &rows {
-        match to_list_item(&state, user_id, row).await {
+        match to_list_item(state, user_id, row).await {
             Ok(item) => groups.push(item),
             Err(_) => return internal_error(),
         }
@@ -194,8 +199,11 @@ async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
 }
 
 async fn create(State(state): State<AppState>, session: SessionUser, body: Bytes) -> Response {
-    let user_id = &session.user.id;
-    let Some(body) = object_body(&body) else { return error(StatusCode::BAD_REQUEST, "invalid JSON") };
+    create_for_user(&state, &session.user.id, &body).await
+}
+
+pub(crate) async fn create_for_user(state: &AppState, user_id: &str, body: &Bytes) -> Response {
+    let Some(body) = object_body(body) else { return error(StatusCode::BAD_REQUEST, "invalid JSON") };
 
     let name = body.get("name").and_then(Value::as_str).map(str::trim).unwrap_or("").to_string();
     if let Some(message) = validate_display_name(&name) {
@@ -207,7 +215,7 @@ async fn create(State(state): State<AppState>, session: SessionUser, body: Bytes
     }
 
     let models_value = body.get("models").cloned().unwrap_or(Value::Null);
-    let models = match validate_models(&state, user_id, &models_value).await {
+    let models = match validate_models(state, user_id, &models_value).await {
         Err(_) => return internal_error(),
         Ok(Err(message)) => return error(StatusCode::BAD_REQUEST, &message),
         Ok(Ok(models)) => models,
@@ -238,7 +246,7 @@ async fn create(State(state): State<AppState>, session: SessionUser, body: Bytes
     if replace_group_models(state.pool(), user_id, &row.id, &models).await.is_err() {
         return internal_error();
     }
-    match to_list_item(&state, user_id, &row).await {
+    match to_list_item(state, user_id, &row).await {
         Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
         Err(_) => internal_error(),
     }
@@ -250,13 +258,16 @@ async fn update(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Response {
-    let user_id = &session.user.id;
-    let existing = match get_model_group_by_id(state.pool(), user_id, &id).await {
+    update_for_user(&state, &session.user.id, &id, &body).await
+}
+
+pub(crate) async fn update_for_user(state: &AppState, user_id: &str, id: &str, body: &Bytes) -> Response {
+    let existing = match get_model_group_by_id(state.pool(), user_id, id).await {
         Err(_) => return internal_error(),
         Ok(None) => return error(StatusCode::NOT_FOUND, "not found"),
         Ok(Some(row)) => row,
     };
-    let Some(body) = object_body(&body) else { return error(StatusCode::BAD_REQUEST, "invalid JSON") };
+    let Some(body) = object_body(body) else { return error(StatusCode::BAD_REQUEST, "invalid JSON") };
 
     let mut name: Option<String> = None;
     if let Some(raw) = body.get("name") {
@@ -286,7 +297,7 @@ async fn update(
 
     let mut models: Option<Vec<GroupModelInput>> = None;
     if let Some(raw) = body.get("models") {
-        match validate_models(&state, user_id, raw).await {
+        match validate_models(state, user_id, raw).await {
             Err(_) => return internal_error(),
             Ok(Err(message)) => return error(StatusCode::BAD_REQUEST, &message),
             Ok(Ok(validated)) => models = Some(validated),
@@ -301,26 +312,30 @@ async fn update(
         strategy = raw.as_str().map(str::to_string);
     }
 
-    if update_model_group_fields(state.pool(), &id, name.as_deref(), slug.as_deref(), strategy.as_deref()).await.is_err() {
+    if update_model_group_fields(state.pool(), id, name.as_deref(), slug.as_deref(), strategy.as_deref()).await.is_err() {
         return internal_error();
     }
     if let Some(models) = models {
-        if replace_group_models(state.pool(), user_id, &id, &models).await.is_err() {
+        if replace_group_models(state.pool(), user_id, id, &models).await.is_err() {
             return internal_error();
         }
     }
-    let updated = match get_model_group_by_id(state.pool(), user_id, &id).await {
+    let updated = match get_model_group_by_id(state.pool(), user_id, id).await {
         Err(_) => return internal_error(),
         Ok(row) => row.unwrap_or(existing),
     };
-    match to_list_item(&state, user_id, &updated).await {
+    match to_list_item(state, user_id, &updated).await {
         Ok(item) => Json(item).into_response(),
         Err(_) => internal_error(),
     }
 }
 
 async fn remove(State(state): State<AppState>, session: SessionUser, Path(id): Path<String>) -> Response {
-    match delete_model_group(state.pool(), &session.user.id, &id).await {
+    remove_for_user(&state, &session.user.id, &id).await
+}
+
+pub(crate) async fn remove_for_user(state: &AppState, user_id: &str, id: &str) -> Response {
+    match delete_model_group(state.pool(), user_id, id).await {
         Err(_) => internal_error(),
         Ok(false) => error(StatusCode::NOT_FOUND, "not found"),
         Ok(true) => Json(json!({ "ok": true })).into_response(),

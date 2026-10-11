@@ -41,7 +41,7 @@ The CLI opens the sign-in page in your browser. Approve the device there, then p
 ## Register a local server
 
 ```console
-$ kano-proxy add
+$ kano-proxy tunnel add
   Slug [my-mac]:
   Type: openai
   Target [http://localhost:11434/v1]:
@@ -56,7 +56,7 @@ The CLI asks the server for its model list. Keep the default, "All models", and 
 ## Start the tunnel
 
 ```console
-$ kano-proxy start
+$ kano-proxy tunnel start
   my-mac: connected, 3 models reported
 ```
 
@@ -73,8 +73,11 @@ They also work as targets in a [model group](/guide/endpoints#model-groups), for
 
 ## Managing devices
 
-- `kano-proxy list` and `kano-proxy status` show what is registered and connected.
-- `kano-proxy remove <slug>` deletes a provider.
-- The **Providers** page in the app lists devices and lets you revoke one. A revoked device disconnects within the hour and cannot reconnect.
+- `kano-proxy tunnel list` and `kano-proxy status` show what is registered and connected.
+- `kano-proxy tunnel remove <slug>` deletes a provider.
+- `kano-proxy logout` signs the machine out: it restores any coding agent the CLI set up here, revokes the device and the API keys the device created, and clears the local state.
+- The **Access** page in the app lists devices and lets you revoke one; revoking also revokes the keys that device created. A revoked device disconnects within the hour and cannot reconnect. The **Providers** page lists the registered local endpoints.
+
+The same CLI also sets up [Claude Code](/agents/claude-code) and the [Codex CLI](/agents/codex-cli) against your proxy: `kano-proxy agent setup claude-code`, `kano-proxy agent setup codex`.
 
 The CLI streams both directions without buffering, reconnects on network failures, and never logs request bodies.

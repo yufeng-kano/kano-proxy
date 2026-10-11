@@ -1,13 +1,26 @@
 ---
 title: Claude Code
-description: Point Claude Code at Kano Proxy with ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN, and choose which provider/model answers.
+description: Point Claude Code at Kano Proxy with one CLI command, or by hand with ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN, and choose which provider/model answers.
 ---
 
 # Claude Code
 
 Works fully. Claude Code speaks the Anthropic Messages API, which the proxy serves natively. Any connected provider can answer, not only Claude: set the model to a `codex/`, `grok/`, or `antigravity/` id and the proxy converts the request and the stream.
 
-## Settings
+## Set it up with the CLI
+
+The [kano-proxy CLI](/guide/local-models) can write this configuration for you:
+
+```console
+$ kano-proxy init                      # once per machine
+$ kano-proxy agent setup claude-code
+```
+
+It reads the models your account can serve, lets you pick what Opus, Sonnet and Haiku resolve to (and optional fallbacks on other providers), creates a model group named `claude-code` whose model names are the plain Claude ids, mints an API key named after this machine, and writes the `env` block below into `~/.claude/settings.json` with `ANTHROPIC_BASE_URL` set to the group's endpoint. Going through a group matters: Claude Code decides what to enable from the model id it sees, and `/g/claude-code/anthropic` serves real ids such as `claude-opus-5` even when the proxy routes them elsewhere.
+
+`kano-proxy agent restore claude-code` puts the fields it wrote back the way they were and revokes the key; `--full` restores the whole file from the backup it took first. `kano-proxy agent list` shows what is managed. The group stays on the Groups page, where you can reorder or add fallback targets at any time.
+
+## Settings by hand
 
 Add an `env` block to `~/.claude/settings.json`. Values there apply to every session and take precedence over the shell environment.
 

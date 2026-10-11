@@ -1,4 +1,4 @@
-//! agent tunnel wire protocol v1
+//! CLI tunnel wire protocol v1
 //! (docs/cli.md § Wire protocol). Control frames are JSON text, body bytes are
 //! binary frames `[u32 BE request id][u8 kind][chunk]`. The frame enum is the
 //! mirror image of the CLI's `apps/cli/src/protocol.rs`, so released CLI
@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const AGENT_PROTO: u32 = 1;
+pub const TUNNEL_PROTO: u32 = 1;
 
 /// Kind 0 = request body (server → CLI), kind 1 = response body (CLI → server).
 pub const BODY_KIND_REQUEST: u8 = 0;
@@ -78,7 +78,7 @@ pub fn is_allowed_path(format: CliProviderFormat, path: &str) -> bool {
 
 /// The tri-state guard's fault vocabulary (docs/cli.md § Failover semantics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentFaultReason {
+pub enum TunnelFaultReason {
     Offline,
     Busy,
     Timeout,
@@ -87,31 +87,31 @@ pub enum AgentFaultReason {
     Protocol,
 }
 
-impl AgentFaultReason {
+impl TunnelFaultReason {
     pub fn as_str(self) -> &'static str {
         match self {
-            AgentFaultReason::Offline => "offline",
-            AgentFaultReason::Busy => "busy",
-            AgentFaultReason::Timeout => "timeout",
-            AgentFaultReason::Replaced => "replaced",
-            AgentFaultReason::TooLarge => "too_large",
-            AgentFaultReason::Protocol => "protocol",
+            TunnelFaultReason::Offline => "offline",
+            TunnelFaultReason::Busy => "busy",
+            TunnelFaultReason::Timeout => "timeout",
+            TunnelFaultReason::Replaced => "replaced",
+            TunnelFaultReason::TooLarge => "too_large",
+            TunnelFaultReason::Protocol => "protocol",
         }
     }
 }
 
-impl std::fmt::Display for AgentFaultReason {
+impl std::fmt::Display for TunnelFaultReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
 /// CLI-reported local failures (`res_err.reason`) → the server's fault vocabulary.
-pub fn fault_from_res_err_reason(reason: &str) -> AgentFaultReason {
+pub fn fault_from_res_err_reason(reason: &str) -> TunnelFaultReason {
     match reason {
-        "connect_refused" => AgentFaultReason::Offline,
-        "timeout" => AgentFaultReason::Timeout,
-        _ => AgentFaultReason::Protocol,
+        "connect_refused" => TunnelFaultReason::Offline,
+        "timeout" => TunnelFaultReason::Timeout,
+        _ => TunnelFaultReason::Protocol,
     }
 }
 
@@ -301,7 +301,7 @@ mod tests {
     /// The frames the CLI parses must be exactly what we encode (apps/cli/src/protocol.rs).
     #[test]
     fn encodes_the_frames_the_cli_expects() {
-        let hello = encode_control_frame(&ControlFrame::Hello { proto: AGENT_PROTO, slug: "my-mac".into() });
+        let hello = encode_control_frame(&ControlFrame::Hello { proto: TUNNEL_PROTO, slug: "my-mac".into() });
         assert_eq!(hello, r#"{"t":"hello","proto":1,"slug":"my-mac"}"#);
         let req = encode_control_frame(&ControlFrame::Req {
             id: 3,
@@ -351,9 +351,9 @@ mod tests {
 
     #[test]
     fn res_err_reasons_map_to_faults() {
-        assert_eq!(fault_from_res_err_reason("connect_refused"), AgentFaultReason::Offline);
-        assert_eq!(fault_from_res_err_reason("timeout"), AgentFaultReason::Timeout);
-        assert_eq!(fault_from_res_err_reason("aborted"), AgentFaultReason::Protocol);
-        assert_eq!(fault_from_res_err_reason("whatever"), AgentFaultReason::Protocol);
+        assert_eq!(fault_from_res_err_reason("connect_refused"), TunnelFaultReason::Offline);
+        assert_eq!(fault_from_res_err_reason("timeout"), TunnelFaultReason::Timeout);
+        assert_eq!(fault_from_res_err_reason("aborted"), TunnelFaultReason::Protocol);
+        assert_eq!(fault_from_res_err_reason("whatever"), TunnelFaultReason::Protocol);
     }
 }

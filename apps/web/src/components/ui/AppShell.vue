@@ -51,7 +51,7 @@ const NAV = [
   { name: "providers", to: "/providers", label: "nav.providers" },
   { name: "models", to: "/models", label: "nav.models" },
   { name: "groups", to: "/groups", label: "nav.groups" },
-  { name: "keys", to: "/keys", label: "nav.keys" },
+  { name: "access", to: "/access", label: "nav.access" },
 ] as const
 
 /** Blank until the first load resolves, so the badge never shows a wrong version. */

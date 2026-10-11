@@ -12,7 +12,20 @@ Two different things share the name:
 - **Codex as a provider**: connect your ChatGPT subscription on the Providers page. Its models show up as `codex/<model>` for every tool on this list.
 - **Codex CLI as a client**: this page. The CLI sends its requests to the proxy, which routes them to whichever provider the model id names.
 
-Three steps: write the config, generate the model catalog, start `codex`.
+Three steps: write the config, generate the model catalog, start `codex`. The CLI does the first two for you; the sections after it describe the same thing by hand.
+
+## Set it up with the CLI
+
+The [kano-proxy CLI](/guide/local-models) performs all three steps:
+
+```console
+$ kano-proxy init                      # once per machine
+$ kano-proxy agent setup codex
+```
+
+It reads the Codex models your account can serve, lets you pick the default model, its reasoning effort and optional fallbacks on other providers, creates a model group named `codex-cli` whose model names are the plain ids (`gpt-5.6-sol`, not `codex/gpt-5.6-sol`), mints an API key named after this machine, edits `~/.codex/config.toml` (your other settings and comments stay), and generates `kano-models.json` from your installed Codex binary — the same transformation as the scripts below, with no `jq` needed. Because the group serves the plain ids, Codex's own catalog metadata lines up with them.
+
+`kano-proxy agent restore codex` puts the fields it wrote back, removes the generated catalog and revokes the key; `--full` restores the whole file from the backup it took first.
 
 ## 1. Config
 

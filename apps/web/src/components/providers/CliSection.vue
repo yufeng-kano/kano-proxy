@@ -1,10 +1,11 @@
 <script setup lang="ts">
 /**
- * The Providers page's CLI sections (docs/admin-ui.md § CLI sections):
- * CLI devices and CLI providers, two cards for two genuinely separate
- * datasets. No create flows — creation is the CLI's job, so the shared empty
- * state teaches the install + `kano-proxy init` path instead. Row actions sit
- * behind each card's edit gate, same convention as the page's other sections.
+ * The Providers page's CLI section (docs/admin-ui.md § CLI section): the
+ * CLI providers card. Devices are not here — a device is a credential and
+ * lives on the Access page beside the keys it mints. No create flow: creation
+ * is `kano-proxy tunnel add`'s job, and the empty state says so. Row actions
+ * sit behind the card's edit gate, same convention as the page's other
+ * sections.
  *
  * Data comes from the shared useCli singleton; the page owns loading and
  * polling, this component only renders and mutates.
@@ -15,7 +16,6 @@ import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
-import CopyField from "@/components/ui/CopyField.vue"
 import DataTable from "@/components/ui/DataTable.vue"
 import type { Column } from "@/components/ui/DataTable.vue"
 import EmptyState from "@/components/ui/EmptyState.vue"
@@ -24,78 +24,34 @@ import Modal from "@/components/ui/Modal.vue"
 import TextInput from "@/components/ui/TextInput.vue"
 import { useCli } from "@/composables/useCli"
 import { useI18n } from "@/i18n"
-import { deleteCliProvider, renameCliDevice, renameCliProvider, revokeCliDevice } from "@/services/api"
-import type { CliDevice, CliProvider } from "@/types"
-
-/**
- * Wire identifiers, not copy (docs/i18n.md): the install commands and the
- * Releases URL are the same for every instance — instances never host
- * binaries themselves (docs/cli.md § Distribution). The init command carries
- * this instance's own origin: the CLI's compiled-in default is the hosted
- * edition, so a self-hosted instance has to teach its address here
- * (docs/admin-ui.md § CLI sections).
- */
-const INSTALL_BREW = "brew install yufeng-kano/tap/kano-proxy"
-const INSTALL_SCRIPT =
-  "curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh"
-const INIT_COMMAND = `kano-proxy init --base-url ${window.location.origin}`
-const RELEASES_URL = "https://github.com/yufeng-kano/kano-proxy/releases"
+import { deleteCliProvider, renameCliProvider } from "@/services/api"
+import type { CliProvider } from "@/types"
 
 const { t, format } = useI18n()
 const { state, load } = useCli()
 
 const error = ref<string | null>(null)
-const editingDevices = ref(false)
-const editingProviders = ref(false)
+const editing = ref(false)
 const busyId = ref<string | null>(null)
 
-/** One rename dialog for both datasets — a device and a provider each own a display name. */
-type RenameTarget = { kind: "device" | "provider"; id: string; name: string }
-const renaming = ref<RenameTarget | null>(null)
+const renaming = ref<CliProvider | null>(null)
 const renameValue = ref("")
 const renameSaving = ref(false)
 
-const devices = computed<CliDevice[]>(() => state.devices ?? [])
 const providers = computed<CliProvider[]>(() => state.providers ?? [])
-const isEmpty = computed(
-  () => !state.loading && devices.value.length === 0 && providers.value.length === 0,
-)
 
-const deviceColumns = computed<Column<CliDevice>[]>(() => [
-  { key: "name", header: t("cli.devices.column.name") },
-  { key: "lastSeen", header: t("cli.devices.column.lastSeen") },
-  { key: "created", header: t("cli.devices.column.created"), hideOnMobile: true },
-  ...(editingDevices.value
-    ? [{ key: "actions", header: "", srHeader: t("action.edit"), align: "end" as const, width: "148px" }]
-    : []),
-])
-
-const providerColumns = computed<Column<CliProvider>[]>(() => [
+const columns = computed<Column<CliProvider>[]>(() => [
   { key: "provider", header: t("cli.providers.column.provider") },
   { key: "state", header: t("cli.providers.column.state") },
   { key: "models", header: t("cli.providers.column.models") },
   { key: "device", header: t("cli.providers.column.device"), hideOnMobile: true },
-  ...(editingProviders.value
+  ...(editing.value
     ? [{ key: "actions", header: "", srHeader: t("action.edit"), align: "end" as const, width: "148px" }]
     : []),
 ])
 
-async function onRevoke(device: CliDevice) {
-  if (!confirm(t("cli.devices.revokeConfirm", { name: device.name }))) return
-  busyId.value = device.id
-  error.value = null
-  try {
-    await revokeCliDevice(device.id)
-    await load({ refresh: true })
-  } catch {
-    error.value = t("cli.error.revoke")
-  } finally {
-    busyId.value = null
-  }
-}
-
-function openRename(kind: RenameTarget["kind"], row: CliDevice | CliProvider) {
-  renaming.value = { kind, id: row.id, name: row.name }
+function openRename(row: CliProvider) {
+  renaming.value = row
   renameValue.value = row.name
 }
 
@@ -106,12 +62,11 @@ async function saveRename() {
   renameSaving.value = true
   error.value = null
   try {
-    if (target.kind === "device") await renameCliDevice(target.id, name)
-    else await renameCliProvider(target.id, name)
+    await renameCliProvider(target.id, name)
     renaming.value = null
     await load({ refresh: true })
   } catch {
-    error.value = t(target.kind === "device" ? "cli.error.renameDevice" : "cli.error.rename")
+    error.value = t("cli.error.rename")
   } finally {
     renameSaving.value = false
   }
@@ -139,7 +94,7 @@ function modelsCell(provider: CliProvider): string {
 
 <template>
   <Banner v-if="error || state.error" tone="error">
-    {{ error || t("cli.error.load") }}
+    {{ error || t("cli.error.loadProviders") }}
     <template #actions>
       <AppButton size="sm" variant="ghost" @click="((error = null), (state.error = null))">
         {{ t("action.dismiss") }}
@@ -147,197 +102,99 @@ function modelsCell(provider: CliProvider): string {
     </template>
   </Banner>
 
-  <!-- Shared empty state: the install path is the content. -->
-  <AppCard v-if="isEmpty" :title="t('cli.title')">
-    <EmptyState :title="t('cli.empty.title')" :body="t('cli.empty.body')">
-      <template #action>
-        <div class="install">
-          <span class="install-label">{{ t("cli.empty.install") }}</span>
-          <CopyField :value="INSTALL_BREW" @error="error = $event" />
-          <CopyField :value="INSTALL_SCRIPT" @error="error = $event" />
-          <span class="install-label">{{ t("cli.empty.thenRun") }}</span>
-          <CopyField :value="INIT_COMMAND" @error="error = $event" />
-          <AppButton variant="ghost" size="sm" :href="RELEASES_URL">
-            {{ t("cli.empty.releases") }}
+  <AppCard flush :title="t('cli.providers.title')">
+    <template #actions>
+      <!-- One gate for the whole section. aria-pressed: the same control
+           opens and closes it, so its state must be audible as one. -->
+      <AppButton
+        v-if="providers.length"
+        icon-only
+        size="sm"
+        variant="ghost"
+        :label="
+          editing
+            ? t('providers.section.doneEditing', { section: t('cli.providers.title') })
+            : t('providers.section.edit', { section: t('cli.providers.title') })
+        "
+        :aria-pressed="editing"
+        @click="editing = !editing"
+      >
+        <template #icon><ActionIcon :name="editing ? 'check' : 'edit'" /></template>
+      </AppButton>
+    </template>
+
+    <EmptyState
+      v-if="!state.loading && !providers.length"
+      compact
+      :title="t('cli.providers.empty.title')"
+      :body="t('cli.providers.empty.body')"
+    />
+    <DataTable
+      v-else-if="providers.length"
+      :columns="columns"
+      :rows="providers"
+      :row-key="(p: CliProvider) => p.id"
+      :caption="t('cli.providers.title')"
+    >
+      <template #cell-provider="{ row }">
+        <div class="provider-cell">
+          <span class="name">{{ row.name }}</span>
+          <span class="meta">
+            <code class="mono slug">{{ row.slug }}/*</code>
+            <Badge tone="neutral">
+              {{ row.format === "anthropic" ? t("custom.dialog.formatAnthropic") : t("custom.dialog.formatOpenAI") }}
+            </Badge>
+          </span>
+        </div>
+      </template>
+      <template #cell-state="{ row }">
+        <!-- Dot + label, never color alone (docs/admin-ui.md § A11y floor). -->
+        <span class="conn" :class="{ on: row.connected }">
+          <span class="conn-dot" aria-hidden="true" />
+          {{ row.connected ? t("cli.providers.connected") : t("cli.providers.offline") }}
+        </span>
+      </template>
+      <template #cell-models="{ row }">
+        <span>{{ modelsCell(row) }}</span>
+        <span
+          v-if="row.models_updated_at"
+          class="report-time"
+          :title="format.dateTime(row.models_updated_at)"
+        >
+          {{ format.relative(row.models_updated_at) }}
+        </span>
+      </template>
+      <template #cell-device="{ row }">
+        <span v-if="row.device_name">{{ row.device_name }}</span>
+        <span v-else class="never">—</span>
+      </template>
+      <template #cell-actions="{ row }">
+        <div class="row-actions">
+          <AppButton
+            icon-only
+            size="sm"
+            variant="ghost"
+            :label="t('cli.providers.renameName', { name: row.name })"
+            @click="openRename(row)"
+          >
+            <template #icon><ActionIcon name="edit" /></template>
+          </AppButton>
+          <AppButton
+            icon-only
+            size="sm"
+            variant="danger"
+            :label="t('cli.providers.removeName', { name: row.name })"
+            :loading="busyId === row.id"
+            @click="onRemove(row)"
+          >
+            <template #icon><ActionIcon name="trash" /></template>
           </AppButton>
         </div>
       </template>
-    </EmptyState>
+    </DataTable>
   </AppCard>
 
-  <template v-else>
-    <!-- --- Devices -------------------------------------------------------- -->
-    <AppCard flush :title="t('cli.devices.title')">
-      <template #actions>
-        <!-- One gate for the whole section. aria-pressed: the same control
-             opens and closes it, so its state must be audible as one. -->
-        <AppButton
-          v-if="devices.length"
-          icon-only
-          size="sm"
-          variant="ghost"
-          :label="
-            editingDevices
-              ? t('providers.section.doneEditing', { section: t('cli.devices.title') })
-              : t('providers.section.edit', { section: t('cli.devices.title') })
-          "
-          :aria-pressed="editingDevices"
-          @click="editingDevices = !editingDevices"
-        >
-          <template #icon><ActionIcon :name="editingDevices ? 'check' : 'edit'" /></template>
-        </AppButton>
-      </template>
-
-      <EmptyState
-        v-if="!state.loading && !devices.length"
-        compact
-        :title="t('cli.empty.title')"
-        :body="t('cli.empty.body')"
-      />
-      <DataTable
-        v-else-if="devices.length"
-        :columns="deviceColumns"
-        :rows="devices"
-        :row-key="(d: CliDevice) => d.id"
-        :caption="t('cli.devices.title')"
-      >
-        <template #cell-name="{ row }">
-          <span class="name">{{ row.name }}</span>
-        </template>
-        <template #cell-lastSeen="{ row }">
-          <span v-if="row.last_seen_at" :title="format.dateTime(row.last_seen_at)">
-            {{ format.relative(row.last_seen_at) }}
-          </span>
-          <span v-else class="never">{{ t("state.never") }}</span>
-        </template>
-        <template #cell-created="{ row }">
-          <span :title="format.dateTime(row.created_at)">{{ format.date(row.created_at) }}</span>
-        </template>
-        <template #cell-actions="{ row }">
-          <!-- Revoke keeps its word: it destroys a sign-in the operator
-               would have to redo on the machine itself, and the row goes
-               with it. -->
-          <div class="row-actions">
-            <AppButton
-              icon-only
-              size="sm"
-              variant="ghost"
-              :label="t('cli.devices.renameName', { name: row.name })"
-              @click="openRename('device', row)"
-            >
-              <template #icon><ActionIcon name="edit" /></template>
-            </AppButton>
-            <AppButton
-              size="sm"
-              variant="danger"
-              :label="t('cli.devices.revokeName', { name: row.name })"
-              :loading="busyId === row.id"
-              @click="onRevoke(row)"
-            >
-              {{ t("cli.devices.revoke") }}
-            </AppButton>
-          </div>
-        </template>
-      </DataTable>
-    </AppCard>
-
-    <!-- --- CLI providers -------------------------------------------------- -->
-    <AppCard flush :title="t('cli.providers.title')">
-      <template #actions>
-        <AppButton
-          v-if="providers.length"
-          icon-only
-          size="sm"
-          variant="ghost"
-          :label="
-            editingProviders
-              ? t('providers.section.doneEditing', { section: t('cli.providers.title') })
-              : t('providers.section.edit', { section: t('cli.providers.title') })
-          "
-          :aria-pressed="editingProviders"
-          @click="editingProviders = !editingProviders"
-        >
-          <template #icon><ActionIcon :name="editingProviders ? 'check' : 'edit'" /></template>
-        </AppButton>
-      </template>
-
-      <EmptyState
-        v-if="!state.loading && !providers.length"
-        compact
-        :title="t('cli.providers.empty.title')"
-        :body="t('cli.providers.empty.body')"
-      />
-      <DataTable
-        v-else-if="providers.length"
-        :columns="providerColumns"
-        :rows="providers"
-        :row-key="(p: CliProvider) => p.id"
-        :caption="t('cli.providers.title')"
-      >
-        <template #cell-provider="{ row }">
-          <div class="provider-cell">
-            <span class="name">{{ row.name }}</span>
-            <span class="meta">
-              <code class="mono slug">{{ row.slug }}/*</code>
-              <Badge tone="neutral">
-                {{ row.format === "anthropic" ? t("custom.dialog.formatAnthropic") : t("custom.dialog.formatOpenAI") }}
-              </Badge>
-            </span>
-          </div>
-        </template>
-        <template #cell-state="{ row }">
-          <!-- Dot + label, never color alone (docs/admin-ui.md § A11y floor). -->
-          <span class="conn" :class="{ on: row.connected }">
-            <span class="conn-dot" aria-hidden="true" />
-            {{ row.connected ? t("cli.providers.connected") : t("cli.providers.offline") }}
-          </span>
-        </template>
-        <template #cell-models="{ row }">
-          <span>{{ modelsCell(row) }}</span>
-          <span
-            v-if="row.models_updated_at"
-            class="report-time"
-            :title="format.dateTime(row.models_updated_at)"
-          >
-            {{ format.relative(row.models_updated_at) }}
-          </span>
-        </template>
-        <template #cell-device="{ row }">
-          <span v-if="row.device_name">{{ row.device_name }}</span>
-          <span v-else class="never">—</span>
-        </template>
-        <template #cell-actions="{ row }">
-          <div class="row-actions">
-            <AppButton
-              icon-only
-              size="sm"
-              variant="ghost"
-              :label="t('cli.providers.renameName', { name: row.name })"
-              @click="openRename('provider', row)"
-            >
-              <template #icon><ActionIcon name="edit" /></template>
-            </AppButton>
-            <AppButton
-              icon-only
-              size="sm"
-              variant="danger"
-              :label="t('cli.providers.removeName', { name: row.name })"
-              :loading="busyId === row.id"
-              @click="onRemove(row)"
-            >
-              <template #icon><ActionIcon name="trash" /></template>
-            </AppButton>
-          </div>
-        </template>
-      </DataTable>
-    </AppCard>
-  </template>
-
-  <Modal
-    v-if="renaming"
-    :title="renaming.kind === 'device' ? t('cli.rename.deviceTitle') : t('cli.rename.title')"
-    @close="renaming = null"
-  >
+  <Modal v-if="renaming" :title="t('cli.rename.title')" @close="renaming = null">
     <form class="rename-form" @submit.prevent="saveRename">
       <FormField v-slot="field" :label="t('cli.rename.label')">
         <TextInput
@@ -419,21 +276,6 @@ function modelsCell(provider: CliProvider): string {
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-1);
-}
-
-.install {
-  display: grid;
-  gap: var(--space-2);
-  justify-items: stretch;
-  text-align: left;
-  max-width: 560px;
-  width: 100%;
-}
-
-.install-label {
-  color: var(--muted);
-  font-size: var(--text-xs);
-  margin-top: var(--space-2);
 }
 
 .rename-form {

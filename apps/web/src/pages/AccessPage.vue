@@ -1,16 +1,20 @@
 <script setup lang="ts">
 /**
- * API keys: the two jobs this page does are split into tabs rather than
- * stacked, so neither pushes the other off-screen (docs/admin-ui.md
+ * Access: the user's credentials, split into tabs rather than stacked so no
+ * dataset pushes another off-screen (docs/admin-ui.md § Access page,
  * § Anti-scroll rules).
  *
  * - **Keys** — the list. Create, edit, and revoke all run in one dialog
  *   (CreateKeyDialog); a fresh key's plaintext is shown once inside that
  *   dialog's done step and nowhere else, while the list refreshes behind it.
+ *   A key a CLI device minted names its device under the key's name.
+ * - **Devices** — the CLI devices (docs/cli.md): a device is a rotating token
+ *   family that can mint keys, so it is revoked here, beside them.
  * - **Connect** — the base URLs this deployment actually serves, derived from
  *   the current host, never hardcoded.
  */
-import { computed, onMounted, ref } from "vue"
+import { computed, onMounted, ref, watch } from "vue"
+import CliDevicesSection from "@/components/access/CliDevicesSection.vue"
 import CreateKeyDialog from "@/components/CreateKeyDialog.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
@@ -23,11 +27,13 @@ import EmptyState from "@/components/ui/EmptyState.vue"
 import PageHeader from "@/components/ui/PageHeader.vue"
 import SectionNav from "@/components/ui/SectionNav.vue"
 import type { SectionItem } from "@/components/ui/SectionNav.vue"
+import { useAuth } from "@/composables/useAuth"
+import { useCli } from "@/composables/useCli"
 import { useI18n } from "@/i18n"
 import { clientBaseUrls, listKeys } from "@/services/api"
 import type { ApiKey } from "@/types"
 
-type Tab = "keys" | "connect"
+type Tab = "keys" | "devices" | "connect"
 
 /**
  * Wire identifiers, not copy: the header name a client sends and the shape of
@@ -39,6 +45,8 @@ const API_KEY_HEADER = "x-api-key"
 const MODEL_ID_FORM = "provider/model"
 
 const { t, format } = useI18n()
+const { user } = useAuth()
+const cli = useCli()
 
 const tab = ref<Tab>("keys")
 const keys = ref<ApiKey[]>([])
@@ -51,8 +59,9 @@ const editingKey = ref<ApiKey | null>(null)
 const baseUrls = clientBaseUrls()
 
 const tabs = computed<SectionItem[]>(() => [
-  { id: "keys", label: t("keys.tab.keys"), count: keys.value.length },
-  { id: "connect", label: t("keys.tab.connect") },
+  { id: "keys", label: t("access.tab.keys"), count: keys.value.length },
+  { id: "devices", label: t("access.tab.devices"), count: cli.state.devices?.length ?? null },
+  { id: "connect", label: t("access.tab.connect") },
 ])
 
 /**
@@ -60,7 +69,7 @@ const tabs = computed<SectionItem[]>(() => [
  * declared width and its own (unlabelled) track rather than riding beside the
  * name: inline it lands at a different x-position on every row, and a column of
  * controls that zigzags is one the eye has to search for. Revoke is not a
- * column at all — it lives in the edit dialog (docs/admin-ui.md § Keys page).
+ * column at all — it lives in the edit dialog (docs/admin-ui.md § Access page).
  */
 const columns = computed<Column<ApiKey>[]>(() => [
   { key: "name", header: t("keys.column.name") },
@@ -70,10 +79,21 @@ const columns = computed<Column<ApiKey>[]>(() => [
   { key: "edit", header: "", srHeader: t("action.edit"), align: "end", width: "56px" },
 ])
 
-onMounted(() => void load())
+onMounted(() => {
+  // Every CLI cache read and write is scoped to the user id, so this lands
+  // before the first load, exactly as the Providers page does.
+  cli.setUserId(user.value?.id ?? null)
+  void load()
+  void cli.load()
+})
+
+watch(
+  () => user.value?.id ?? null,
+  (id) => cli.setUserId(id),
+)
 
 function onSelectTab(id: string) {
-  tab.value = id === "connect" ? "connect" : "keys"
+  tab.value = id === "connect" ? "connect" : id === "devices" ? "devices" : "keys"
 }
 
 async function load() {
@@ -115,7 +135,7 @@ function spendCell(key: ApiKey): string {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('keys.title')">
+    <PageHeader :title="t('access.title')">
       <template #actions>
         <AppButton v-if="tab === 'keys'" variant="primary" @click="openCreate">
           <template #icon><ActionIcon name="plus" /></template>
@@ -126,7 +146,7 @@ function spendCell(key: ApiKey): string {
         <SectionNav
           :items="tabs"
           :active="tab"
-          :label="t('keys.title')"
+          :label="t('access.title')"
           @select="onSelectTab"
         />
       </template>
@@ -147,7 +167,7 @@ function spendCell(key: ApiKey): string {
       id="panel-keys"
       class="panel"
       role="tabpanel"
-      :aria-label="t('keys.tab.keys')"
+      :aria-label="t('access.tab.keys')"
     >
       <AppCard fill flush class="list">
         <div v-if="loading" class="skeletons">
@@ -172,10 +192,17 @@ function spendCell(key: ApiKey): string {
           :columns="columns"
           :rows="keys"
           :row-key="(k) => k.id"
-          :caption="t('keys.title')"
+          :caption="t('access.tab.keys')"
         >
           <template #cell-name="{ row }">
-            <span class="name">{{ row.name }}</span>
+            <div class="name-cell">
+              <span class="name">{{ row.name }}</span>
+              <!-- The minting device, where the key is revoked — the only place
+                   the link is needed (docs/admin-ui.md § Access page). -->
+              <span v-if="row.device_name" class="from-device">
+                {{ t("keys.fromDevice", { device: row.device_name }) }}
+              </span>
+            </div>
           </template>
           <template #cell-edit="{ row }">
             <AppButton
@@ -204,13 +231,25 @@ function spendCell(key: ApiKey): string {
       </AppCard>
     </section>
 
+    <!-- --- Devices ------------------------------------------------------- -->
+    <section
+      v-else-if="tab === 'devices'"
+      id="panel-devices"
+      class="panel"
+      role="tabpanel"
+      :aria-label="t('access.tab.devices')"
+    >
+      <!-- Revoking a device takes its keys along, so the key list reloads. -->
+      <CliDevicesSection @changed="load" />
+    </section>
+
     <!-- --- Connect ------------------------------------------------------- -->
     <section
       v-else
       id="panel-connect"
       class="panel"
       role="tabpanel"
-      :aria-label="t('keys.tab.connect')"
+      :aria-label="t('access.tab.connect')"
     >
       <!-- `fill` like the key list: Connect is short and would otherwise hug
            its content, resizing the card on every tab switch. A tab changes
@@ -256,7 +295,7 @@ function spendCell(key: ApiKey): string {
 <style scoped>
 /*
  * The page fills the content region exactly, which is what gives
- * `AppCard fill` a bounded box to scroll the key list inside of instead of
+ * `AppCard fill` a bounded box to scroll the lists inside of instead of
  * growing the page (docs/admin-ui.md § Anti-scroll rules).
  *
  * Every value here is AppShell's own, inherited rather than restated: it owns
@@ -287,11 +326,18 @@ function spendCell(key: ApiKey): string {
 
 /* --- Cards -------------------------------------------------------------- */
 
-/* Both tabs' cards fill the panel, so switching tabs does not resize the page.
-   `AppCard fill` scrolls its own body, so neither panel scrolls itself. */
+/* Every tab's card fills the panel, so switching tabs does not resize the
+   page. `AppCard fill` scrolls its own body, so no panel scrolls itself. */
 .list {
   flex: 1;
   min-height: 0;
+}
+
+.name-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .name {
@@ -299,6 +345,11 @@ function spendCell(key: ApiKey): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.from-device {
+  color: var(--muted);
+  font-size: var(--text-xs);
 }
 
 .never {

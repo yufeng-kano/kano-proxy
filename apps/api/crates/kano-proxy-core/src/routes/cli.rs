@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use crate::auth::session::SessionUser;
 use crate::crypto::cli_tokens::{new_pairing_code, sha256_hex_str};
 use crate::db::accounts::{list_accounts, update_account_identity, AccountIdentity};
+use crate::db::keys::count_keys_for_device;
 use crate::db::cli::{
     approve_login_request, delete_login_request, get_cli_provider_by_id, get_login_request, list_cli_devices,
     rename_cli_device, rename_cli_provider, revoke_cli_device, CliLoginRequestRow,
@@ -49,17 +50,21 @@ async fn list_devices(State(state): State<AppState>, session: SessionUser) -> Re
     let Ok(rows) = list_cli_devices(state.pool(), &session.user.id).await else {
         return internal_error();
     };
-    let devices: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "id": row.id,
-                "name": row.name,
-                "last_seen_at": row.last_seen_at,
-                "created_at": row.created_at,
-            })
-        })
-        .collect();
+    let mut devices: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in rows {
+        // How many keys the device minted and still exist — the revoke confirmation names
+        // them, since revoking takes them along (docs/cli.md § Keys and groups).
+        let Ok(key_count) = count_keys_for_device(state.pool(), &row.id).await else {
+            return internal_error();
+        };
+        devices.push(json!({
+            "id": row.id,
+            "name": row.name,
+            "last_seen_at": row.last_seen_at,
+            "created_at": row.created_at,
+            "key_count": key_count,
+        }));
+    }
     Json(json!({ "devices": devices })).into_response()
 }
 

@@ -21,7 +21,7 @@ Go to **Providers** and connect at least one:
 
 ## 3. Create an API key
 
-Go to **Keys** and create one. The key starts with `sk-kano-proxy-` and is shown once. Copy it when it appears. You can create several keys, one per tool, and revoke any of them later. The Keys page also shows the exact base URLs for your instance.
+Go to **Access** and create one. The key starts with `sk-kano-proxy-` and is shown once. Copy it when it appears. You can create several keys, one per tool, and revoke any of them later. The Keys page also shows the exact base URLs for your instance.
 
 ## 4. Send a request
 

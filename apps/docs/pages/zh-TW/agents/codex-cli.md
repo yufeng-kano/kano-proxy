@@ -12,7 +12,20 @@ description: 把 Codex CLI 指向 Kano Proxy，產生模型目錄讓 /model 列�
 - **Codex 作為供應商**：在 Providers 頁面連接你的 ChatGPT 訂閱，它的模型會以 `codex/<model>` 出現在這份清單上的每個工具裡。
 - **Codex CLI 作為客戶端**：就是這一頁。CLI 把請求送到 proxy，proxy 依模型 id 轉給對應的供應商。
 
-三步：寫設定、產生模型目錄、啟動 `codex`。
+三步：寫設定、產生模型目錄、啟動 `codex`。前兩步 CLI 可以代勞，之後各節是手動做法。
+
+## 用 CLI 一次設好
+
+[kano-proxy CLI](/zh-TW/guide/local-models) 會把三步一次做完：
+
+```console
+$ kano-proxy init                      # 每台機器一次
+$ kano-proxy agent setup codex
+```
+
+它會讀取你的帳號能用的 Codex 模型，讓你挑預設模型、reasoning effort 與其他供應商的備援，建立名為 `codex-cli` 的模型群組、群組裡的模型名稱就是原本的 id（`gpt-5.6-sol`，不是 `codex/gpt-5.6-sol`），建立一把以這台機器命名的 API key，編輯 `~/.codex/config.toml`（你原有的設定和註解都保留），再從你安裝的 Codex 產生 `kano-models.json`，等同下面的腳本但不需要 `jq`。因為群組用的是原本的 id，Codex 自己的目錄資料就能直接對上。
+
+`kano-proxy agent restore codex` 會還原寫過的欄位、移除產生的目錄並撤銷 key；加 `--full` 則用事前備份整檔還原。
 
 ## 1. 設定
 

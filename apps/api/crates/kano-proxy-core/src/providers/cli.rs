@@ -31,7 +31,7 @@ fn pseudo_custom_row(row: &CliProviderRow) -> CustomProviderRow {
 }
 
 /// `createCliAdapter(env, row)`. The transport is `cx.tunnels().transport(&row.id)`: a tunnel
-/// fault comes back as the 502 `x-agent-fault` marker response, never a transport error,
+/// fault comes back as the 502 `x-tunnel-fault` marker response, never a transport error,
 /// exactly as the TypeScript `createAgentFetch` did. The catalog is agent-reported, never
 /// pulled (docs/cli.md § Model catalog), so the inherited live `list_models` is dropped and
 /// nothing ever queries the tunnel for a list the database already answers.
@@ -222,7 +222,7 @@ mod tests {
 
         let res = call.await.unwrap().expect("a response");
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(res.headers().get("x-agent-upstream").unwrap(), "1");
+        assert_eq!(res.headers().get("x-tunnel-upstream").unwrap(), "1");
         assert_eq!(body_json(res).await["usage"]["prompt_tokens"], 3);
     }
 
@@ -242,14 +242,14 @@ mod tests {
             .await
             .expect("the agent transport never errors");
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(res.headers().get("x-agent-fault").unwrap(), "offline");
+        assert_eq!(res.headers().get("x-tunnel-fault").unwrap(), "offline");
         assert_eq!(body_json(res).await, json!({ "error": { "type": "agent_fault", "reason": "offline" } }));
     }
 
     #[tokio::test]
     async fn a_fault_marker_survives_the_anthropic_adapters_openai_surface_error_rebuild() {
         // The cli-anthropic chatCompletions error path reconstructs the response to re-read
-        // its text — the x-agent-fault header must survive that rebuild or dispatch can
+        // its text — the x-tunnel-fault header must survive that rebuild or dispatch can
         // neither fail over nor bench.
         let registry = TunnelRegistry::new();
         let row = cli_row("anthropic");
@@ -265,7 +265,7 @@ mod tests {
             .await
             .expect("the agent transport never errors");
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(res.headers().get("x-agent-fault").unwrap(), "offline");
+        assert_eq!(res.headers().get("x-tunnel-fault").unwrap(), "offline");
     }
 
     #[tokio::test]
@@ -331,6 +331,6 @@ mod tests {
             .await
             .expect("the agent transport never errors");
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
-        assert_eq!(res.headers().get("x-agent-fault").unwrap(), "protocol");
+        assert_eq!(res.headers().get("x-tunnel-fault").unwrap(), "protocol");
     }
 }

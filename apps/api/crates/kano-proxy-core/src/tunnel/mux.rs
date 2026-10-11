@@ -1,4 +1,4 @@
-//! the agent tunnel's request
+//! the CLI tunnel's request
 //! multiplexer (docs/cli.md § Wire protocol / § Failover semantics).
 //!
 //! One mux serves one live socket. In-flight state is memory-only by design: if
@@ -24,25 +24,25 @@ use serde_json::json;
 
 use super::protocol::{
     decode_binary_frame, encode_binary_frame, encode_control_frame, fault_from_res_err_reason,
-    parse_control_frame, validate_models_report, AgentFaultReason, ControlFrame, BODY_KIND_REQUEST,
+    parse_control_frame, validate_models_report, TunnelFaultReason, ControlFrame, BODY_KIND_REQUEST,
     BODY_KIND_RESPONSE, FIRST_RES_TIMEOUT_MS, MAX_CHUNK_BYTES, MAX_INFLIGHT,
     REQUEST_BODY_LIMIT_BYTES, RESPONSE_BUFFER_LIMIT_BYTES,
 };
 use crate::upstream::transport::ByteStream;
 use crate::upstream::UpstreamResponse;
 
-pub const AGENT_UPSTREAM_HEADER: &str = "x-agent-upstream";
-pub const AGENT_FAULT_HEADER: &str = "x-agent-fault";
+pub const TUNNEL_UPSTREAM_HEADER: &str = "x-tunnel-upstream";
+pub const TUNNEL_FAULT_HEADER: &str = "x-tunnel-fault";
 
-/// A tunnel-level failure: 502 with `x-agent-fault: <reason>`, never an upstream
+/// A tunnel-level failure: 502 with `x-tunnel-fault: <reason>`, never an upstream
 /// answer (docs/cli.md § Failover semantics — the tri-state guard).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TunnelFault {
-    pub reason: AgentFaultReason,
+    pub reason: TunnelFaultReason,
 }
 
 impl TunnelFault {
-    pub fn new(reason: AgentFaultReason) -> Self {
+    pub fn new(reason: TunnelFaultReason) -> Self {
         Self { reason }
     }
     pub fn into_upstream_response(self) -> UpstreamResponse {
@@ -52,7 +52,7 @@ impl TunnelFault {
 
 impl std::fmt::Display for TunnelFault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "agent tunnel fault: {}", self.reason)
+        write!(f, "CLI tunnel fault: {}", self.reason)
     }
 }
 
@@ -64,15 +64,15 @@ impl axum::response::IntoResponse for TunnelFault {
         let mut response = (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response();
         response
             .headers_mut()
-            .insert(AGENT_FAULT_HEADER, HeaderValue::from_static(self.reason.as_str()));
+            .insert(TUNNEL_FAULT_HEADER, HeaderValue::from_static(self.reason.as_str()));
         response
     }
 }
 
 /// The fault answer the routing layer reads markers off (`agentFaultResponse`).
-pub fn agent_fault_response(reason: AgentFaultReason) -> UpstreamResponse {
+pub fn agent_fault_response(reason: TunnelFaultReason) -> UpstreamResponse {
     let mut headers = HeaderMap::new();
-    headers.insert(AGENT_FAULT_HEADER, HeaderValue::from_static(reason.as_str()));
+    headers.insert(TUNNEL_FAULT_HEADER, HeaderValue::from_static(reason.as_str()));
     headers.insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
     let body = json!({ "error": { "type": "agent_fault", "reason": reason.as_str() } });
     UpstreamResponse::from_bytes(StatusCode::BAD_GATEWAY, headers, serde_json::to_vec(&body).expect("json"))
@@ -174,7 +174,7 @@ impl TunnelMux {
     }
 
     /// Opens one proxied request over the socket. Resolves with either the local
-    /// server's answer (marked `x-agent-upstream: 1`, status passed through) or a
+    /// server's answer (marked `x-tunnel-upstream: 1`, status passed through) or a
     /// tunnel fault. The caller has already enforced the path allowlist and
     /// reduced the headers.
     pub async fn open_request(&self, opts: OpenRequest) -> Result<UpstreamResponse, TunnelFault> {
@@ -182,7 +182,7 @@ impl TunnelMux {
         let id = {
             let mut pending = self.inner.pending.lock().expect("mux lock");
             if pending.len() >= MAX_INFLIGHT {
-                return Err(TunnelFault::new(AgentFaultReason::Busy));
+                return Err(TunnelFault::new(TunnelFaultReason::Busy));
             }
             let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
             pending.insert(
@@ -199,7 +199,7 @@ impl TunnelMux {
         };
         if self.inner.socket.send(OutFrame::Text(encode_control_frame(&frame))).is_err() {
             self.inner.pending.lock().expect("mux lock").remove(&id);
-            return Err(TunnelFault::new(AgentFaultReason::Offline));
+            return Err(TunnelFault::new(TunnelFaultReason::Offline));
         }
         let inner = self.inner.clone();
         tokio::spawn(async move { pump_request_body(inner, id, opts.body).await });
@@ -208,12 +208,12 @@ impl TunnelMux {
             // The entry was dropped without settling (only reachable through a
             // `res_end` for a request that never saw `res`); the TypeScript
             // promise hung there, a fault is the honest answer.
-            Err(_) => Err(TunnelFault::new(AgentFaultReason::Protocol)),
+            Err(_) => Err(TunnelFault::new(TunnelFaultReason::Protocol)),
         }
     }
 
     /// Socket gone (close/error/replaced/expired): every open request faults.
-    pub fn abort_all(&self, reason: AgentFaultReason) {
+    pub fn abort_all(&self, reason: TunnelFaultReason) {
         let ids: Vec<u32> = self.inner.pending.lock().expect("mux lock").keys().copied().collect();
         for id in ids {
             self.inner.fail_pending(id, reason, false);
@@ -235,7 +235,7 @@ impl TunnelMux {
                 // reach the queue (the 8 MiB backpressure check only runs after
                 // an enqueue).
                 if frame.chunk.len() > MAX_CHUNK_BYTES {
-                    self.inner.fail_pending(frame.id, AgentFaultReason::Protocol, true);
+                    self.inner.fail_pending(frame.id, TunnelFaultReason::Protocol, true);
                     return MessageOutcome::Handled;
                 }
                 let (id, chunk) = (frame.id, Bytes::copy_from_slice(frame.chunk));
@@ -259,7 +259,7 @@ impl TunnelMux {
                     }
                     // The CLI's local abort raced a partial response — drop it like res_err.
                     ControlFrame::Cancel { id } => {
-                        self.inner.fail_pending(id, AgentFaultReason::Protocol, false);
+                        self.inner.fail_pending(id, TunnelFaultReason::Protocol, false);
                         MessageOutcome::Handled
                     }
                     ControlFrame::Models { models } => {
@@ -271,7 +271,7 @@ impl TunnelMux {
                         match hook.on_models_report(models).await {
                             Ok(()) => MessageOutcome::Handled,
                             Err(error) => {
-                                tracing::error!(%error, "agent tunnel: models report write failed");
+                                tracing::error!(%error, "CLI tunnel: models report write failed");
                                 MessageOutcome::ModelsPersistFailed
                             }
                         }
@@ -294,7 +294,7 @@ impl Inner {
         let _ = self.socket.send(OutFrame::Text(encode_control_frame(&ControlFrame::Cancel { id })));
     }
 
-    fn fail_pending(&self, id: u32, reason: AgentFaultReason, send_cancel: bool) {
+    fn fail_pending(&self, id: u32, reason: TunnelFaultReason, send_cancel: bool) {
         let entry = { self.pending.lock().expect("mux lock").remove(&id) };
         let Some(mut entry) = entry else { return };
         if let Some(timer) = entry.first_res_timer.take() {
@@ -309,7 +309,7 @@ impl Inner {
             }
             None => {
                 if let Some(tx) = entry.body_tx.take() {
-                    let _ = tx.send(Err(io::Error::other(format!("agent tunnel: {reason}"))));
+                    let _ = tx.send(Err(io::Error::other(format!("CLI tunnel: {reason}"))));
                 }
             }
         }
@@ -353,7 +353,7 @@ impl Inner {
         drop(guard);
 
         let mut response_headers = HeaderMap::new();
-        response_headers.insert(AGENT_UPSTREAM_HEADER, HeaderValue::from_static("1"));
+        response_headers.insert(TUNNEL_UPSTREAM_HEADER, HeaderValue::from_static("1"));
         // Header reduction discipline (docs/cli.md): content-type only.
         if let Some(value) = headers.get("content-type").and_then(|v| HeaderValue::from_str(v).ok()) {
             response_headers.insert(http::header::CONTENT_TYPE, value);
@@ -400,7 +400,7 @@ impl Inner {
         // The end client reads slower than the CLI sends and the gap passed the
         // cap: cancel rather than buffer without bound (docs/cli.md — `too_large`).
         if buffered.fetch_add(len, Ordering::SeqCst) + len > RESPONSE_BUFFER_LIMIT_BYTES {
-            self.fail_pending(id, AgentFaultReason::TooLarge, true);
+            self.fail_pending(id, TunnelFaultReason::TooLarge, true);
         }
     }
 
@@ -424,7 +424,7 @@ async fn pump_request_body(inner: Arc<Inner>, id: u32, body: Option<ByteStream>)
                 // Reading the client's request body failed (usually a client
                 // abort) — tell the CLI to drop the request rather than leaving
                 // it half-sent.
-                Err(_) => return inner.fail_pending(id, AgentFaultReason::Protocol, true),
+                Err(_) => return inner.fail_pending(id, TunnelFaultReason::Protocol, true),
             };
             if !inner.has_pending(id) {
                 return;
@@ -434,11 +434,11 @@ async fn pump_request_body(inner: Arc<Inner>, id: u32, body: Option<ByteStream>)
             // honest request-side bound (docs/cli.md).
             sent += chunk.len();
             if sent > REQUEST_BODY_LIMIT_BYTES {
-                return inner.fail_pending(id, AgentFaultReason::TooLarge, true);
+                return inner.fail_pending(id, TunnelFaultReason::TooLarge, true);
             }
             for part in chunk.chunks(MAX_CHUNK_BYTES) {
                 if inner.socket.send(OutFrame::Binary(encode_binary_frame(id, BODY_KIND_REQUEST, part))).is_err() {
-                    return inner.fail_pending(id, AgentFaultReason::Offline, false);
+                    return inner.fail_pending(id, TunnelFaultReason::Offline, false);
                 }
             }
         }
@@ -447,14 +447,14 @@ async fn pump_request_body(inner: Arc<Inner>, id: u32, body: Option<ByteStream>)
         return;
     }
     if inner.socket.send(OutFrame::Text(encode_control_frame(&ControlFrame::ReqEnd { id }))).is_err() {
-        return inner.fail_pending(id, AgentFaultReason::Offline, false);
+        return inner.fail_pending(id, TunnelFaultReason::Offline, false);
     }
     let timer = {
         let timeout = inner.first_res_timeout;
         let inner = inner.clone();
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
-            inner.fail_pending(id, AgentFaultReason::Timeout, true);
+            inner.fail_pending(id, TunnelFaultReason::Timeout, true);
         })
     };
     let mut guard = inner.pending.lock().expect("mux lock");
@@ -674,7 +674,7 @@ mod tests {
         .await;
         let response = expect_ok(handle.await.unwrap());
         assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(response.headers.get(AGENT_UPSTREAM_HEADER).unwrap(), "1");
+        assert_eq!(response.headers.get(TUNNEL_UPSTREAM_HEADER).unwrap(), "1");
         assert_eq!(response.content_type(), Some("text/event-stream"));
 
         mux.handle_message(binary_frame(1, BODY_KIND_RESPONSE, b"data: hi\n\n")).await;
@@ -697,8 +697,8 @@ mod tests {
         mux.handle_message(text_frame(json!({"t":"res_end","id":1}))).await;
         let response = expect_ok(handle.await.unwrap());
         assert_eq!(response.status, StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(response.headers.get(AGENT_UPSTREAM_HEADER).unwrap(), "1");
-        assert!(response.headers.get(AGENT_FAULT_HEADER).is_none());
+        assert_eq!(response.headers.get(TUNNEL_UPSTREAM_HEADER).unwrap(), "1");
+        assert!(response.headers.get(TUNNEL_FAULT_HEADER).is_none());
         assert_eq!(collect(response).await.unwrap(), "{}");
     }
 
@@ -711,10 +711,10 @@ mod tests {
         }
         flush().await;
         let fault = expect_fault(mux.open_request(post("/chat/completions", None)).await);
-        assert_eq!(fault.reason, AgentFaultReason::Busy);
+        assert_eq!(fault.reason, TunnelFaultReason::Busy);
         let response = fault.into_upstream_response();
         assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(response.headers.get(AGENT_FAULT_HEADER).unwrap(), "busy");
+        assert_eq!(response.headers.get(TUNNEL_FAULT_HEADER).unwrap(), "busy");
     }
 
     #[tokio::test]
@@ -724,7 +724,7 @@ mod tests {
         let handle = open(&mux, post("/v1/messages", None));
         flush().await;
         mux.handle_message(text_frame(json!({"t":"res_err","id":1,"reason":"connect_refused"}))).await;
-        assert_eq!(expect_fault(handle.await.unwrap()).reason, AgentFaultReason::Offline);
+        assert_eq!(expect_fault(handle.await.unwrap()).reason, TunnelFaultReason::Offline);
     }
 
     #[tokio::test]
@@ -733,7 +733,7 @@ mod tests {
         let mux = TunnelMux::with_options(socket.clone(), None, Duration::from_millis(50));
         let handle = open(&mux, post("/chat/completions", None));
         let fault = expect_fault(handle.await.unwrap());
-        assert_eq!(fault.reason, AgentFaultReason::Timeout);
+        assert_eq!(fault.reason, TunnelFaultReason::Timeout);
         assert_eq!(socket.controls("cancel").len(), 1);
         assert_eq!(socket.controls("cancel")[0]["id"], 1);
         assert_eq!(mux.inflight_count(), 0);
@@ -746,9 +746,9 @@ mod tests {
         let a = open(&mux, post("/chat/completions", None));
         let b = open(&mux, post("/chat/completions", None));
         flush().await;
-        mux.abort_all(AgentFaultReason::Offline);
-        assert_eq!(expect_fault(a.await.unwrap()).reason, AgentFaultReason::Offline);
-        assert_eq!(expect_fault(b.await.unwrap()).reason, AgentFaultReason::Offline);
+        mux.abort_all(TunnelFaultReason::Offline);
+        assert_eq!(expect_fault(a.await.unwrap()).reason, TunnelFaultReason::Offline);
+        assert_eq!(expect_fault(b.await.unwrap()).reason, TunnelFaultReason::Offline);
         // abortAll never sends cancel: the socket is already gone.
         assert!(socket.controls("cancel").is_empty());
     }
@@ -762,7 +762,7 @@ mod tests {
         mux.handle_message(text_frame(json!({"t":"res","id":1,"status":200,"headers":{}}))).await;
         let response = expect_ok(handle.await.unwrap());
         mux.handle_message(binary_frame(1, BODY_KIND_RESPONSE, b"partial")).await;
-        mux.abort_all(AgentFaultReason::Offline);
+        mux.abort_all(TunnelFaultReason::Offline);
         let error = collect(response).await.unwrap_err();
         assert!(error.to_string().contains("offline"));
     }
@@ -774,7 +774,7 @@ mod tests {
         let handle = open(&mux, post("/chat/completions", None));
         flush().await;
         mux.handle_message(binary_frame(1, BODY_KIND_RESPONSE, &vec![0u8; MAX_CHUNK_BYTES + 1])).await;
-        assert_eq!(expect_fault(handle.await.unwrap()).reason, AgentFaultReason::Protocol);
+        assert_eq!(expect_fault(handle.await.unwrap()).reason, TunnelFaultReason::Protocol);
         assert_eq!(mux.inflight_count(), 0);
     }
 
@@ -888,7 +888,7 @@ mod tests {
         let fault = expect_fault(mux
             .open_request(post("/audio/transcriptions", Some(Box::pin(chunks))))
             .await);
-        assert_eq!(fault.reason, AgentFaultReason::TooLarge);
+        assert_eq!(fault.reason, TunnelFaultReason::TooLarge);
         let cancels = socket.controls("cancel");
         assert_eq!(cancels.len(), 1);
         assert_eq!(cancels[0]["id"], 1);
@@ -907,7 +907,7 @@ mod tests {
         assert_eq!(sizes, vec![MAX_CHUNK_BYTES, MAX_CHUNK_BYTES, 5]);
         assert_eq!(sizes.iter().sum::<usize>(), size);
         mux.handle_message(text_frame(json!({"t":"res_err","id":1,"reason":"aborted"}))).await;
-        assert_eq!(expect_fault(handle.await.unwrap()).reason, AgentFaultReason::Protocol);
+        assert_eq!(expect_fault(handle.await.unwrap()).reason, TunnelFaultReason::Protocol);
     }
 
     #[tokio::test]
@@ -916,7 +916,7 @@ mod tests {
         let mux = mux_with(socket.clone());
         socket.kill();
         let fault = expect_fault(mux.open_request(post("/chat/completions", None)).await);
-        assert_eq!(fault.reason, AgentFaultReason::Offline);
+        assert_eq!(fault.reason, TunnelFaultReason::Offline);
         assert_eq!(mux.inflight_count(), 0);
     }
 
@@ -927,7 +927,7 @@ mod tests {
         let handle = open(&mux, post("/chat/completions", None));
         flush().await;
         mux.handle_message(text_frame(json!({"t":"cancel","id":1}))).await;
-        assert_eq!(expect_fault(handle.await.unwrap()).reason, AgentFaultReason::Protocol);
+        assert_eq!(expect_fault(handle.await.unwrap()).reason, TunnelFaultReason::Protocol);
     }
 
     #[tokio::test]
@@ -957,9 +957,9 @@ mod tests {
 
     #[tokio::test]
     async fn fault_response_carries_the_marker_and_a_json_body() {
-        let response = agent_fault_response(AgentFaultReason::Offline);
+        let response = agent_fault_response(TunnelFaultReason::Offline);
         assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(response.headers.get(AGENT_FAULT_HEADER).unwrap(), "offline");
+        assert_eq!(response.headers.get(TUNNEL_FAULT_HEADER).unwrap(), "offline");
         assert_eq!(
             response.json_value().await.unwrap(),
             json!({"error":{"type":"agent_fault","reason":"offline"}})

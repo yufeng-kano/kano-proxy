@@ -1,12 +1,12 @@
 //! HTTP route groups. `core_routes` assembles them in the order
 //! `application.ts` mounts them; each group module owns its paths.
 
-pub mod agent;
 pub mod anthropic;
 pub mod auth;
 pub mod changelog;
 pub mod cli;
 pub mod cli_shared;
+pub mod cli_v1;
 pub mod custom_providers;
 pub mod group_endpoints;
 pub mod keys;
@@ -46,10 +46,15 @@ pub fn core_routes(state: &AppState, shadowed: &[String]) -> Router<AppState> {
         .merge(if shadows("/api/changelog") { Router::new() } else { Router::new().nest("/api/changelog", changelog::routes()) })
         .layer(crate::http::cors::admin_cors(&state.config().app_url))
         .layer(crate::http::cors::no_store_layer());
-    // `/agent/v1` is its own namespace beside `/api/*`: token-authenticated, never
+    // `/cli/v1` is its own namespace beside `/api/*`: token-authenticated, never
     // session, and no CORS — the CLI is the only caller (docs/cli.md § Server routes).
+    // `/agent/v1` was its pre-2.0 name and now only tells a 1.x binary to update.
     // The LLM surfaces (`/openai/v1`, `/anthropic`, `/g`) carry permissive, never credentialed
     // CORS and the API-key middleware, which also runs the edition's `RequestPolicy`
     // (`openai::llm_routes`, matching `application.ts`).
-    Router::new().merge(admin).nest("/agent/v1", agent::routes()).merge(openai::llm_routes(state))
+    Router::new()
+        .merge(admin)
+        .nest("/cli/v1", cli_v1::routes())
+        .nest("/agent/v1", cli_v1::legacy_routes())
+        .merge(openai::llm_routes(state))
 }
