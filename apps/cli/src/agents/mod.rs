@@ -124,6 +124,29 @@ pub fn home_dir() -> PathBuf {
 // ---------------------------------------------------------------------------
 // plans
 
+/// What is in place before `setup` runs — the agent's config file as it is now and the group
+/// on the server — so the pickers start from the current choices and a rerun is an edit, not
+/// a fresh start (docs/cli.md § Command surface).
+pub struct Current<'a> {
+    pub doc: Option<&'a Doc>,
+    pub group: Option<&'a Group>,
+}
+
+impl Current<'_> {
+    /// A string field of the current config, when present.
+    pub fn field(&self, field: &str) -> Option<String> {
+        self.doc.and_then(|d| d.get(field)).and_then(|v| v.as_str().map(str::to_string))
+    }
+
+    /// The fallbacks the group already holds for `name`: its targets minus the model's own.
+    pub fn fallbacks(&self, name: &str, own: &str) -> Vec<String> {
+        self.group
+            .and_then(|g| g.models.iter().find(|m| m.name == name))
+            .map(|m| m.targets.iter().map(|t| t.model.clone()).filter(|t| t != own).collect())
+            .unwrap_or_default()
+    }
+}
+
 /// What `setup` will do, computed before anything is written — printed as-is by `--dry-run`.
 #[derive(Debug)]
 pub struct Plan {
@@ -286,12 +309,17 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
     let access = tokens.get(false).await?;
 
     let catalog = api::list_models(&base_url, &access).await?;
+    // What is there now feeds the pickers: a rerun edits the current choices.
+    let path = kind.config_path();
+    let current_doc = Doc::load(kind.doc_kind(), &path)?;
+    let groups = api::list_groups(&base_url, &access).await?;
+    let existing: Option<&Group> = groups.iter().find(|g| g.slug == kind.group_slug());
+    let current = Current { doc: Some(&current_doc), group: existing };
     let plan = match kind {
-        AgentKind::ClaudeCode => claude_code::plan(&base_url, &catalog, &args)?,
-        AgentKind::Codex => codex::plan(&base_url, &catalog, &args)?,
+        AgentKind::ClaudeCode => claude_code::plan(&base_url, &catalog, &args, &current)?,
+        AgentKind::Codex => codex::plan(&base_url, &catalog, &args, &current)?,
     };
 
-    let path = kind.config_path();
     let previous = state.agents.get(kind.id()).cloned();
     if args.dry_run {
         println!("dry run — nothing is written, minted or changed\n");
@@ -306,7 +334,7 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
         println!("\nkey: \"{}@{}\" (minted on the real run{})", kind.id(), state.device_name.as_deref().unwrap_or("?"),
             if previous.is_some() { "; the previous one is revoked first" } else { "" });
         println!("\n{} ({}):", path.display(), if path.exists() { "exists" } else { "will be created" });
-        let doc = Doc::load(kind.doc_kind(), &path)?;
+        let doc = &current_doc;
         for (field, value) in &plan.fields {
             let was = previous.as_ref().and_then(|p| p.fields.get(field)).map(|r| r.before.clone()).unwrap_or_else(|| doc.get(field));
             println!("  {field} = {}  (was: {})", render_value(value), was.map(|v| render_value(&v)).unwrap_or_else(|| "absent".into()));
@@ -318,8 +346,6 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
     }
 
     // 1. The group — looked up by slug so a rerun updates instead of duplicating.
-    let groups = api::list_groups(&base_url, &access).await?;
-    let existing: Option<&Group> = groups.iter().find(|g| g.slug == kind.group_slug());
     let models = merge_with_existing(plan.group_models.clone(), existing.map(|g| g.models.as_slice()).unwrap_or(&[]));
     let group = match existing {
         Some(g) => api::update_group_models(&base_url, &access, &g.id, &models).await?,
@@ -336,7 +362,7 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
     eprintln!("✓ key \"{}\"", key.name);
 
     // 3. The config — backed up whole before the first write, every field recorded.
-    let mut doc = Doc::load(kind.doc_kind(), &path)?;
+    let mut doc = current_doc;
     let backup_path = match &previous {
         Some(prev) => prev.backup_path.clone(),
         None => take_backup(file, kind, &path)?.map(|p| p.display().to_string()).unwrap_or_default(),

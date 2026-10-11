@@ -7,9 +7,9 @@
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
-use super::{fallback_candidates, group_models, provider_ids, validate_fallbacks, AgentKind, Plan, SetupArgs, KEY_PLACEHOLDER};
+use super::{fallback_candidates, group_models, provider_ids, validate_fallbacks, AgentKind, Current, Plan, SetupArgs, KEY_PLACEHOLDER};
 use crate::api::CatalogModel;
-use crate::tui;
+use crate::tui::{self, Nav};
 
 pub const KEY_FIELD: &str = "env.ANTHROPIC_AUTH_TOKEN";
 
@@ -31,15 +31,15 @@ fn default_for(ids: &[String], family: &str) -> usize {
     ids.iter().position(|id| id.to_lowercase().contains(family)).unwrap_or(0)
 }
 
-pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel]) -> Result<Picks> {
+pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current) -> Result<Picks> {
     let kind = AgentKind::ClaudeCode;
     let ids = provider_ids(catalog, kind.provider());
     if ids.is_empty() {
         bail!("your account has no claude-code models — connect a Claude Code subscription on the Providers page first");
     }
-    let mut slots = Vec::new();
     if args.no_tui {
         let fallbacks = validate_fallbacks(catalog, &args.fallback)?;
+        let mut slots = Vec::new();
         for ((label, _, _), flag) in SLOTS.iter().zip([&args.opus, &args.sonnet, &args.haiku]) {
             let Some(id) = flag.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
                 bail!("--{} <bare id> is required with --no-tui (one of: {})", label.to_lowercase(), ids.join(", "));
@@ -55,31 +55,64 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel]) -> Result<Picks
     tui::require_tty()?;
     let title = "kano-proxy agent setup claude-code";
     let options: Vec<&str> = ids.iter().map(String::as_str).collect();
-    for (label, family, _) in SLOTS {
-        let note = [
-            &*format!("Which model should Claude Code's {label} slot resolve to?"),
-            "The group serves this name as-is, so Claude Code sees a real Claude id.",
-        ];
-        let index = tui::choose_default(title, &note, &options, default_for(&ids, family))?;
-        let id = ids[index].clone();
-        let candidates = fallback_candidates(catalog, &format!("claude-code/{id}"));
-        let fallbacks = if candidates.is_empty() {
-            Vec::new()
+    // Start from what is in place: the slot the config holds now (when it is still in the
+    // catalog), else the family default; the fallbacks the group holds now. Six steps —
+    // model then fallbacks per slot; Esc re-enters the previous step with its answer.
+    let defaults: Vec<usize> = SLOTS.iter().map(|(_, family, _)| default_for(&ids, family)).collect();
+    let mut chosen: Vec<usize> = SLOTS
+        .iter()
+        .zip(&defaults)
+        .map(|((_, _, field), &default)| current.field(field).and_then(|v| ids.iter().position(|i| *i == v)).unwrap_or(default))
+        .collect();
+    let mut fallbacks: Vec<Vec<String>> =
+        chosen.iter().map(|&i| current.fallbacks(&ids[i], &format!("claude-code/{}", ids[i]))).collect();
+    let mut step = 0usize;
+    while step < SLOTS.len() * 2 {
+        let slot = step / 2;
+        let (label, _, _) = SLOTS[slot];
+        if step.is_multiple_of(2) {
+            let note = [
+                &*format!("Which model should Claude Code's {label} slot resolve to?"),
+                "The group serves this name as-is, so Claude Code sees a real Claude id.",
+            ];
+            match tui::choose_default(title, &note, &options, defaults[slot], chosen[slot])? {
+                Nav::Next(i) => {
+                    if i != chosen[slot] {
+                        chosen[slot] = i;
+                        fallbacks[slot] = current.fallbacks(&ids[i], &format!("claude-code/{}", ids[i]));
+                    }
+                    step += 1;
+                }
+                Nav::Back => step = step.saturating_sub(1),
+            }
         } else {
+            let id = &ids[chosen[slot]];
+            let own = format!("claude-code/{id}");
+            let candidates = fallback_candidates(catalog, &own);
+            if candidates.is_empty() {
+                fallbacks[slot].clear();
+                step += 1;
+                continue;
+            }
             let note = [
                 &*format!("Fallbacks for {label} ({id}) — tried in order when claude-code is benched or out of quota."),
                 "Space toggles, Enter with nothing toggled means no fallback.",
             ];
-            tui::pick_many(title, &note, Some(&format!("claude-code/{id}")), &candidates)?
-        };
-        slots.push((id, fallbacks));
+            match tui::pick_many(title, &note, Some(&own), &candidates, &fallbacks[slot])? {
+                Nav::Next(picked) => {
+                    fallbacks[slot] = picked;
+                    step += 1;
+                }
+                Nav::Back => step -= 1,
+            }
+        }
     }
-    Ok(Picks { slots })
+    Ok(Picks { slots: chosen.iter().zip(fallbacks).map(|(&i, fb)| (ids[i].clone(), fb)).collect() })
 }
 
-pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs) -> Result<Plan> {
+pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs, current: &Current) -> Result<Plan> {
     let kind = AgentKind::ClaudeCode;
-    let picks = collect_picks(args, catalog)?;
+    let picks = collect_picks(args, catalog, current)?;
     let ids = provider_ids(catalog, kind.provider());
     let models = group_models(kind.provider(), &ids, &picks.slots);
     let base = kind.group_base(base_url);
@@ -106,6 +139,8 @@ pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs) -> Resul
 mod tests {
     use super::*;
 
+    const NONE: Current<'static> = Current { doc: None, group: None };
+
     fn catalog() -> Vec<CatalogModel> {
         ["claude-code/claude-opus-5", "claude-code/claude-sonnet-5", "claude-code/claude-haiku-4-5", "codex/gpt-5.6-sol"]
             .iter()
@@ -131,7 +166,7 @@ mod tests {
 
     #[test]
     fn the_plan_writes_the_group_endpoint_and_explicit_slots() {
-        let plan = plan("https://p.example", &catalog(), &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &["codex/gpt-5.6-sol"])).unwrap();
+        let plan = plan("https://p.example", &catalog(), &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &["codex/gpt-5.6-sol"]), &NONE).unwrap();
         let get = |f: &str| plan.fields.iter().find(|(k, _)| k == f).map(|(_, v)| v.clone()).unwrap();
         assert_eq!(get("env.ANTHROPIC_BASE_URL"), json!("https://p.example/g/claude-code/anthropic"));
         assert_eq!(get("env.ANTHROPIC_AUTH_TOKEN"), json!(KEY_PLACEHOLDER));
@@ -146,13 +181,13 @@ mod tests {
 
     #[test]
     fn no_tui_requires_real_ids_and_a_claude_account() {
-        assert!(plan("https://p.example", &catalog(), &args("claude-opus-5", "nope", "claude-haiku-4-5", &[])).is_err());
-        assert!(plan("https://p.example", &catalog(), &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &["grok/grok-4.5"])).is_err());
+        assert!(plan("https://p.example", &catalog(), &args("claude-opus-5", "nope", "claude-haiku-4-5", &[]), &NONE).is_err());
+        assert!(plan("https://p.example", &catalog(), &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &["grok/grok-4.5"]), &NONE).is_err());
         let mut missing = args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &[]);
         missing.haiku = None;
-        assert!(plan("https://p.example", &catalog(), &missing).is_err());
+        assert!(plan("https://p.example", &catalog(), &missing, &NONE).is_err());
         let codex_only: Vec<CatalogModel> = catalog().into_iter().filter(|m| m.provider == "codex").collect();
-        let err = plan("https://p.example", &codex_only, &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &[])).unwrap_err();
+        let err = plan("https://p.example", &codex_only, &args("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", &[]), &NONE).unwrap_err();
         assert!(err.to_string().contains("no claude-code models"));
     }
 

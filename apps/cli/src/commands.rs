@@ -9,7 +9,7 @@ use anyhow::{bail, Context, Result};
 use crate::agents::{self, AgentKind, RestoreArgs};
 use crate::api;
 use crate::state::{PendingLogin, ProviderState, State, StateFile};
-use crate::tui;
+use crate::tui::{self, Nav};
 use crate::tunnel::{self, TokenCache};
 
 pub const EXIT_AUTH_REJECTED: i32 = 2;
@@ -177,26 +177,56 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
 
     tui::require_tty()?;
     let title = "kano-proxy login — sign this device in";
-    let base = api::normalize_base_url(&tui::input(
-        title,
-        "Server",
-        server_prompt_default(args.base_url.as_deref(), &state.base_url),
-    )?)?;
-    let device_name = tui::input(title, "Device name", args.device_name.as_deref().unwrap_or(&hostname()))?;
-    let start = api::login_start(&base, &device_name).await?;
-    // Printed for the scrollback, and drawn on the code screen below: the
-    // screens run on the alternate screen, so this line is hidden while the
-    // code prompt is up — over SSH the browser is on another machine and the
-    // URL is the only way through (docs/cli.md § Command surface).
-    eprintln!("→ approve this device at: {}", start.verify_url);
-    open_browser(&start.verify_url);
-    let note = [
-        "Sign in with Google and press Approve at:",
-        start.verify_url.as_str(),
-        "",
-        "Then paste the one-time code the page shows.",
-    ];
-    let code = tui::input_with_note(title, &note, "Code shown in browser", "")?;
+    // Three steps; Esc re-enters the previous one with its answer (tui.rs). Going
+    // back from the code screen abandons that login request — the next one is new.
+    let mut server = String::new();
+    let mut device_name = String::new();
+    let mut start: Option<api::LoginStart> = None;
+    let mut step = 0usize;
+    let (base, device_name, start, code) = loop {
+        match step {
+            0 => match tui::input_with_note(title, &[], "Server", server_prompt_default(args.base_url.as_deref(), &state.base_url), &server)? {
+                Nav::Next(v) => {
+                    server = api::normalize_base_url(&v)?;
+                    step = 1;
+                }
+                Nav::Back => {}
+            },
+            1 => match tui::input_with_note(title, &[], "Device name", args.device_name.as_deref().unwrap_or(&hostname()), &device_name)? {
+                Nav::Next(v) => {
+                    device_name = v;
+                    start = None;
+                    step = 2;
+                }
+                Nav::Back => step = 0,
+            },
+            _ => {
+                let request = match &start {
+                    Some(s) => s,
+                    None => {
+                        let s = api::login_start(&server, &device_name).await?;
+                        // Printed for the scrollback, and drawn on the code screen below:
+                        // the screens run on the alternate screen, so this line is hidden
+                        // while the code prompt is up — over SSH the browser is on another
+                        // machine and the URL is the only way through (docs/cli.md).
+                        eprintln!("→ approve this device at: {}", s.verify_url);
+                        open_browser(&s.verify_url);
+                        start.insert(s)
+                    }
+                };
+                let note = [
+                    "Sign in with Google and press Approve at:",
+                    request.verify_url.as_str(),
+                    "",
+                    "Then paste the one-time code the page shows.",
+                ];
+                match tui::input_with_note(title, &note, "Code shown in browser", "", "")? {
+                    Nav::Next(code) => break (server.clone(), device_name.clone(), start.take().expect("a request"), code),
+                    Nav::Back => step = 1,
+                }
+            }
+        }
+    };
     let done = api::login_complete(&base, &start.request_id, &code).await?;
     state.base_url = base;
     state.device_id = Some(done.device_id);
@@ -287,8 +317,7 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
         (slug, format, target, args.target_key, expose, Vec::new())
     } else {
         tui::require_tty()?;
-        let title = "kano-proxy add — register a local endpoint";
-        let slug = tui::input(title, "Slug", &default_slug(&state.providers))?;
+        let title = "kano-proxy tunnel add — register a local endpoint";
         // The choice names the HTTP API the local server speaks, and the
         // target prompt that follows is written for that API alone: its own
         // shape rule, its own default, and copy-pasteable examples for the
@@ -299,43 +328,88 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
             "openai     — OpenAI-compatible chat API   (Ollama, LM Studio, vLLM, llama.cpp, …)",
             "anthropic  — Anthropic Messages API       (Ollama, llama.cpp, …)",
         ];
-        let format = match tui::choose(title, &format_note, &format_options)? {
-            1 => "anthropic".to_string(),
-            _ => "openai".to_string(),
-        };
-        let (target_note, default_target): (&[&str], &str) = if format == "anthropic" {
-            (&ANTHROPIC_TARGET_NOTE, ANTHROPIC_DEFAULT_TARGET)
-        } else {
-            (&OPENAI_TARGET_NOTE, OPENAI_DEFAULT_TARGET)
-        };
-        let target = normalize_target(&tui::input_with_note(title, target_note, "Target base URL", default_target)?)?;
-        let key = tui::input_secret(title, "Local API key (Enter for none)")?;
-        let target_key = if key.is_empty() { None } else { Some(key) };
-
-        match api::probe_local_models(&format, &target, target_key.as_deref()).await {
-            Ok(models) if !models.is_empty() => {
-                eprintln!("✓ found {} models", models.len());
-                match tui::pick_models(&format!("{title} — expose which models?"), &models)? {
-                    // "All models (follow local server)": store no filter, so
-                    // models added locally later appear automatically.
-                    None => (slug, format, target, target_key, Vec::new(), Vec::new()),
-                    Some(subset) => (slug, format, target, target_key, subset, Vec::new()),
+        // Five steps; Esc re-enters the previous one with its answer (tui.rs).
+        let mut slug = String::new();
+        let mut format_index = 0usize;
+        let mut target = String::new();
+        let mut key = String::new();
+        let expose: Vec<String> = Vec::new();
+        let mut step = 0usize;
+        loop {
+            match step {
+                0 => match tui::input_with_note(title, &[], "Slug", &default_slug(&state.providers), &slug)? {
+                    Nav::Next(v) => {
+                        slug = v;
+                        step = 1;
+                    }
+                    Nav::Back => {}
+                },
+                1 => match tui::choose(title, &format_note, &format_options, format_index)? {
+                    Nav::Next(i) => {
+                        format_index = i;
+                        step = 2;
+                    }
+                    Nav::Back => step = 0,
+                },
+                2 => {
+                    let (target_note, default_target): (&[&str], &str) = if format_index == 1 {
+                        (&ANTHROPIC_TARGET_NOTE, ANTHROPIC_DEFAULT_TARGET)
+                    } else {
+                        (&OPENAI_TARGET_NOTE, OPENAI_DEFAULT_TARGET)
+                    };
+                    match tui::input_with_note(title, target_note, "Target base URL", default_target, &target)? {
+                        Nav::Next(v) => {
+                            target = normalize_target(&v)?;
+                            step = 3;
+                        }
+                        Nav::Back => step = 1,
+                    }
                 }
-            }
-            _ => {
-                // A target that is not running yet must not block registration:
-                // ask for ids by hand; the first connect overwrites with truth.
-                let manual = tui::input(
-                    title,
-                    "Couldn't reach the target — model ids, comma-separated (Enter for none)",
-                    "-",
-                )?;
-                let initial: Vec<String> = if manual == "-" {
-                    Vec::new()
-                } else {
-                    manual.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-                };
-                (slug, format, target, target_key, Vec::new(), initial)
+                3 => match tui::input_secret(title, "Local API key (Enter for none)", &key)? {
+                    Nav::Next(v) => {
+                        key = v;
+                        step = 4;
+                    }
+                    Nav::Back => step = 2,
+                },
+                _ => {
+                    let format = if format_index == 1 { "anthropic".to_string() } else { "openai".to_string() };
+                    let target_key = if key.is_empty() { None } else { Some(key.clone()) };
+                    match api::probe_local_models(&format, &target, target_key.as_deref()).await {
+                        Ok(models) if !models.is_empty() => {
+                            eprintln!("✓ found {} models", models.len());
+                            match tui::pick_models(&format!("{title} — expose which models?"), &models, &expose)? {
+                                // "All models (follow local server)": store no filter, so
+                                // models added locally later appear automatically.
+                                Nav::Next(None) => break (slug, format, target, target_key, Vec::new(), Vec::new()),
+                                Nav::Next(Some(subset)) => break (slug, format, target, target_key, subset, Vec::new()),
+                                Nav::Back => step = 3,
+                            }
+                        }
+                        _ => {
+                            // A target that is not running yet must not block registration:
+                            // ask for ids by hand; the first connect overwrites with truth.
+                            let typed = expose.join(",");
+                            match tui::input_with_note(
+                                title,
+                                &[],
+                                "Couldn't reach the target — model ids, comma-separated (Enter for none)",
+                                "-",
+                                &typed,
+                            )? {
+                                Nav::Next(manual) => {
+                                    let initial: Vec<String> = if manual == "-" {
+                                        Vec::new()
+                                    } else {
+                                        manual.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+                                    };
+                                    break (slug, format, target, target_key, Vec::new(), initial);
+                                }
+                                Nav::Back => step = 3,
+                            }
+                        }
+                    }
+                }
             }
         }
     };

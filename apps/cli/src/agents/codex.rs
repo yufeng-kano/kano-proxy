@@ -10,9 +10,9 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{doc, fallback_candidates, group_models, provider_ids, validate_fallbacks, AgentKind, Plan, SetupArgs, EFFORTS, KEY_PLACEHOLDER};
+use super::{doc, fallback_candidates, group_models, provider_ids, validate_fallbacks, AgentKind, Current, Plan, SetupArgs, EFFORTS, KEY_PLACEHOLDER};
 use crate::api::CatalogModel;
-use crate::tui;
+use crate::tui::{self, Nav};
 
 pub const KEY_FIELD: &str = "model_providers.kano";
 pub const CATALOG_FILE: &str = "kano-models.json";
@@ -33,7 +33,7 @@ pub struct CatalogPlan {
     pub models: Vec<Value>,
 }
 
-pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel]) -> Result<Picks> {
+pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current) -> Result<Picks> {
     let kind = AgentKind::Codex;
     let ids = provider_ids(catalog, kind.provider());
     if ids.is_empty() {
@@ -60,26 +60,68 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel]) -> Result<Picks
     tui::require_tty()?;
     let title = "kano-proxy agent setup codex";
     let options: Vec<&str> = ids.iter().map(String::as_str).collect();
-    let note = ["Which model should Codex start with? /model inside Codex switches later.", "The group serves this name as-is, so Codex's own catalog metadata lines up."];
-    let model = ids[tui::choose_default(title, &note, &options, 0)?].clone();
-    let effort_note = ["Default reasoning effort (the proxy accepts these four; Codex's /model changes it later)."];
-    let effort = EFFORTS[tui::choose_default(title, &effort_note, &EFFORTS, 2)?].to_string();
-    let candidates = fallback_candidates(catalog, &format!("codex/{model}"));
-    let fallbacks = if candidates.is_empty() {
-        Vec::new()
-    } else {
-        let note = [
-            &*format!("Fallbacks for {model} — tried in order when codex is benched or out of quota."),
-            "Space toggles, Enter with nothing toggled means no fallback.",
-        ];
-        tui::pick_many(title, &note, Some(&format!("codex/{model}")), &candidates)?
-    };
-    Ok(Picks { model, effort, fallbacks })
+    // Start from what is in place: the config's model and effort when still valid, the
+    // group's fallbacks. Three steps; Esc re-enters the previous one with its answer.
+    let default_effort = EFFORTS.iter().position(|e| *e == DEFAULT_EFFORT).unwrap_or(0);
+    let mut model = current.field("model").and_then(|v| ids.iter().position(|i| *i == v)).unwrap_or(0);
+    let mut effort = current
+        .field("model_reasoning_effort")
+        .and_then(|v| EFFORTS.iter().position(|e| *e == v))
+        .unwrap_or(default_effort);
+    let mut fallbacks = current.fallbacks(&ids[model], &format!("codex/{}", ids[model]));
+    let mut step = 0usize;
+    loop {
+        match step {
+            0 => {
+                let note = ["Which model should Codex start with? /model inside Codex switches later.", "The group serves this name as-is, so Codex's own catalog metadata lines up."];
+                match tui::choose_default(title, &note, &options, 0, model)? {
+                    Nav::Next(i) => {
+                        if i != model {
+                            model = i;
+                            fallbacks = current.fallbacks(&ids[i], &format!("codex/{}", ids[i]));
+                        }
+                        step = 1;
+                    }
+                    Nav::Back => {}
+                }
+            }
+            1 => {
+                let note = ["Default reasoning effort (the proxy accepts these four; Codex's /model changes it later)."];
+                match tui::choose_default(title, &note, &EFFORTS, default_effort, effort)? {
+                    Nav::Next(i) => {
+                        effort = i;
+                        step = 2;
+                    }
+                    Nav::Back => step = 0,
+                }
+            }
+            _ => {
+                let own = format!("codex/{}", ids[model]);
+                let candidates = fallback_candidates(catalog, &own);
+                if candidates.is_empty() {
+                    fallbacks.clear();
+                    break;
+                }
+                let note = [
+                    &*format!("Fallbacks for {} — tried in order when codex is benched or out of quota.", ids[model]),
+                    "Space toggles, Enter with nothing toggled means no fallback.",
+                ];
+                match tui::pick_many(title, &note, Some(&own), &candidates, &fallbacks)? {
+                    Nav::Next(picked) => {
+                        fallbacks = picked;
+                        break;
+                    }
+                    Nav::Back => step = 1,
+                }
+            }
+        }
+    }
+    Ok(Picks { model: ids[model].clone(), effort: EFFORTS[effort].to_string(), fallbacks })
 }
 
-pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs) -> Result<Plan> {
+pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs, current: &Current) -> Result<Plan> {
     let kind = AgentKind::Codex;
-    let picks = collect_picks(args, catalog)?;
+    let picks = collect_picks(args, catalog, current)?;
     let ids = provider_ids(catalog, kind.provider());
     let models = group_models(kind.provider(), &ids, &[(picks.model.clone(), picks.fallbacks.clone())]);
     let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
@@ -166,6 +208,8 @@ pub fn write_catalog(plan: &CatalogPlan) -> Result<()> {
 mod tests {
     use super::*;
 
+    const NONE: Current<'static> = Current { doc: None, group: None };
+
     fn catalog() -> Vec<CatalogModel> {
         ["codex/gpt-5.6-sol", "codex/gpt-6-astra", "claude-code/claude-opus-5"]
             .iter()
@@ -191,14 +235,14 @@ mod tests {
 
     #[test]
     fn picks_validate_against_the_catalog_and_the_effort_ladder() {
-        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5"]), &catalog()).unwrap();
+        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5"]), &catalog(), &NONE).unwrap();
         assert_eq!((p.model.as_str(), p.effort.as_str()), ("gpt-5.6-sol", "high"));
         assert_eq!(p.fallbacks, ["claude-code/claude-opus-5"]);
-        assert!(collect_picks(&args("o3", None, &[]), &catalog()).is_err());
-        assert!(collect_picks(&args("gpt-5.6-sol", Some("minimal"), &[]), &catalog()).is_err());
-        assert!(collect_picks(&args("gpt-5.6-sol", None, &["grok/grok-4.5"]), &catalog()).is_err());
+        assert!(collect_picks(&args("o3", None, &[]), &catalog(), &NONE).is_err());
+        assert!(collect_picks(&args("gpt-5.6-sol", Some("minimal"), &[]), &catalog(), &NONE).is_err());
+        assert!(collect_picks(&args("gpt-5.6-sol", None, &["grok/grok-4.5"]), &catalog(), &NONE).is_err());
         let no_codex: Vec<CatalogModel> = catalog().into_iter().filter(|m| m.provider != "codex").collect();
-        assert!(collect_picks(&args("gpt-5.6-sol", None, &[]), &no_codex).unwrap_err().to_string().contains("no codex models"));
+        assert!(collect_picks(&args("gpt-5.6-sol", None, &[]), &no_codex, &NONE).unwrap_err().to_string().contains("no codex models"));
     }
 
     #[test]
