@@ -2,7 +2,7 @@
 //!
 //! Two jobs, two namespaces: `tunnel` exposes local LLM servers as providers
 //! over the CLI tunnel; `agent` points coding agents on this machine at the
-//! proxy. Device-level commands (`init`, `logout`, `status`, `update`) stay
+//! proxy. Device-level commands (`login`, `logout`, `status`, `update`) stay
 //! top-level.
 
 mod agents;
@@ -43,8 +43,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Sign this device in (once per machine)
-    Init {
+    /// Sign this device in (once per machine; signs in again when the server revoked this device)
+    Login {
         /// Server origin, e.g. https://proxy.example.com
         #[arg(long)]
         base_url: Option<String>,
@@ -184,8 +184,8 @@ async fn main() {
     let file = StateFile::new(cli.state.clone().unwrap_or_else(default_state_path));
 
     let result = match cli.command {
-        Command::Init { base_url, device_name, auth_code } => {
-            commands::cmd_init(&file, commands::InitArgs { no_tui: cli.no_tui, base_url, device_name, auth_code }).await
+        Command::Login { base_url, device_name, auth_code } => {
+            commands::cmd_login(&file, commands::LoginArgs { no_tui: cli.no_tui, base_url, device_name, auth_code }).await
         }
         Command::Logout { force, remove_group } => commands::cmd_logout(&file, cli.no_tui, force, remove_group).await,
         Command::Status => commands::cmd_status(&file).await,

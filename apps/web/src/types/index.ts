@@ -179,7 +179,7 @@ export type CustomProviderModelsMode = "auto" | "manual"
 export type CustomProviderStatus = "active" | "benched"
 
 /** User-defined BYO OpenAI-/Anthropic-compatible upstream. `GET /api/custom-providers` item shape. */
-/** One machine signed in with `kano-proxy init` (docs/cli.md). */
+/** One machine signed in with `kano-proxy login` (docs/cli.md). */
 export type CliDevice = {
   id: string
   name: string
@@ -210,7 +210,7 @@ export type CliProvider = {
   updated_at: string
 }
 
-/** A pending `kano-proxy init` login, as the authorize view reads it. */
+/** A pending `kano-proxy login` login, as the authorize view reads it. */
 export type CliLoginRequest = {
   id: string
   device_name: string

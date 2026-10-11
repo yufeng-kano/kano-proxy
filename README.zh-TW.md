@@ -142,7 +142,7 @@ curl https://<your-domain>/openai/v1/chat/completions \
 curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
 # 或：brew install yufeng-kano/tap/kano-proxy
 
-kano-proxy init          # 開啟瀏覽器授權此裝置，貼回一次性代碼
+kano-proxy login          # 開啟瀏覽器授權此裝置，貼回一次性代碼
 kano-proxy tunnel add    # slug、openai|anthropic、http://localhost:11434/v1
 kano-proxy tunnel start  # 每個已註冊的供應商一條對外 WebSocket
 ```

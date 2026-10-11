@@ -12,7 +12,7 @@ description: 用一道 CLI 指令，或手動用 ANTHROPIC_BASE_URL 與 ANTHROPI
 [kano-proxy CLI](/zh-TW/guide/local-models) 可以替你寫好這份設定：
 
 ```console
-$ kano-proxy init                      # 每台機器一次
+$ kano-proxy login                      # 每台機器一次
 $ kano-proxy agent setup claude-code
 ```
 

@@ -142,7 +142,7 @@ Install the CLI (Homebrew, Scoop or the install script), sign the machine in onc
 curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
 # or: brew install yufeng-kano/tap/kano-proxy
 
-kano-proxy init          # opens the browser, you approve the device, paste the code
+kano-proxy login          # opens the browser, you approve the device, paste the code
 kano-proxy tunnel add    # slug, openai|anthropic, http://localhost:11434/v1
 kano-proxy tunnel start  # one outbound WebSocket per registered provider
 ```

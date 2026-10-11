@@ -70,7 +70,7 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel]) -> Result<Picks
                 &*format!("Fallbacks for {label} ({id}) — tried in order when claude-code is benched or out of quota."),
                 "Space toggles, Enter with nothing toggled means no fallback.",
             ];
-            tui::pick_many(title, &note, &candidates)?
+            tui::pick_many(title, &note, Some(&format!("claude-code/{id}")), &candidates)?
         };
         slots.push((id, fallbacks));
     }

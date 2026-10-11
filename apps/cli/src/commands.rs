@@ -99,24 +99,54 @@ fn open_browser(url: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// init
+// login
 
-pub struct InitArgs {
+pub struct LoginArgs {
     pub no_tui: bool,
     pub base_url: Option<String>,
     pub device_name: Option<String>,
     pub auth_code: Option<String>,
 }
 
-pub async fn cmd_init(file: &StateFile, args: InitArgs) -> Result<()> {
+pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
     let mut state = file.load()?;
 
-    // Phase 2 of a --no-tui init: redeem the code against the pending request.
+    // Signed in locally: find out whether the server still agrees. A device the
+    // server revoked (Access page, theft detection) must be able to sign in
+    // again without hand-editing the state file; a device the server still
+    // accepts is refused — sign out deliberately, not by accident (docs/cli.md).
+    if state.signed_in() && args.auth_code.is_none() {
+        let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
+        match tokens.get(false).await {
+            Ok(_) => bail!(
+                "this device is already signed in as \"{}\" against {} — run `kano-proxy logout` first",
+                state.device_name.as_deref().unwrap_or("?"),
+                state.base_url,
+            ),
+            Err(e) if api::is_auth_rejection(&e) => {
+                eprintln!(
+                    "· the server no longer accepts this device (\"{}\" was revoked or signed out there) — signing in again",
+                    state.device_name.as_deref().unwrap_or("?")
+                );
+                mutate_state(file, |s| {
+                    s.device_id = None;
+                    s.device_name = None;
+                    s.refresh_token = None;
+                    s.providers.clear();
+                    s.agents.clear();
+                })?;
+                state = file.load()?;
+            }
+            Err(e) => return Err(e.context("cannot tell whether this device is still signed in — check the connection, or run `kano-proxy logout`")),
+        }
+    }
+
+    // Phase 2 of a --no-tui login: redeem the code against the pending request.
     if let Some(code) = &args.auth_code {
         let pending = state
             .pending_login
             .clone()
-            .context("no pending sign-in — run `kano-proxy init --no-tui --base-url … --device-name …` first")?;
+            .context("no pending sign-in — run `kano-proxy login --no-tui --base-url … --device-name …` first")?;
         let done = api::login_complete(&pending.base_url, &pending.request_id, code).await?;
         state.base_url = pending.base_url.clone();
         state.device_id = Some(done.device_id);
@@ -126,16 +156,6 @@ pub async fn cmd_init(file: &StateFile, args: InitArgs) -> Result<()> {
         file.save(&state)?;
         eprintln!("✓ device \"{}\" signed in", pending.device_name);
         return Ok(());
-    }
-
-    // Re-running on an initialized state file refuses with a hint — sign out
-    // deliberately, not by accident (docs/cli.md).
-    if state.signed_in() {
-        bail!(
-            "this device is already signed in as \"{}\" against {} — run `kano-proxy logout` first",
-            state.device_name.as_deref().unwrap_or("?"),
-            state.base_url,
-        );
     }
 
     if args.no_tui {
@@ -151,12 +171,12 @@ pub async fn cmd_init(file: &StateFile, args: InitArgs) -> Result<()> {
         });
         file.save(&state)?;
         println!("open {}  then run:", start.verify_url);
-        println!("kano-proxy init --no-tui --auth-code XXXX-XXXX");
+        println!("kano-proxy login --no-tui --auth-code XXXX-XXXX");
         return Ok(());
     }
 
     tui::require_tty()?;
-    let title = "kano-proxy init — sign this device in";
+    let title = "kano-proxy login — sign this device in";
     let base = api::normalize_base_url(&tui::input(
         title,
         "Server",
@@ -430,7 +450,7 @@ pub async fn cmd_list(file: &StateFile) -> Result<()> {
 pub async fn cmd_status(file: &StateFile) -> Result<()> {
     let state = file.load()?;
     if !state.signed_in() {
-        println!("not signed in — run `kano-proxy init`");
+        println!("not signed in — run `kano-proxy login`");
         return Ok(());
     }
     println!(
@@ -469,7 +489,7 @@ pub async fn cmd_status(file: &StateFile) -> Result<()> {
 // ---------------------------------------------------------------------------
 // logout
 
-/// The reverse of `init` (docs/cli.md § Command surface): restore every agent
+/// The reverse of `login` (docs/cli.md § Command surface): restore every agent
 /// this device set up, revoke the device (its keys go with it), forget the
 /// sign-in. A server that already forgot the device does not block the local
 /// cleanup.

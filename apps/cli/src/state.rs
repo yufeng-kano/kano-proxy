@@ -62,7 +62,7 @@ pub struct AgentState {
     pub catalog_backup_path: Option<String>,
 }
 
-/// A `--no-tui` init's first phase, waiting for its `--auth-code` second phase.
+/// A `--no-tui` login's first phase, waiting for its `--auth-code` second phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingLogin {
     pub base_url: String,

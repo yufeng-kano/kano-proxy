@@ -31,7 +31,7 @@ Later, `kano-proxy update` upgrades the binary in place. Binaries installed by H
 ## Sign the device in
 
 ```console
-$ kano-proxy init
+$ kano-proxy login
   Server: https://<your-domain>
   Device name [my-mac]:
 ```

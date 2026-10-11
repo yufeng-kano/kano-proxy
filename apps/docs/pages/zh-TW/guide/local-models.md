@@ -31,7 +31,7 @@ scoop install kano-proxy
 ## 登入這台裝置
 
 ```console
-$ kano-proxy init
+$ kano-proxy login
   Server: https://<your-domain>
   Device name [my-mac]:
 ```

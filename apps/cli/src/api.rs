@@ -200,16 +200,22 @@ async fn rotate_token(base_url: &str, refresh_token: &str) -> Result<TokenPair> 
 /// re-read the state (a sibling process may have rotated first), call the
 /// server, persist the new refresh token, and only then hand out the access
 /// token. HTTP 401 means the device is revoked or unregistered — callers exit
-/// with a message to re-run init rather than retrying.
+/// with a message to run `kano-proxy login` again rather than retrying.
 pub async fn fresh_access_token(file: &StateFile) -> Result<String> {
     let _lock = file.acquire_lock()?;
     let mut state = file.load()?;
     let refresh = state
         .refresh_token
         .clone()
-        .context("this device is not signed in — run `kano-proxy init` first")?;
+        .context("this device is not signed in — run `kano-proxy login` first")?;
     let base = state.base_url.clone();
-    let pair = rotate_token(&base, &refresh).await?;
+    let pair = rotate_token(&base, &refresh).await.map_err(|e| {
+        if is_auth_rejection(&e) {
+            e.context("this device was revoked or signed out on the server — run `kano-proxy login` again")
+        } else {
+            e
+        }
+    })?;
     state.refresh_token = Some(pair.refresh_token);
     file.save(&state)
         .context("could not persist the rotated refresh token — refusing to continue")?;
@@ -399,7 +405,7 @@ fn is_loopback_host(host: &str) -> bool {
     bare.parse::<std::net::IpAddr>().map(|ip| ip.is_loopback()).unwrap_or(false)
 }
 
-/// Base URL sanity for init input. Cleartext HTTP is allowed only for
+/// Base URL sanity for login input. Cleartext HTTP is allowed only for
 /// loopback hosts: against a remote origin it would carry the pairing
 /// response, every rotating refresh token, and the WebSocket bearer token
 /// past an on-path observer.
@@ -416,10 +422,17 @@ pub fn normalize_base_url(raw: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// Whether an error from this module is the server refusing the device's credentials
+/// (401), as opposed to the network or a server fault — the one case where the fix is
+/// signing in again.
+pub fn is_auth_rejection(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.to_string().contains("(401 Unauthorized)"))
+}
+
 /// Load state and require a signed-in device, with a uniform message.
 pub fn require_signed_in(state: &State) -> Result<()> {
     if !state.signed_in() {
-        bail!("this device is not signed in — run `kano-proxy init` first");
+        bail!("this device is not signed in — run `kano-proxy login` first");
     }
     Ok(())
 }

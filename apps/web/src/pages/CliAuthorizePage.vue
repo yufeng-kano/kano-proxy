@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Approve view for a pending `kano-proxy init` login (docs/cli.md § Web UI,
+ * Approve view for a pending `kano-proxy login` login (docs/cli.md § Web UI,
  * docs/admin-ui.md § CLI authorize view). Session-gated by the router like
  * every admin page, but rendered bare — no shell, a blank page with one
  * centered card: the person landing here came from a terminal to answer one

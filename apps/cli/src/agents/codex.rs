@@ -72,7 +72,7 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel]) -> Result<Picks
             &*format!("Fallbacks for {model} — tried in order when codex is benched or out of quota."),
             "Space toggles, Enter with nothing toggled means no fallback.",
         ];
-        tui::pick_many(title, &note, &candidates)?
+        tui::pick_many(title, &note, Some(&format!("codex/{model}")), &candidates)?
     };
     Ok(Picks { model, effort, fallbacks })
 }

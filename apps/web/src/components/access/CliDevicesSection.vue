@@ -4,7 +4,7 @@
  * devices card. A device is a credential — a rotating token family that can
  * mint API keys — so it lives beside the keys it mints, where both are
  * revoked. No create flow: signing in is the CLI's job, so the empty state
- * teaches the install + `kano-proxy init` path instead. Row actions sit
+ * teaches the install + `kano-proxy login` path instead. Row actions sit
  * behind the card's edit gate, the convention every section shares.
  *
  * Data comes from the shared useCli singleton; the page owns loading, this
@@ -37,7 +37,7 @@ import type { CliDevice } from "@/types"
 const INSTALL_BREW = "brew install yufeng-kano/tap/kano-proxy"
 const INSTALL_SCRIPT =
   "curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh"
-const INIT_COMMAND = `kano-proxy init --base-url ${window.location.origin}`
+const LOGIN_COMMAND = `kano-proxy login --base-url ${window.location.origin}`
 const RELEASES_URL = "https://github.com/yufeng-kano/kano-proxy/releases"
 
 const emit = defineEmits<{ (e: "changed"): void }>()
@@ -150,7 +150,7 @@ async function saveRename() {
           <CopyField :value="INSTALL_BREW" @error="error = $event" />
           <CopyField :value="INSTALL_SCRIPT" @error="error = $event" />
           <span class="install-label">{{ t("cli.empty.thenRun") }}</span>
-          <CopyField :value="INIT_COMMAND" @error="error = $event" />
+          <CopyField :value="LOGIN_COMMAND" @error="error = $event" />
           <AppButton variant="ghost" size="sm" :href="RELEASES_URL">
             {{ t("cli.empty.releases") }}
           </AppButton>

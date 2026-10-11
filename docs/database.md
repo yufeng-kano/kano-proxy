@@ -100,7 +100,7 @@ User-defined custom upstream providers (BYO endpoint + API key — see [provider
 
 ### `cli_devices`
 
-One machine that ran `kano-proxy init` (contract: [cli.md](./cli.md)). Added in `0015_cli_providers.sql`.
+One machine that ran `kano-proxy login` (contract: [cli.md](./cli.md)). Added in `0015_cli_providers.sql`.
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -116,7 +116,7 @@ Deleting a device cascades to `api_keys.device_id` (the keys it minted) and null
 
 ### `cli_login_requests`
 
-Pending `kano-proxy init` authorize-then-paste logins ([cli.md](./cli.md) § Device auth). Added in `0015_cli_providers.sql`. Expired rows are purged by the daily retention sweep ([logging.md](./logging.md)).
+Pending `kano-proxy login` authorize-then-paste logins ([cli.md](./cli.md) § Device auth). Added in `0015_cli_providers.sql`. Expired rows are purged by the daily retention sweep ([logging.md](./logging.md)).
 
 | Column | Type | Notes |
 |--------|------|-------|

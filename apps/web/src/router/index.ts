@@ -70,7 +70,7 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
         meta: { titleKey: "nav.groups" },
       },
       {
-        // The authorize view a `kano-proxy init` login lands on (docs/cli.md).
+        // The authorize view a `kano-proxy login` login lands on (docs/cli.md).
         // Session-gated like every non-public route — the guard redirects
         // through login and back, query string intact. `bare`: rendered outside
         // the shell — a blank page with one centered card (docs/admin-ui.md

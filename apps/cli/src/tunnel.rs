@@ -3,7 +3,7 @@
 //! chunk-for-chunk with no whole-body buffering. Reconnects forever on
 //! network failures (1s → 60s full-jitter backoff); `4003` refreshes the
 //! token silently; `4001` drops the provider (another `start` owns it); a
-//! failed refresh / 401 exits with a message to re-run init.
+//! failed refresh / 401 exits with a message to run `kano-proxy login` again.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,7 +114,7 @@ pub async fn run_provider(
             Err(e) => {
                 // A rejected refresh is terminal: the device was revoked or
                 // unregistered. Retrying cannot help (docs/cli.md).
-                return Err(anyhow!("{}: sign-in rejected ({e}) — run `kano-proxy init` again", provider.slug));
+                return Err(anyhow!("{}: sign-in rejected ({e:#}) — run `kano-proxy login` again", provider.slug));
             }
         };
         force_refresh = false;

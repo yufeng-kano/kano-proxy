@@ -19,7 +19,7 @@ Three steps: write the config, generate the model catalog, start `codex`. The CL
 The [kano-proxy CLI](/guide/local-models) performs all three steps:
 
 ```console
-$ kano-proxy init                      # once per machine
+$ kano-proxy login                      # once per machine
 $ kano-proxy agent setup codex
 ```
 

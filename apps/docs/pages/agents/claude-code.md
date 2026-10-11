@@ -12,7 +12,7 @@ Works fully. Claude Code speaks the Anthropic Messages API, which the proxy serv
 The [kano-proxy CLI](/guide/local-models) can write this configuration for you:
 
 ```console
-$ kano-proxy init                      # once per machine
+$ kano-proxy login                      # once per machine
 $ kano-proxy agent setup claude-code
 ```
 

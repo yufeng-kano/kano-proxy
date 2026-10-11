@@ -19,7 +19,7 @@ description: 把 Codex CLI 指向 Kano Proxy，產生模型目錄讓 /model 列�
 [kano-proxy CLI](/zh-TW/guide/local-models) 會把三步一次做完：
 
 ```console
-$ kano-proxy init                      # 每台機器一次
+$ kano-proxy login                      # 每台機器一次
 $ kano-proxy agent setup codex
 ```
 

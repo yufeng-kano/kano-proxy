@@ -14,7 +14,7 @@ Vue 3 + Vite + TypeScript, served as static files from the same hostname as the 
 | `/models` | Searchable catalog of `provider/model` ids, grouped by provider |
 | `/groups` | Model groups: virtual endpoints (`/g/<slug>/…`) whose model names map to ordered `provider/model` targets |
 | `/access` | The user's credentials: API keys (create / edit / revoke), CLI devices (rename / revoke), and the client connection details — three tabs (§ Access page) |
-| `/cli/authorize` | Session-gated approve view the `kano-proxy init` login lands on — a **bare** page outside the shell (§ CLI authorize view) |
+| `/cli/authorize` | Session-gated approve view the `kano-proxy login` login lands on — a **bare** page outside the shell (§ CLI authorize view) |
 | `/changelog` | Published GitHub Releases, newest first ([changelog.md](./changelog.md)). An edition may leave it out (§ Layout: edition options) |
 | `/docs/` | **Not a route of this app.** Static VitePress site served by Pages from the same build ([docs-site.md](./docs-site.md)); the router never sees it. Linked from the login footer and the sidebar |
 
@@ -349,7 +349,7 @@ Key creation and editing run in a **dialog**, opened from a Create key button in
 
 The CLI devices card, moved here from the Providers page: name, last seen, created, and **Keys** — how many API keys the device minted that still exist (`key_count`). Row actions behind the section edit gate (§ Providers page): **Rename** as the pencil, then **Revoke**, danger tone, confirm-first, and the confirmation names the key count — revoking a device deletes the keys it minted ([cli.md](./cli.md) § Keys and groups), which is exactly the thing the user must know before pressing it. Revoking deletes the device, so it leaves the list at once — there is no revoked history to show (operator decision, 2026-09-23). Data: `GET /api/cli/devices`, through the shared CLI cache (§ CLI section).
 
-**No create flow** — signing in is the CLI's job. When there are no devices the card shows the install one-liners (brew + install script, from the message catalog) and `kano-proxy init --base-url <location.origin>` (this instance's own address, since the CLI's compiled-in default is the hosted edition — [cli.md](./cli.md) § Command surface), and links the GitHub Releases page.
+**No create flow** — signing in is the CLI's job. When there are no devices the card shows the install one-liners (brew + install script, from the message catalog) and `kano-proxy login --base-url <location.origin>` (this instance's own address, since the CLI's compiled-in default is the hosted edition — [cli.md](./cli.md) § Command surface), and links the GitHub Releases page.
 
 ### Connect tab
 

@@ -157,7 +157,7 @@ async fn login_complete(State(state): State<AppState>, body: bytes::Bytes) -> Re
         return error(StatusCode::BAD_REQUEST, "request_id and code are required");
     }
 
-    let expired = || error(StatusCode::UNAUTHORIZED, "login request expired or already used — run init again");
+    let expired = || error(StatusCode::UNAUTHORIZED, "login request expired or already used — run `kano-proxy login` again");
     let Ok(row) = get_login_request(state.pool(), &request_id).await else {
         return internal_error();
     };
@@ -173,7 +173,7 @@ async fn login_complete(State(state): State<AppState>, body: bytes::Bytes) -> Re
         return error(StatusCode::UNAUTHORIZED, "login request not approved yet");
     }
     if row.attempts >= MAX_LOGIN_CODE_ATTEMPTS {
-        return error(StatusCode::UNAUTHORIZED, "too many wrong codes — run init again");
+        return error(StatusCode::UNAUTHORIZED, "too many wrong codes — run `kano-proxy login` again");
     }
     if !timing_safe_equal(&sha256_hex_str(&code), &code_hash) {
         let _ = record_login_code_attempt(state.pool(), &request_id).await;
