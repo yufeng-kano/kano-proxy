@@ -21,7 +21,7 @@ use serde_json::Value;
 
 use crate::api::{self, CatalogModel, Group, GroupModel, GroupTarget};
 use crate::state::{backups_dir, AgentState, FieldRecord, StateFile};
-use crate::tui;
+use crate::tui::{self, Nav};
 use crate::tunnel::TokenCache;
 
 use doc::{Doc, Kind};
@@ -145,6 +145,14 @@ impl Current<'_> {
             .map(|m| m.targets.iter().map(|t| t.model.clone()).filter(|t| t != own).collect())
             .unwrap_or_default()
     }
+}
+
+/// One pass of an agent's pickers — kept so the review screen can send the user back into
+/// the flow with every answer intact.
+#[derive(Debug, Clone)]
+pub enum Picks {
+    Claude(claude_code::Picks),
+    Codex(codex::Picks),
 }
 
 /// What `setup` will do, computed before anything is written — printed as-is by `--dry-run`.
@@ -315,38 +323,58 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
     let groups = api::list_groups(&base_url, &access).await?;
     let existing: Option<&Group> = groups.iter().find(|g| g.slug == kind.group_slug());
     let current = Current { doc: Some(&current_doc), group: existing };
-    let plan = match kind {
-        AgentKind::ClaudeCode => claude_code::plan(&base_url, &catalog, &args, &current)?,
-        AgentKind::Codex => codex::plan(&base_url, &catalog, &args, &current)?,
+    let previous = state.agents.get(kind.id()).cloned();
+    let device_name = state.device_name.as_deref().unwrap_or("device");
+
+    // Pick, then review the whole plan; Esc on the review goes back into the pickers with
+    // every answer kept, Enter goes ahead. `--no-tui` and `--dry-run` skip the review.
+    let mut resume: Option<Picks> = None;
+    let (plan, models) = loop {
+        let picks = match kind {
+            AgentKind::ClaudeCode => Picks::Claude(claude_code::collect_picks(
+                &args,
+                &catalog,
+                &current,
+                match &resume {
+                    Some(Picks::Claude(p)) => Some(p),
+                    _ => None,
+                },
+            )?),
+            AgentKind::Codex => Picks::Codex(codex::collect_picks(
+                &args,
+                &catalog,
+                &current,
+                match &resume {
+                    Some(Picks::Codex(p)) => Some(p),
+                    _ => None,
+                },
+            )?),
+        };
+        let plan = match &picks {
+            Picks::Claude(p) => claude_code::plan_from(&base_url, &catalog, p),
+            Picks::Codex(p) => codex::plan_from(&base_url, &catalog, p),
+        };
+        // What the group will hold after the merge — what the review shows and what is sent.
+        let models = merge_with_existing(plan.group_models.clone(), existing.map(|g| g.models.as_slice()).unwrap_or(&[]));
+        if args.dry_run || args.no_tui {
+            break (plan, models);
+        }
+        let lines = review_lines(kind, &plan, &models, existing.is_some(), &current_doc, previous.as_ref(), device_name, &path);
+        match tui::review(&format!("kano-proxy agent setup {} — review", kind.id()), &lines, "writes all of this")? {
+            Nav::Next(()) => break (plan, models),
+            Nav::Back => resume = Some(picks),
+        }
     };
 
-    let previous = state.agents.get(kind.id()).cloned();
     if args.dry_run {
         println!("dry run — nothing is written, minted or changed\n");
-        for line in &plan.summary {
-            println!("  {line}");
-        }
-        println!("\ngroup \"{}\" ({}):", kind.group_slug(), if previous.is_some() { "update" } else { "create or update" });
-        for model in &plan.group_models {
-            let targets: Vec<&str> = model.targets.iter().map(|t| t.model.as_str()).collect();
-            println!("  {:<40} → {}", model.name, targets.join(", "));
-        }
-        println!("\nkey: \"{}@{}\" (minted on the real run{})", kind.id(), state.device_name.as_deref().unwrap_or("?"),
-            if previous.is_some() { "; the previous one is revoked first" } else { "" });
-        println!("\n{} ({}):", path.display(), if path.exists() { "exists" } else { "will be created" });
-        let doc = &current_doc;
-        for (field, value) in &plan.fields {
-            let was = previous.as_ref().and_then(|p| p.fields.get(field)).map(|r| r.before.clone()).unwrap_or_else(|| doc.get(field));
-            println!("  {field} = {}  (was: {})", render_value(value), was.map(|v| render_value(&v)).unwrap_or_else(|| "absent".into()));
-        }
-        if let Some(catalog) = &plan.catalog {
-            println!("\n{}: {} models from `codex debug models --bundled`", catalog.path.display(), catalog.models.len());
+        for line in review_lines(kind, &plan, &models, existing.is_some(), &current_doc, previous.as_ref(), device_name, &path) {
+            println!("{line}");
         }
         return Ok(());
     }
 
     // 1. The group — looked up by slug so a rerun updates instead of duplicating.
-    let models = merge_with_existing(plan.group_models.clone(), existing.map(|g| g.models.as_slice()).unwrap_or(&[]));
     let group = match existing {
         Some(g) => api::update_group_models(&base_url, &access, &g.id, &models).await?,
         None => api::create_group(&base_url, &access, kind.group_name(), kind.group_slug(), &models).await?,
@@ -455,6 +483,53 @@ impl Plan {
     }
 }
 
+/// The plan as lines — the review screen and `--dry-run` print the same thing. Values are
+/// shown as they will be written, except the key, which does not exist yet.
+#[allow(clippy::too_many_arguments)]
+fn review_lines(
+    kind: AgentKind,
+    plan: &Plan,
+    models: &[GroupModel],
+    group_exists: bool,
+    doc: &Doc,
+    previous: Option<&AgentState>,
+    device_name: &str,
+    path: &Path,
+) -> Vec<String> {
+    let mut out: Vec<String> = plan.summary.clone();
+    out.push(String::new());
+    out.push(format!("Group \"{}\" — {}:", kind.group_slug(), if group_exists { "update" } else { "create" }));
+    for model in models {
+        let targets: Vec<&str> = model.targets.iter().map(|t| t.model.as_str()).collect();
+        out.push(format!("  {:<32} → {}", model.name, targets.join(", ")));
+    }
+    out.push(String::new());
+    out.push(format!(
+        "Key \"{}@{device_name}\" — minted now{}",
+        kind.id(),
+        if previous.is_some() { ", the previous one is revoked first" } else { "" }
+    ));
+    out.push(String::new());
+    out.push(format!(
+        "{} — {}:",
+        path.display(),
+        if !path.exists() { "created" } else if previous.is_some() { "updated (the first backup is kept)" } else { "updated, backed up first" }
+    ));
+    for (field, value) in &plan.fields {
+        let was = previous.and_then(|p| p.fields.get(field)).map(|r| r.before.clone()).unwrap_or_else(|| doc.get(field));
+        out.push(format!(
+            "  {field} = {}   (was: {})",
+            render_value(value),
+            was.map(|v| render_value(&v)).unwrap_or_else(|| "absent".into())
+        ));
+    }
+    if let Some(catalog) = &plan.catalog {
+        out.push(String::new());
+        out.push(format!("{} — {} models from `codex debug models --bundled`", catalog.path.display(), catalog.models.len()));
+    }
+    out
+}
+
 /// Copy `path` into the backups directory before the first write ever made to it; `None`
 /// when there is nothing to back up (the file did not exist).
 fn take_backup(file: &StateFile, kind: AgentKind, path: &Path) -> Result<Option<PathBuf>> {
@@ -499,60 +574,68 @@ pub async fn cmd_restore(file: &StateFile, kind: AgentKind, args: RestoreArgs) -
 
     let backup = if args.full { Some(resolve_backup(&record, args.backup.as_deref())?) } else { None };
 
-    println!("restore {} ({}):", kind.label(), if args.full { "full file" } else { "fields" });
+    let mut lines: Vec<String> = vec![format!("Restore {} ({}):", kind.label(), if args.full { "full file" } else { "fields" })];
     if let Some(backup) = &backup {
         match backup {
             Some(b) => {
-                println!("  {} ← {}", path.display(), b.display());
+                lines.push(format!("  {} ← {}", path.display(), b.display()));
                 let current = fs::read_to_string(&path).unwrap_or_default();
                 let original = fs::read_to_string(b).with_context(|| format!("cannot read {}", b.display()))?;
-                for line in line_diff(&current, &original).iter().take(80) {
-                    println!("    {line}");
-                }
+                lines.extend(line_diff(&current, &original).iter().take(80).map(|l| format!("    {l}")));
             }
-            None => println!("  {} did not exist before setup — it will be deleted", path.display()),
+            None => lines.push(format!("  {} did not exist before setup — it will be deleted", path.display())),
         }
     } else {
         for (field, r) in &record.fields {
             let back = r.before.as_ref().map(render_value).unwrap_or_else(|| "absent".into());
-            println!("  {field} ← {back}{}", if drifted.contains(field) { "   (edited since setup!)" } else { "" });
+            lines.push(format!("  {field} ← {back}{}", if drifted.contains(field) { "   (edited since setup!)" } else { "" }));
         }
     }
     if let Some(cat) = &record.catalog_path {
         match &record.catalog_backup_path {
-            Some(b) => println!("  {cat} ← {b}"),
-            None => println!("  {cat} will be deleted"),
+            Some(b) => lines.push(format!("  {cat} ← {b}")),
+            None => lines.push(format!("  {cat} will be deleted")),
         }
     }
-    println!("  key \"{}\" will be revoked; group \"{}\" {}", record.key_name, record.group_slug,
-        if args.remove_group { "will be deleted" } else { "stays (pass --remove-group to delete it)" });
+    lines.push(format!(
+        "  key \"{}\" will be revoked; group \"{}\" {}",
+        record.key_name,
+        record.group_slug,
+        if args.remove_group { "will be deleted" } else { "stays (pass --remove-group to delete it)" }
+    ));
+    if args.full {
+        lines.push(String::new());
+        lines.push(format!("The whole file {} is replaced by the backup. Every change made since is lost.", path.display()));
+    }
+    if !drifted.is_empty() {
+        lines.push(String::new());
+        lines.push("These fields were edited since the CLI wrote them — restoring overwrites the edits:".into());
+        lines.extend(drifted.iter().map(|f| format!("  {f}")));
+    }
+    if args.dry_run || args.no_tui {
+        for line in &lines {
+            println!("{line}");
+        }
+    }
     if args.dry_run {
         println!("\ndry run — nothing changed");
         return Ok(());
     }
 
-    // Consent for anything that throws away the user's own edits.
-    let needs_consent = args.full || !drifted.is_empty();
-    if needs_consent && !args.force {
-        if args.no_tui {
+    // Interactive: always show the plan and wait for Enter. Non-interactive: only a full
+    // replace or overwriting the user's own edits needs `--force`.
+    if args.no_tui {
+        if (args.full || !drifted.is_empty()) && !args.force {
             bail!(if args.full {
                 "--full replaces the whole file — pass --force to confirm with --no-tui"
             } else {
                 "fields were edited since setup — pass --force to overwrite them with --no-tui"
             });
         }
+    } else if !args.force {
         tui::require_tty()?;
-        let mut lines: Vec<String> = Vec::new();
-        if args.full {
-            lines.push(format!("The whole file {} is replaced by the backup. Every change made since is lost.", path.display()));
-        }
-        if !drifted.is_empty() {
-            lines.push("These fields were edited since the CLI wrote them:".into());
-            lines.extend(drifted.iter().map(|f| format!("  {f}")));
-        }
-        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
-        if !tui::confirm(&format!("kano-proxy agent restore {}", kind.id()), &refs, "Yes — restore anyway")? {
-            bail!("cancelled");
+        if tui::review(&format!("kano-proxy agent restore {}", kind.id()), &lines, "restores all of this")? == Nav::Back {
+            return Err(tui::cancelled());
         }
     }
 
@@ -611,6 +694,8 @@ pub async fn cmd_restore(file: &StateFile, kind: AgentKind, args: RestoreArgs) -
                     false => eprintln!("· key \"{}\" was already revoked", record.key_name),
                 }
                 if args.remove_group {
+                    // The review above already named the group as deleted; this second
+                    // question exists because other devices may depend on it.
                     let confirmed = args.force || args.no_tui || {
                         tui::require_tty()?;
                         tui::confirm(

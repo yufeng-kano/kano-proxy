@@ -19,7 +19,7 @@ const SLOTS: [(&str, &str, &str); 3] = [
     ("Haiku", "haiku", "env.ANTHROPIC_DEFAULT_HAIKU_MODEL"),
 ];
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Picks {
     /// Per slot (Opus, Sonnet, Haiku): the bare id and its fallbacks.
     pub slots: Vec<(String, Vec<String>)>,
@@ -31,7 +31,9 @@ fn default_for(ids: &[String], family: &str) -> usize {
     ids.iter().position(|id| id.to_lowercase().contains(family)).unwrap_or(0)
 }
 
-pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current) -> Result<Picks> {
+/// `resume`: the answers from a previous pass — set when the review screen sent the user
+/// back, so the flow re-enters at its last step with every answer intact.
+pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current, resume: Option<&Picks>) -> Result<Picks> {
     let kind = AgentKind::ClaudeCode;
     let ids = provider_ids(catalog, kind.provider());
     if ids.is_empty() {
@@ -67,6 +69,18 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
     let mut fallbacks: Vec<Vec<String>> =
         chosen.iter().map(|&i| current.fallbacks(&ids[i], &format!("claude-code/{}", ids[i]))).collect();
     let mut step = 0usize;
+    if let Some(prev) = resume {
+        for (slot, (id, fb)) in prev.slots.iter().enumerate() {
+            if let Some(i) = ids.iter().position(|x| x == id) {
+                chosen[slot] = i;
+                fallbacks[slot] = fb.clone();
+            }
+        }
+        step = SLOTS.len() * 2 - 1;
+    }
+    // A step with nothing to ask (no fallback candidates) is skipped in whichever
+    // direction the user is moving, so Esc never lands on an invisible step.
+    let mut backward = resume.is_some();
     while step < SLOTS.len() * 2 {
         let slot = step / 2;
         let (label, _, _) = SLOTS[slot];
@@ -81,9 +95,13 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                         chosen[slot] = i;
                         fallbacks[slot] = current.fallbacks(&ids[i], &format!("claude-code/{}", ids[i]));
                     }
+                    backward = false;
                     step += 1;
                 }
-                Nav::Back => step = step.saturating_sub(1),
+                Nav::Back => {
+                    backward = true;
+                    step = step.saturating_sub(1);
+                }
             }
         } else {
             let id = &ids[chosen[slot]];
@@ -91,7 +109,11 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
             let candidates = fallback_candidates(catalog, &own);
             if candidates.is_empty() {
                 fallbacks[slot].clear();
-                step += 1;
+                if backward {
+                    step -= 1;
+                } else {
+                    step += 1;
+                }
                 continue;
             }
             let note = [
@@ -101,18 +123,26 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
             match tui::pick_many(title, &note, Some(&own), &candidates, &fallbacks[slot])? {
                 Nav::Next(picked) => {
                     fallbacks[slot] = picked;
+                    backward = false;
                     step += 1;
                 }
-                Nav::Back => step -= 1,
+                Nav::Back => {
+                    backward = true;
+                    step -= 1;
+                }
             }
         }
     }
     Ok(Picks { slots: chosen.iter().zip(fallbacks).map(|(&i, fb)| (ids[i].clone(), fb)).collect() })
 }
 
+#[cfg(test)]
 pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs, current: &Current) -> Result<Plan> {
+    Ok(plan_from(base_url, catalog, &collect_picks(args, catalog, current, None)?))
+}
+
+pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Plan {
     let kind = AgentKind::ClaudeCode;
-    let picks = collect_picks(args, catalog, current)?;
     let ids = provider_ids(catalog, kind.provider());
     let models = group_models(kind.provider(), &ids, &picks.slots);
     let base = kind.group_base(base_url);
@@ -132,7 +162,7 @@ pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs, current:
             format!("{label}: {id}  (fallbacks: {})", fallbacks.join(", "))
         });
     }
-    Ok(Plan { group_models: models, fields, summary, catalog: None })
+    Plan { group_models: models, fields, summary, catalog: None }
 }
 
 #[cfg(test)]

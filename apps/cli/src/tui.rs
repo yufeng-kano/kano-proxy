@@ -22,6 +22,24 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 
+/// The user quit (Esc twice, Ctrl-C, or "No" on a confirmation). Not a failure: `main`
+/// prints it as a plain line — never `error: …` — and exits 130. The message says what
+/// state things were left in when that is not simply "nothing changed".
+#[derive(Debug)]
+pub struct Cancelled(pub Option<String>);
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.as_deref().unwrap_or("Cancelled — nothing was changed."))
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+pub fn cancelled() -> anyhow::Error {
+    Cancelled(None).into()
+}
+
 /// What a screen hands back: the answer, or "go back one step".
 #[derive(Debug, PartialEq, Eq)]
 pub enum Nav<T> {
@@ -77,11 +95,11 @@ fn read_key() -> Result<Key> {
                 continue;
             }
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                bail!("cancelled");
+                return Err(cancelled());
             }
             if key.code == KeyCode::Esc {
                 if ESC_ARMED.swap(true, Ordering::SeqCst) {
-                    bail!("cancelled");
+                    return Err(cancelled());
                 }
                 return Ok(Key::Back);
             }
@@ -91,7 +109,16 @@ fn read_key() -> Result<Key> {
     }
 }
 
-const NAV_HINT: &str = "Esc back · Esc twice quits";
+/// The navigation half of every footer. Right after an Esc it changes to say that the
+/// next Esc quits — on the first screen, where there is nothing to go back to, that line
+/// is the only visible response to the first Esc.
+fn nav_hint() -> &'static str {
+    if ESC_ARMED.load(Ordering::SeqCst) {
+        "Press Esc again to quit · any other key continues"
+    } else {
+        "Esc back · Esc twice quits"
+    }
+}
 
 fn note_height(note: &[&str], width: usize) -> u16 {
     if note.is_empty() {
@@ -138,7 +165,7 @@ pub fn input_with_note(title: &str, note: &[&str], label: &str, default: &str, i
                 Span::styled("▏", Style::default().add_modifier(Modifier::SLOW_BLINK)),
             ]);
             f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), chunks[2]);
-            f.render_widget(dim(&format!("Enter accepts · {NAV_HINT}")), chunks[3]);
+            f.render_widget(dim(&format!("Enter accepts · {}", nav_hint())), chunks[3]);
         })?;
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
@@ -173,7 +200,7 @@ pub fn input_secret(title: &str, label: &str, initial: &str) -> Result<Nav<Strin
                 Span::styled("\u{258f}", Style::default().add_modifier(Modifier::SLOW_BLINK)),
             ]);
             f.render_widget(Paragraph::new(line), chunks[1]);
-            f.render_widget(dim(&format!("Enter accepts (blank = none) · input is hidden · {NAV_HINT}")), chunks[2]);
+            f.render_widget(dim(&format!("Enter accepts (blank = none) · input is hidden · {}", nav_hint())), chunks[2]);
         })?;
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
@@ -249,7 +276,7 @@ fn choose_at(title: &str, note: &[&str], options: &[&str], default: Option<usize
                 ])),
                 chunks[3],
             );
-            f.render_widget(dim(&format!("↑/↓ move · Enter accepts · {NAV_HINT}")), chunks[4]);
+            f.render_widget(dim(&format!("↑/↓ move · Enter accepts · {}", nav_hint())), chunks[4]);
         })?;
         let selected = state.selected().unwrap_or(0);
         match read_key()? {
@@ -303,7 +330,7 @@ pub fn pick_models(title: &str, models: &[String], preselected: &[String]) -> Re
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("› ");
             f.render_stateful_widget(list, chunks[2], &mut state);
-            f.render_widget(dim(&format!("↑/↓ move · Space toggles · Enter accepts · type to search · {NAV_HINT}")), chunks[3]);
+            f.render_widget(dim(&format!("↑/↓ move · Space toggles · Enter accepts · type to search · {}", nav_hint())), chunks[3]);
         })?;
         let cursor = state.selected().unwrap_or(0).min(row_count.saturating_sub(1));
         match read_key()? {
@@ -410,7 +437,7 @@ pub fn pick_many(title: &str, note: &[&str], primary: Option<&str>, items: &[Str
                 .wrap(Wrap { trim: false }),
                 chunks[5],
             );
-            f.render_widget(dim(&format!("↑/↓ move · Space toggles · Enter accepts · type to search · {NAV_HINT}")), chunks[6]);
+            f.render_widget(dim(&format!("↑/↓ move · Space toggles · Enter accepts · type to search · {}", nav_hint())), chunks[6]);
         })?;
         let cursor = state.selected().unwrap_or(0).min(visible.len().saturating_sub(1));
         match read_key()? {
@@ -445,4 +472,72 @@ pub fn pick_many(title: &str, note: &[&str], primary: Option<&str>, items: &[Str
 pub fn confirm(title: &str, lines: &[&str], yes: &str) -> Result<bool> {
     let options = ["No — leave it as it is", yes];
     Ok(matches!(choose_at(title, lines, &options, None, 0)?, Nav::Next(1)))
+}
+
+/// The last screen before anything is written: the whole plan as lines, scrollable, with
+/// Enter to go ahead and Esc to go back and change an answer (docs/cli.md § Navigation).
+pub fn review(title: &str, lines: &[String], go: &str) -> Result<Nav<()>> {
+    let mut screen = Screen::open()?;
+    let mut scroll: u16 = 0;
+    let text = lines.join("\n");
+    loop {
+        let mut max_scroll = 0u16;
+        screen.terminal.draw(|f| {
+            let chunks = Layout::vertical([
+                Constraint::Length(3),
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(f.area());
+            f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
+            max_scroll = (lines.len() as u16).saturating_sub(chunks[1].height);
+            f.render_widget(Paragraph::new(text.as_str()).scroll((scroll.min(max_scroll), 0)), chunks[1]);
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Enter ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(go),
+                ])),
+                chunks[2],
+            );
+            let more = if max_scroll > 0 { "↑/↓ scroll · " } else { "" };
+            f.render_widget(dim(&format!("{more}Enter goes ahead · {}", nav_hint())), chunks[3]);
+        })?;
+        match read_key()? {
+            Key::Back => return Ok(Nav::Back),
+            Key::Other(KeyCode::Enter) => return Ok(Nav::Next(())),
+            Key::Other(KeyCode::Up) | Key::Other(KeyCode::Char('k')) => scroll = scroll.min(max_scroll).saturating_sub(1),
+            Key::Other(KeyCode::Down) | Key::Other(KeyCode::Char('j')) => scroll = (scroll + 1).min(max_scroll),
+            Key::Other(KeyCode::PageUp) => scroll = scroll.min(max_scroll).saturating_sub(10),
+            Key::Other(KeyCode::PageDown) => scroll = (scroll + 10).min(max_scroll),
+            Key::Other(_) => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Quitting is a typed outcome `main` recognises, not an error string to match on —
+    /// and the default wording is the "nothing changed" one.
+    #[test]
+    fn cancelled_is_typed_and_says_nothing_changed() {
+        let e = cancelled();
+        assert!(e.is::<Cancelled>());
+        assert_eq!(e.to_string(), "Cancelled — nothing was changed.");
+        let partial: anyhow::Error = Cancelled(Some("Cancelled — Claude Code already restored.".into())).into();
+        assert_eq!(partial.downcast_ref::<Cancelled>().unwrap().to_string(), "Cancelled — Claude Code already restored.");
+        // Context added on the way up does not hide it.
+        assert!(cancelled().context("while picking").is::<Cancelled>());
+    }
+
+    #[test]
+    fn the_footer_says_when_the_next_esc_quits() {
+        ESC_ARMED.store(false, Ordering::SeqCst);
+        assert_eq!(nav_hint(), "Esc back · Esc twice quits");
+        ESC_ARMED.store(true, Ordering::SeqCst);
+        assert!(nav_hint().starts_with("Press Esc again to quit"));
+        ESC_ARMED.store(false, Ordering::SeqCst);
+    }
 }

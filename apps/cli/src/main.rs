@@ -221,6 +221,12 @@ async fn main() {
     };
 
     if let Err(e) = result {
+        // The user quitting is not a failure: say what happened, plainly, and use the
+        // shell's interrupted-by-user status (docs/cli.md § Runtime behavior).
+        if let Some(cancelled) = e.downcast_ref::<tui::Cancelled>() {
+            eprintln!("{cancelled}");
+            std::process::exit(130);
+        }
         eprintln!("error: {e:#}");
         // 1 = usage/config error; auth-rejected paths exit 2 before reaching here.
         std::process::exit(1);

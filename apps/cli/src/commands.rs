@@ -250,6 +250,10 @@ pub struct AddArgs {
     pub expose: Option<String>,
 }
 
+/// `tunnel add`'s answers, held for the review step: slug, format, target, local key,
+/// expose whitelist, hand-typed initial models.
+type AddAnswers = (String, String, String, Option<String>, Vec<String>, Vec<String>);
+
 fn parse_format(raw: &str) -> Result<String> {
     match raw {
         "openai" | "anthropic" => Ok(raw.to_string()),
@@ -328,12 +332,13 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
             "openai     — OpenAI-compatible chat API   (Ollama, LM Studio, vLLM, llama.cpp, …)",
             "anthropic  — Anthropic Messages API       (Ollama, llama.cpp, …)",
         ];
-        // Five steps; Esc re-enters the previous one with its answer (tui.rs).
+        // Five steps and a review; Esc re-enters the previous one with its answer (tui.rs).
         let mut slug = String::new();
         let mut format_index = 0usize;
         let mut target = String::new();
         let mut key = String::new();
-        let expose: Vec<String> = Vec::new();
+        let mut expose: Vec<String> = Vec::new();
+        let mut picked: Option<AddAnswers> = None;
         let mut step = 0usize;
         loop {
             match step {
@@ -372,7 +377,7 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
                     }
                     Nav::Back => step = 2,
                 },
-                _ => {
+                4 => {
                     let format = if format_index == 1 { "anthropic".to_string() } else { "openai".to_string() };
                     let target_key = if key.is_empty() { None } else { Some(key.clone()) };
                     match api::probe_local_models(&format, &target, target_key.as_deref()).await {
@@ -381,8 +386,16 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
                             match tui::pick_models(&format!("{title} — expose which models?"), &models, &expose)? {
                                 // "All models (follow local server)": store no filter, so
                                 // models added locally later appear automatically.
-                                Nav::Next(None) => break (slug, format, target, target_key, Vec::new(), Vec::new()),
-                                Nav::Next(Some(subset)) => break (slug, format, target, target_key, subset, Vec::new()),
+                                Nav::Next(None) => {
+                                    expose.clear();
+                                    picked = Some((slug.clone(), format, target.clone(), target_key, Vec::new(), Vec::new()));
+                                    step = 5;
+                                }
+                                Nav::Next(Some(subset)) => {
+                                    expose = subset.clone();
+                                    picked = Some((slug.clone(), format, target.clone(), target_key, subset, Vec::new()));
+                                    step = 5;
+                                }
                                 Nav::Back => step = 3,
                             }
                         }
@@ -403,11 +416,36 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
                                     } else {
                                         manual.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
                                     };
-                                    break (slug, format, target, target_key, Vec::new(), initial);
+                                    expose = initial.clone();
+                                    picked = Some((slug.clone(), format, target.clone(), target_key, Vec::new(), initial));
+                                    step = 5;
                                 }
                                 Nav::Back => step = 3,
                             }
                         }
+                    }
+                }
+                _ => {
+                    let (slug, format, target, target_key, subset, initial) = picked.clone().expect("set by the step before");
+                    let models = if !subset.is_empty() {
+                        format!("only {}", subset.join(", "))
+                    } else if !initial.is_empty() {
+                        format!("{} (typed by hand; the first connect reports the real list)", initial.join(", "))
+                    } else {
+                        "all — follows the local server".to_string()
+                    };
+                    let lines = vec![
+                        format!("Register \"{slug}\" on {}:", state.base_url),
+                        format!("  API        {format}"),
+                        format!("  Target     {target}"),
+                        format!("  Local key  {}", if target_key.is_some() { "set (kept on this device only)" } else { "none" }),
+                        format!("  Models     {models}"),
+                        String::new(),
+                        format!("Callable as {slug}/<model> once `kano-proxy tunnel start` runs."),
+                    ];
+                    match tui::review(title, &lines, "registers it")? {
+                        Nav::Next(()) => break (slug, format, target, target_key, subset, initial),
+                        Nav::Back => step = 4,
                     }
                 }
             }
@@ -573,14 +611,27 @@ pub async fn cmd_logout(file: &StateFile, no_tui: bool, force: bool, remove_grou
         bail!("this device is not signed in");
     }
     let managed: Vec<AgentKind> = AgentKind::ALL.iter().copied().filter(|k| state.agents.contains_key(k.id())).collect();
+    let mut restored: Vec<&str> = Vec::new();
     for kind in managed {
         eprintln!("→ restoring {}", kind.label());
-        agents::cmd_restore(
+        let result = agents::cmd_restore(
             file,
             kind,
             RestoreArgs { no_tui, dry_run: false, full: false, force, backup: None, remove_group },
         )
-        .await?;
+        .await;
+        match result {
+            Ok(()) => restored.push(kind.label()),
+            // Quitting part-way is not "nothing changed": say where it stopped.
+            Err(e) if e.is::<tui::Cancelled>() && !restored.is_empty() => {
+                return Err(tui::Cancelled(Some(format!(
+                    "Cancelled — {} already restored; this device is still signed in. Run `kano-proxy logout` again to finish.",
+                    restored.join(" and ")
+                )))
+                .into())
+            }
+            Err(e) => return Err(e),
+        }
     }
     if state.signed_in() {
         let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));

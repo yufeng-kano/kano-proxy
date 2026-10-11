@@ -18,7 +18,7 @@ pub const KEY_FIELD: &str = "model_providers.kano";
 pub const CATALOG_FILE: &str = "kano-models.json";
 const DEFAULT_EFFORT: &str = "high";
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Picks {
     pub model: String,
     pub effort: String,
@@ -33,7 +33,8 @@ pub struct CatalogPlan {
     pub models: Vec<Value>,
 }
 
-pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current) -> Result<Picks> {
+/// `resume`: the answers from a previous pass (the review screen sent the user back).
+pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current, resume: Option<&Picks>) -> Result<Picks> {
     let kind = AgentKind::Codex;
     let ids = provider_ids(catalog, kind.provider());
     if ids.is_empty() {
@@ -70,6 +71,17 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
         .unwrap_or(default_effort);
     let mut fallbacks = current.fallbacks(&ids[model], &format!("codex/{}", ids[model]));
     let mut step = 0usize;
+    if let Some(prev) = resume {
+        if let Some(i) = ids.iter().position(|x| *x == prev.model) {
+            model = i;
+        }
+        if let Some(i) = EFFORTS.iter().position(|e| *e == prev.effort) {
+            effort = i;
+        }
+        fallbacks = prev.fallbacks.clone();
+        step = 2;
+    }
+    let mut backward = resume.is_some();
     loop {
         match step {
             0 => {
@@ -80,6 +92,7 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                             model = i;
                             fallbacks = current.fallbacks(&ids[i], &format!("codex/{}", ids[i]));
                         }
+                        backward = false;
                         step = 1;
                     }
                     Nav::Back => {}
@@ -90,9 +103,13 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                 match tui::choose_default(title, &note, &EFFORTS, default_effort, effort)? {
                     Nav::Next(i) => {
                         effort = i;
+                        backward = false;
                         step = 2;
                     }
-                    Nav::Back => step = 0,
+                    Nav::Back => {
+                        backward = true;
+                        step = 0;
+                    }
                 }
             }
             _ => {
@@ -100,6 +117,10 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                 let candidates = fallback_candidates(catalog, &own);
                 if candidates.is_empty() {
                     fallbacks.clear();
+                    if backward {
+                        step = 1;
+                        continue;
+                    }
                     break;
                 }
                 let note = [
@@ -111,7 +132,10 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                         fallbacks = picked;
                         break;
                     }
-                    Nav::Back => step = 1,
+                    Nav::Back => {
+                        backward = true;
+                        step = 1;
+                    }
                 }
             }
         }
@@ -119,9 +143,8 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
     Ok(Picks { model: ids[model].clone(), effort: EFFORTS[effort].to_string(), fallbacks })
 }
 
-pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs, current: &Current) -> Result<Plan> {
+pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Plan {
     let kind = AgentKind::Codex;
-    let picks = collect_picks(args, catalog, current)?;
     let ids = provider_ids(catalog, kind.provider());
     let models = group_models(kind.provider(), &ids, &[(picks.model.clone(), picks.fallbacks.clone())]);
     let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
@@ -156,7 +179,7 @@ pub fn plan(base_url: &str, catalog: &[CatalogModel], args: &SetupArgs, current:
     if !picks.fallbacks.is_empty() {
         summary.push(format!("fallbacks: {}", picks.fallbacks.join(", ")));
     }
-    Ok(Plan { group_models: models, fields, summary, catalog: catalog_plan })
+    Plan { group_models: models, fields, summary, catalog: catalog_plan }
 }
 
 /// `codex debug models --bundled` as JSON, from the `codex` on `PATH`.
@@ -235,14 +258,14 @@ mod tests {
 
     #[test]
     fn picks_validate_against_the_catalog_and_the_effort_ladder() {
-        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5"]), &catalog(), &NONE).unwrap();
+        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5"]), &catalog(), &NONE, None).unwrap();
         assert_eq!((p.model.as_str(), p.effort.as_str()), ("gpt-5.6-sol", "high"));
         assert_eq!(p.fallbacks, ["claude-code/claude-opus-5"]);
-        assert!(collect_picks(&args("o3", None, &[]), &catalog(), &NONE).is_err());
-        assert!(collect_picks(&args("gpt-5.6-sol", Some("minimal"), &[]), &catalog(), &NONE).is_err());
-        assert!(collect_picks(&args("gpt-5.6-sol", None, &["grok/grok-4.5"]), &catalog(), &NONE).is_err());
+        assert!(collect_picks(&args("o3", None, &[]), &catalog(), &NONE, None).is_err());
+        assert!(collect_picks(&args("gpt-5.6-sol", Some("minimal"), &[]), &catalog(), &NONE, None).is_err());
+        assert!(collect_picks(&args("gpt-5.6-sol", None, &["grok/grok-4.5"]), &catalog(), &NONE, None).is_err());
         let no_codex: Vec<CatalogModel> = catalog().into_iter().filter(|m| m.provider != "codex").collect();
-        assert!(collect_picks(&args("gpt-5.6-sol", None, &[]), &no_codex, &NONE).unwrap_err().to_string().contains("no codex models"));
+        assert!(collect_picks(&args("gpt-5.6-sol", None, &[]), &no_codex, &NONE, None).unwrap_err().to_string().contains("no codex models"));
     }
 
     #[test]
