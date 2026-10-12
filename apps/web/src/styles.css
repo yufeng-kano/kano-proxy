@@ -42,6 +42,8 @@
 
   /* --- Color: status --------------------------------------------------- */
   --danger: #b91c1c;
+  --danger-fg: #ffffff;
+  --danger-hover: #991b1b;
   --danger-bg: #fef2f2;
   --danger-border: #fecaca;
   --warn: #a16207;
@@ -201,6 +203,8 @@
     --hover: #27272a;
     --topbar-bg: rgb(9 9 11 / 72%);
     --danger: #f87171;
+    --danger-fg: #18181b;
+    --danger-hover: #fca5a5;
     --danger-bg: #2a1416;
     --danger-border: #7f1d1d;
     --warn: #fbbf24;

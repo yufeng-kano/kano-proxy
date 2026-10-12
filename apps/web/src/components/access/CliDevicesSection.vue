@@ -23,6 +23,7 @@ import FormField from "@/components/ui/FormField.vue"
 import Modal from "@/components/ui/Modal.vue"
 import TextInput from "@/components/ui/TextInput.vue"
 import { useCli } from "@/composables/useCli"
+import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
 import { renameCliDevice, revokeCliDevice } from "@/services/api"
 import type { CliDevice } from "@/types"
@@ -43,6 +44,7 @@ const RELEASES_URL = "https://github.com/yufeng-kano/kano-proxy/releases"
 const emit = defineEmits<{ (e: "changed"): void }>()
 
 const { t, format } = useI18n()
+const confirm = useConfirm()
 const { state, load } = useCli()
 
 const error = ref<string | null>(null)
@@ -73,7 +75,12 @@ async function onRevoke(device: CliDevice) {
     device.key_count > 0
       ? t("cli.devices.revokeConfirmKeys", { name: device.name, count: device.key_count })
       : t("cli.devices.revokeConfirm", { name: device.name })
-  if (!confirm(message)) return
+  const confirmed = await confirm({
+    title: t("cli.devices.revokeTitle", { name: device.name }),
+    message,
+    confirmLabel: t("cli.devices.revoke"),
+  })
+  if (!confirmed) return
   busyId.value = device.id
   error.value = null
   try {

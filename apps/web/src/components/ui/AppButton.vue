@@ -15,7 +15,13 @@ import Spinner from "./Spinner.vue"
 
 const props = withDefaults(
   defineProps<{
-    variant?: "primary" | "secondary" | "ghost" | "danger"
+    /**
+     * `danger` is the outlined tone for a control that *leads to* destroying
+     * something; `destructive` is the solid one that fires it, and lives only
+     * on `ConfirmDialog`'s confirm button (docs/admin-ui.md § Component
+     * primitives).
+     */
+    variant?: "primary" | "secondary" | "ghost" | "danger" | "destructive"
     size?: "sm" | "md"
     /** Square button with an icon and no visible label — `label` becomes its accessible name. */
     iconOnly?: boolean
@@ -185,6 +191,15 @@ const bindings = computed(() => {
 
 .btn-danger.btn-icon:hover {
   background: var(--danger-bg);
+}
+
+.btn-destructive {
+  background: var(--danger);
+  color: var(--danger-fg);
+}
+
+.btn-destructive:hover {
+  background: var(--danger-hover);
 }
 
 .btn-spinner {

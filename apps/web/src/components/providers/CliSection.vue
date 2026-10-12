@@ -23,11 +23,13 @@ import FormField from "@/components/ui/FormField.vue"
 import Modal from "@/components/ui/Modal.vue"
 import TextInput from "@/components/ui/TextInput.vue"
 import { useCli } from "@/composables/useCli"
+import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
 import { deleteCliProvider, renameCliProvider } from "@/services/api"
 import type { CliProvider } from "@/types"
 
 const { t, format } = useI18n()
+const confirm = useConfirm()
 const { state, load } = useCli()
 
 const error = ref<string | null>(null)
@@ -73,7 +75,12 @@ async function saveRename() {
 }
 
 async function onRemove(provider: CliProvider) {
-  if (!confirm(t("cli.providers.removeConfirm", { name: provider.name, slug: provider.slug }))) return
+  const confirmed = await confirm({
+    title: t("cli.providers.removeTitle", { name: provider.name }),
+    message: t("cli.providers.removeConfirm", { slug: provider.slug }),
+    confirmLabel: t("action.remove"),
+  })
+  if (!confirmed) return
   busyId.value = provider.id
   error.value = null
   try {

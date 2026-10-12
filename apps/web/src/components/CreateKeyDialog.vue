@@ -21,6 +21,7 @@ import CopyField from "@/components/ui/CopyField.vue"
 import FormField from "@/components/ui/FormField.vue"
 import Modal from "@/components/ui/Modal.vue"
 import TextInput from "@/components/ui/TextInput.vue"
+import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import { createKey, revokeKey, updateKey, type KeyLimitFields } from "@/services/api"
@@ -43,6 +44,7 @@ const emit = defineEmits<{
 }>()
 
 const { t, format } = useI18n()
+const confirm = useConfirm()
 
 const isEdit = computed(() => !!props.editing)
 
@@ -131,7 +133,12 @@ async function submit() {
 
 async function revoke() {
   if (!props.editing || revoking.value) return
-  if (!confirm(t("keys.revokeConfirm"))) return
+  const confirmed = await confirm({
+    title: t("keys.revokeTitle"),
+    message: t("keys.revokeConfirm"),
+    confirmLabel: t("keys.revoke"),
+  })
+  if (!confirmed) return
   error.value = null
   revoking.value = true
   try {

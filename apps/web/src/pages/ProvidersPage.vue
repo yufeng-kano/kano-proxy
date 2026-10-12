@@ -31,6 +31,7 @@ import { useAccounts } from "@/composables/useAccounts"
 import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { useCustomProviders } from "@/composables/useCustomProviders"
+import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import {
@@ -54,6 +55,7 @@ import {
 } from "@/types"
 
 const { t } = useI18n()
+const confirm = useConfirm()
 const { user } = useAuth()
 const { byProvider, setUserId, loadAll, loadProvider, setStrategy, CACHE_TTL_MS } = useAccounts()
 const customProviders = useCustomProviders()
@@ -314,7 +316,12 @@ async function onMove(provider: ProviderId, from: number, to: number) {
 }
 
 async function onRemove(provider: ProviderId, id: string) {
-  if (!confirm(t("providers.account.removeConfirm"))) return
+  const confirmed = await confirm({
+    title: t("providers.account.removeTitle"),
+    message: t("providers.account.removeConfirm"),
+    confirmLabel: t("action.remove"),
+  })
+  if (!confirmed) return
   busyId.value = id
   actionError.value = null
   try {
@@ -494,7 +501,12 @@ async function onResumeCustom(provider: CustomProvider) {
 }
 
 async function onRemoveCustomProvider(provider: CustomProvider) {
-  if (!confirm(t("custom.removeConfirm", { name: provider.name }))) return
+  const confirmed = await confirm({
+    title: t("custom.removeTitle", { name: provider.name }),
+    message: t("custom.removeConfirm", { slug: provider.slug }),
+    confirmLabel: t("action.remove"),
+  })
+  if (!confirmed) return
   customBusyId.value = provider.id
   actionError.value = null
   try {

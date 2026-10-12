@@ -26,6 +26,7 @@ import { useAccounts } from "@/composables/useAccounts"
 import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { useCustomProviders } from "@/composables/useCustomProviders"
+import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import {
@@ -73,6 +74,7 @@ const props = defineProps<{
 const emit = defineEmits<{ close: []; saved: [] }>()
 
 const { t } = useI18n()
+const confirm = useConfirm()
 const { user } = useAuth()
 const accounts = useAccounts()
 const customProviders = useCustomProviders()
@@ -698,7 +700,12 @@ async function submit() {
 
 async function remove() {
   if (!props.group || deleting.value) return
-  if (!confirm(t("groups.deleteConfirm"))) return
+  const confirmed = await confirm({
+    title: t("groups.deleteTitle"),
+    message: t("groups.deleteConfirm"),
+    confirmLabel: t("groups.deleteAction"),
+  })
+  if (!confirmed) return
   error.value = null
   deleting.value = true
   try {

@@ -8,6 +8,7 @@
 import { computed } from "vue"
 import { useRoute } from "vue-router"
 import AppShell from "@/components/ui/AppShell.vue"
+import ConfirmDialog from "@/components/ui/ConfirmDialog.vue"
 import Spinner from "@/components/ui/Spinner.vue"
 import { useAuth } from "@/composables/useAuth"
 import { useI18n } from "@/i18n"
@@ -39,6 +40,8 @@ const showBoot = computed(
   </div>
 
   <RouterView v-else />
+
+  <ConfirmDialog />
 </template>
 
 <style scoped>

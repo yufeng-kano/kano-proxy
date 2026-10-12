@@ -223,8 +223,8 @@ export const en = {
   "providers.account.primary": "Primary",
   "providers.account.rename": "Rename {name}",
   "providers.account.remove": "Remove {name}",
-  "providers.account.removeConfirm":
-    "Remove this account? Requests will stop routing through it.",
+  "providers.account.removeTitle": "Remove this account?",
+  "providers.account.removeConfirm": "Requests stop routing through it immediately.",
   "providers.account.noUsage": "Usage will appear once this account is used",
   // Antigravity reports a credit balance beside its quota windows; it has no
   // total, so it is a line and not a bar — docs/providers.md § Antigravity.
@@ -328,7 +328,8 @@ export const en = {
   "custom.field.endpoint": "Endpoint",
   "custom.field.key": "Key",
   "custom.field.countTokens": "Token count",
-  "custom.removeConfirm": "Remove \"{name}\"? Its stored key is deleted too.",
+  "custom.removeTitle": "Remove \"{name}\"?",
+  "custom.removeConfirm": "Its stored key is deleted too, and requests to {slug}/… stop resolving.",
   "custom.test.ok": "Connected",
   "custom.test.okModels_one": "Connected · {count} model",
   "custom.test.okModels_other": "Connected · {count} models",
@@ -451,7 +452,9 @@ export const en = {
   "groups.empty.body":
     "A group is an endpoint of your own. Point a client at its base URL, and the model names you define there route to whatever you actually run — one name can try several accounts and providers in order.",
   "groups.delete": "Delete group",
-  "groups.deleteConfirm": "Delete this group? Its endpoint stops working immediately.",
+  "groups.deleteTitle": "Delete this group?",
+  "groups.deleteConfirm": "Its endpoint stops working immediately.",
+  "groups.deleteAction": "Delete",
   "groups.dialog.editTitle": "Edit group",
   "groups.dialog.save": "Save changes",
   // The three column heads. Nouns, not verbs: they name what each side holds,
@@ -551,10 +554,11 @@ export const en = {
   "cli.devices.revoke": "Revoke",
   "cli.devices.revokeName": "Revoke {name}",
   "cli.devices.renameName": "Rename {name}",
+  "cli.devices.revokeTitle": "Revoke \"{name}\"?",
   "cli.devices.revokeConfirm":
-    "Revoke \"{name}\"? It is removed, stops connecting within the hour and can only come back by signing in again.",
+    "It is removed, stops connecting within the hour and can only come back by signing in again.",
   "cli.devices.revokeConfirmKeys":
-    "Revoke \"{name}\"? It is removed, stops connecting within the hour and can only come back by signing in again. The {count} API key(s) it created are revoked with it.",
+    "It is removed, stops connecting within the hour and can only come back by signing in again. The {count} API key(s) it created are revoked with it.",
   "cli.providers.title": "CLI providers",
   "cli.providers.column.provider": "Provider",
   "cli.providers.column.state": "State",
@@ -567,8 +571,8 @@ export const en = {
   "cli.providers.noModels": "No models reported yet",
   "cli.providers.renameName": "Rename {name}",
   "cli.providers.removeName": "Remove {name}",
-  "cli.providers.removeConfirm":
-    "Remove \"{name}\"? Requests to {slug}/… stop resolving immediately.",
+  "cli.providers.removeTitle": "Remove \"{name}\"?",
+  "cli.providers.removeConfirm": "Requests to {slug}/… stop resolving immediately.",
   "cli.providers.empty.title": "No CLI providers yet",
   "cli.providers.empty.body":
     "Register a local endpoint with kano-proxy tunnel add, then run kano-proxy tunnel start. Sign the machine in first from Access › Devices.",
@@ -635,7 +639,8 @@ export const en = {
     "Include traffic through your connected subscriptions at their list prices. Custom endpoints always count.",
   "keys.dialog.currentSpend": "This key has spent {amount} in the current window.",
   "keys.revoke": "Revoke",
-  "keys.revokeConfirm": "Revoke this key? Anything using it stops working immediately.",
+  "keys.revokeTitle": "Revoke this key?",
+  "keys.revokeConfirm": "Anything using it stops working immediately.",
   "keys.empty.title": "No keys yet",
   "keys.empty.body": "Create one to start calling your models.",
   "keys.created.title": "Key created",

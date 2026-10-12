@@ -10,11 +10,11 @@
  * action buttons under the thumb-unfriendly middle of the screen and often
  * behind the keyboard.
  */
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue"
+import { nextTick, onBeforeUnmount, onMounted, ref, useId } from "vue"
 import { useI18n } from "@/i18n"
 import { getScrollRegion } from "@/services/scrollRegion"
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     title: string
     /**
@@ -23,6 +23,12 @@ withDefaults(
      * sized to the viewport (docs/admin-ui.md § Groups page).
      */
     size?: "sm" | "md" | "lg" | "wide"
+    /**
+     * A confirmation (`ConfirmDialog`): `role="alertdialog"` described by the
+     * body, and focus opens on the footer's first button — Cancel — not the
+     * panel, so the question is read out and Enter cannot fire the action.
+     */
+    alert?: boolean
   }>(),
   { size: "sm" },
 )
@@ -31,6 +37,7 @@ const emit = defineEmits<{ close: [] }>()
 
 const { t } = useI18n()
 const panel = ref<HTMLElement | null>(null)
+const bodyId = useId()
 /** Restored on unmount, so closing a dialog does not dump focus on <body>. */
 let previouslyFocused: HTMLElement | null = null
 
@@ -110,8 +117,11 @@ onMounted(async () => {
   lockRegion()
   await nextTick()
   // First field if there is one, else the panel — never the close button,
-  // which would make Escape and Enter do the same thing on open.
-  const target = focusables().find((el) => el.tagName !== "BUTTON") ?? panel.value
+  // which would make Escape and Enter do the same thing on open. An alert
+  // has no fields; it opens on its safe answer.
+  const target = props.alert
+    ? panel.value?.querySelector<HTMLElement>(".panel-foot button") ?? panel.value
+    : focusables().find((el) => el.tagName !== "BUTTON") ?? panel.value
   target?.focus()
 })
 
@@ -128,9 +138,10 @@ onBeforeUnmount(() => {
         ref="panel"
         class="panel"
         :class="size"
-        role="dialog"
+        :role="alert ? 'alertdialog' : 'dialog'"
         aria-modal="true"
         :aria-label="title"
+        :aria-describedby="alert ? bodyId : undefined"
         tabindex="-1"
       >
         <header class="panel-head">
@@ -147,7 +158,7 @@ onBeforeUnmount(() => {
           </button>
         </header>
 
-        <div class="panel-body">
+        <div :id="bodyId" class="panel-body">
           <slot />
         </div>
 
