@@ -13,22 +13,24 @@ hero:
     - theme: alt
       text: Set up a coding agent
       link: /agents/claude-code
+    - theme: alt
+      text: Tour the app
+      link: /app/overview
 features:
   - title: Two API shapes, one key
-    details: Call every connected provider through an OpenAI-compatible base or an Anthropic Messages base. Same key, same model ids on both.
-  - title: Your subscriptions, your pools
-    details: Bind Claude Code, Codex, Grok, or Antigravity accounts, or bring your own OpenAI- or Anthropic-compatible endpoint. Accounts fail over automatically.
-  - title: Local models included
-    details: Run the kano-proxy CLI next to Ollama, LM Studio, or vLLM and reach that machine from anywhere as a normal provider.
+    details: Call every connected provider through an OpenAI-compatible base or an Anthropic Messages base. Same key and same model ids on both.
+  - title: Your subscriptions, pooled
+    details: Connect Claude Code, Codex, Grok, or Antigravity accounts, or your own OpenAI- or Anthropic-compatible endpoint. When one account runs out, the next one answers.
+  - title: Every request on record
+    details: Overview and Logs show which key sent each request, which account answered, the tokens it used, and its estimated cost.
 ---
 
-## The two base URLs
+## What it does
 
-| Protocol | Base URL |
-|----------|----------|
-| OpenAI-compatible | `https://<your-domain>/openai/v1` |
-| Anthropic Messages | `https://<your-domain>/anthropic` |
+Kano Proxy sits between your tools and the AI providers you pay for. You connect your provider accounts once. Your tools then call one URL with one Kano Proxy key, and the proxy sends each request to an account that can answer it.
 
-Authenticate with an API key from the Access page, as `Authorization: Bearer <your-api-key>` or `x-api-key: <your-api-key>`. Model ids are `provider/model`, for example `claude-code/claude-opus-5`. The full list is on the Models page and at `GET https://<your-domain>/openai/v1/models`.
+## Where to go next
 
-Next: [Getting started](/guide/getting-started).
+- **New here.** [Getting started](/guide/getting-started) takes you from sign-in to a first request in a few minutes.
+- **Setting up a tool.** Each coding agent has its own page, starting with [Claude Code](/agents/claude-code) and [Codex CLI](/agents/codex-cli).
+- **Finding your way around the app.** [The app](/app/overview) explains each page: Overview, Logs, Providers, Models, Groups, and Access.

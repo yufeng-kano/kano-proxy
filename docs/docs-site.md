@@ -18,15 +18,15 @@ The admin UI is a client-rendered SPA behind a login wall; search engines and li
 | `apps/docs/.vitepress/dist/` | Build output (gitignored, like every `dist/`) |
 | `apps/docs/.vitepress/cache/` | Dev cache (gitignored) |
 
-The docs are served from the **same hostname** as the admin UI, under `/docs/`. Root `pnpm build:site` builds the web app, builds the docs, and copies the docs output into `apps/web/dist/docs/`; that single directory is what the web image serves.
+The docs are served from the **same hostname** as the admin UI, under `/docs/`. The web image (`deploy/web/Dockerfile`) builds the web app, builds the docs, and copies the docs output into `apps/web/dist/docs/`; that single directory is what its nginx serves.
 
 **SPA fallback and the docs.** The static server answers an unknown path under `/docs/` with VitePress's own `404.html` and a real `404` status, and every other unknown path with the SPA's `index.html`. A blanket rewrite to `index.html` would swallow the documentation pages, so the two rules are separate and `/docs/` is matched first. Extensionless docs URLs (`/docs/guide/x`) resolve to `x.html`, which is what VitePress's own links expect.
 
 Checked by hand after the v4.7.0 deploy: `/docs/` and a docs page return 200 with their own titles, `/keys` returns the SPA shell with `noindex`, `/docs/no-such-page` returns 404. `/robots.txt` also carries `noindex` from the `/*` rule; harmless, since the file is read, not indexed.
 
-Local: `pnpm --filter docs dev` serves the docs alone at `http://127.0.0.1:5174/docs/`.
+Local: `pnpm dev` inside `apps/docs` serves the docs alone at `http://127.0.0.1:5174/docs/`.
 
-CI (`ci.yml`, `release-deploy.yml`) runs `pnpm build:site` in place of the old web-only build. The release job passes `APP_URL` into the build so the sitemap carries absolute URLs; when `APP_URL` is unset (local builds, PR CI) no sitemap is emitted and the build still succeeds. The release job also checks out with full history (`fetch-depth: 0`): VitePress reads each page's "last updated" from `git log`, and a shallow clone would date every page to the release commit.
+CI (`ci.yml`) builds the docs beside the web app. `site.ts` emits a sitemap with absolute URLs only when `APP_URL` is set at build time; the image build does not set it today, so no sitemap is emitted and the build still succeeds.
 
 ## The real hostname without hardcoding it
 
@@ -38,13 +38,29 @@ Write every URL in the docs as `https://<your-domain>/...` exactly, so the fill 
 
 English is the reference tree; `zh-TW/` mirrors it page for page with the same file names, so the language switcher (`i18nRouting`) lands on the same topic. A page added to one tree is added to the other in the same change.
 
-| Page | Covers |
-|------|--------|
-| `index.md` | What the proxy is, the two base URLs, where to go next |
-| `guide/getting-started.md` | Sign in, connect a provider, create a key, first request |
-| `guide/endpoints.md` | Base URLs, auth header, `provider/model` ids, model groups, listing models |
-| `guide/local-models.md` | Exposing a local LLM with the `kano-proxy` CLI ([cli.md](./cli.md)) |
-| `agents/<tool>.md` | One page per coding agent: Claude Code, Codex CLI, Cursor, Cline, OpenCode, Gemini CLI |
+The site is organised by what the reader is doing, and the sidebar follows the app's own sidebar where it describes the app (operator decision 2026-10-12, replacing the first layout of 2026-09-04: content and structure were rewritten, the default theme stays).
+
+| Sidebar group | Pages | Covers |
+|---------------|-------|--------|
+| (home) | `index.md` | What the proxy does, the three things a reader can do next |
+| Get started | `guide/getting-started.md` | Sign in, connect one provider, set up one agent with the CLI, check the request in Logs |
+| The app | `app/overview.md`, `app/logs.md`, `app/providers.md`, `app/models.md`, `app/groups.md`, `app/access.md` | One page per page of the app, same names and order as the app's sidebar |
+| Coding agents | `agents/<tool>.md` | One page per coding agent: Claude Code, Codex CLI, Cursor, Cline, OpenCode, Gemini CLI |
+| CLI | `cli/install.md`, `cli/agents.md`, `cli/local-models.md` | Install, sign a device in and update; `agent setup`, `restore`, `list`; exposing a local model server ([cli.md](./cli.md)) |
+| Reference | `reference/endpoints.md`, `reference/routing.md`, `reference/errors.md` | Base URLs, headers, `provider/model` ids, request parameters; how a request picks a provider and account; error responses and what to do about each |
+
+A concept is explained once, on the page where the reader meets it: model groups on the Groups page, account pools and failover on the Providers page with the full rules in `reference/routing.md`. Other pages link there instead of repeating it.
+
+Every page of **The app** has the same shape:
+
+1. One sentence: what this page is for.
+2. What is on it: each section, tab, table column or chart, and what it shows.
+3. Common tasks as numbered steps.
+4. Related pages.
+
+Pages and controls are named exactly as the app labels them, in bold. The app ships English only ([i18n.md](./i18n.md)), so `zh-TW/` pages name them in English too, as the reader sees them, and the sidebar lists the app pages under their English names in both locales. A page written from memory drifts; each one is written against the page's source (`apps/web/src/pages/` and its components, `apps/web/src/i18n/`) and changes when that page changes. No screenshots: they go stale with every UI change and would need fixture data.
+
+Every agent page has the same shape: one sentence on whether and how well the tool works through the proxy; setup with the CLI (`kano-proxy agent setup`) when the CLI supports the tool; setup by hand; how to check it works; limits; the source it was checked against. Explanations of why a setting is needed sit in a collapsed `::: details` block below the step that needs them, so the steps read straight through.
 
 Rules for the agent pages:
 
@@ -79,7 +95,7 @@ Not done, on purpose: `apple-touch-icon` and a web manifest (nobody installs an 
 
 A private edition ([cloud-edition.md](./cloud-edition.md)) documents features the core does not have, on the same site. It does so from its own VitePress project rather than by patching this one:
 
-- Its `.vitepress/config.ts` imports `defineDocsConfig` from this package's `site.ts` and passes the sidebar groups and nav entries for its pages, which are appended after the core's. Its theme re-exports this package's theme so the origin fill still runs.
+- Its `.vitepress/config.ts` imports `defineDocsConfig` from this package's `site.ts` and passes the sidebar groups and nav entries for its pages, which are appended after the core's. A page describing one of the edition's own app pages goes under `app/` and into `appPages`, which appends it to the core's **The app** group, so the sidebar keeps matching the app. Its theme re-exports this package's theme so the origin fill still runs.
 - Its source tree is **assembled at build time**: the core's `*.md` files copied first, the edition's pages copied over them into the same `guide/`, `agents/`, `zh-TW/…` layout. An edition page may not have the path of a core page; the core's text is the core's to change.
 - The assembled copy has no git history, so the edition passes `lastUpdated: false` instead of letting every page date itself to the build.
 - The content rules above apply unchanged: an English page has its `zh-TW/` twin in the same change, placeholders only for secrets and hosts, no invented model ids.

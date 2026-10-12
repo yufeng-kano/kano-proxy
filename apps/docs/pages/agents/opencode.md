@@ -5,11 +5,14 @@ description: Add Kano Proxy as a custom provider in opencode.json using @ai-sdk/
 
 # OpenCode
 
-Works fully. OpenCode takes any OpenAI-compatible endpoint as a custom provider in its config file.
+Works fully: OpenCode takes any OpenAI-compatible endpoint as a custom provider in its config file.
 
-## Settings
+The kano-proxy CLI does not set up OpenCode. Set it up by hand.
 
-Put this in `~/.config/opencode/opencode.json` for all projects, or in `opencode.json` at a project root for one project:
+## Set it up by hand
+
+1. Create a key on the **Access** page.
+2. Put this in `~/.config/opencode/opencode.json` for all projects, or in `opencode.json` at a project root for one project. The model ids are examples; list ids from your own **Models** page.
 
 ```json
 {
@@ -32,17 +35,29 @@ Put this in `~/.config/opencode/opencode.json` for all projects, or in `opencode
 }
 ```
 
-Then export the key:
+3. Export the key in the shell you start OpenCode from:
 
-```bash
+::: code-group
+
+```bash [macOS / Linux]
 export KANO_PROXY_API_KEY=<your-api-key>
 ```
 
-- `kano` is your name for the provider. Model references are `<provider name>/<model key>`, so the slash inside `claude-code/claude-opus-5` is fine.
-- List under `models` the ids you want in the picker, taken from your Models page. The display `name` is free text.
-- `{env:VAR}` reads an environment variable at startup. A missing variable becomes an empty string with no error, so an auth failure usually means the export did not happen.
+```powershell [Windows]
+$env:KANO_PROXY_API_KEY = "<your-api-key>"
+```
 
-## Anthropic format instead
+:::
+
+4. Start `opencode`.
+
+::: details What each setting does
+- `kano` is your name for the provider. Model references are `<provider name>/<model key>`, so the slash inside `claude-code/claude-opus-5` is fine.
+- `models` lists the ids you want in the picker. The display `name` is free text. Model id rules are in [Endpoints and model ids](/reference/endpoints).
+- `{env:VAR}` reads an environment variable at startup. A missing variable becomes an empty string with no error, so an auth failure usually means the export did not happen.
+:::
+
+### Anthropic format instead
 
 OpenCode can also talk to the Anthropic base by loading `@ai-sdk/anthropic`. That SDK appends `/messages`, so the base must end in `/v1`:
 
@@ -64,7 +79,19 @@ OpenCode can also talk to the Anthropic base by loading `@ai-sdk/anthropic`. Tha
 }
 ```
 
-Use a name other than `anthropic`, because overriding the built-in `anthropic` provider makes OpenCode add Anthropic-specific beta headers. The OpenCode docs describe only the OpenAI-compatible custom provider; the Anthropic form is verified from the source and a third-party gateway guide, not from the docs.
+Use a provider name other than `anthropic`.
+
+::: details Why not the name `anthropic`
+Overriding the built-in `anthropic` provider makes OpenCode add Anthropic-specific beta headers. The OpenCode docs describe only the OpenAI-compatible custom provider; the Anthropic form is verified from the source and a third-party gateway guide, not from the docs.
+:::
+
+## Check it
+
+Send a message in OpenCode with one of the listed models. The request appears on the [Logs](/app/logs) page within seconds. If it fails with an auth error, check that `KANO_PROXY_API_KEY` is exported in that shell.
+
+## Limits
+
+No known limits through the proxy.
 
 ## Checked against
 

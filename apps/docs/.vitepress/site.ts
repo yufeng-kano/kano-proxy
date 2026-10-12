@@ -1,8 +1,8 @@
 import { defineConfig, type DefaultTheme, type UserConfig } from "vitepress"
 
 /**
- * Public documentation site, served at /docs/ from the same Pages project as
- * the admin UI (docs/docs-site.md). Static only: no session, no /api calls.
+ * Public documentation site, served at /docs/ from the same web image as the
+ * admin UI (docs/docs-site.md). Static only: no session, no /api calls.
  *
  * `config.ts` is the standalone site: `defineDocsConfig()` with nothing
  * added. An edition builds the same site from its own VitePress project,
@@ -15,6 +15,14 @@ const appUrl = process.env.APP_URL?.replace(/\/+$/, "")
 
 /** What an edition adds to the site; every field is appended after the core's own. */
 export interface DocsEditionOptions {
+  /**
+   * Pages for the edition's own app pages, appended to the core's "The app"
+   * group so the sidebar keeps the app's order, per locale.
+   */
+  appPages?: {
+    en?: DefaultTheme.SidebarItem[]
+    "zh-TW"?: DefaultTheme.SidebarItem[]
+  }
   /** Sidebar groups appended below the core's, per locale. */
   sidebar?: {
     en?: DefaultTheme.SidebarItem[]
@@ -35,51 +43,103 @@ const DESCRIPTION_EN =
   "Connect the AI subscriptions you already pay for, then point any OpenAI- or Anthropic-compatible client at a single URL."
 const DESCRIPTION_ZH = "接上你已付費的 AI 訂閱，讓任何 OpenAI 或 Anthropic 相容的客戶端都指向同一個網址。"
 
-function sidebarEn(): DefaultTheme.SidebarItem[] {
+type Labels = Record<
+  | "start" | "gettingStarted" | "app" | "agents" | "cli" | "cliInstall" | "cliAgents"
+  | "cliLocal" | "reference" | "endpoints" | "routing" | "errors",
+  string
+>
+
+const LABELS: { en: Labels; "zh-TW": Labels } = {
+  en: {
+    start: "Get started",
+    gettingStarted: "Getting started",
+    app: "The app",
+    agents: "Coding agents",
+    cli: "CLI",
+    cliInstall: "Install and sign in",
+    cliAgents: "Set up agents",
+    cliLocal: "Local models",
+    reference: "Reference",
+    endpoints: "Endpoints and model ids",
+    routing: "How requests are routed",
+    errors: "Errors",
+  },
+  "zh-TW": {
+    start: "開始",
+    gettingStarted: "開始使用",
+    app: "介面說明",
+    agents: "Coding agent 設定",
+    cli: "CLI",
+    cliInstall: "安裝與登入",
+    cliAgents: "設定 agent",
+    cliLocal: "本機模型",
+    reference: "參考",
+    endpoints: "端點與模型 id",
+    routing: "請求如何分配",
+    errors: "錯誤訊息",
+  },
+}
+
+/**
+ * The app's own sidebar labels (apps/web/src/i18n), which the "The app" pages
+ * mirror. The app ships English only, so both locales show them as is.
+ */
+const APP_PAGES: [string, string][] = [
+  ["Overview", "overview"],
+  ["Logs", "logs"],
+  ["Providers", "providers"],
+  ["Models", "models"],
+  ["Groups", "groups"],
+  ["Access", "access"],
+]
+
+const AGENTS: [string, string][] = [
+  ["Claude Code", "claude-code"],
+  ["Codex CLI", "codex-cli"],
+  ["Cursor", "cursor"],
+  ["Cline", "cline"],
+  ["OpenCode", "opencode"],
+  ["Gemini CLI", "gemini-cli"],
+]
+
+function sidebar(locale: "en" | "zh-TW", appPages: DefaultTheme.SidebarItem[]): DefaultTheme.SidebarItem[] {
+  const t = LABELS[locale]
+  const p = locale === "en" ? "" : "/zh-TW"
   return [
+    { text: t.start, items: [{ text: t.gettingStarted, link: `${p}/guide/getting-started` }] },
     {
-      text: "Guide",
+      text: t.app,
+      items: [...APP_PAGES.map(([text, slug]) => ({ text, link: `${p}/app/${slug}` })), ...appPages],
+    },
+    { text: t.agents, items: AGENTS.map(([text, slug]) => ({ text, link: `${p}/agents/${slug}` })) },
+    {
+      text: t.cli,
       items: [
-        { text: "Getting started", link: "/guide/getting-started" },
-        { text: "Endpoints and model ids", link: "/guide/endpoints" },
-        { text: "Local models (CLI)", link: "/guide/local-models" },
+        { text: t.cliInstall, link: `${p}/cli/install` },
+        { text: t.cliAgents, link: `${p}/cli/agents` },
+        { text: t.cliLocal, link: `${p}/cli/local-models` },
       ],
     },
     {
-      text: "Coding agents",
+      text: t.reference,
       items: [
-        { text: "Claude Code", link: "/agents/claude-code" },
-        { text: "Codex CLI", link: "/agents/codex-cli" },
-        { text: "Cursor", link: "/agents/cursor" },
-        { text: "Cline", link: "/agents/cline" },
-        { text: "OpenCode", link: "/agents/opencode" },
-        { text: "Gemini CLI", link: "/agents/gemini-cli" },
+        { text: t.endpoints, link: `${p}/reference/endpoints` },
+        { text: t.routing, link: `${p}/reference/routing` },
+        { text: t.errors, link: `${p}/reference/errors` },
       ],
     },
   ]
 }
 
-function sidebarZh(): DefaultTheme.SidebarItem[] {
+function nav(locale: "en" | "zh-TW"): DefaultTheme.NavItem[] {
+  const t = LABELS[locale]
+  const p = locale === "en" ? "" : "/zh-TW"
   return [
-    {
-      text: "指南",
-      items: [
-        { text: "開始使用", link: "/zh-TW/guide/getting-started" },
-        { text: "端點與模型 id", link: "/zh-TW/guide/endpoints" },
-        { text: "本機模型（CLI）", link: "/zh-TW/guide/local-models" },
-      ],
-    },
-    {
-      text: "Coding agent 設定",
-      items: [
-        { text: "Claude Code", link: "/zh-TW/agents/claude-code" },
-        { text: "Codex CLI", link: "/zh-TW/agents/codex-cli" },
-        { text: "Cursor", link: "/zh-TW/agents/cursor" },
-        { text: "Cline", link: "/zh-TW/agents/cline" },
-        { text: "OpenCode", link: "/zh-TW/agents/opencode" },
-        { text: "Gemini CLI", link: "/zh-TW/agents/gemini-cli" },
-      ],
-    },
+    { text: t.start, link: `${p}/guide/getting-started`, activeMatch: `${p}/guide/` },
+    { text: t.app, link: `${p}/app/overview`, activeMatch: `${p}/app/` },
+    { text: t.agents, link: `${p}/agents/claude-code`, activeMatch: `${p}/agents/` },
+    { text: t.cli, link: `${p}/cli/install`, activeMatch: `${p}/cli/` },
+    { text: t.reference, link: `${p}/reference/endpoints`, activeMatch: `${p}/reference/` },
   ]
 }
 
@@ -122,20 +182,8 @@ export function defineDocsConfig(edition: DocsEditionOptions = {}): UserConfig<D
         lang: "en",
         description: DESCRIPTION_EN,
         themeConfig: {
-          nav: [
-            {
-              text: "Guide",
-              link: "/guide/getting-started",
-              activeMatch: "/guide/",
-            },
-            {
-              text: "Coding agents",
-              link: "/agents/claude-code",
-              activeMatch: "/agents/",
-            },
-            ...(edition.nav?.en ?? []),
-          ],
-          sidebar: [...sidebarEn(), ...(edition.sidebar?.en ?? [])],
+          nav: [...nav("en"), ...(edition.nav?.en ?? [])],
+          sidebar: [...sidebar("en", edition.appPages?.en ?? []), ...(edition.sidebar?.en ?? [])],
           outline: { label: "On this page" },
         },
       },
@@ -145,20 +193,11 @@ export function defineDocsConfig(edition: DocsEditionOptions = {}): UserConfig<D
         link: "/zh-TW/",
         description: DESCRIPTION_ZH,
         themeConfig: {
-          nav: [
-            {
-              text: "指南",
-              link: "/zh-TW/guide/getting-started",
-              activeMatch: "/zh-TW/guide/",
-            },
-            {
-              text: "Coding agent",
-              link: "/zh-TW/agents/claude-code",
-              activeMatch: "/zh-TW/agents/",
-            },
-            ...(edition.nav?.["zh-TW"] ?? []),
+          nav: [...nav("zh-TW"), ...(edition.nav?.["zh-TW"] ?? [])],
+          sidebar: [
+            ...sidebar("zh-TW", edition.appPages?.["zh-TW"] ?? []),
+            ...(edition.sidebar?.["zh-TW"] ?? []),
           ],
-          sidebar: [...sidebarZh(), ...(edition.sidebar?.["zh-TW"] ?? [])],
           outline: { label: "本頁內容" },
           docFooter: { prev: "上一頁", next: "下一頁" },
           lastUpdated: { text: "最後更新" },

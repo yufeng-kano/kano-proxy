@@ -13,22 +13,24 @@ hero:
     - theme: alt
       text: 設定 coding agent
       link: /zh-TW/agents/claude-code
+    - theme: alt
+      text: 認識介面
+      link: /zh-TW/app/overview
 features:
   - title: 兩種 API 格式，一把金鑰
-    details: 用 OpenAI 相容端點或 Anthropic Messages 端點呼叫所有已連接的供應商。同一把金鑰，同一組模型 id。
-  - title: 你的訂閱，你的帳號池
-    details: 綁定 Claude Code、Codex、Grok、Antigravity 帳號，或接上自己的 OpenAI 或 Anthropic 相容端點。帳號額度用完會自動切換。
-  - title: 本機模型也能用
-    details: 在 Ollama、LM Studio、vLLM 旁邊跑 kano-proxy CLI，那台機器就成為可以從任何地方呼叫的供應商。
+    details: 用 OpenAI 相容端點或 Anthropic Messages 端點呼叫所有已連接的供應商。兩邊用同一把金鑰、同一組模型 id。
+  - title: 訂閱帳號集中成帳號池
+    details: 連接 Claude Code、Codex、Grok、Antigravity 帳號，或接上自己的 OpenAI、Anthropic 相容端點。一個帳號額度用完，就換下一個回應。
+  - title: 每個請求都有紀錄
+    details: Overview 與 Logs 會列出每個請求來自哪把金鑰、由哪個帳號回應、用了多少 token、估算花費多少。
 ---
 
-## 兩個 base URL
+## 它做什麼
 
-| 協定 | Base URL |
-|------|----------|
-| OpenAI 相容 | `https://<your-domain>/openai/v1` |
-| Anthropic Messages | `https://<your-domain>/anthropic` |
+Kano Proxy 位在你的工具和你付費的 AI 供應商之間。供應商帳號只要連接一次，之後工具只需要呼叫一個網址、帶一把 Kano Proxy 金鑰，proxy 會把每個請求交給能回應的帳號。
 
-驗證用 Access 頁面產生的 API key，放在 `Authorization: Bearer <your-api-key>` 或 `x-api-key: <your-api-key>` 都可以。模型 id 是 `provider/model` 格式，例如 `claude-code/claude-opus-5`。完整清單在 Models 頁面，或呼叫 `GET https://<your-domain>/openai/v1/models`。
+## 接下來
 
-下一步：[開始使用](/zh-TW/guide/getting-started)。
+- **第一次使用。** [開始使用](/zh-TW/guide/getting-started)會帶你從登入走到送出第一個請求，幾分鐘就能完成。
+- **要設定工具。** 每個 coding agent 都有自己的頁面，從 [Claude Code](/zh-TW/agents/claude-code) 和 [Codex CLI](/zh-TW/agents/codex-cli) 開始。
+- **想了解介面。** [介面說明](/zh-TW/app/overview)逐頁說明 Overview、Logs、Providers、Models、Groups、Access 各自的用途。

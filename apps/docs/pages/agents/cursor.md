@@ -5,18 +5,27 @@ description: Use Kano Proxy models in Cursor through the OpenAI API key and the 
 
 # Cursor
 
-Works for chat and Agent through Cursor's OpenAI-compatible path. Tab completion, subagents, and Cursor's own built-in models do not go through your key. Read the limits before switching it on.
+Works for chat and Agent through Cursor's OpenAI-compatible path; Tab completion, subagents and Cursor's own built-in models do not go through your key, so read the limits before switching it on.
 
-## Settings
+The kano-proxy CLI does not set up Cursor. Set it up by hand.
 
-In **Cursor Settings › Models**:
+## Set it up by hand
 
-1. Turn on **OpenAI API Key** and paste `<your-api-key>`.
-2. Turn on **Override OpenAI Base URL** and enter `https://<your-domain>/openai/v1`.
-3. Use **+ Add model** and type a model id from your Models page, for example `claude-code/claude-opus-5` or `codex/gpt-5.6-sol`.
-4. Select that model in the chat model picker.
+1. Create a dedicated key on the **Access** page, so you can revoke it on its own.
+2. In **Cursor Settings › Models**, turn on **OpenAI API Key** and paste `<your-api-key>`.
+3. Turn on **Override OpenAI Base URL** and enter `https://<your-domain>/openai/v1`.
+4. Use **+ Add model** and type a model id from your **Models** page, for example `claude-code/claude-opus-5` or `codex/gpt-5.6-sol`. Model id rules are in [Endpoints and model ids](/reference/endpoints).
+5. Select that model in the chat model picker.
 
-Claude models go through the OpenAI-compatible base as well. Cursor has no base URL override for its Anthropic key, so leave that key off.
+Claude models go through the OpenAI-compatible base as well. Leave Cursor's Anthropic key off.
+
+::: details Why the Anthropic key stays off
+Cursor has no base URL override for its Anthropic key. A Claude model added there would go to Anthropic directly, not to the proxy.
+:::
+
+## Check it
+
+Send a chat message with the model you added. The request appears on the [Logs](/app/logs) page within seconds.
 
 ## Limits
 
@@ -24,7 +33,7 @@ Claude models go through the OpenAI-compatible base as well. Cursor has no base 
 - **Tab** always uses Cursor's own models.
 - **Subagents** ignore custom keys and bill against your Cursor plan.
 - **Background and cloud agents** have no base URL override.
-- Requests travel through Cursor's servers to reach the proxy, so the proxy must be reachable from the internet and your `sk-kano-proxy-` key passes through Cursor on every request. Use a dedicated key so you can revoke it on its own.
+- **Requests travel through Cursor's servers.** The proxy must be reachable from the internet, and your `sk-kano-proxy-` key passes through Cursor on every request.
 
 ## Checked against
 

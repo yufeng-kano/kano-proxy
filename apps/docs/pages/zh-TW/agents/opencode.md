@@ -7,9 +7,12 @@ description: 在 opencode.json 用 @ai-sdk/openai-compatible 把 Kano Proxy 加�
 
 完整可用。OpenCode 可以在設定檔裡把任何 OpenAI 相容端點加成自訂供應商。
 
-## 設定
+kano-proxy CLI 不支援設定 OpenCode，請手動設定。
 
-全域設定放在 `~/.config/opencode/opencode.json`，單一專案則放在專案根目錄的 `opencode.json`：
+## 手動設定
+
+1. 在 **Access** 頁面建立一把 key。
+2. 所有專案共用的設定放在 `~/.config/opencode/opencode.json`，只給單一專案用就放在專案根目錄的 `opencode.json`。模型 id 只是範例，請列出你 **Models** 頁面上的 id。
 
 ```json
 {
@@ -32,19 +35,31 @@ description: 在 opencode.json 用 @ai-sdk/openai-compatible 把 Kano Proxy 加�
 }
 ```
 
-然後匯出金鑰：
+3. 在要啟動 OpenCode 的 shell 匯出 key：
 
-```bash
+::: code-group
+
+```bash [macOS / Linux]
 export KANO_PROXY_API_KEY=<your-api-key>
 ```
 
-- `kano` 是你給供應商取的名字。模型參照格式是 `<供應商名>/<模型鍵>`，所以 `claude-code/claude-opus-5` 裡的斜線不會有問題。
-- `models` 底下列出你想出現在選單的 id，取自你的 Models 頁面。顯示用的 `name` 可以自由填寫。
-- `{env:VAR}` 在啟動時讀環境變數。變數不存在時會變成空字串且不報錯，所以驗證失敗通常表示忘了匯出。
+```powershell [Windows]
+$env:KANO_PROXY_API_KEY = "<your-api-key>"
+```
 
-## 改用 Anthropic 格式
+:::
 
-OpenCode 也可以載入 `@ai-sdk/anthropic` 走 Anthropic 端點。這個 SDK 會接上 `/messages`，所以 base 必須以 `/v1` 結尾：
+4. 啟動 `opencode`。
+
+::: details 每個設定的作用
+- `kano` 是你替這個供應商取的名字。模型參照的格式是 `<供應商名稱>/<模型鍵>`，所以 `claude-code/claude-opus-5` 裡的斜線沒有問題。
+- `models` 列出你想放進選單的 id，顯示用的 `name` 可以自由填。模型 id 的規則見[端點與模型 id](/zh-TW/reference/endpoints)。
+- `{env:VAR}` 在啟動時讀取環境變數。變數不存在時會變成空字串，而且不會報錯，所以驗證失敗通常是忘了匯出。
+:::
+
+### 改用 Anthropic 格式
+
+OpenCode 也能載入 `@ai-sdk/anthropic`，改走 Anthropic 端點。這個 SDK 會自己接上 `/messages`，所以 base 必須以 `/v1` 結尾：
 
 ```json
 {
@@ -64,7 +79,19 @@ OpenCode 也可以載入 `@ai-sdk/anthropic` 走 Anthropic 端點。這個 SDK �
 }
 ```
 
-名字不要用 `anthropic`，覆寫內建的 `anthropic` 供應商會讓 OpenCode 加上 Anthropic 專用的 beta 標頭。OpenCode 文件只描述 OpenAI 相容的自訂供應商，Anthropic 這種寫法是從原始碼與第三方 gateway 指南確認的，文件沒有寫。
+供應商名稱不要用 `anthropic`。
+
+::: details 為什麼不能叫 `anthropic`
+覆寫內建的 `anthropic` 供應商時，OpenCode 會加上 Anthropic 專用的 beta 標頭。OpenCode 文件只描述 OpenAI 相容的自訂供應商，Anthropic 這種寫法是從原始碼和第三方 gateway 指南確認的，文件沒有寫。
+:::
+
+## 確認可用
+
+用清單裡的模型在 OpenCode 送出一則訊息。幾秒內 [Logs](/zh-TW/app/logs) 頁面就會出現這筆請求。如果出現驗證錯誤，先確認那個 shell 有匯出 `KANO_PROXY_API_KEY`。
+
+## 限制
+
+透過 proxy 使用時，目前沒有已知的限制。
 
 ## 查證來源
 

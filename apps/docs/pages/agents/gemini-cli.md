@@ -5,13 +5,23 @@ description: Gemini CLI cannot use Kano Proxy. It speaks only Google's Gemini AP
 
 # Gemini CLI
 
-**Not usable.** Gemini CLI has no OpenAI- or Anthropic-compatible provider. Its only endpoint overrides, `GOOGLE_GEMINI_BASE_URL` and `GOOGLE_VERTEX_BASE_URL`, still send Gemini-format requests (`generateContent` and `streamGenerateContent`) with Gemini model names. Kano Proxy does not serve that API.
+**Not usable:** Gemini CLI speaks only Google's Gemini API, which Kano Proxy does not serve.
 
-If you want Gemini models through the proxy, connect **Antigravity** on the Providers page and call `antigravity/gemini-3-flash` and its siblings from any of the other tools on this list, for example [Claude Code](/agents/claude-code) or [OpenCode](/agents/opencode).
+There is nothing to set up, with the CLI or by hand.
 
-## What would change this
+## Use Gemini models another way
 
+1. Connect **Antigravity** on the [Providers](/app/providers) page.
+2. Call `antigravity/gemini-3-flash` or another Antigravity id from your **Models** page, from any other tool on this list, for example [Claude Code](/agents/claude-code) or [OpenCode](/agents/opencode). The id is an example.
+
+## Limits
+
+- Gemini CLI has no OpenAI- or Anthropic-compatible provider.
+- Its only endpoint overrides, `GOOGLE_GEMINI_BASE_URL` and `GOOGLE_VERTEX_BASE_URL`, still send Gemini-format requests (`generateContent` and `streamGenerateContent`) with Gemini model names.
+
+::: details What would change this
 The proxy would have to expose a Gemini-format API under `/v1beta/models/<model>:streamGenerateContent`. That is not planned. Gemini CLI's gateway path also has open bugs of its own, so even then the pairing would be fragile.
+:::
 
 ## Checked against
 
