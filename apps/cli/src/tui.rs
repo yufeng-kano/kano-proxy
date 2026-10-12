@@ -98,7 +98,9 @@ impl Screen {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         stdout.execute(EnterAlternateScreen)?;
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        // The alternate screen starts blank on most terminals; clearing makes it so on all.
+        terminal.clear()?;
         Ok(Self { terminal })
     }
 }
@@ -162,6 +164,12 @@ fn note_height(note: &[&str], width: usize) -> u16 {
     } else {
         note.iter().map(|l| l.chars().count().div_ceil(width).max(1) as u16).sum::<u16>() + 1
     }
+}
+
+/// A list's height: its rows, within what the screen has left after `fixed` lines — so the
+/// line under a list sits right under it, not at the bottom of a tall terminal.
+fn list_height(rows: usize, area: ratatui::layout::Rect, fixed: u16) -> u16 {
+    (rows as u16).clamp(1, area.height.saturating_sub(fixed).max(1))
 }
 
 fn dim(text: &str) -> Paragraph<'_> {
@@ -276,12 +284,14 @@ fn choose_at(title: &str, note: &[&str], options: &[&str], default: Option<usize
     loop {
         screen.terminal.draw(|f| {
             let width = f.area().width.max(1) as usize;
+            let note_h = note_height(note, width);
             let chunks = Layout::vertical([
                 Constraint::Length(3),
-                Constraint::Length(note_height(note, width)),
-                Constraint::Min(3),
+                Constraint::Length(note_h),
+                Constraint::Length(list_height(options.len(), f.area(), 3 + note_h + 2)),
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Min(0),
             ])
             .split(f.area());
             f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
@@ -353,8 +363,9 @@ pub fn pick_models(title: &str, models: &[String], preselected: &[String]) -> Re
             let chunks = Layout::vertical([
                 Constraint::Length(3),
                 Constraint::Length(2),
-                Constraint::Min(3),
+                Constraint::Length(list_height(row_count, f.area(), 3 + 2 + 1)),
                 Constraint::Length(1),
+                Constraint::Min(0),
             ])
             .split(f.area());
             f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
@@ -433,13 +444,15 @@ pub fn pick_ordered(title: &str, note: &[&str], items: &[String], preselected: &
             .collect();
         screen.terminal.draw(|f| {
             let width = f.area().width.max(1) as usize;
+            let note_h = note_height(note, width);
             let chunks = Layout::vertical([
                 Constraint::Length(3),
-                Constraint::Length(note_height(note, width)),
+                Constraint::Length(note_h),
                 Constraint::Length(2),
-                Constraint::Min(3),
+                Constraint::Length(list_height(visible.len(), f.area(), 3 + note_h + 2 + 2)),
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Min(0),
             ])
             .split(f.area());
             f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
@@ -554,28 +567,47 @@ pub fn review(title: &str, lines: &[String], go: &str) -> Result<Nav<()>> {
 }
 
 /// The root page of an editing flow: every item with its value, edited items marked.
-/// Enter opens an item, Tab saves the whole draft, Esc twice exits. `status` is the line
-/// under the list that says whether the draft differs from what is in place.
-pub fn root(title: &str, note: &[&str], rows: &[RootRow], cursor: usize, status: &str) -> Result<(RootAction, usize)> {
+/// Enter opens an item, Tab saves the whole draft, Esc twice exits. `header`, when given,
+/// is a dim column-heading line over the label and value columns (a page whose values are
+/// themselves columns pads them to line up). `status` is the line under the list that says
+/// whether the draft differs from what is in place. The list is only as tall as its rows,
+/// so the status and the key hints sit right under it rather than at the screen's bottom.
+pub fn root(title: &str, note: &[&str], header: Option<(&str, &str)>, rows: &[RootRow], cursor: usize, status: &str) -> Result<(RootAction, usize)> {
     let mut screen = Screen::open()?;
     let mut state = ListState::default();
     state.select(Some(cursor.min(rows.len().saturating_sub(1))));
     let note_text = note.join("\n");
-    let label_width = rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
+    let label_width = rows
+        .iter()
+        .map(|r| r.label.chars().count())
+        .chain(header.map(|(l, _)| l.chars().count()))
+        .max()
+        .unwrap_or(0);
     loop {
         screen.terminal.draw(|f| {
             let width = f.area().width.max(1) as usize;
+            let note_h = note_height(note, width);
+            let header_h = u16::from(header.is_some());
+            let fixed = 3 + note_h + header_h + 2;
+            let list_h = (rows.len() as u16).clamp(1, f.area().height.saturating_sub(fixed).max(1));
             let chunks = Layout::vertical([
                 Constraint::Length(3),
-                Constraint::Length(note_height(note, width)),
-                Constraint::Min(3),
+                Constraint::Length(note_h),
+                Constraint::Length(header_h),
+                Constraint::Length(list_h),
                 Constraint::Length(1),
                 Constraint::Length(1),
+                Constraint::Min(0),
             ])
             .split(f.area());
             f.render_widget(Paragraph::new(title).block(Block::default().borders(Borders::BOTTOM)), chunks[0]);
             if !note.is_empty() {
                 f.render_widget(Paragraph::new(note_text.as_str()).wrap(Wrap { trim: false }), chunks[1]);
+            }
+            if let Some((label, value)) = header {
+                // Indented past the highlight symbol and the change mark, so the headings
+                // sit over the columns they name.
+                f.render_widget(dim(&format!("    {:<label_width$}   {value}", label)), chunks[2]);
             }
             let items: Vec<ListItem> = rows
                 .iter()
@@ -596,14 +628,14 @@ pub fn root(title: &str, note: &[&str], rows: &[RootRow], cursor: usize, status:
             let list = List::new(items)
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("› ");
-            f.render_stateful_widget(list, chunks[2], &mut state);
-            f.render_widget(Paragraph::new(status).style(Style::default().add_modifier(Modifier::BOLD)), chunks[3]);
+            f.render_stateful_widget(list, chunks[3], &mut state);
+            f.render_widget(Paragraph::new(status).style(Style::default().add_modifier(Modifier::BOLD)), chunks[4]);
             let nav = if ESC_ARMED.load(Ordering::SeqCst) {
                 "Press Esc again to exit · any other key continues"
             } else {
                 "Esc twice exits"
             };
-            f.render_widget(dim(&format!("↑/↓ move · Enter edits · Tab saves all · {nav}")), chunks[4]);
+            f.render_widget(dim(&format!("↑/↓ move · Enter edits · Tab saves all · {nav}")), chunks[5]);
         })?;
         let selected = state.selected().unwrap_or(0);
         match read_key()? {

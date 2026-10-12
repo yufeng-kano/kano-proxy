@@ -117,7 +117,7 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
             (Some(_), n) => format!("{n} unsaved change{} — Tab saves", if n == 1 { "" } else { "s" }),
         };
         let note = ["Codex sees the model name as-is, so its own catalog metadata lines up; the targets are what answers under that name."];
-        let (action, at) = tui::root(title, &note, &rows, cursor, &status)?;
+        let (action, at) = tui::root(title, &note, None, &rows, cursor, &status)?;
         cursor = at;
         match action {
             tui::RootAction::Save => return Ok(picks()),

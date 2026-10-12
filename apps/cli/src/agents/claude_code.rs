@@ -17,12 +17,12 @@ pub const KEY_FIELD: &str = "env.ANTHROPIC_AUTH_TOKEN";
 /// so every name in the group — not only the slots — can be chosen there.
 pub const DISCOVERY_FIELD: &str = "env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
 
-/// (label, family word, env field) — Claude Code's model slots, in picker order.
+/// (label, family word, env field) — Claude Code's model slots, the most capable first.
 pub const SLOTS: [(&str, &str, &str); 4] = [
+    ("Fable", "fable", "env.ANTHROPIC_DEFAULT_FABLE_MODEL"),
     ("Opus", "opus", "env.ANTHROPIC_DEFAULT_OPUS_MODEL"),
     ("Sonnet", "sonnet", "env.ANTHROPIC_DEFAULT_SONNET_MODEL"),
     ("Haiku", "haiku", "env.ANTHROPIC_DEFAULT_HAIKU_MODEL"),
-    ("Fable", "fable", "env.ANTHROPIC_DEFAULT_FABLE_MODEL"),
 ];
 
 #[derive(Debug, Clone)]
@@ -64,7 +64,7 @@ fn default_targets(catalog: &[CatalogModel], family: &str) -> Vec<String> {
 
 fn targets_text(targets: &[String]) -> String {
     if targets.is_empty() {
-        "not set — Claude Code's own default".to_string()
+        "not set (Claude Code's own default)".to_string()
     } else {
         targets.join(" › ")
     }
@@ -80,9 +80,9 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
         bail!("your account has no models — connect a provider on the Providers page first");
     }
     if args.no_tui {
-        let flags = [&args.opus, &args.sonnet, &args.haiku, &args.fable];
+        let flags = [&args.fable, &args.opus, &args.sonnet, &args.haiku];
         if flags.iter().all(|f| f.is_none()) {
-            bail!("--opus/--sonnet/--haiku/--fable <provider/model[,provider/model…]>: at least one slot is required with --no-tui");
+            bail!("--fable/--opus/--sonnet/--haiku <provider/model[,provider/model…]>: at least one slot is required with --no-tui");
         }
         let mut slots = Vec::new();
         for ((label, _, _), flag) in SLOTS.iter().zip(flags) {
@@ -111,16 +111,18 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
     // What is set up now — the draft is compared against it. None: not set up on this
     // machine yet, so saving would change everything.
     let baseline = current.configured.then(|| slots.clone());
+    const SEES: &str = "Claude Code sees";
     let mut cursor = 0usize;
     loop {
+        // Two columns inside the value: the name Claude Code sees, then who answers.
+        let names: Vec<String> = SLOTS.iter().zip(&slots).map(|((_, family, _), t)| served_name(catalog, family, t).unwrap_or_else(|| "—".into())).collect();
+        let name_width = names.iter().map(|n| n.chars().count()).max().unwrap_or(0).max(SEES.chars().count());
+        let header = format!("{SEES:<name_width$}   Answered by, in order");
         let mut rows = Vec::new();
         let mut changes = Vec::new();
-        for (slot, (label, family, _)) in SLOTS.iter().enumerate() {
+        for (slot, (label, _, _)) in SLOTS.iter().enumerate() {
             let changed = baseline.as_ref().is_some_and(|b| b[slot] != slots[slot]);
-            let value = match served_name(catalog, family, &slots[slot]) {
-                Some(name) => format!("{}  (as {name})", targets_text(&slots[slot])),
-                None => targets_text(&slots[slot]),
-            };
+            let value = format!("{:<name_width$}   {}", names[slot], targets_text(&slots[slot]));
             rows.push(tui::RootRow { label: (*label).to_string(), value, changed });
             match &baseline {
                 Some(b) => {
@@ -139,8 +141,11 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
             (Some(_), 0) => "No changes — this is what is set up now".to_string(),
             (Some(_), n) => format!("{n} unsaved change{} — Tab saves", if n == 1 { "" } else { "s" }),
         };
-        let note = ["Each slot's targets, first answers; Claude Code sees the name in parentheses, a real Claude id."];
-        let (action, at) = tui::root(title, &note, &rows, cursor, &status)?;
+        let note = [
+            "Which models on the proxy answer for each of Claude Code's model slots. The first answers; the rest take over, in order, when it is benched or out of quota.",
+            "Claude Code always sees a real Claude id, whoever answers. Haiku also runs Claude Code's background work, so keep it cheap.",
+        ];
+        let (action, at) = tui::root(title, &note, Some(("Slot", &header)), &rows, cursor, &status)?;
         cursor = at;
         match action {
             tui::RootAction::Save => return Ok(Picks { slots }),

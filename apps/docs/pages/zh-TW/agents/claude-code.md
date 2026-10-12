@@ -16,7 +16,7 @@ $ kano-proxy login                      # 每台機器一次
 $ kano-proxy agent setup claude-code
 ```
 
-它會讀取你的帳號實際能用的模型，讓你替 Claude Code 的每個槽位（Opus、Sonnet、Haiku、Fable）依序選 proxy 上由哪些模型來回答：任何供應商都行，第一個回答，它被暫停或額度用完時由後面的依序接手。接著建立一個名為 `claude-code` 的模型群組、群組裡的模型名稱就是原本的 Claude id，建立一把以這台機器命名的 API key，然後把類似下面那段 `env` 寫進 `~/.claude/settings.json`，`ANTHROPIC_BASE_URL` 指向群組端點。走群組是有原因的：Claude Code 會依它看到的模型 id 決定開啟哪些功能，而 `/g/claude-code/anthropic` 回的是 `claude-opus-5` 這種真實 id，即使 proxy 實際轉到別的供應商也一樣——所以一個槽位可以先由 `antigravity` 或 `codex` 回答，Claude Code 看到的仍是 Claude id。它也會開啟 Claude Code 的 gateway model discovery，讓群組裡每個名字都出現在 `/model` 選單，而且不會寫 `ANTHROPIC_MODEL`，所以你用 `/model` 存的預設會留住。Haiku 槽位同時是 Claude Code 跑背景工作（例如產生 session 標題）的模型，請讓它留在便宜的模型上。
+它會讀取你的帳號實際能用的模型，讓你替 Claude Code 的每個槽位（Fable、Opus、Sonnet、Haiku）依序選 proxy 上由哪些模型來回答：任何供應商都行，第一個回答，它被暫停或額度用完時由後面的依序接手。接著建立一個名為 `claude-code` 的模型群組、群組裡的模型名稱就是原本的 Claude id，建立一把以這台機器命名的 API key，然後把類似下面那段 `env` 寫進 `~/.claude/settings.json`，`ANTHROPIC_BASE_URL` 指向群組端點。走群組是有原因的：Claude Code 會依它看到的模型 id 決定開啟哪些功能，而 `/g/claude-code/anthropic` 回的是 `claude-opus-5` 這種真實 id，即使 proxy 實際轉到別的供應商也一樣——所以一個槽位可以先由 `antigravity` 或 `codex` 回答，Claude Code 看到的仍是 Claude id。它也會開啟 Claude Code 的 gateway model discovery，讓群組裡每個名字都出現在 `/model` 選單，而且不會寫 `ANTHROPIC_MODEL`，所以你用 `/model` 存的預設會留住。Haiku 槽位同時是 Claude Code 跑背景工作（例如產生 session 標題）的模型，請讓它留在便宜的模型上。
 
 `kano-proxy agent restore claude-code` 會把寫過的欄位還原並撤銷 key；加 `--full` 則用事前備份整檔還原。`kano-proxy agent list` 顯示目前由 CLI 管理的項目。群組會留在 Groups 頁面，隨時可以調整順序或加備援目標。
 
@@ -40,7 +40,7 @@ $ kano-proxy agent setup claude-code
 
 - `ANTHROPIC_BASE_URL` 是 gateway 根路徑，**不含** `/v1`。Claude Code 會自己接上 `/v1/messages`。
 - `ANTHROPIC_AUTH_TOKEN` 以 `Authorization: Bearer` 送出。`ANTHROPIC_API_KEY` 也可以，會以 `x-api-key` 送出，proxy 兩種都接受。擇一使用。
-- `ANTHROPIC_DEFAULT_*_MODEL` 決定 `/model` 選單裡 Opus、Sonnet、Haiku、Fable 各自對應到哪個 id。請填你 Models 頁面上有的 id。Haiku 也是 Claude Code 背景工作用的模型。
+- `ANTHROPIC_DEFAULT_*_MODEL` 決定 `/model` 選單裡 Fable、Opus、Sonnet、Haiku 各自對應到哪個 id。請填你 Models 頁面上有的 id。Haiku 也是 Claude Code 背景工作用的模型。
 - 除非你要釘死啟動模型，否則不要設 `ANTHROPIC_MODEL`：它每次啟動都會蓋掉你用 `/model` 存的預設。
 - `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 讓 Claude Code 啟動時向 proxy 讀 `GET /v1/models`，把結果加進 `/model` 選單（見下）。
 

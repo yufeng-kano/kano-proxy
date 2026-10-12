@@ -407,7 +407,7 @@ async fn add_root(state: &State) -> Result<AddAnswers> {
             tui::RootRow { label: "Models".into(), value: models_text(&expose, &initial), changed: false },
         ];
         let status = notice.take().unwrap_or_else(|| format!("Not registered yet — Tab registers \"{slug}\" on {}", state.base_url));
-        let (action, at) = tui::root(title, &[], &rows, cursor, &status)?;
+        let (action, at) = tui::root(title, &[], None, &rows, cursor, &status)?;
         cursor = at;
         match action {
             tui::RootAction::Save => return Ok(answers(&slug, format, &target, &key, &expose, &initial)),
