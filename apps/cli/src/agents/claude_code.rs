@@ -16,6 +16,9 @@ pub const KEY_FIELD: &str = "env.ANTHROPIC_AUTH_TOKEN";
 /// Claude Code's `/model` picker lists what the group endpoint serves (its `GET /v1/models`),
 /// so every name in the group — not only the slots — can be chosen there.
 pub const DISCOVERY_FIELD: &str = "env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
+/// Top-level: with the proxy's token set, Claude Code would otherwise print on every start
+/// that claude.ai connectors are disabled because another auth source takes precedence.
+pub const CONNECTORS_FIELD: &str = "disableClaudeAiConnectors";
 
 /// (label, family word, env field) — Claude Code's model slots, the most capable first.
 pub const SLOTS: [(&str, &str, &str); 4] = [
@@ -189,6 +192,7 @@ pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Pla
         ("env.ANTHROPIC_BASE_URL".into(), json!(base)),
         (KEY_FIELD.into(), json!(KEY_PLACEHOLDER)),
         (DISCOVERY_FIELD.into(), json!("1")),
+        (CONNECTORS_FIELD.into(), json!(true)),
     ];
     let mut summary = vec![format!("Claude Code → {base}")];
     for (label, field, name, targets) in &named {
@@ -248,6 +252,7 @@ mod tests {
         assert_eq!(get("env.ANTHROPIC_BASE_URL"), Some(json!("https://p.example/g/claude-code/anthropic")));
         assert_eq!(get("env.ANTHROPIC_AUTH_TOKEN"), Some(json!(KEY_PLACEHOLDER)));
         assert_eq!(get(DISCOVERY_FIELD), Some(json!("1")));
+        assert_eq!(get(CONNECTORS_FIELD), Some(json!(true)));
         assert_eq!(get("env.ANTHROPIC_MODEL"), None, "never pinned — /model's saved default must win");
         // A slot routed elsewhere first is still served under the account's Claude id of its family.
         assert_eq!(get("env.ANTHROPIC_DEFAULT_OPUS_MODEL"), Some(json!("claude-opus-5")));

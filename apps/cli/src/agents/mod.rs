@@ -1022,6 +1022,7 @@ mod tests {
         assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-kano-proxy-e2e-secret");
         assert_eq!(written["env"]["ANTHROPIC_MODEL"], "old-model", "the user's own start model is not touched");
         assert_eq!(written["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1");
+        assert_eq!(written["disableClaudeAiConnectors"], true, "a top-level key beside env");
         assert_eq!(written["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-5");
         assert_eq!(written["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5");
         assert!(written["env"].get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none(), "a slot without targets is not written");
@@ -1084,6 +1085,7 @@ mod tests {
         assert_eq!(restored["env"]["OTHER"], "keep");
         assert!(restored["env"].get("ANTHROPIC_BASE_URL").is_none());
         assert!(restored["env"].get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(restored.get("disableClaudeAiConnectors").is_none());
         assert_eq!(restored["permissions"]["allow"][0], "Bash");
         assert!(sandbox.file.load().unwrap().agents.is_empty(), "the record is gone");
         assert!(Path::new(&first_backup).exists(), "backups are never deleted");

@@ -2,7 +2,7 @@
 # product SemVer (root package.json / the vX.Y.Z tag) — bump together.
 [package]
 name = "kano-proxy"
-version = "2.5.1"
+version = "2.5.2"
 edition = "2021"
 license = "MIT"
 description = "Official kano-proxy CLI: tunnel local LLM servers in as providers, and point Claude Code or the Codex CLI at the proxy"

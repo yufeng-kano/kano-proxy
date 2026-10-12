@@ -26,6 +26,7 @@ Add an `env` block to `~/.claude/settings.json`. Values there apply to every ses
 
 ```json
 {
+  "disableClaudeAiConnectors": true,
   "env": {
     "ANTHROPIC_BASE_URL": "https://<your-domain>/anthropic",
     "ANTHROPIC_AUTH_TOKEN": "<your-api-key>",
@@ -42,6 +43,7 @@ Add an `env` block to `~/.claude/settings.json`. Values there apply to every ses
 - `ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer`. `ANTHROPIC_API_KEY` also works and is sent as `x-api-key`; the proxy accepts both. Use one of them.
 - The `ANTHROPIC_DEFAULT_*_MODEL` values are what the Fable, Opus, Sonnet and Haiku entries in `/model` resolve to. Fill them with ids from your own Models page. Haiku is also what Claude Code uses for background work.
 - Leave `ANTHROPIC_MODEL` unset unless you want to pin the start model: it overrides whatever you save with `/model`, every launch.
+- `disableClaudeAiConnectors: true` (top level, beside `env`) stops the start-up notice that claude.ai connectors are disabled because another auth source takes precedence — with the proxy's token set they are disabled either way.
 - `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` makes Claude Code read `GET /v1/models` from the proxy at startup and add the results to the `/model` picker (see below).
 
 Or export the same variables in your shell for a one-off session:

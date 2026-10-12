@@ -26,6 +26,7 @@ $ kano-proxy agent setup claude-code
 
 ```json
 {
+  "disableClaudeAiConnectors": true,
   "env": {
     "ANTHROPIC_BASE_URL": "https://<your-domain>/anthropic",
     "ANTHROPIC_AUTH_TOKEN": "<your-api-key>",
@@ -42,6 +43,7 @@ $ kano-proxy agent setup claude-code
 - `ANTHROPIC_AUTH_TOKEN` 以 `Authorization: Bearer` 送出。`ANTHROPIC_API_KEY` 也可以，會以 `x-api-key` 送出，proxy 兩種都接受。擇一使用。
 - `ANTHROPIC_DEFAULT_*_MODEL` 決定 `/model` 選單裡 Fable、Opus、Sonnet、Haiku 各自對應到哪個 id。請填你 Models 頁面上有的 id。Haiku 也是 Claude Code 背景工作用的模型。
 - 除非你要釘死啟動模型，否則不要設 `ANTHROPIC_MODEL`：它每次啟動都會蓋掉你用 `/model` 存的預設。
+- `disableClaudeAiConnectors: true`（頂層，和 `env` 同一層）關掉啟動時那句「claude.ai connectors are disabled because another auth source takes precedence」——設了 proxy 的 token 之後 connectors 本來就不會載入。
 - `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` 讓 Claude Code 啟動時向 proxy 讀 `GET /v1/models`，把結果加進 `/model` 選單（見下）。
 
 一次性的 session 也可以直接在 shell 匯出同一組變數：
