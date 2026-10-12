@@ -32,7 +32,7 @@ kano-proxy/
         kano-proxy-api/  # the standalone binary
     cli/                 # the kano-proxy CLI — its own crate and release pipeline
     web/                 # Vue + Vite, built to static files
-      public/            # robots.txt, _headers (noindex except /docs/* and /login)
+      public/            # robots.txt (the noindex header is nginx's, deploy/web/nginx.conf)
       src/
         main.ts          # standalone web assembly
         bootstrap.ts     # createWebApp: app, router and extension composition
@@ -41,9 +41,10 @@ kano-proxy/
         router/, pages/, components/, composables/, i18n/, services/, types/
       package.json, pnpm-lock.yaml
     docs/                # the public documentation site — VitePress (docs/docs-site.md)
-      .vitepress/        # site.ts (shared config), config.ts (standalone), theme/
+      .vitepress/        # site.ts (shared config), config.ts (standalone), llms.ts (llms.txt), theme/
       pages/             # English pages and their Traditional Chinese twins under zh-TW/
       package.json, pnpm-lock.yaml
+  deploy/                # one Dockerfile per service: api/, web/ (nginx.conf, public-origin.sh), caddy/ (Caddyfile)
   docs/                  # this documentation set
   scripts/               # release helpers
   .github/workflows/     # ci (push/PR), cli-release (cli-v* Release)

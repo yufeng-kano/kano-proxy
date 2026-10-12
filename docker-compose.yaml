@@ -45,6 +45,9 @@ services:
       dockerfile: deploy/web/Dockerfile
     image: kano-proxy-web:latest
     restart: unless-stopped
+    # Fills the docs' absolute URLs and the robots.txt Sitemap line at start.
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN is required}
     networks: [internal]
 
   caddy:

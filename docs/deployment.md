@@ -41,7 +41,7 @@ Everything is environment variables, read once at start. `.env.example` is the c
 
 | Variable | Meaning |
 |---|---|
-| `DOMAIN`, `ACME_EMAIL` | What Caddy serves and who Let's Encrypt contacts |
+| `DOMAIN`, `ACME_EMAIL` | What Caddy serves and who Let's Encrypt contacts. The web container also reads `DOMAIN` at start to write the docs' canonical URLs, sitemap and llms.txt ([docs-site.md](./docs-site.md) § The real hostname) |
 | `APP_URL`, `GOOGLE_REDIRECT_URI` | The public origin and the OAuth callback on it |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | The Google OAuth client that admin sign-in uses |
 | `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | The database the compose file creates and the server connects to |

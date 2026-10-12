@@ -14,5 +14,6 @@ RUN cp -r apps/docs/.vitepress/dist apps/web/dist/docs
 FROM nginx:alpine
 COPY --from=build /src/apps/web/dist /usr/share/nginx/html
 COPY deploy/web/nginx.conf /etc/nginx/conf.d/default.conf
+COPY --chmod=755 deploy/web/public-origin.sh /docker-entrypoint.d/40-public-origin.sh
 EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s CMD wget -qO- http://127.0.0.1/index.html >/dev/null || exit 1

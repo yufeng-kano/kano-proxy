@@ -1,4 +1,5 @@
 import { defineConfig, type DefaultTheme, type UserConfig } from "vitepress"
+import { writeLlmsTxt } from "./llms"
 
 /**
  * Public documentation site, served at /docs/ from the same web image as the
@@ -8,10 +9,13 @@ import { defineConfig, type DefaultTheme, type UserConfig } from "vitepress"
  * added. An edition builds the same site from its own VitePress project,
  * passing the pages it adds (docs/docs-site.md § Editions).
  *
- * Hostnames never live in tracked files, so the sitemap hostname comes from
- * APP_URL at build time (release CI sets it); unset means no sitemap.
+ * Hostnames never live in tracked files or images. Absolute URLs (canonical,
+ * hreflang, og:url, the sitemap, llms.txt) are written with ORIGIN_PLACEHOLDER,
+ * which the web container replaces with its real origin at start
+ * (docs/docs-site.md § The real hostname). APP_URL at build time skips that.
  */
-const appUrl = process.env.APP_URL?.replace(/\/+$/, "")
+const ORIGIN_PLACEHOLDER = "https://origin.invalid"
+const origin = process.env.APP_URL?.replace(/\/+$/, "") || ORIGIN_PLACEHOLDER
 
 /** What an edition adds to the site; every field is appended after the core's own. */
 export interface DocsEditionOptions {
@@ -143,7 +147,17 @@ function nav(locale: "en" | "zh-TW"): DefaultTheme.NavItem[] {
   ]
 }
 
+/** The page's URL path under /docs/: `guide/x.md` → `guide/x`, `zh-TW/index.md` → `zh-TW/`. */
+function pagePath(relativePath: string): string {
+  return relativePath.replace(/(^|\/)index\.md$/, "$1").replace(/\.md$/, "")
+}
+
 export function defineDocsConfig(edition: DocsEditionOptions = {}): UserConfig<DefaultTheme.Config> {
+  const sidebarEn = [...sidebar("en", edition.appPages?.en ?? []), ...(edition.sidebar?.en ?? [])]
+  const sidebarZh = [
+    ...sidebar("zh-TW", edition.appPages?.["zh-TW"] ?? []),
+    ...(edition.sidebar?.["zh-TW"] ?? []),
+  ]
   return defineConfig({
     base: "/docs/",
     title: SITE_NAME,
@@ -164,18 +178,33 @@ export function defineDocsConfig(edition: DocsEditionOptions = {}): UserConfig<D
       ["meta", { name: "twitter:card", content: "summary" }],
     ],
     // VitePress emits <title> and <meta name="description"> per page from the
-    // frontmatter; these two mirror them for link previews.
+    // frontmatter; the og:* tags mirror them for link previews. Every page also
+    // names its canonical URL and its twin in the other language (hreflang), so
+    // search engines index each language once and show the reader's own.
     transformPageData(pageData) {
+      if (pageData.isNotFound) return
       const title =
         pageData.title && pageData.title !== SITE_NAME ? `${pageData.title} | ${SITE_NAME}` : SITE_NAME
       const description = pageData.description || pageData.frontmatter.description || ""
+      const path = pagePath(pageData.relativePath)
+      const enPath = path.replace(/^zh-TW\/?/, "")
+      const url = (p: string) => `${origin}/docs/${p}`
       pageData.frontmatter.head ??= []
       pageData.frontmatter.head.push(
         ["meta", { property: "og:title", content: title }],
         ["meta", { property: "og:description", content: description }],
+        ["meta", { property: "og:url", content: url(path) }],
+        ["meta", { property: "og:locale", content: path.startsWith("zh-TW") ? "zh_TW" : "en_US" }],
+        ["link", { rel: "canonical", href: url(path) }],
+        ["link", { rel: "alternate", hreflang: "en", href: url(enPath) }],
+        ["link", { rel: "alternate", hreflang: "zh-TW", href: url(`zh-TW/${enPath}`) }],
+        ["link", { rel: "alternate", hreflang: "x-default", href: url(enPath) }],
       )
     },
-    sitemap: appUrl ? { hostname: `${appUrl}/docs/` } : undefined,
+    sitemap: { hostname: `${origin}/docs/` },
+    buildEnd(site) {
+      writeLlmsTxt(site, { origin, name: SITE_NAME, summary: DESCRIPTION_EN, sidebar: sidebarEn })
+    },
     locales: {
       root: {
         label: "English",
@@ -183,7 +212,7 @@ export function defineDocsConfig(edition: DocsEditionOptions = {}): UserConfig<D
         description: DESCRIPTION_EN,
         themeConfig: {
           nav: [...nav("en"), ...(edition.nav?.en ?? [])],
-          sidebar: [...sidebar("en", edition.appPages?.en ?? []), ...(edition.sidebar?.en ?? [])],
+          sidebar: sidebarEn,
           outline: { label: "On this page" },
         },
       },
@@ -194,10 +223,7 @@ export function defineDocsConfig(edition: DocsEditionOptions = {}): UserConfig<D
         description: DESCRIPTION_ZH,
         themeConfig: {
           nav: [...nav("zh-TW"), ...(edition.nav?.["zh-TW"] ?? [])],
-          sidebar: [
-            ...sidebar("zh-TW", edition.appPages?.["zh-TW"] ?? []),
-            ...(edition.sidebar?.["zh-TW"] ?? []),
-          ],
+          sidebar: sidebarZh,
           outline: { label: "本頁內容" },
           docFooter: { prev: "上一頁", next: "下一頁" },
           lastUpdated: { text: "最後更新" },

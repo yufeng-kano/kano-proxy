@@ -510,7 +510,7 @@ export const en = {
   "groups.dialog.railEmpty.body": "Bind one on the {page} page and it shows up here.",
   "groups.dialog.pickAccount": "Pick an account to see what it can run.",
   "groups.dialog.searchPlaceholder": "Search models",
-  "groups.dialog.modelsEmpty": "This provider lists no models. Add one by id below.",
+  "groups.dialog.modelsEmpty": "This account lists no models.",
   "groups.dialog.addModelOn": "Add {model} on {account}",
   "groups.dialog.added": "Added",
   "groups.dialog.add": "Add",

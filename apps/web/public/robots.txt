@@ -1,14 +1,18 @@
-# Admin routes are kept out of indexes with X-Robots-Tag: noindex (see
-# _headers), not with Disallow: a disallowed URL can still be indexed from
-# links, a noindex one cannot. The Worker-routed API prefixes below never reach
-# Pages, so _headers cannot cover them; they carry no content, and Disallow is
-# the right tool for an API surface. No Sitemap line: the directive needs an
-# absolute URL and this file carries no hostname; submit /docs/sitemap.xml in
-# Search Console instead. See docs/docs-site.md.
+# Admin routes are kept out of indexes with X-Robots-Tag: noindex, set by the
+# web image's nginx (deploy/web/nginx.conf), not with Disallow: a disallowed URL
+# can still be indexed from links, a noindex one cannot. The API prefixes below
+# are routed to the API server and never reach nginx, so the header cannot
+# cover them; they carry no content, and Disallow is the right tool for an API
+# surface. The Sitemap line is written with a placeholder origin that the web
+# container replaces at start, and drops when it has none. See
+# docs/docs-site.md § SEO and indexing.
 User-agent: *
 Disallow: /openai/
 Disallow: /anthropic/
 Disallow: /g/
 Disallow: /api/
+Disallow: /cli/v1/
 Disallow: /agent/
 Allow: /
+
+Sitemap: https://origin.invalid/docs/sitemap.xml

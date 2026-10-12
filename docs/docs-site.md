@@ -1,6 +1,6 @@
 # Public documentation site (`/docs/`)
 
-The one public, indexable surface of a kano-proxy instance. It tells an end user how to sign in, connect a subscription, issue a key, and point a coding agent at the proxy. Everything else on the host is behind Google sign-in and is deliberately kept out of search indexes (§ SEO).
+The one public, indexable surface of a kano-proxy instance, with `/llms.txt` as its machine-readable index. It tells an end user how to sign in, connect a subscription, issue a key, and point a coding agent at the proxy. Everything else on the host is behind Google sign-in and is deliberately kept out of search indexes (§ SEO).
 
 ## Why a separate static site
 
@@ -26,13 +26,17 @@ Checked by hand after the v4.7.0 deploy: `/docs/` and a docs page return 200 wit
 
 Local: `pnpm dev` inside `apps/docs` serves the docs alone at `http://127.0.0.1:5174/docs/`.
 
-CI (`ci.yml`) builds the docs beside the web app. `site.ts` emits a sitemap with absolute URLs only when `APP_URL` is set at build time; the image build does not set it today, so no sitemap is emitted and the build still succeeds.
+CI (`ci.yml`) builds the docs beside the web app.
 
 ## The real hostname without hardcoding it
 
-Tracked files keep `<your-domain>` placeholders ([deployment.md](./deployment.md)). A public docs page that only ever said `<your-domain>` would be useless to the reader, so the site fills the placeholder in the browser: a theme enhancement walks the rendered page's `code` elements after each route render and replaces `https://<your-domain>` with `location.origin` and any remaining `<your-domain>` with `location.host`. The static HTML that crawlers index still contains the placeholder; a person reading the page sees their instance's real URL, and the copy button copies what is shown. The fill is skipped under `vitepress dev`, where the docs server is not the proxy and filling would point every sample at port 5174.
+Tracked files and images keep placeholders ([deployment.md](./deployment.md)); the docs fill in the real hostname in two places.
+
+**Code samples, in the browser.** A public docs page that only ever said `<your-domain>` would be useless to the reader, so a theme enhancement walks the rendered page's `code` elements after each route render and replaces `https://<your-domain>` with `location.origin` and any remaining `<your-domain>` with `location.host`. The static HTML still contains the placeholder; a person reading the page sees their instance's real URL, and the copy button copies what is shown. The fill is skipped under `vitepress dev`, where the docs server is not the proxy and filling would point every sample at port 5174.
 
 Write every URL in the docs as `https://<your-domain>/...` exactly, so the fill matches. Do not invent other spellings of the placeholder.
+
+**Absolute URLs, when the container starts.** Canonical and `hreflang` links, `og:url`, `sitemap.xml`, the llms.txt files and the `robots.txt` `Sitemap:` line need a real origin before any script runs. The build writes them with `https://origin.invalid` (or `APP_URL`, when set at build time). The web image's `deploy/web/public-origin.sh` runs from nginx's `/docker-entrypoint.d/` and replaces the placeholder in every served file with `https://$DOMAIN`, the same variable Caddy serves. Without `DOMAIN` the URLs become root-relative and the `Sitemap:` line is dropped; a `DOMAIN` that is not a hostname leaves the placeholder and logs why. The image stays the same for every instance.
 
 ## Content
 
@@ -79,17 +83,29 @@ Writing style, both languages:
 
 ## SEO and indexing
 
-Only `/docs/*` and `/login` are meant to be indexed. The admin routes render the same empty shell to a crawler and are hidden from indexes with a header, not with `robots.txt`: a `Disallow` stops crawling but not indexing of a linked URL, while `noindex` needs the crawler to fetch the page.
+Only `/docs/*`, `/login` and `/llms.txt` are meant to be indexed. The admin routes render the same empty shell to a crawler and are hidden from indexes with a header, not with `robots.txt`: a `Disallow` stops crawling but not indexing of a linked URL, while `noindex` needs the crawler to fetch the page.
 
 | Piece | Where | What it does |
 |-------|-------|--------------|
-| `apps/web/public/robots.txt` | site root | Allows crawling, except the API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/agent/`): those never reach the static server, so `_headers` cannot mark them, and an API surface is what `Disallow` is for. No `Sitemap:` line because the directive needs an absolute URL and tracked files carry no hostname; submit `/docs/sitemap.xml` in Search Console instead |
-| `apps/web/public/_headers` | site root | `X-Robots-Tag: noindex` on `/*`, detached again (`! X-Robots-Tag`) for `/docs/*` and `/login`. A catch-all rather than a route list, because any unknown path also serves the SPA shell. Nothing to maintain when a route is added |
+| `deploy/web/nginx.conf` | web image | `X-Robots-Tag: noindex` on `location /` and `/assets/`, none on `/docs/`, `= /login` and `= /llms.txt`. A catch-all rather than a route list, because any unknown path also serves the SPA shell. Nothing to maintain when a route is added |
+| `apps/web/public/robots.txt` | site root | Allows crawling, except the API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/cli/v1/`, `/agent/`): those are routed to the API server and never reach nginx, so the header cannot mark them, and an API surface is what `Disallow` is for. Its `Sitemap:` line points at `/docs/sitemap.xml` through the origin placeholder (§ The real hostname); without an origin the line is removed |
 | `apps/web/index.html` | SPA shell | `description`, Open Graph and Twitter card tags, so a shared link to the app gets a preview card. Copy repeats the login pitch from the message catalog; keep them in sync |
 | Router `afterEach` | SPA | Sets `document.title` to `<page> · <site name>` from the route's `titleKey` (a catalog key), so tabs and history are readable. `<html lang>` is already set by `setLocale()` ([i18n.md](./i18n.md)) |
-| VitePress config | docs | Per-page `<title>` and `description`, Open Graph tags, `sitemap.xml` under `/docs/` when `APP_URL` is set at build time |
+| `site.ts` | docs | Per page: `<title>`, `description`, `og:title`, `og:description`, `og:url`, `og:locale`, a `canonical` link to itself and `hreflang` links to its `en` and `zh-TW` twins plus `x-default` (English), so each language is indexed once and searchers see their own. `sitemap.xml` under `/docs/`. The 404 page gets none of the URL tags |
 
-Not done, on purpose: `apple-touch-icon` and a web manifest (nobody installs an admin panel to a home screen), `llms.txt` (revisit once the docs have settled), and any structured data.
+Not done, on purpose: `apple-touch-icon` and a web manifest (nobody installs an admin panel to a home screen), an `og:image` (no social card has been designed), and any structured data.
+
+## llms.txt
+
+The build writes the [llms.txt](https://llmstxt.org) set from the English sidebar, so an edition's pages are in it and the order is the site's (`apps/docs/.vitepress/llms.ts`, called from `buildEnd` in `site.ts`):
+
+| File | Content |
+|------|---------|
+| `/docs/llms.txt`, also served at `/llms.txt` | The site name, its summary, a line saying samples use `https://<your-domain>`, then one link per page under the sidebar's group titles, each with the page's frontmatter `description` |
+| `/docs/<page>.md` | The page's Markdown source without frontmatter, next to its HTML (`/docs/app/logs` → `/docs/app/logs.md`) |
+| `/docs/llms-full.txt` | Every English page in sidebar order, for a reader that wants the whole site in one request |
+
+English only: the zh-TW tree says the same things. The links are absolute through the origin placeholder. nginx serves `.md` as `text/markdown` and both text types as UTF-8.
 
 ## Editions
 
