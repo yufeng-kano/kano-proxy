@@ -135,24 +135,27 @@ enum AgentCommand {
         /// Print what would be written, minted and created; change nothing
         #[arg(long)]
         dry_run: bool,
-        /// claude-code, --no-tui: the bare id the Opus slot resolves to
-        #[arg(long)]
+        /// claude-code, --no-tui: the Opus slot's targets, provider/model ids from your catalog in the order tried, comma-separated (a bare id means claude-code/<id>)
+        #[arg(long, value_name = "TARGETS")]
         opus: Option<String>,
-        /// claude-code, --no-tui: the bare id the Sonnet slot resolves to
-        #[arg(long)]
+        /// claude-code, --no-tui: the Sonnet slot's targets (as --opus)
+        #[arg(long, value_name = "TARGETS")]
         sonnet: Option<String>,
-        /// claude-code, --no-tui: the bare id the Haiku slot resolves to
-        #[arg(long)]
+        /// claude-code, --no-tui: the Haiku slot's targets (as --opus); Claude Code also runs its background work here
+        #[arg(long, value_name = "TARGETS")]
         haiku: Option<String>,
+        /// claude-code, --no-tui: the Fable slot's targets (as --opus)
+        #[arg(long, value_name = "TARGETS")]
+        fable: Option<String>,
         /// codex, --no-tui: the bare id Codex starts with
         #[arg(long)]
         model: Option<String>,
         /// codex, --no-tui: low | medium | high | xhigh (default high)
         #[arg(long)]
         effort: Option<String>,
-        /// Fallback target(s) for the picked model(s), as provider/model ids from your catalog; repeatable
-        #[arg(long)]
-        fallback: Vec<String>,
+        /// codex, --no-tui: a target behind the model, a provider/model id from your catalog (a bare id means codex/<id>); repeatable, in the order tried; default the model itself
+        #[arg(long, value_name = "PROVIDER/MODEL")]
+        target: Vec<String>,
     },
     /// Undo setup: fields back to before (default), or the whole file from the backup (--full); revoke the key
     Restore {
@@ -200,11 +203,11 @@ async fn main() {
             TunnelCommand::Start { concurrency } => commands::cmd_start(file, concurrency).await,
         },
         Command::Agent(sub) => match sub {
-            AgentCommand::Setup { agent, dry_run, opus, sonnet, haiku, model, effort, fallback } => {
+            AgentCommand::Setup { agent, dry_run, opus, sonnet, haiku, fable, model, effort, target } => {
                 agents::cmd_setup(
                     &file,
                     agent,
-                    agents::SetupArgs { no_tui: cli.no_tui, dry_run, opus, sonnet, haiku, model, effort, fallback },
+                    agents::SetupArgs { no_tui: cli.no_tui, dry_run, opus, sonnet, haiku, fable, model, effort, target },
                 )
                 .await
             }

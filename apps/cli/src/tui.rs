@@ -411,17 +411,16 @@ pub fn pick_models(title: &str, models: &[String], preselected: &[String]) -> Re
     }
 }
 
-/// Searchable multi-select with no "all" row: Space toggles, Enter accepts the
-/// toggled set (possibly empty — "no fallbacks" is a normal answer). Used for
-/// `agent setup`'s fallback targets: `primary` is the model already picked,
-/// drawn as a fixed, checked first row so the screen reads as the whole
-/// ordered target list rather than a list the chosen model is missing from;
-/// `preselected` re-toggles the fallbacks already in place; the line under
-/// the list spells out what Enter will accept.
-pub fn pick_many(title: &str, note: &[&str], primary: Option<&str>, items: &[String], preselected: &[String]) -> Result<Nav<Vec<String>>> {
+/// Searchable ordered multi-select: Space toggles an item, and the order items
+/// were toggled on is the order kept — each row shows its position (`[1]`,
+/// `[2]`…) so the list reads as the target list it becomes. Enter accepts the
+/// set (possibly empty — the caller decides what "none" means); `preselected`
+/// restores the order already in place; the line under the list spells out
+/// what Enter will accept.
+pub fn pick_ordered(title: &str, note: &[&str], items: &[String], preselected: &[String]) -> Result<Nav<Vec<String>>> {
     let mut screen = Screen::open()?;
     let mut query = String::new();
-    let mut selected: Vec<bool> = items.iter().map(|m| preselected.contains(m)).collect();
+    let mut selected: Vec<String> = preselected.iter().filter(|p| items.contains(p)).cloned().collect();
     let mut state = ListState::default();
     state.select(Some(0));
     let note_text = note.join("\n");
@@ -432,14 +431,12 @@ pub fn pick_many(title: &str, note: &[&str], primary: Option<&str>, items: &[Str
             .filter(|(_, m)| query.is_empty() || m.to_lowercase().contains(&query.to_lowercase()))
             .map(|(i, _)| i)
             .collect();
-        let chosen: Vec<&str> = items.iter().enumerate().filter(|(i, _)| selected[*i]).map(|(_, m)| m.as_str()).collect();
         screen.terminal.draw(|f| {
             let width = f.area().width.max(1) as usize;
             let chunks = Layout::vertical([
                 Constraint::Length(3),
                 Constraint::Length(note_height(note, width)),
                 Constraint::Length(2),
-                Constraint::Length(u16::from(primary.is_some())),
                 Constraint::Min(3),
                 Constraint::Length(1),
                 Constraint::Length(1),
@@ -450,45 +447,44 @@ pub fn pick_many(title: &str, note: &[&str], primary: Option<&str>, items: &[Str
                 f.render_widget(Paragraph::new(note_text.as_str()).wrap(Wrap { trim: false }), chunks[1]);
             }
             f.render_widget(Paragraph::new(format!("Search: {query}▏")), chunks[2]);
-            if let Some(primary) = primary {
-                f.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::raw("  [x] "),
-                        Span::styled(primary.to_string(), Style::default().add_modifier(Modifier::BOLD)),
-                        Span::styled("  (primary — always tried first)", Style::default().add_modifier(Modifier::DIM)),
-                    ])),
-                    chunks[3],
-                );
-            }
             let rows: Vec<ListItem> = visible
                 .iter()
-                .map(|&i| ListItem::new(format!("{}{}", if selected[i] { "[x] " } else { "[ ] " }, items[i])))
+                .map(|&i| {
+                    let mark = match selected.iter().position(|s| *s == items[i]) {
+                        Some(n) => format!("[{}] ", n + 1),
+                        None => "[ ] ".to_string(),
+                    };
+                    ListItem::new(format!("{mark}{}", items[i]))
+                })
                 .collect();
             let list = List::new(rows)
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("› ");
-            f.render_stateful_widget(list, chunks[4], &mut state);
-            let summary = if chosen.is_empty() { "none".to_string() } else { chosen.join(", ") };
+            f.render_stateful_widget(list, chunks[3], &mut state);
+            let summary = if selected.is_empty() { "none".to_string() } else { selected.join(" › ") };
             f.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("Enter accepts fallbacks: ", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("Enter sets targets: ", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(summary),
                 ]))
                 .wrap(Wrap { trim: false }),
-                chunks[5],
+                chunks[4],
             );
-            f.render_widget(dim(&format!("↑/↓ move · Space toggles · Enter accepts · type to search · {}", nav_hint())), chunks[6]);
+            f.render_widget(dim(&format!("↑/↓ move · Space toggles (in order) · Enter accepts · type to search · {}", nav_hint())), chunks[5]);
         })?;
         let cursor = state.selected().unwrap_or(0).min(visible.len().saturating_sub(1));
         match read_key()? {
             Key::Back => return Ok(Nav::Back),
             Key::Exit => return Ok(Nav::Exit),
-            Key::Other(KeyCode::Enter) => {
-                return Ok(Nav::Next(items.iter().enumerate().filter(|(i, _)| selected[*i]).map(|(_, m)| m.clone()).collect()));
-            }
+            Key::Other(KeyCode::Enter) => return Ok(Nav::Next(selected)),
             Key::Other(KeyCode::Char(' ')) => {
                 if let Some(&idx) = visible.get(cursor) {
-                    selected[idx] = !selected[idx];
+                    match selected.iter().position(|s| *s == items[idx]) {
+                        Some(n) => {
+                            selected.remove(n);
+                        }
+                        None => selected.push(items[idx].clone()),
+                    }
                 }
             }
             Key::Other(KeyCode::Up) => state.select(Some(cursor.saturating_sub(1))),

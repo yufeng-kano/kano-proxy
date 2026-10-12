@@ -16,7 +16,7 @@ $ kano-proxy login                      # once per machine
 $ kano-proxy agent setup claude-code
 ```
 
-It reads the models your account can serve, lets you pick what Opus, Sonnet and Haiku resolve to (and optional fallbacks on other providers), creates a model group named `claude-code` whose model names are the plain Claude ids, mints an API key named after this machine, and writes the `env` block below into `~/.claude/settings.json` with `ANTHROPIC_BASE_URL` set to the group's endpoint. Going through a group matters: Claude Code decides what to enable from the model id it sees, and `/g/claude-code/anthropic` serves real ids such as `claude-opus-5` even when the proxy routes them elsewhere.
+It reads the models your account can serve and lets you pick, for each of Claude Code's slots — Opus, Sonnet, Haiku and Fable — which models on your proxy answer, in order: any provider, the first answers, the rest take over when it is benched or out of quota. It then creates a model group named `claude-code` whose model names are plain Claude ids, mints an API key named after this machine, and writes an `env` block like the one below into `~/.claude/settings.json` with `ANTHROPIC_BASE_URL` set to the group's endpoint. Going through a group matters: Claude Code decides what to enable from the model id it sees, and `/g/claude-code/anthropic` serves real ids such as `claude-opus-5` even when the proxy routes them elsewhere — so a slot can be answered by `antigravity` or `codex` first and Claude Code still sees a Claude id. It also turns on Claude Code's gateway model discovery, so every name in the group shows up in `/model`, and it never writes `ANTHROPIC_MODEL`, so the default you save with `/model` sticks. The Haiku slot is also where Claude Code runs its background work (session titles and the like), so keep it on a cheap model.
 
 `kano-proxy agent restore claude-code` puts the fields it wrote back the way they were and revokes the key; `--full` restores the whole file from the backup it took first. `kano-proxy agent list` shows what is managed. The group stays on the Groups page, where you can reorder or add fallback targets at any time.
 
@@ -29,17 +29,20 @@ Add an `env` block to `~/.claude/settings.json`. Values there apply to every ses
   "env": {
     "ANTHROPIC_BASE_URL": "https://<your-domain>/anthropic",
     "ANTHROPIC_AUTH_TOKEN": "<your-api-key>",
-    "ANTHROPIC_MODEL": "claude-code/claude-opus-5",
+    "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-code/claude-opus-5",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-code/claude-sonnet-5",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-code/claude-haiku-4-5"
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-code/claude-haiku-4-5",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-code/claude-fable-5-1"
   }
 }
 ```
 
 - `ANTHROPIC_BASE_URL` is the gateway root **without** `/v1`. Claude Code appends `/v1/messages` itself.
 - `ANTHROPIC_AUTH_TOKEN` is sent as `Authorization: Bearer`. `ANTHROPIC_API_KEY` also works and is sent as `x-api-key`; the proxy accepts both. Use one of them.
-- `ANTHROPIC_MODEL` is the model used at start. The three `ANTHROPIC_DEFAULT_*_MODEL` values are what the Opus, Sonnet, and Haiku entries in `/model` resolve to. Fill them with ids from your own Models page.
+- The `ANTHROPIC_DEFAULT_*_MODEL` values are what the Opus, Sonnet, Haiku and Fable entries in `/model` resolve to. Fill them with ids from your own Models page. Haiku is also what Claude Code uses for background work.
+- Leave `ANTHROPIC_MODEL` unset unless you want to pin the start model: it overrides whatever you save with `/model`, every launch.
+- `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` makes Claude Code read `GET /v1/models` from the proxy at startup and add the results to the `/model` picker (see below).
 
 Or export the same variables in your shell for a one-off session:
 
@@ -56,7 +59,7 @@ Do not put the key in a project's committed `.claude/settings.json`.
 
 `/model <id>` inside a session switches to any id your proxy serves, for example `/model codex/gpt-5.6-sol`. Press Enter to save it as your default or `s` to keep it for this session only.
 
-Setting `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` makes Claude Code read `GET /v1/models` from the proxy and add the results to the `/model` picker. Claude Code keeps only ids containing `claude` or `anthropic`, so `claude-code/...` ids appear and `codex/...` ids do not; type those by hand.
+With `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` (the CLI sets it) Claude Code reads `GET /v1/models` from the proxy at startup and adds the results to the `/model` picker. Claude Code keeps only ids containing `claude` or `anthropic`, so Claude ids appear and `codex/...` ids do not; type those by hand.
 
 ## Check it
 

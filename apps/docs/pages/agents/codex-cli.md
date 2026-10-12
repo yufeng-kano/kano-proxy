@@ -23,7 +23,7 @@ $ kano-proxy login                      # once per machine
 $ kano-proxy agent setup codex
 ```
 
-It reads the Codex models your account can serve, lets you pick the default model, its reasoning effort and optional fallbacks on other providers, creates a model group named `codex-cli` whose model names are the plain ids (`gpt-5.6-sol`, not `codex/gpt-5.6-sol`), mints an API key named after this machine, edits `~/.codex/config.toml` (your other settings and comments stay), and generates `kano-models.json` from your installed Codex binary — the same transformation as the scripts below, with no `jq` needed. Because the group serves the plain ids, Codex's own catalog metadata lines up with them.
+It reads the Codex models your account can serve, lets you pick the default model, its reasoning effort and which models on your proxy answer behind it, in order (any provider — the first answers, the rest take over when it is benched or out of quota), creates a model group named `codex-cli` whose model names are the plain ids (`gpt-5.6-sol`, not `codex/gpt-5.6-sol`), mints an API key named after this machine, edits `~/.codex/config.toml` (your other settings and comments stay), and generates `kano-models.json` from your installed Codex binary — the same transformation as the scripts below, with no `jq` needed. Because the group serves the plain ids, Codex's own catalog metadata lines up with them.
 
 `kano-proxy agent restore codex` puts the fields it wrote back, removes the generated catalog and revokes the key; `--full` restores the whole file from the backup it took first.
 

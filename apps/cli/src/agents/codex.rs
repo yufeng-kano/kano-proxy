@@ -3,6 +3,8 @@
 //! `config.toml`, pointed at the `codex-cli` group's OpenAI endpoint, plus the
 //! model catalog generated from the installed `codex` binary so the `/model`
 //! picker shows what this account can serve, with efforts the proxy accepts.
+//! The model Codex starts with is a name from its own catalog; the targets
+//! behind that name are picked from the whole proxy catalog, in order.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -10,7 +12,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{doc, fallback_candidates, group_models, provider_ids, validate_fallbacks, AgentKind, Current, Plan, SetupArgs, EFFORTS, KEY_PLACEHOLDER};
+use super::{doc, group_models, provider_ids, resolve_targets, target_candidates, AgentKind, Current, Plan, SetupArgs, EFFORTS, KEY_PLACEHOLDER};
 use crate::api::CatalogModel;
 use crate::tui::{self, Nav};
 
@@ -22,7 +24,8 @@ const DEFAULT_EFFORT: &str = "high";
 pub struct Picks {
     pub model: String,
     pub effort: String,
-    pub fallbacks: Vec<String>,
+    /// The `provider/model` targets behind `model`, first answers; never empty.
+    pub targets: Vec<String>,
 }
 
 /// The catalog file `setup` writes: `~/.codex/kano-models.json`, derived from the bundled
@@ -34,9 +37,9 @@ pub struct CatalogPlan {
 }
 
 /// The interactive root page (docs/cli.md § Navigation): model, reasoning effort and
-/// fallbacks, starting from the config's `model` / `model_reasoning_effort` and the
-/// group's fallbacks. Enter edits a row into the draft; Tab saves; Esc twice exits,
-/// asking first when the draft differs from what is set up now.
+/// targets, starting from the config's `model` / `model_reasoning_effort` and the
+/// group's targets for that name. Enter edits a row into the draft; Tab saves; Esc twice
+/// exits, asking first when the draft differs from what is set up now.
 pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Current) -> Result<Picks> {
     let kind = AgentKind::Codex;
     let ids = provider_ids(catalog, kind.provider());
@@ -54,11 +57,11 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
         if !EFFORTS.contains(&effort) {
             bail!("--effort {effort}: use one of {}", EFFORTS.join(", "));
         }
-        let fallbacks = validate_fallbacks(catalog, &args.fallback)?
-            .into_iter()
-            .filter(|f| f != &format!("codex/{model}"))
-            .collect();
-        return Ok(Picks { model: model.to_string(), effort: effort.to_string(), fallbacks });
+        let mut targets = resolve_targets(catalog, kind.provider(), &args.target).context("--target")?;
+        if targets.is_empty() {
+            targets.push(format!("codex/{model}"));
+        }
+        return Ok(Picks { model: model.to_string(), effort: effort.to_string(), targets });
     }
 
     tui::require_tty()?;
@@ -71,20 +74,23 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
         .field("model_reasoning_effort")
         .and_then(|v| EFFORTS.iter().position(|e| *e == v))
         .unwrap_or(default_effort);
-    let mut fallbacks = current.fallbacks(&ids[model], &own(model));
-    let baseline = current.configured.then(|| (model, effort, fallbacks.clone()));
-    let fb_text = |fb: &[String]| if fb.is_empty() { "none".to_string() } else { fb.join(", ") };
+    // The group's targets for the name in place, else the model itself.
+    let targets_for = |i: usize| current.targets(&ids[i]).filter(|t| !t.is_empty()).unwrap_or_else(|| vec![own(i)]);
+    let candidates = target_candidates(catalog);
+    let mut targets = targets_for(model);
+    let baseline = current.configured.then(|| (model, effort, targets.clone()));
+    let t_text = |t: &[String]| t.join(" › ");
     let mut cursor = 0usize;
     loop {
-        let picks = || Picks { model: ids[model].clone(), effort: EFFORTS[effort].to_string(), fallbacks: fallbacks.clone() };
+        let picks = || Picks { model: ids[model].clone(), effort: EFFORTS[effort].to_string(), targets: targets.clone() };
         let changed = |i: usize| match &baseline {
-            Some(b) => [b.0 != model, b.1 != effort, b.2 != fallbacks][i],
+            Some(b) => [b.0 != model, b.1 != effort, b.2 != targets][i],
             None => false,
         };
         let rows = vec![
             tui::RootRow { label: "Model".into(), value: ids[model].clone(), changed: changed(0) },
             tui::RootRow { label: "Reasoning effort".into(), value: EFFORTS[effort].into(), changed: changed(1) },
-            tui::RootRow { label: "Fallbacks".into(), value: fb_text(&fallbacks), changed: changed(2) },
+            tui::RootRow { label: "Targets".into(), value: t_text(&targets), changed: changed(2) },
         ];
         let changes: Vec<String> = match &baseline {
             Some(b) => {
@@ -96,13 +102,13 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                     c.push(format!("  Reasoning effort: {} → {}", EFFORTS[b.1], EFFORTS[effort]));
                 }
                 if changed(2) {
-                    c.push(format!("  Fallbacks: {} → {}", fb_text(&b.2), fb_text(&fallbacks)));
+                    c.push(format!("  Targets: {} → {}", t_text(&b.2), t_text(&targets)));
                 }
                 c
             }
             None => vec![
                 "The Codex CLI is not set up on this machine — saving sets it up with:".into(),
-                format!("  Model: {}  effort: {}  fallbacks: {}", ids[model], EFFORTS[effort], fb_text(&fallbacks)),
+                format!("  Model: {}  effort: {}  targets: {}", ids[model], EFFORTS[effort], t_text(&targets)),
             ],
         };
         let status = match (&baseline, changes.len()) {
@@ -110,7 +116,7 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
             (Some(_), 0) => "No changes — this is what is set up now".to_string(),
             (Some(_), n) => format!("{n} unsaved change{} — Tab saves", if n == 1 { "" } else { "s" }),
         };
-        let note = ["The group serves these names as-is, so Codex's own catalog metadata lines up."];
+        let note = ["Codex sees the model name as-is, so its own catalog metadata lines up; the targets are what answers under that name."];
         let (action, at) = tui::root(title, &note, &rows, cursor, &status)?;
         cursor = at;
         match action {
@@ -125,7 +131,7 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                 if let Nav::Next(i) = tui::choose_default(title, &note, &options, 0, model)? {
                     if i != model {
                         model = i;
-                        fallbacks = current.fallbacks(&ids[i], &own(i));
+                        targets = targets_for(i);
                     }
                 }
             }
@@ -136,13 +142,13 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
                 }
             }
             tui::RootAction::Edit(_) => {
-                let candidates = fallback_candidates(catalog, &own(model));
                 let note = [
-                    &*format!("Fallbacks for {} — tried in order when codex is benched or out of quota.", ids[model]),
-                    "Space toggles · Enter applies to the draft (nothing is saved until Tab on the main page).",
+                    &*format!("Targets behind {} — the first answers, the rest take over in order when it is benched or out of quota.", ids[model]),
+                    "Space toggles (the order toggled on is the order tried) · Enter applies to the draft (nothing is saved until Tab on the main page).",
                 ];
-                if let Nav::Next(picked) = tui::pick_many(title, &note, Some(&own(model)), &candidates, &fallbacks)? {
-                    fallbacks = picked;
+                if let Nav::Next(picked) = tui::pick_ordered(title, &note, &candidates, &targets)? {
+                    // A model with nothing behind it answers as itself.
+                    targets = if picked.is_empty() { vec![own(model)] } else { picked };
                 }
             }
         }
@@ -152,7 +158,7 @@ pub fn collect_picks(args: &SetupArgs, catalog: &[CatalogModel], current: &Curre
 pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Plan {
     let kind = AgentKind::Codex;
     let ids = provider_ids(catalog, kind.provider());
-    let models = group_models(kind.provider(), &ids, &[(picks.model.clone(), picks.fallbacks.clone())]);
+    let models = group_models(kind.provider(), &ids, &[(picks.model.clone(), picks.targets.clone())]);
     let names: Vec<String> = models.iter().map(|m| m.name.clone()).collect();
     let base = kind.group_base(base_url);
 
@@ -181,10 +187,10 @@ pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Pla
             "wire_api": "responses",
         }),
     ));
-    let mut summary = vec![format!("Codex CLI → {base}"), format!("model: {}  effort: {}", picks.model, picks.effort)];
-    if !picks.fallbacks.is_empty() {
-        summary.push(format!("fallbacks: {}", picks.fallbacks.join(", ")));
-    }
+    let summary = vec![
+        format!("Codex CLI → {base}"),
+        format!("model: {}  effort: {}  ← {}", picks.model, picks.effort, picks.targets.join(" › ")),
+    ];
     Plan { group_models: models, fields, summary, catalog: catalog_plan }
 }
 
@@ -249,24 +255,26 @@ mod tests {
             .collect()
     }
 
-    fn args(model: &str, effort: Option<&str>, fallback: &[&str]) -> SetupArgs {
+    fn args(model: &str, effort: Option<&str>, target: &[&str]) -> SetupArgs {
         SetupArgs {
             no_tui: true,
             dry_run: false,
             opus: None,
             sonnet: None,
             haiku: None,
+            fable: None,
             model: Some(model.into()),
             effort: effort.map(str::to_string),
-            fallback: fallback.iter().map(|s| s.to_string()).collect(),
+            target: target.iter().map(|s| s.to_string()).collect(),
         }
     }
 
     #[test]
     fn picks_validate_against_the_catalog_and_the_effort_ladder() {
-        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5"]), &catalog(), &NONE).unwrap();
+        let p = collect_picks(&args("gpt-5.6-sol", None, &["claude-code/claude-opus-5", "gpt-6-astra"]), &catalog(), &NONE).unwrap();
         assert_eq!((p.model.as_str(), p.effort.as_str()), ("gpt-5.6-sol", "high"));
-        assert_eq!(p.fallbacks, ["claude-code/claude-opus-5"]);
+        assert_eq!(p.targets, ["claude-code/claude-opus-5", "codex/gpt-6-astra"], "targets as given, a bare id on codex");
+        assert_eq!(collect_picks(&args("gpt-5.6-sol", None, &[]), &catalog(), &NONE).unwrap().targets, ["codex/gpt-5.6-sol"], "the model itself by default");
         assert!(collect_picks(&args("o3", None, &[]), &catalog(), &NONE).is_err());
         assert!(collect_picks(&args("gpt-5.6-sol", Some("minimal"), &[]), &catalog(), &NONE).is_err());
         assert!(collect_picks(&args("gpt-5.6-sol", None, &["grok/grok-4.5"]), &catalog(), &NONE).is_err());

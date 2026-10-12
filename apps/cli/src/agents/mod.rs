@@ -142,12 +142,11 @@ impl Current<'_> {
         self.doc.and_then(|d| d.get(field)).and_then(|v| v.as_str().map(str::to_string))
     }
 
-    /// The fallbacks the group already holds for `name`: its targets minus the model's own.
-    pub fn fallbacks(&self, name: &str, own: &str) -> Vec<String> {
+    /// The targets the group already holds for `name`, in order; `None` when it has no such model.
+    pub fn targets(&self, name: &str) -> Option<Vec<String>> {
         self.group
             .and_then(|g| g.models.iter().find(|m| m.name == name))
-            .map(|m| m.targets.iter().map(|t| t.model.clone()).filter(|t| t != own).collect())
-            .unwrap_or_default()
+            .map(|m| m.targets.iter().map(|t| t.model.clone()).collect())
     }
 }
 
@@ -165,12 +164,16 @@ pub struct Plan {
 pub struct SetupArgs {
     pub no_tui: bool,
     pub dry_run: bool,
+    /// Claude Code: a slot's targets, comma-separated `provider/model` ids (a bare id means
+    /// the agent's own provider).
     pub opus: Option<String>,
     pub sonnet: Option<String>,
     pub haiku: Option<String>,
+    pub fable: Option<String>,
+    /// Codex: the bare id Codex starts with, its effort, and the model's targets in order.
     pub model: Option<String>,
     pub effort: Option<String>,
-    pub fallback: Vec<String>,
+    pub target: Vec<String>,
 }
 
 pub struct RestoreArgs {
@@ -187,42 +190,45 @@ pub fn provider_ids(catalog: &[CatalogModel], provider: &str) -> Vec<String> {
     catalog.iter().filter(|m| m.provider == provider).map(|m| m.upstream.clone()).collect()
 }
 
-/// Every id a fallback may name: the full `provider/model` ids, minus the one being backed up.
-pub fn fallback_candidates(catalog: &[CatalogModel], except: &str) -> Vec<String> {
-    catalog.iter().map(|m| m.id.clone()).filter(|id| id != except).collect()
+/// Every id a target may name: the full `provider/model` ids of the live catalog, in order.
+pub fn target_candidates(catalog: &[CatalogModel]) -> Vec<String> {
+    catalog.iter().map(|m| m.id.clone()).collect()
 }
 
-/// Validates `--fallback` ids against the live catalog — a fallback the account cannot serve
-/// would only ever be skipped by the walk, which is not what the user asked for.
-pub fn validate_fallbacks(catalog: &[CatalogModel], fallbacks: &[String]) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    for id in fallbacks {
+/// Target ids from flags, resolved against the live catalog: a bare id means the agent's own
+/// provider; an id the account cannot serve would only ever be skipped by the walk, which is
+/// not what the user asked for. Order kept, duplicates dropped.
+pub fn resolve_targets(catalog: &[CatalogModel], provider: &str, targets: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for id in targets {
         let id = id.trim();
         if id.is_empty() {
             continue;
         }
-        if !catalog.iter().any(|m| m.id == id) {
-            bail!("--fallback {id}: not in your catalog (GET /cli/v1/models lists what your accounts can serve)");
+        let full = if id.contains('/') { id.to_string() } else { format!("{provider}/{id}") };
+        if !catalog.iter().any(|m| m.id == full) {
+            bail!("{full}: not in your catalog (GET /cli/v1/models lists what your accounts can serve)");
         }
-        if !out.iter().any(|o| o == id) {
-            out.push(id.to_string());
+        if !out.contains(&full) {
+            out.push(full);
         }
     }
     Ok(out)
 }
 
-/// The group's model set: `primary` names first (each targeting itself on the agent's
-/// provider, then its fallbacks), then every other id of the provider, within the cap.
+/// The group's model set: `primary` names first, each with its targets as picked (the first
+/// answers, the rest take over in order; a name picked twice keeps its first definition),
+/// then every other id of the provider targeting itself, within the cap.
 pub fn group_models(provider: &str, ids: &[String], primary: &[(String, Vec<String>)]) -> Vec<GroupModel> {
     let mut out: Vec<GroupModel> = Vec::new();
-    for (name, fallbacks) in primary {
-        if out.iter().any(|m| &m.name == name) {
+    for (name, picked) in primary {
+        if out.iter().any(|m| &m.name == name) || picked.is_empty() {
             continue;
         }
-        let mut targets = vec![GroupTarget { model: format!("{provider}/{name}"), account_id: None }];
-        for fb in fallbacks {
-            if !targets.iter().any(|t| &t.model == fb) {
-                targets.push(GroupTarget { model: fb.clone(), account_id: None });
+        let mut targets: Vec<GroupTarget> = Vec::new();
+        for t in picked {
+            if !targets.iter().any(|x| &x.model == t) {
+                targets.push(GroupTarget { model: t.clone(), account_id: None });
             }
         }
         out.push(GroupModel { name: name.clone(), targets });
@@ -891,6 +897,7 @@ mod tests {
                         { "id": "claude-code/claude-opus-5", "provider": "claude-code", "upstream": "claude-opus-5", "display_name": "Opus", "available": true },
                         { "id": "claude-code/claude-sonnet-5", "provider": "claude-code", "upstream": "claude-sonnet-5", "display_name": "Sonnet", "available": true },
                         { "id": "claude-code/claude-haiku-4-5", "provider": "claude-code", "upstream": "claude-haiku-4-5", "display_name": "Haiku", "available": true },
+                        { "id": "claude-code/claude-fable-5-1", "provider": "claude-code", "upstream": "claude-fable-5-1", "display_name": "Fable", "available": true },
                         { "id": "codex/gpt-5.6-sol", "provider": "codex", "upstream": "gpt-5.6-sol", "display_name": "GPT", "available": true }
                     ], "providers": [] }).to_string()),
                     ("GET", "/cli/v1/model-groups") => {
@@ -923,7 +930,7 @@ mod tests {
                     ("DELETE", p) if p.starts_with("/cli/v1/keys/key_") => (200, json!({ "ok": true }).to_string()),
                     ("DELETE", "/cli/v1/keys/key_gone") => (404, json!({ "error": "not found" }).to_string()),
                     ("GET", "/g/claude-code/anthropic/v1/models") => (200, json!({ "data": [
-                        { "id": "claude-opus-5" }, { "id": "claude-sonnet-5" }, { "id": "claude-haiku-4-5" }, { "id": "my-alias" }
+                        { "id": "claude-opus-5" }, { "id": "claude-sonnet-5" }, { "id": "claude-haiku-4-5" }, { "id": "claude-fable-5-1" }, { "id": "my-alias" }
                     ]}).to_string()),
                     ("GET", "/g/codex-cli/openai/v1/models") => (200, json!({ "object": "list", "data": [{ "id": "gpt-5.6-sol" }] }).to_string()),
                     ("DELETE", "/cli/v1/device") => (200, json!({ "ok": true }).to_string()),
@@ -974,12 +981,14 @@ mod tests {
         SetupArgs {
             no_tui: true,
             dry_run,
-            opus: Some("claude-opus-5".into()),
+            // Opus answers on codex first and is still served under the Claude id.
+            opus: Some("codex/gpt-5.6-sol,claude-opus-5".into()),
             sonnet: Some("claude-sonnet-5".into()),
             haiku: Some("claude-haiku-4-5".into()),
+            fable: None,
             model: None,
             effort: None,
-            fallback: vec!["codex/gpt-5.6-sol".into()],
+            target: vec![],
         }
     }
 
@@ -1011,15 +1020,19 @@ mod tests {
         assert_eq!(written["env"]["OTHER"], "keep");
         assert_eq!(written["env"]["ANTHROPIC_BASE_URL"], format!("{}/g/claude-code/anthropic", server.base));
         assert_eq!(written["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-kano-proxy-e2e-secret");
-        assert_eq!(written["env"]["ANTHROPIC_MODEL"], "claude-opus-5");
+        assert_eq!(written["env"]["ANTHROPIC_MODEL"], "old-model", "the user's own start model is not touched");
+        assert_eq!(written["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1");
+        assert_eq!(written["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-5");
         assert_eq!(written["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "claude-sonnet-5");
+        assert!(written["env"].get("ANTHROPIC_DEFAULT_FABLE_MODEL").is_none(), "a slot without targets is not written");
         let state = sandbox.file.load().unwrap();
         let record = state.agents.get("claude-code").expect("recorded");
         assert_eq!(record.key_name, "claude-code@my-mac");
         assert_eq!(record.group_slug, "claude-code");
         assert!(!fs::read_to_string(&sandbox.file.path).unwrap().contains("sk-kano-proxy-e2e-secret"), "no plaintext key in the state file");
-        assert_eq!(record.fields["env.ANTHROPIC_MODEL"].before, Some(json!("old-model")));
+        assert!(!record.fields.contains_key("env.ANTHROPIC_MODEL"));
         assert_eq!(record.fields["env.ANTHROPIC_BASE_URL"].before, None);
+        assert_eq!(record.fields["env.ANTHROPIC_DEFAULT_OPUS_MODEL"].wrote, json!("claude-opus-5"));
         assert_eq!(record.fields["env.ANTHROPIC_AUTH_TOKEN"].wrote, json!(KEY_RECORD));
         assert!(Path::new(&record.backup_path).exists(), "the pre-setup backup exists");
         assert!(fs::read_to_string(&record.backup_path).unwrap().contains("old-model"));
@@ -1029,14 +1042,16 @@ mod tests {
             let body: Value = serde_json::from_str(&created.2).unwrap();
             assert_eq!(body["slug"], "claude-code");
             assert_eq!(body["models"][0]["name"], "claude-opus-5");
-            assert_eq!(body["models"][0]["targets"][1]["model"], "codex/gpt-5.6-sol");
+            assert_eq!(body["models"][0]["targets"][0]["model"], "codex/gpt-5.6-sol", "targets in the order picked");
+            assert_eq!(body["models"][0]["targets"][1]["model"], "claude-code/claude-opus-5");
+            assert!(body["models"].as_array().unwrap().iter().any(|m| m["name"] == "claude-fable-5-1"), "every claude-code id is mirrored");
             assert!(seen.iter().any(|(m, p, _)| m == "GET" && p == "/g/claude-code/anthropic/v1/models"), "verified through the group endpoint");
         }
         assert_eq!(rows(&state)[0].drift, "ok");
 
         // The user edits a managed field; list reports drift.
         let mut edited: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
-        edited["env"]["ANTHROPIC_MODEL"] = json!("claude-sonnet-5");
+        edited["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"] = json!("claude-opus-5");
         fs::write(&settings, serde_json::to_string_pretty(&edited).unwrap()).unwrap();
         assert_eq!(rows(&sandbox.file.load().unwrap())[0].drift, "drifted");
 
@@ -1049,7 +1064,7 @@ mod tests {
         let record = &state.agents["claude-code"];
         assert_eq!(record.backup_path, first_backup);
         assert_ne!(record.key_id, first_key);
-        assert_eq!(record.fields["env.ANTHROPIC_MODEL"].before, Some(json!("old-model")));
+        assert_eq!(record.fields["env.ANTHROPIC_DEFAULT_SONNET_MODEL"].before, None, "the first run's \"before\" is kept across reruns");
         {
             let seen = server.requests.lock().unwrap();
             assert!(seen.iter().any(|(m, p, _)| m == "DELETE" && p == &format!("/cli/v1/keys/{first_key}")), "the previous key is revoked");
@@ -1057,7 +1072,7 @@ mod tests {
             let body: Value = serde_json::from_str(&updated.2).unwrap();
             let opus = &body["models"][0];
             let targets: Vec<&str> = opus["targets"].as_array().unwrap().iter().map(|t| t["model"].as_str().unwrap()).collect();
-            assert_eq!(targets, ["claude-code/claude-opus-5", "codex/gpt-5.6-sol", "grok/grok-4.5"], "the user's own target stays after the computed ones");
+            assert_eq!(targets, ["codex/gpt-5.6-sol", "claude-code/claude-opus-5", "grok/grok-4.5"], "the user's own target stays after the picked ones");
             assert!(body["models"].as_array().unwrap().iter().any(|m| m["name"] == "my-alias"), "the user's extra model stays");
         }
 
@@ -1110,9 +1125,10 @@ mod tests {
             opus: None,
             sonnet: None,
             haiku: None,
+            fable: None,
             model: Some("gpt-5.6-sol".into()),
             effort: Some("xhigh".into()),
-            fallback: vec!["claude-code/claude-opus-5".into()],
+            target: vec!["gpt-5.6-sol".into(), "claude-code/claude-opus-5".into()],
         };
         cmd_setup(&sandbox.file, AgentKind::Codex, args).await.unwrap();
         let written = fs::read_to_string(&config).unwrap();
@@ -1221,7 +1237,11 @@ mod tests {
     #[test]
     fn group_models_put_primaries_first_and_respect_the_cap() {
         let ids: Vec<String> = (0..30).map(|i| format!("claude-{i}")).collect();
-        let primary = vec![("claude-25".to_string(), vec!["codex/gpt".to_string()]), ("claude-3".to_string(), vec![])];
+        let primary = vec![
+            ("claude-25".to_string(), vec!["claude-code/claude-25".to_string(), "codex/gpt".to_string()]),
+            ("claude-3".to_string(), vec!["claude-code/claude-3".to_string()]),
+            ("claude-9".to_string(), vec![]),
+        ];
         let models = group_models("claude-code", &ids, &primary);
         assert_eq!(models.len(), MAX_GROUP_MODELS);
         assert_eq!(models[0].name, "claude-25");
@@ -1229,11 +1249,13 @@ mod tests {
         assert_eq!(models[1].name, "claude-3");
         assert_eq!(models[2].name, "claude-0");
         assert_eq!(models.iter().filter(|m| m.name == "claude-3").count(), 1, "no duplicate names");
+        let nine = models.iter().find(|m| m.name == "claude-9").unwrap();
+        assert_eq!(nine.targets[0].model, "claude-code/claude-9", "a name with no picks is mirrored like any other id");
     }
 
     #[test]
     fn merge_keeps_user_targets_and_extra_models() {
-        let computed = group_models("claude-code", &["claude-opus-5".to_string()], &[("claude-opus-5".to_string(), vec![])]);
+        let computed = group_models("claude-code", &["claude-opus-5".to_string()], &[("claude-opus-5".to_string(), vec!["claude-code/claude-opus-5".to_string()])]);
         let existing = vec![
             GroupModel {
                 name: "claude-opus-5".into(),
@@ -1252,12 +1274,17 @@ mod tests {
     }
 
     #[test]
-    fn fallbacks_must_exist_in_the_catalog() {
+    fn targets_must_exist_in_the_catalog() {
         let catalog = cat(&["claude-code/claude-opus-5", "codex/gpt-5.6-sol"]);
-        assert_eq!(validate_fallbacks(&catalog, &["codex/gpt-5.6-sol".into(), " codex/gpt-5.6-sol ".into()]).unwrap(), ["codex/gpt-5.6-sol"]);
-        assert!(validate_fallbacks(&catalog, &["grok/grok-4.5".into()]).is_err());
+        assert_eq!(
+            resolve_targets(&catalog, "claude-code", &["codex/gpt-5.6-sol".into(), " codex/gpt-5.6-sol ".into(), "claude-opus-5".into()]).unwrap(),
+            ["codex/gpt-5.6-sol", "claude-code/claude-opus-5"],
+            "order kept, duplicates dropped, a bare id is the agent's own provider"
+        );
+        assert!(resolve_targets(&catalog, "claude-code", &["grok/grok-4.5".into()]).is_err());
+        assert!(resolve_targets(&catalog, "claude-code", &["gpt-5.6-sol".into()]).is_err(), "bare means claude-code/, not any provider");
         assert_eq!(provider_ids(&catalog, "claude-code"), ["claude-opus-5"]);
-        assert_eq!(fallback_candidates(&catalog, "claude-code/claude-opus-5"), ["codex/gpt-5.6-sol"]);
+        assert_eq!(target_candidates(&catalog), ["claude-code/claude-opus-5", "codex/gpt-5.6-sol"]);
     }
 
     #[test]
