@@ -13,6 +13,7 @@ Public releases retain verification and independent CLI distribution. The public
 - Extensions are passed at composition time; no global mutable plugin registry. Constructing two apps must not leak routes, middleware, or policies between them.
 - Authentication establishes the caller. Subscription policy runs after authentication without replacing the caller identity. Credentials are never returned to clients.
 - Personal pools remain isolated by default. Cross-user account access exists only through the explicit pool extension below; unrestricted cross-tenant lookup is forbidden.
+- An edition that must change its own rows and an API key together passes its transaction to the core's key functions (`create_key`, `create_key_for_device`, `delete_key` accept any Postgres executor, [auth.md](./auth.md) § Client API keys). The key commits or rolls back with the edition's rows.
 - Public migrations remain immutable. Cloud migrations have distinct names and a documented unified application order. Preserve existing user/key/session IDs, credential encryption keys and AgentTunnel identity on production cutover.
 
 ## Cloud product specification
@@ -89,5 +90,10 @@ export interface ShellOptions {
 ```
 
 Both exist for a hosted edition whose release notes are written for its operator, not for the people signed in to it ([admin-ui.md](./admin-ui.md) § Layout: edition options). The API keeps serving `/api/changelog`; an edition that hides the page also leaves `GITHUB_REPO` unset so the route reports unavailable.
+
+Extension routes passed in `routes` read two `meta` flags the same way core routes do:
+
+- `bare: true` renders the page outside the shell, with no sidebar, header or nav, like the CLI authorize view ([admin-ui.md](./admin-ui.md) § CLI authorize view). The route stays session-gated unless it is also `public`.
+- `restorable: false` keeps the path out of the persisted last route, so a reopened tab never lands on it ([admin-ui.md](./admin-ui.md) § View preferences). Use it for a page that only makes sense with its one-shot query, such as an authorize page.
 
 The public documentation site is extended the same way, from the edition's own VitePress project ([docs-site.md](./docs-site.md) § Editions).

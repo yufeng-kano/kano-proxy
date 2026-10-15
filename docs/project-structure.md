@@ -39,6 +39,7 @@ kano-proxy/
         core.ts          # supported web exports for composing editions
         extensions.ts    # route/navigation contracts and injection
         router/, pages/, components/, composables/, i18n/, services/, types/
+      tests/             # vitest, node environment (`pnpm test`)
       package.json, pnpm-lock.yaml
     docs/                # the public documentation site — VitePress (docs/docs-site.md)
       .vitepress/        # site.ts (shared config), config.ts (standalone), llms.ts (llms.txt), theme/

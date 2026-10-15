@@ -13,6 +13,8 @@ import { useI18n, type MessageKey } from "@/i18n"
  */
 // /cli/authorize carries its request id in the query, which lastPath does not
 // keep — a restore onto the bare path could only show "request missing".
+// Any route, including an edition's extension route, opts out the same way with
+// `meta: { restorable: false }` (docs/admin-ui.md § View preferences).
 const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli", "/cli/authorize", "/keys"])
 
 export interface RouterOptions {
@@ -172,15 +174,17 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
     // deleted since it was stored from 404ing the boot.
     if (isBoot && entryPath === "/" && !to.query.redirect) {
       const saved = readPrefs().lastPath
-      if (
-        saved &&
-        saved !== to.path &&
-        !NON_RESTORABLE.has(saved) &&
-        // A route deleted since the pref was written would otherwise fall
-        // through the catch-all and bounce straight back here.
-        router.resolve(saved).matched.length > 0
-      ) {
-        return saved
+      if (saved && saved !== to.path && !NON_RESTORABLE.has(saved)) {
+        const target = router.resolve(saved)
+        if (
+          // A pref written before the route opted out must not replay it either.
+          target.meta.restorable !== false &&
+          // A route deleted since the pref was written would otherwise fall
+          // through the catch-all and bounce straight back here.
+          target.matched.length > 0
+        ) {
+          return saved
+        }
       }
     }
 
@@ -188,7 +192,7 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
   })
 
   router.afterEach((to) => {
-    if (!NON_RESTORABLE.has(to.path)) setLastPath(to.path)
+    if (!NON_RESTORABLE.has(to.path) && to.meta.restorable !== false) setLastPath(to.path)
     // "<page> · <site>" so tabs and history are readable; the static <title> in
     // index.html is only the pre-boot value (docs/admin-ui.md § Pages).
     const key = to.meta.titleKey as MessageKey | undefined

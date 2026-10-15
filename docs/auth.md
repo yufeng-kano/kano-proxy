@@ -50,6 +50,7 @@ The callback redirects to the SPA root (`APP_URL/`), not to a specific page: lan
 - Multiple keys per user.
 - A key minted by the CLI (`POST /cli/v1/keys`, [cli.md](./cli.md) § Keys and groups) carries `device_id`, the `cli_devices` row that minted it — `NULL` for keys created here. The column is `ON DELETE CASCADE`: revoking the device deletes those keys, from the Access page or from `kano-proxy logout`. The device can revoke only its own keys; the Access page revokes any.
 - LLM requests resolve `key → user_id` then use **that user’s** pools only.
+- The database functions that mint and revoke a key (`db::keys::create_key`, `create_key_for_device`, `delete_key`) take any sqlx Postgres executor: the pool, a connection, or the caller's open transaction. An edition can therefore mint or revoke a key atomically with its own rows ([cloud-edition.md](./cloud-edition.md) § Module boundaries). A key minted in a transaction that rolls back never existed and never authenticates; it exists and authenticates only once that transaction commits.
 - Optional per-key **spend limit** (`spend_limit` USD + `spend_limit_interval` `daily|weekly|monthly|total` + `spend_limit_include_oauth`): enforced in the API-key auth middleware; at/over the window's estimated spend the LLM surfaces return **429** `spend_limit_exceeded` (Anthropic surface: `rate_limit_error`) before any upstream call. See [pricing.md](./pricing.md).
 
 ### Management routes (session required)

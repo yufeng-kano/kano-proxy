@@ -189,6 +189,7 @@ Server **data** caches (above) and **view preferences** — what the user picked
 - **Never** stores tokens, session state, emails, or any server payload — only enum-ish UI choices and integers. Unlike the server-data caches it is therefore **not** user-id scoped and **not** swept on logout: it holds nothing user-identifying, and a shared machine reveals only a route name.
 - Every read is validated against the current allowed values and falls back to the default on anything unexpected (stale schema, hand-edited storage, removed route). A malformed blob is discarded, never trusted.
 - Restore-on-boot only replays a route the router still knows and the signed-in user may see; the auth guard runs unchanged, so a persisted path never bypasses login.
+- Some paths are never written as the last path and never replayed from it. The core keeps a fixed list for its own: the root, login, the legacy redirect aliases and the CLI authorize view. Any route, core or extension, also opts out with `meta: { restorable: false }`. That is for a page whose URL carries a one-shot query (an edition's authorize page): the stored path keeps no query, so a later restore would land on the page without it.
 - Scroll restore waits for the page's first data paint, then sets the offset on the content region once; a user scroll during restore cancels it rather than fighting the user.
 
 ## Overview page

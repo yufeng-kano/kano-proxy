@@ -2,7 +2,7 @@
 //! display prefix; the plaintext exists only in the create response (docs/auth.md).
 
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgExecutor, PgPool};
 
 use crate::crypto::keys::create_api_key_material;
 use crate::ids::{new_id, now_iso};
@@ -77,8 +77,11 @@ pub async fn count_keys_for_device(db: &PgPool, device_id: &str) -> Result<i64, 
     sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE device_id = $1").bind(device_id).fetch_one(db).await
 }
 
+/// Takes any executor — the pool, or a caller's transaction so the key commits or rolls back
+/// with the caller's own rows (docs/auth.md § Client API keys). The same holds for
+/// `create_key_for_device` and `delete_key`.
 pub async fn create_key(
-    db: &PgPool,
+    db: impl PgExecutor<'_>,
     user_id: &str,
     name: &str,
     limits: Option<SpendLimitFields>,
@@ -89,7 +92,7 @@ pub async fn create_key(
 /// A key minted by a CLI device (`POST /cli/v1/keys`): the same row, with `device_id` set so the
 /// device's revocation takes the key with it. No limit fields — those are set on the Access page.
 pub async fn create_key_for_device(
-    db: &PgPool,
+    db: impl PgExecutor<'_>,
     user_id: &str,
     device_id: Option<&str>,
     name: &str,
@@ -175,7 +178,7 @@ pub async fn update_key(
     Ok(true)
 }
 
-pub async fn delete_key(db: &PgPool, user_id: &str, key_id: &str) -> Result<bool, sqlx::Error> {
+pub async fn delete_key(db: impl PgExecutor<'_>, user_id: &str, key_id: &str) -> Result<bool, sqlx::Error> {
     let r = sqlx::query("DELETE FROM api_keys WHERE id = $1 AND user_id = $2")
         .bind(key_id)
         .bind(user_id)
@@ -287,6 +290,43 @@ mod tests {
         let left = list_keys(&pool, &user.id).await.unwrap();
         assert_eq!(left.iter().map(|k| k.id.as_str()).collect::<Vec<_>>(), vec![manual.row.id.as_str()]);
         assert!(find_key_by_hash(&pool, &minted.row.key_hash).await.unwrap().is_none());
+    }
+
+    /// What the API-key middleware does with a presented key: hash it and look the row up.
+    async fn authenticates(pool: &PgPool, plaintext: &str) -> bool {
+        find_key_by_hash(pool, &hash_api_key(plaintext)).await.unwrap().is_some()
+    }
+
+    /// Minting and revoking run inside a caller's transaction and take effect only when it
+    /// commits: a rolled-back mint never authenticates, a rolled-back revoke leaves the key
+    /// working (docs/auth.md § Client API keys).
+    #[tokio::test]
+    async fn key_writes_follow_the_callers_transaction() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let user = insert_user(&pool, "tx@example.com").await;
+
+        let mut tx = pool.begin().await.unwrap();
+        let rolled_back = create_key(&mut *tx, &user.id, "rolled back", None).await.unwrap();
+        tx.rollback().await.unwrap();
+        assert!(!authenticates(&pool, &rolled_back.plaintext).await);
+        assert!(list_keys(&pool, &user.id).await.unwrap().is_empty());
+
+        let mut tx = pool.begin().await.unwrap();
+        let committed = create_key(&mut *tx, &user.id, "committed", None).await.unwrap();
+        // Not visible outside the transaction until it commits.
+        assert!(!authenticates(&pool, &committed.plaintext).await);
+        tx.commit().await.unwrap();
+        assert!(authenticates(&pool, &committed.plaintext).await);
+
+        let mut tx = pool.begin().await.unwrap();
+        assert!(delete_key(&mut *tx, &user.id, &committed.row.id).await.unwrap());
+        tx.rollback().await.unwrap();
+        assert!(authenticates(&pool, &committed.plaintext).await);
+
+        let mut tx = pool.begin().await.unwrap();
+        assert!(delete_key(&mut *tx, &user.id, &committed.row.id).await.unwrap());
+        tx.commit().await.unwrap();
+        assert!(!authenticates(&pool, &committed.plaintext).await);
     }
 
     #[tokio::test]
