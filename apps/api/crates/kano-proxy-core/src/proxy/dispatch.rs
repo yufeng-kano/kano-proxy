@@ -25,6 +25,7 @@ use crate::app::now_ms;
 use crate::db::custom_providers::CustomProviderRow;
 use crate::logging::request_log::{log_request, LogEntry};
 use crate::logging::usage_capture::{NormalizedUsage, UsageSniffer};
+use crate::pricing::litellm::{model_price, ModelPrice};
 use crate::pool::extension::{borrower_safe_headers, settle_lease, AttemptLease, LeaseOutcome};
 use crate::providers::types::{AdapterError, CallExtras, ChatCompletionRequest, DynAdapter};
 use crate::providers::ProviderId;
@@ -36,6 +37,7 @@ use crate::proxy::sse::{
     stream_with_eager_producer, stream_with_keepalive, PipeOpts, StreamCloseReason, StreamKeepaliveOpts,
     DEFAULT_KEEPALIVE_INTERVAL,
 };
+use crate::proxy::usage_cost::{annotate_usage_cost, annotate_usage_cost_stream};
 use crate::proxy::wire::{NonStreamResponse, Wire};
 use crate::proxy::wire_anthropic::AnthropicWire;
 use crate::proxy::wire_openai::OpenAiWire;
@@ -256,6 +258,9 @@ pub struct TransportOpts {
     /// `false` for `count_tokens`: an estimate never consumes tokens, so no usage is ever
     /// logged from it.
     pub capture_usage: bool,
+    /// Put `usage.cost` on a successful response (docs/api.md § Cost in usage) — the Chat
+    /// Completions route only. The price resolved for it is handed to the log row.
+    pub attach_cost: bool,
 }
 
 impl TransportOpts {
@@ -327,11 +332,14 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
     // Whether any upstream byte reached the client — a stream that produced output and then
     // broke still counts.
     let saw_output = Arc::new(AtomicBool::new(false));
+    // The price the piped body was annotated with, handed to the row on close.
+    let resolved_price: Arc<Mutex<Option<Option<ModelPrice>>>> = Arc::new(Mutex::new(None));
 
     let on_close = {
         let cx = cx.clone();
         let t = t.clone();
         let sniffer = sniffer.clone();
+        let resolved_price = resolved_price.clone();
         let progress = progress.clone();
         let forced_error_code = forced_error_code.clone();
         let headers_latency = headers_latency.clone();
@@ -365,6 +373,7 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
             entry.error_code = error_code;
             entry.upstream_status = progress.upstream_status;
             apply_usage(&mut entry, usage);
+            entry.resolved_price = resolved_price.lock().unwrap_or_else(|e| e.into_inner()).take();
             // The row must outlive the client connection, exactly as `waitUntil` kept it alive.
             tokio::spawn(async move { log_request(&cx, entry).await });
         })
@@ -396,9 +405,9 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
                 // Take the lease before anything else can await: every other outcome already
                 // settled its own leases, so `None` is final for them too.
                 let (delivered, frame) = match outcome {
-                    WalkOutcome::Response { response, lease, .. } => {
+                    WalkOutcome::Response { candidate, response, lease } => {
                         slot.lock().unwrap_or_else(|e| e.into_inner()).lease = lease;
-                        (Some(response), None)
+                        (Some((candidate, response)), None)
                     }
                     WalkOutcome::Cancelled => (None, None),
                     WalkOutcome::NoAccount => {
@@ -419,7 +428,7 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
                 if let Some(pending) = pending {
                     settle_once(&slot, pending);
                 }
-                let Some(response) = delivered else {
+                let Some((candidate, response)) = delivered else {
                     if let Some(frame) = frame {
                         ctl.fail(frame).await;
                     }
@@ -434,8 +443,16 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
                     *headers_latency.lock().unwrap_or_else(|e| e.into_inner()) = Some(now_ms() - started);
                     let tap_sniffer = sniffer.clone();
                     let tap_saw_output = saw_output.clone();
+                    let upstream: crate::upstream::ByteStream = if t.attach_cost {
+                        let model = canonical_model_id(&candidate.provider, &candidate.upstream_model);
+                        let price = model_price(&cx, &model).await;
+                        *resolved_price.lock().unwrap_or_else(|e| e.into_inner()) = Some(price.clone());
+                        Box::pin(annotate_usage_cost_stream(Box::pin(body_stream(body)), price))
+                    } else {
+                        Box::pin(body_stream(body))
+                    };
                     ctl.pipe_upstream(
-                        Box::pin(body_stream(body)),
+                        upstream,
                         PipeOpts {
                             tap: Some(Arc::new(move |chunk: &Bytes| {
                                 tap_saw_output.store(true, Ordering::SeqCst);
@@ -640,6 +657,13 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
         if event_stream {
             // "Legacy attach": an event-stream body under a non-stream request. The log row —
             // and with it the lease — lands on the stream's close.
+            let upstream: crate::upstream::ByteStream = if t.attach_cost && status.is_success() {
+                let price = model_price(cx, &entry.model).await;
+                entry.resolved_price = Some(price.clone());
+                Box::pin(annotate_usage_cost_stream(Box::pin(body_stream(body)), price))
+            } else {
+                Box::pin(body_stream(body))
+            };
             let sniffer: Arc<Mutex<Box<dyn UsageSniffer>>> = Arc::new(Mutex::new(t.wire.create_usage_sniffer()));
             let saw_output = Arc::new(AtomicBool::new(false));
             let tap_sniffer = sniffer.clone();
@@ -664,7 +688,7 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
                 });
             });
             let stream = stream_with_keepalive(
-                Box::pin(body_stream(body)),
+                upstream,
                 DEFAULT_KEEPALIVE_INTERVAL,
                 StreamKeepaliveOpts {
                     tap: Some(Arc::new(move |chunk: &Bytes| {
@@ -682,12 +706,19 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
             return res;
         }
 
-        let text = safe_response_text(body).await;
-        let usage = if t.capture_usage {
-            serde_json::from_str::<Value>(&text).ok().map(|json| t.wire.parse_usage(json.get("usage")))
-        } else {
-            None
-        };
+        let mut text = safe_response_text(body).await;
+        let attach_cost = t.attach_cost && status.is_success();
+        let json = if t.capture_usage || attach_cost { serde_json::from_str::<Value>(&text).ok() } else { None };
+        let usage = if t.capture_usage { json.as_ref().map(|json| t.wire.parse_usage(json.get("usage"))) } else { None };
+        if attach_cost {
+            let price = model_price(cx, &entry.model).await;
+            if let Some(mut json) = json {
+                if annotate_usage_cost(&mut json, price.as_ref()) {
+                    text = json.to_string();
+                }
+            }
+            entry.resolved_price = Some(price);
+        }
         apply_usage(&mut entry, usage);
         settle_and_log(cx, entry, lease, status.as_u16(), true).await;
 
@@ -764,6 +795,9 @@ pub struct ChatDispatchOptions {
     pub strategy: Option<String>,
     pub is_builtin: Option<bool>,
     pub custom_provider: Option<CustomProviderRow>,
+    /// `usage.cost` on the response — set by the Chat Completions route only; the Responses
+    /// and Anthropic conversion paths that reuse this dispatch leave it off.
+    pub attach_cost: bool,
 }
 
 impl ChatDispatchOptions {
@@ -796,6 +830,7 @@ pub async fn dispatch_chat_completions(cx: &AppState, opts: ChatDispatchOptions)
         caller: Arc::new(ChatCaller { req: opts.req.clone() }),
         wire: Arc::new(OpenAiWire),
         capture_usage: true,
+        attach_cost: opts.attach_cost,
     });
     if stream {
         dispatch_eager(cx, transport).await
@@ -944,6 +979,7 @@ pub async fn dispatch_anthropic_messages(cx: &AppState, opts: AnthropicDispatchO
         }),
         wire: Arc::new(AnthropicWire),
         capture_usage: endpoint != AnthropicEndpoint::CountTokens,
+        attach_cost: false,
     });
     if stream {
         dispatch_eager(cx, transport).await

@@ -131,11 +131,30 @@ pub async fn get_price_table(state: &AppState) -> Option<PriceTable> {
 
 /// Cache-only seam (the `AppState` wrapper above is what routes call).
 pub async fn get_price_table_with(cache: &Cache) -> Option<PriceTable> {
+    reload_memo(cache).await;
+    let memo = memo_state(cache);
+    memo.memo.as_ref().map(|m| m.table.clone())
+}
+
+/// One model's price off the same memo → cache read as [`get_price_table`], resolved in place
+/// instead of cloning the whole table — the per-request path (request log rows and the Chat
+/// Completions `usage.cost`, docs/pricing.md § Cost in the response). Never fetches; `None`
+/// when no table is loaded or the model has no match.
+pub async fn model_price(state: &AppState, raw_model: &str) -> Option<ModelPrice> {
+    let cache = state.cache();
+    reload_memo(cache).await;
+    let memo = memo_state(cache);
+    resolve_model_price(&memo.memo.as_ref()?.table, raw_model)
+}
+
+/// Re-reads the cached snapshot into the memo at most once per recheck window. The window
+/// caches misses too, so a process with no table does not pay a cache read per call.
+async fn reload_memo(cache: &Cache) {
     let now = now_ms();
     {
         let mut memo = memo_state(cache);
         if now - memo.checked_at < MEMO_RECHECK_MS {
-            return memo.memo.as_ref().map(|m| m.table.clone());
+            return;
         }
         memo.checked_at = now;
     }
@@ -143,8 +162,6 @@ pub async fn get_price_table_with(cache: &Cache) -> Option<PriceTable> {
         let mut memo = memo_state(cache);
         memo.memo = Some(snap);
     }
-    let memo = memo_state(cache);
-    memo.memo.as_ref().map(|m| m.table.clone())
 }
 
 async fn fetch_and_trim(

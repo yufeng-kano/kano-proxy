@@ -13,7 +13,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [auth.md](./auth.md) | Google OIDC admin, client API keys, OAuth account binding |
 | [database.md](./database.md) | Schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, routing module + strategies, failover, usage windows, manual unpause, adapters, turn-scoped Codex reasoning replay |
-| [pricing.md](./pricing.md) | Estimated per-request cost (LiteLLM + OpenRouter tables), per-key spend limits |
+| [pricing.md](./pricing.md) | Estimated per-request cost (LiteLLM + OpenRouter tables), per-key spend limits, `usage.cost` on Chat Completions responses |
 | [cli.md](./cli.md) | The official `kano-proxy` CLI (device login, Rust/ratatui): `tunnel` — the reverse tunnel exposing local LLMs as first-class providers; `agent` — sets up Claude Code / Codex CLI against the proxy through a model group and a device-minted key, and restores them |
 | [admin-ui.md](./admin-ui.md) | Web UI: design restraint (the house style), shell layout, pages, responsive rules, cache-first UX |
 | [docs-site.md](./docs-site.md) | Public `/docs/` site (VitePress, en + zh-TW): build, same-host serving, origin fill, page layout (one page per app page) and writing rules, SEO and indexing of the whole host |

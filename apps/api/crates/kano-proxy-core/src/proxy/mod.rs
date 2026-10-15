@@ -16,6 +16,7 @@ pub mod responses_openai;
 pub mod sse;
 pub mod sse_error_rewrite;
 pub mod sse_lines;
+pub mod usage_cost;
 pub mod wire;
 pub mod wire_anthropic;
 pub mod wire_openai;

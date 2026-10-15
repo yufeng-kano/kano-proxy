@@ -329,6 +329,8 @@ pub async fn handle_chat_completions(
             strategy: Some(resolved.strategy.clone()),
             is_builtin: Some(resolved.primary.is_builtin),
             custom_provider: resolved.primary.custom_provider.clone(),
+            // OpenRouter-style `usage.cost` (docs/api.md § Cost in usage) — this route only.
+            attach_cost: true,
             ..Default::default()
         },
     )
@@ -1229,5 +1231,247 @@ mod tests {
         }
         // The policy answered without ever reaching a route, so no upstream was touched.
         assert_eq!(f.mock.requests().len(), 0);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // usage.cost (docs/api.md § Cost in usage, docs/pricing.md § Cost in the response)
+    // ---------------------------------------------------------------------------------------
+
+    use crate::pricing::litellm::{compute_cost, CostUsage, ModelPrice, PriceSource, PriceTable, CACHE_KEY};
+
+    fn local_model_price() -> ModelPrice {
+        ModelPrice {
+            input: 0.000_003,
+            output: 0.000_015,
+            cache_read: Some(0.000_000_3),
+            cache_creation: Some(0.000_003_75),
+            source: Some(PriceSource::Litellm),
+        }
+    }
+
+    /// A price table for `local-model` in this fixture's own cache — the only place the request
+    /// path reads prices from. No network is involved.
+    async fn seed_local_model_price(f: &Fixture) {
+        let mut table = PriceTable::new();
+        table.insert("local-model".into(), local_model_price());
+        f.state
+            .cache()
+            .put_json(
+                CACHE_KEY,
+                &json!({ "table": table, "fetchedAt": crate::app::now_ms() }),
+                std::time::Duration::from_secs(600),
+            )
+            .await;
+    }
+
+    fn expected_cost(prompt: i64, completion: i64, cache_read: Option<i64>, cache_creation: Option<i64>) -> f64 {
+        compute_cost(
+            &local_model_price(),
+            &CostUsage {
+                prompt_tokens: Some(prompt),
+                completion_tokens: Some(completion),
+                cache_read_input_tokens: cache_read,
+                cache_creation_input_tokens: cache_creation,
+            },
+        )
+        .expect("priced")
+    }
+
+    fn chat_body(model: &str, stream: bool) -> serde_json::Value {
+        json!({ "model": model, "messages": [{ "role": "user", "content": "hi" }], "stream": stream })
+    }
+
+    /// The one chunk whose `usage` is an object.
+    fn usage_chunk(text: &str) -> serde_json::Value {
+        let chunks: Vec<_> = sse_events(text).into_iter().filter(|e| e["usage"].is_object()).collect();
+        assert_eq!(chunks.len(), 1, "{text}");
+        chunks.into_iter().next().unwrap()
+    }
+
+    const ANTHROPIC_MESSAGE_SSE: &str = "event: message_start\n\
+        data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"local-model\",\"content\":[],\"usage\":{\"input_tokens\":100,\"output_tokens\":1,\"cache_read_input_tokens\":50,\"cache_creation_input_tokens\":10}}}\n\n\
+        event: content_block_start\n\
+        data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+        event: content_block_delta\n\
+        data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n\
+        event: content_block_stop\n\
+        data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+        event: message_delta\n\
+        data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n\
+        event: message_stop\n\
+        data: {\"type\":\"message_stop\"}\n\n";
+
+    #[tokio::test]
+    async fn a_passthrough_completion_carries_the_logged_cost_and_nothing_else_changes() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        seed_local_model_price(&f).await;
+        f.mock.respond_json(StatusCode::OK, chat_ok());
+
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("mygw/local-model", false))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        let cost = json["usage"]["cost"].as_f64().expect("a priced request carries a number");
+        assert_eq!(cost, expected_cost(11, 2, None, None));
+        // The only change to the upstream body is the added field.
+        let mut upstream = chat_ok();
+        upstream["usage"]["cost"] = json!(cost);
+        assert_eq!(json, upstream);
+
+        let rows = f.logs(1).await;
+        assert_eq!(rows[0]["cost"].as_f64(), Some(cost));
+    }
+
+    #[tokio::test]
+    async fn a_converted_completion_carries_the_logged_cost_over_the_cache_inclusive_usage() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.custom_provider("my-claude", "anthropic", "https://upstream.example.com").await;
+        seed_local_model_price(&f).await;
+        f.mock.respond_json(
+            StatusCode::OK,
+            json!({
+                "id": "msg_1", "type": "message", "role": "assistant", "model": "local-model",
+                "content": [{ "type": "text", "text": "hello" }],
+                "stop_reason": "end_turn",
+                "usage": { "input_tokens": 100, "output_tokens": 20, "cache_read_input_tokens": 50, "cache_creation_input_tokens": 10 }
+            }),
+        );
+
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("my-claude/local-model", false))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["usage"]["prompt_tokens"], 160);
+        let cost = json["usage"]["cost"].as_f64().expect("priced");
+        assert_eq!(cost, expected_cost(160, 20, Some(50), Some(10)));
+        let rows = f.logs(1).await;
+        assert_eq!(rows[0]["cost"].as_f64(), Some(cost));
+    }
+
+    #[tokio::test]
+    async fn a_passthrough_stream_annotates_only_its_usage_chunk_on_a_group_endpoint_too() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        f.group("team", "fast", &["mygw/local-model"]).await;
+        seed_local_model_price(&f).await;
+        const CONTENT: &str = "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n";
+        const USAGE: &str = "{\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}";
+        const DONE: &str = "data: [DONE]\n\n";
+        f.mock.respond_sse(
+            StatusCode::OK,
+            Box::leak(format!("{CONTENT}data: {USAGE}\n\n{DONE}").into_boxed_str()),
+        );
+
+        let response = f.router().oneshot(f.post("/g/team/openai/v1/chat/completions", chat_body("fast", true))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let text = drain_sse(response).await;
+        let cost = expected_cost(3, 1, None, None);
+        let mut annotated: serde_json::Value = serde_json::from_str(USAGE).unwrap();
+        annotated["usage"]["cost"] = json!(cost);
+        // Every other byte is exactly what the upstream sent.
+        assert_eq!(text, format!("{CONTENT}data: {annotated}\n\n{DONE}"));
+
+        let rows = f.logs(1).await;
+        assert_eq!(rows[0]["group_name"], "team/fast");
+        assert_eq!(rows[0]["cost"].as_f64(), Some(cost));
+    }
+
+    #[tokio::test]
+    async fn a_converted_stream_carries_the_logged_cost_on_its_final_usage_chunk() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.custom_provider("my-claude", "anthropic", "https://upstream.example.com").await;
+        seed_local_model_price(&f).await;
+        f.mock.respond_sse(StatusCode::OK, ANTHROPIC_MESSAGE_SSE);
+
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("my-claude/local-model", true))).await.unwrap();
+        let text = drain_sse(response).await;
+        let chunk = usage_chunk(&text);
+        assert_eq!(chunk["usage"]["prompt_tokens"], 160);
+        assert_eq!(chunk["usage"]["completion_tokens"], 7);
+        let cost = chunk["usage"]["cost"].as_f64().expect("priced");
+        assert_eq!(cost, expected_cost(160, 7, Some(50), Some(10)));
+        let rows = f.logs(1).await;
+        assert_eq!(rows[0]["completion_tokens"], 7);
+        assert_eq!(rows[0]["cost"].as_f64(), Some(cost));
+    }
+
+    #[tokio::test]
+    async fn an_unpriced_request_reports_null_cost_both_ways_never_zero() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        // No price table was ever loaded for this instance.
+        custom_gateway(&f).await;
+        f.mock.respond_json(StatusCode::OK, chat_ok());
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("mygw/local-model", false))).await.unwrap();
+        let json = body_json(response).await;
+        assert!(json["usage"].as_object().unwrap().contains_key("cost"));
+        assert_eq!(json["usage"]["cost"], serde_json::Value::Null);
+
+        f.mock.respond_sse(StatusCode::OK, ANTHROPIC_MESSAGE_SSE);
+        f.custom_provider("my-claude", "anthropic", "https://upstream.example.com").await;
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("my-claude/local-model", true))).await.unwrap();
+        let chunk = usage_chunk(&drain_sse(response).await);
+        assert!(chunk["usage"].as_object().unwrap().contains_key("cost"));
+        assert_eq!(chunk["usage"]["cost"], serde_json::Value::Null);
+
+        let rows = f.logs(2).await;
+        assert!(rows.iter().all(|r| r["cost"].is_null()), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn an_upstream_supplied_cost_is_left_untouched_while_the_row_keeps_the_estimate() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        seed_local_model_price(&f).await;
+        let mut upstream = chat_ok();
+        upstream["usage"]["cost"] = json!(0.123);
+        f.mock.respond_json(StatusCode::OK, upstream.clone());
+        f.mock.respond_sse(
+            StatusCode::OK,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2,\"cost\":0.123}}\n\ndata: [DONE]\n\n",
+        );
+
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("mygw/local-model", false))).await.unwrap();
+        assert_eq!(body_json(response).await, upstream);
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("mygw/local-model", true))).await.unwrap();
+        assert_eq!(
+            drain_sse(response).await,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2,\"cost\":0.123}}\n\ndata: [DONE]\n\n"
+        );
+
+        let rows = f.logs(2).await;
+        let estimate = expected_cost(11, 2, None, None);
+        assert!(rows.iter().all(|r| r["cost"].as_f64() == Some(estimate)), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_answering_a_non_stream_request_is_annotated_too() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        seed_local_model_price(&f).await;
+        f.mock.respond_sse(
+            StatusCode::OK,
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n",
+        );
+        let response = f.router().oneshot(f.post("/openai/v1/chat/completions", chat_body("mygw/local-model", false))).await.unwrap();
+        let cost = usage_chunk(&drain_sse(response).await)["usage"]["cost"].as_f64().expect("priced");
+        assert_eq!(cost, expected_cost(3, 1, None, None));
+        let rows = f.logs(1).await;
+        assert_eq!(rows[0]["cost"].as_f64(), Some(cost));
+    }
+
+    #[tokio::test]
+    async fn the_responses_surface_gets_no_cost_field() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        seed_local_model_price(&f).await;
+        f.mock.respond_json(StatusCode::OK, chat_ok());
+        let response = f
+            .router()
+            .oneshot(f.post("/openai/v1/responses", json!({ "model": "mygw/local-model", "input": "hi" })))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert!(json["usage"].is_object(), "{json}");
+        assert!(json["usage"].get("cost").is_none(), "{json}");
     }
 }

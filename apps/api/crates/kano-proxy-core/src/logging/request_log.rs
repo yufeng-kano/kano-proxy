@@ -8,7 +8,7 @@
 
 use crate::db::request_logs::{account_label, api_key_name, insert_request_log, RequestLogEntry};
 use crate::ids::{iso_ms, now_iso};
-use crate::pricing::litellm::{estimate_cost, get_price_table, CostUsage};
+use crate::pricing::litellm::{compute_cost, model_price, CostUsage, ModelPrice};
 use crate::AppState;
 
 /// What a dispatch transport knows when it decides a row. `started_at_ms` is the UTC epoch
@@ -34,6 +34,11 @@ pub struct LogEntry {
     /// The model-group alias this request was addressed to, if any; `model`/`provider` always
     /// store the expanded canonical target.
     pub group_name: Option<String>,
+    /// `Some` when the response path already resolved `model`'s price to put `usage.cost` on
+    /// the response (docs/pricing.md § Cost in the response): the row applies the formula with
+    /// that very price — `Some(None)` = unpriced — so row and response cannot disagree across a
+    /// table refresh. `None` resolves at write time.
+    pub resolved_price: Option<Option<ModelPrice>>,
 }
 
 /// Writes one row, cost included. Never returns an error: a logging failure is recorded and
@@ -66,21 +71,23 @@ async fn write_request_log(cx: &AppState, entry: LogEntry) -> anyhow::Result<()>
         None => None,
     };
 
-    // Estimated USD at write time (docs/pricing.md). `get_price_table` never fetches — memo and
+    // Estimated USD at write time (docs/pricing.md). `model_price` never fetches — memo and
     // cache only — so a missing table degrades to NULL cost without delaying the write.
-    let cost = match get_price_table(cx).await {
-        Some(table) => estimate_cost(
-            &table,
-            &entry.model,
+    let price = match entry.resolved_price {
+        Some(price) => price,
+        None => model_price(cx, &entry.model).await,
+    };
+    let cost = price.and_then(|price| {
+        compute_cost(
+            &price,
             &CostUsage {
                 prompt_tokens: entry.prompt_tokens,
                 completion_tokens: entry.completion_tokens,
                 cache_read_input_tokens: entry.cache_read_input_tokens,
                 cache_creation_input_tokens: entry.cache_creation_input_tokens,
             },
-        ),
-        None => None,
-    };
+        )
+    });
 
     insert_request_log(
         cx.pool(),
@@ -114,7 +121,7 @@ mod tests {
     use super::*;
     use crate::db::test_support::{insert_account, insert_api_key, insert_user, skip_without_db, test_pool, test_state};
     use crate::pool::StoredCredential;
-    use crate::pricing::litellm::{ModelPrice, PriceSource, PriceTable};
+    use crate::pricing::litellm::{estimate_cost, get_price_table, PriceSource, PriceTable};
     use crate::upstream::MockTransport;
 
     async fn rows(state: &AppState) -> Vec<crate::db::request_logs::RequestLogRow> {
@@ -178,6 +185,7 @@ mod tests {
                 error_code: None,
                 upstream_status: Some(200),
                 group_name: Some("team/opus".into()),
+                resolved_price: None,
             },
         )
         .await;

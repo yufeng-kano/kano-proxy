@@ -1,6 +1,6 @@
 # Pricing & spend
 
-Estimated USD cost per request, computed from logged token counts and a public per-model price table. Powers the Overview spend cards and per-API-key spend limits ([admin-ui.md](./admin-ui.md), [auth.md](./auth.md)).
+Estimated USD cost per request, computed from logged token counts and a public per-model price table. Powers the Overview spend cards, per-API-key spend limits ([admin-ui.md](./admin-ui.md), [auth.md](./auth.md)) and the OpenRouter-compatible `usage.cost` on Chat Completions responses (§ Cost in the response).
 
 **Estimates, not invoices.** Costs are derived from `request_logs` token fields and list prices; they exist so an operator can bound and compare usage, not to reconcile a bill. Subscription (OAuth) traffic through `claude-code` / `codex` / `grok` / `antigravity` is priced at the same list rates — that is the "what would this have cost via API" number, which is also what makes the per-key include-OAuth toggle meaningful.
 
@@ -41,8 +41,20 @@ A table entry missing a cache-read or cache-creation rate falls back to the plai
 
 ## Storage & backfill
 
-- `request_logs.cost` (REAL, USD, nullable) is computed **at write time** inside `logRequest` — one choke point for every logging call site. A pricing failure degrades to `NULL` cost; it never fails the log write or the request.
+- `request_logs.cost` (REAL, USD, nullable) is computed **at write time** inside `logRequest` — one choke point for every logging call site. A pricing failure degrades to `NULL` cost; it never fails the log write or the request. When the Chat Completions transport already resolved the served model's price for the response's `usage.cost` (§ Cost in the response), it hands that resolved price to the log row, and `logRequest` applies the formula with it instead of resolving again — so the row and the response cannot disagree across a table refresh.
 - Rows from before the column existed (or unpriced at write time) have `NULL` cost. `GET /api/usage/summary` re-prices those rows **at read time** with the same shared resolver, so history isn't blank. The response marks how much of the range is estimated vs unpriced.
+
+## Cost in the response
+
+`POST /openai/v1/chat/completions` — and the same route on every group endpoint, `/g/<slug>/openai/v1/chat/completions` — reports the request's estimate to the client as `usage.cost`, a USD number, in the field OpenRouter uses. It is the same estimate `request_logs.cost` gets for that request ([api.md](./api.md) § Cost in usage has the wire details):
+
+- **Same inputs.** The price is resolved once per request, for the served candidate's canonical `provider/upstream` id (the expanded target, never a group alias), through the model matching chain above. The formula is § Cost formula. The token numbers are the ones logging captures from that same `usage` object. The transport passes the resolved price to the log row, so the response's `cost` and the row's `cost` are one computation over the same numbers.
+- **An estimate, not a charge.** Subscription (OAuth) traffic is priced at the same list rates as everywhere else on this page. The number says what the request would have cost through the provider's API. It is not money the operator paid, and it is not an invoice line.
+- **`null` means unknown.** No price table loaded yet, no match for the model, or a `usage` object with no token counts gives `"cost": null`. It is never `0` as a guess. A response with no `usage` object at all gets none added; the proxy never fabricates a usage object to carry the field.
+- **An upstream's own figure wins.** When the upstream already put a numeric `usage.cost` in the object (a custom provider pointed at OpenRouter, for example), the proxy leaves it untouched: it is the upstream's real charge, and replacing it with a list-price estimate would be less accurate. `request_logs.cost` keeps the proxy's estimate as before, so the dashboard and spend limits stay on one consistent basis. For these requests the response and the row may differ, by design.
+- **Never on the critical path.** The price comes from the in-process memo / in-process cache only, the same read `logRequest` does. No network fetch, no database read. Any failure there yields `null`, and the response is otherwise unchanged.
+
+Out of scope: the `/anthropic` surface, `/openai/v1/responses` (both its native and conversion paths) and `/models` carry no cost field. Their requests are still priced into `request_logs.cost` exactly as before.
 
 ## Per-key spend limits
 

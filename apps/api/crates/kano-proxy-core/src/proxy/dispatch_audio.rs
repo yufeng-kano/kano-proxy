@@ -133,6 +133,7 @@ pub async fn dispatch_audio_transcriptions(cx: &AppState, opts: AudioDispatchOpt
         caller: Arc::new(AudioCaller { form: opts.form.clone(), raw_model: opts.raw_model.clone() }),
         wire: Arc::new(OpenAiWire),
         capture_usage: true,
+        attach_cost: false,
     });
     dispatch_non_stream_with(cx, transport, &AudioDelivery { idle_timeout }).await
 }

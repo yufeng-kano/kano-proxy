@@ -111,6 +111,7 @@ pub async fn dispatch_anthropic_via_openai(cx: &AppState, opts: ViaOpenAiDispatc
             strategy: opts.strategy.clone(),
             is_builtin: opts.is_builtin,
             custom_provider: opts.custom_provider.clone(),
+            attach_cost: false,
             req: ChatCompletionRequest {
                 model: opts.raw_model.clone(),
                 raw_model: opts.raw_model.clone(),

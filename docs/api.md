@@ -157,7 +157,19 @@ Wherever this proxy **builds** an OpenAI-shaped `usage` object (claude-code / cu
 
 Conversely, when building an Anthropic-shaped `usage` from an OpenAI upstream that reported `prompt_tokens_details.cached_tokens` (`/anthropic` → grok / codex / custom `format=openai`), the converted usage reports proper Anthropic semantics: `input_tokens` excludes the cached share, which appears as `cache_read_input_tokens`.
 
-Pure passthrough paths (`grok` and custom `format=openai` on `/openai/v1`; native `/anthropic` passthroughs) never rewrite upstream usage. These numbers also feed `request_logs` for the admin dashboard (see [logging.md](./logging.md)).
+Pure passthrough paths (`grok` and custom `format=openai` on `/openai/v1`; native `/anthropic` passthroughs) never rewrite upstream token counts. The one addition on `/openai/v1/chat/completions` is `usage.cost` (next section); native `/anthropic` passthroughs get nothing added. These numbers also feed `request_logs` for the admin dashboard (see [logging.md](./logging.md)).
+
+### Cost in usage
+
+`/openai/v1/chat/completions` and `/g/<slug>/openai/v1/chat/completions` add the request's estimated USD cost as `usage.cost`, OpenRouter's field, so a client that shows OpenRouter spend shows this proxy's the same way. The value is the estimate `request_logs.cost` stores for that request — same resolver, formula and token numbers; semantics, `null` cases and the OAuth list-price caveat are in [pricing.md](./pricing.md) § Cost in the response. It applies to every adapter on this surface: the conversion paths (`claude-code`, custom `format=anthropic`, `codex`, `antigravity`) and the pure passthroughs (`grok`, custom `format=openai`, and a CLI tunnel provider).
+
+- **Non-stream:** a `2xx` JSON body whose top-level `usage` is an object gets `cost` inserted into it. The body is re-serialized for that, keeping every other key, value and key order. A body that does not parse, an error status, or a body with no `usage` object is returned exactly as before.
+- **Stream** (and an event-stream body answering a non-stream request): every `data:` chunk whose top-level `usage` is an object gets `cost` — in practice the final usage chunk, the one the converters attach and `stream_options.include_usage` produces. When an upstream repeats usage on several chunks, each gets the cost of the usage it carries, and the last one matches the logged row, because logging keeps the last usage seen. Only that line is re-serialized. Every other line passes through byte-for-byte, but each line is now forwarded whole: a partial line is held until its newline arrives, so chunk boundaries can move to line ends. The hold is bounded at 256 KiB; a longer line is forwarded as it arrives and never annotated. Nothing beyond that one line is ever buffered, and backpressure and cancellation are unchanged.
+- **Upstream-supplied cost:** a `usage` object that already carries a numeric `cost` is left untouched — the upstream's real figure is never overwritten. `request_logs.cost` still records the proxy's estimate ([pricing.md](./pricing.md)).
+- **Unpriced:** `"cost": null`, never `0`. No `usage` object is ever created just to carry it.
+- **Never a failure:** the price comes from the in-process table only. A missing table or any pricing error gives `null`, never an error or a delay.
+
+Not on `/anthropic`, not on `/openai/v1/responses` (the Responses conversion dispatches Chat Completions internally, without this annotation), and not on `/models`.
 
 ### `POST /openai/v1/responses`
 
@@ -389,7 +401,7 @@ Effort inputs, in priority order where applicable: (1) `reasoning_effort` (OpenA
 
 ## Streaming
 
-Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive / eager-commit wrapper (`proxy/sse.ts`). Both wrappers are **demand-driven**: while the client is not consuming, the pump stops reading upstream (backpressure propagates instead of the remainder buffering in memory), and the keepalive/idle timers pause with it — a client-side stall is not an upstream silence gap, so it neither draws keepalives into an unread queue nor counts toward the 120s upstream idle timeout.
+Every streaming response, both surfaces, every provider, is relayed byte-for-byte from upstream — this proxy never buffers a whole completion before forwarding it — through a shared keepalive / eager-commit wrapper (`proxy/sse.ts`). The one exception is the usage chunk on `/openai/v1/chat/completions`, which gains `usage.cost`; that path forwards whole lines, holding at most one partial line (§ Cost in usage). Both wrappers are **demand-driven**: while the client is not consuming, the pump stops reading upstream (backpressure propagates instead of the remainder buffering in memory), and the keepalive/idle timers pause with it — a client-side stall is not an upstream silence gap, so it neither draws keepalives into an unread queue nor counts toward the 120s upstream idle timeout.
 
 ### `message_start` and the client's context indicator
 
