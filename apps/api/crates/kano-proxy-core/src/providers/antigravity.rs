@@ -292,20 +292,44 @@ async fn error_detail(response: UpstreamResponse) -> String {
     }
 }
 
+/// A side call (`loadCodeAssist`, `retrieveUserQuotaSummary`) on the same hosts, in the same
+/// order, as the data plane: `daily-` first, then `cloudcode-pa`, which is also what the real
+/// CLI does. These two used to go straight to `cloudcode-pa`, which as of 2026-10-16 does not
+/// return the Gemini 4 Argon quota group that `daily-` does. The last host's error is the one
+/// reported.
+async fn side_post(cx: &AppState, path: &str, name: &str, access_token: &str, body: &Value) -> anyhow::Result<Value> {
+    let mut last_error: Option<anyhow::Error> = None;
+    for base in BASE_URLS {
+        let request = api_request(cx, format!("{base}{path}"), access_token, "*/*")
+            .body(Bytes::from(body.to_string()))
+            .timeout(SIDE_FETCH_TIMEOUT);
+        let response = match cx.transport().send(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                last_error = Some(error.into());
+                continue;
+            }
+        };
+        if !response.status.is_success() {
+            let status = response.status.as_u16();
+            last_error = Some(anyhow::anyhow!("{name} {status}: {}", error_detail(response).await));
+            continue;
+        }
+        match response.json_value().await {
+            Ok(json) => return Ok(json),
+            Err(error) => last_error = Some(error.into()),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("{name}: no base URL")))
+}
+
 /// `v1internal:loadCodeAssist` — the account's CloudCode project, tier, and (for paid tiers)
 /// its Google One AI credit balance. CLIProxyAPI `internal/auth/antigravity/auth.go`
 /// `FetchProjectID` for the project/tier halves, `antigravity_executor_credits.go` for the
 /// credit half.
 pub async fn load_code_assist(cx: &AppState, access_token: &str) -> anyhow::Result<LoadCodeAssist> {
-    let request = api_request(cx, format!("{}{LOAD_CODE_ASSIST_PATH}", BASE_URLS[1]), access_token, "*/*")
-        .body(Bytes::from(json!({ "metadata": { "ideType": "ANTIGRAVITY" } }).to_string()))
-        .timeout(SIDE_FETCH_TIMEOUT);
-    let response = cx.transport().send(request).await?;
-    if !response.status.is_success() {
-        let status = response.status.as_u16();
-        anyhow::bail!("loadCodeAssist {status}: {}", error_detail(response).await);
-    }
-    let json = response.json_value().await?;
+    let body = json!({ "metadata": { "ideType": "ANTIGRAVITY" } });
+    let json = side_post(cx, LOAD_CODE_ASSIST_PATH, "loadCodeAssist", access_token, &body).await?;
     let paid_tier = json.get("paidTier");
     let mut credits = None;
     if let Some(available) = paid_tier.and_then(|t| t.get("availableCredits")).and_then(Value::as_array) {
@@ -427,15 +451,8 @@ pub async fn retrieve_user_quota_summary(
     access_token: &str,
     project: &str,
 ) -> anyhow::Result<Vec<UsageWindow>> {
-    let request = api_request(cx, format!("{}{RETRIEVE_QUOTA_PATH}", BASE_URLS[1]), access_token, "*/*")
-        .body(Bytes::from(json!({ "project": project }).to_string()))
-        .timeout(SIDE_FETCH_TIMEOUT);
-    let response = cx.transport().send(request).await?;
-    if !response.status.is_success() {
-        let status = response.status.as_u16();
-        anyhow::bail!("retrieveUserQuotaSummary {status}: {}", error_detail(response).await);
-    }
-    let json = response.json_value().await?;
+    let body = json!({ "project": project });
+    let json = side_post(cx, RETRIEVE_QUOTA_PATH, "retrieveUserQuotaSummary", access_token, &body).await?;
     let mut windows = Vec::new();
     collect_quota_buckets(json.get("buckets"), None, &mut windows);
     if let Some(groups) = json.get("groups").and_then(Value::as_array) {
@@ -1325,7 +1342,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_on_a_failed_project_bootstrap_so_dispatch_skips_the_candidate() {
         let transport = MockTransport::new();
-        transport.expect(|_| Ok(UpstreamResponse::from_bytes(StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), "boom")));
+        for _ in BASE_URLS {
+            transport.expect(|_| Ok(UpstreamResponse::from_bytes(StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), "boom")));
+        }
         let Some((cx, account)) = setup(transport, credential_without_project()).await else {
             return skip_without_db();
         };
@@ -1832,6 +1851,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_quota_from_the_daily_host_and_falls_back_to_prod() {
+        let transport = MockTransport::new();
+        transport.expect(|_| Ok(UpstreamResponse::json(StatusCode::OK, &json!({ "cloudaicompanionProject": "proj-42" }))));
+        transport.expect(|_| Ok(UpstreamResponse::json(StatusCode::SERVICE_UNAVAILABLE, &json!({}))));
+        transport.expect(|_| {
+            Ok(UpstreamResponse::json(
+                StatusCode::OK,
+                &json!({ "groups": [{ "displayName": "GEMINI MODELS", "buckets": [
+                    { "displayName": "Weekly Limit Remaining", "remainingFraction": 0.5, "resetTime": "2026-10-22T00:00:00Z" },
+                ] }] }),
+            ))
+        });
+        let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
+
+        let usage = AntigravityAdapter.fetch_usage(&cx, &account).await;
+        let urls: Vec<String> = transport.requests().iter().map(|c| c.url.clone()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                format!("{DAILY}/v1internal:loadCodeAssist"),
+                format!("{DAILY}/v1internal:retrieveUserQuotaSummary"),
+                format!("{PROD}/v1internal:retrieveUserQuotaSummary"),
+            ]
+        );
+        assert_eq!(usage.error, None);
+        assert_eq!(usage.windows.len(), 1);
+    }
+
+    #[tokio::test]
     async fn keeps_an_unrecognized_bucket_name_verbatim_after_the_two_known_windows() {
         let transport = MockTransport::new();
         stub_quota(
@@ -1911,8 +1959,11 @@ mod tests {
             StatusCode::OK,
             json!({ "cloudaicompanionProject": "proj-42", "paidTier": { "id": "g1-pro-tier", "name": "Google AI Pro" } }),
         );
-        transport
-            .expect(|_| Ok(UpstreamResponse::from_bytes(StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), "nope")));
+        // Both hosts fail, so the quota call as a whole fails.
+        for _ in BASE_URLS {
+            transport
+                .expect(|_| Ok(UpstreamResponse::from_bytes(StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new(), "nope")));
+        }
         let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
 
         let usage = AntigravityAdapter.fetch_usage(&cx, &account).await;
@@ -2032,9 +2083,11 @@ mod tests {
     #[tokio::test]
     async fn marks_the_snapshot_stale_on_failure_rather_than_blanking_it() {
         let transport = MockTransport::new();
-        transport.expect(|_| {
-            Ok(UpstreamResponse::from_bytes(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new(), "boom"))
-        });
+        for _ in BASE_URLS {
+            transport.expect(|_| {
+                Ok(UpstreamResponse::from_bytes(StatusCode::SERVICE_UNAVAILABLE, HeaderMap::new(), "boom"))
+            });
+        }
         let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
         let usage = AntigravityAdapter.fetch_usage(&cx, &account).await;
         assert!(usage.stale);
