@@ -363,6 +363,10 @@ pub async fn load_code_assist(cx: &AppState, access_token: &str) -> anyhow::Resu
 /// Emission order within a group, matching the pair claude-code pushes.
 const WINDOW_ORDER: [&str; 2] = ["5h", "Week"];
 
+/// Group order on the card: the two Gemini quotas together, then the Claude/GPT one, whatever
+/// order upstream lists them in (it puts Argon last).
+const GROUP_ORDER: [&str; 3] = ["Gemini", "Argon", "Other"];
+
 /// Upstream bucket names are sentences ("Five Hour Limit Remaining"); the Providers page
 /// gives a window label one short column. Compress to the strings every other adapter already
 /// emits, and leave anything unrecognized alone rather than mangling it.
@@ -456,12 +460,19 @@ pub async fn retrieve_user_quota_summary(
     let mut windows = Vec::new();
     collect_quota_buckets(json.get("buckets"), None, &mut windows);
     if let Some(groups) = json.get("groups").and_then(Value::as_array) {
-        for group in groups {
-            if !group.is_object() {
-                continue;
-            }
-            let name = group.get("displayName").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty());
-            collect_quota_buckets(group.get("buckets"), name, &mut windows);
+        let mut named: Vec<(usize, &str, &Value)> = groups
+            .iter()
+            .filter(|group| group.is_object())
+            .filter_map(|group| {
+                let name = group.get("displayName").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty())?;
+                let rank = GROUP_ORDER.iter().position(|g| *g == group_short_name(name)).unwrap_or(GROUP_ORDER.len());
+                Some((rank, name, group))
+            })
+            .collect();
+        // Stable: two groups with the same short name keep upstream order.
+        named.sort_by_key(|(rank, _, _)| *rank);
+        for (_, name, group) in named {
+            collect_quota_buckets(group.get("buckets"), Some(name), &mut windows);
         }
     }
     Ok(windows)
@@ -1837,16 +1848,16 @@ mod tests {
         let usage = AntigravityAdapter.fetch_usage(&cx, &account).await;
         assert!(transport.requests().iter().any(|c| c.url.contains("retrieveUserQuotaSummary")));
         let labels: Vec<&str> = usage.windows.iter().map(|w| w.label.as_str()).collect();
-        assert_eq!(labels, vec!["Gemini 5h", "Gemini Week", "Other 5h", "Other Week", "Argon Week"]);
+        assert_eq!(labels, vec!["Gemini 5h", "Gemini Week", "Argon Week", "Other 5h", "Other Week"]);
         // utilization is percent *used*, so a 0.9998 remaining fraction is ~0.02.
         assert!(close_to(usage.windows[0].utilization, 0.13));
         assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-08-22T14:00:00Z"));
         assert!(close_to(usage.windows[1].utilization, 0.02));
         assert_eq!(usage.windows[1].resets_at.as_deref(), Some("2026-08-29T09:00:00Z"));
-        assert_eq!(usage.windows[2].utilization, Some(0.0));
-        assert_eq!(usage.windows[2].resets_at, None);
+        assert!(close_to(usage.windows[2].utilization, 25.0));
         assert_eq!(usage.windows[3].utilization, Some(0.0));
-        assert!(close_to(usage.windows[4].utilization, 25.0));
+        assert_eq!(usage.windows[3].resets_at, None);
+        assert_eq!(usage.windows[4].utilization, Some(0.0));
         assert_eq!(usage.error, None);
     }
 
