@@ -41,7 +41,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 | **Active · no Fable** | 只有 Claude Code 會出現。下一個請求會送到這裡，但這個席位不能用 Fable 模型。 |
 | **Active · Fable** | 只有 Claude Code 會出現。Fable 的請求會送到這裡，因為上面那個帳號不能用 Fable。 |
 
-- **用量條**：供應商回報幾個用量區間就有幾條，例如 **5h** 和 **Week**，各自顯示已用百分比和重置時間。Antigravity 有四條：**Gemini 5h**、**Gemini Week**、**Other 5h**、**Other Week**；Google 有回報餘額時，下面還會多一行，例如 `1,500 credits left`。剛加入的帳號會顯示 **Usage will appear once this account is used**。
+- **用量條**：供應商回報幾個用量區間就有幾條，例如 **5h** 和 **Week**，各自顯示已用百分比和重置時間。Antigravity 有 **Gemini 5h**、**Gemini Week**、**Other 5h**、**Other Week**，Google AI Pro 方案另有 Gemini 4 Argon 專屬的週額度 **Argon Week**；Google 有回報餘額時，下面還會多一行，例如 `1,500 credits left`。剛加入的帳號會顯示 **Usage will appear once this account is used**。
 
 ### Custom endpoints
 

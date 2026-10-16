@@ -73,10 +73,13 @@ const MODELS_PATH: &str = "/v1internal:fetchAvailableModels";
 /// the hub UA the effort-tiered ids are not callable at all — this divergence from
 /// CLIProxyAPI is deliberate, do not "fix" it back.
 ///
+/// The version gates new models as well: Gemini 4 Argon and its quota group appear only from
+/// 1.3.6 on (measured 2026-10-16). The build stays 1.1.21's — 1.3.6's could not be read.
+///
 /// Version and build are pinned (an extra network call per request to learn a version string
 /// is not worth it); `ANTIGRAVITY_CLIENT_VERSION` and `ANTIGRAVITY_CLIENT_BUILD` exist for
 /// when the pins go stale. docs/providers.md § Antigravity.
-const FALLBACK_CLIENT_VERSION: &str = "1.1.21";
+const FALLBACK_CLIENT_VERSION: &str = "1.3.6";
 const FALLBACK_CLIENT_BUILD: &str = "970856724";
 const CLIENT_OS_TYPE: &str = "darwin";
 const CLIENT_ARCH: &str = "arm64";
@@ -356,12 +359,16 @@ fn five_hour_re() -> &'static regex::Regex {
     &RE
 }
 
-/// "GEMINI MODELS" → "Gemini". Every other group bundles more than one vendor ("CLAUDE AND
-/// GPT MODELS"), so naming it after either would be wrong and spelling it out does not fit
-/// the column — it becomes "Other". A third Google group would land there too and need its
-/// own rule (docs/providers.md).
+/// "GEMINI 4 ARGON" → "Argon", checked first because it also contains "gemini" and would
+/// otherwise become a second "Gemini Week". "GEMINI MODELS" → "Gemini". The remaining group
+/// bundles more than one vendor ("CLAUDE AND GPT MODELS"), so naming it after either would be
+/// wrong and spelling it out does not fit the column — it becomes "Other". A fourth Google
+/// group would land there too and need its own rule (docs/providers.md).
 fn group_short_name(group_name: &str) -> &'static str {
-    if group_name.to_lowercase().contains("gemini") {
+    let lower = group_name.to_lowercase();
+    if lower.contains("argon") {
+        "Argon"
+    } else if lower.contains("gemini") {
         "Gemini"
     } else {
         "Other"
@@ -1091,7 +1098,7 @@ mod tests {
     const PROD: &str = "https://cloudcode-pa.googleapis.com";
     /// The pinned CLI identity every data-plane call must send.
     const CLI_UA: &str =
-        "antigravity/cli/1.1.21 (aidev_client; os_type=darwin; arch=arm64; cl=970856724; auth_method=consumer)";
+        "antigravity/cli/1.3.6 (aidev_client; os_type=darwin; arch=arm64; cl=970856724; auth_method=consumer)";
 
     /// A credential whose token is fresh and whose project is already resolved, so neither the
     /// refresh nor the bootstrap path fires during the test.
@@ -1795,6 +1802,13 @@ mod tests {
                             { "displayName": "Five Hour Limit Remaining", "remainingFraction": 1, "resetTime": null },
                         ],
                     },
+                    {
+                        // Also says "Gemini"; labelled "Gemini Week" it would be a duplicate.
+                        "displayName": "GEMINI 4 ARGON",
+                        "buckets": [
+                            { "displayName": "Gemini 4 Argon Weekly Limit", "remainingFraction": 0.75, "resetTime": "2026-10-22T00:00:00Z" },
+                        ],
+                    },
                 ]
             }),
             json!({}),
@@ -1804,7 +1818,7 @@ mod tests {
         let usage = AntigravityAdapter.fetch_usage(&cx, &account).await;
         assert!(transport.requests().iter().any(|c| c.url.contains("retrieveUserQuotaSummary")));
         let labels: Vec<&str> = usage.windows.iter().map(|w| w.label.as_str()).collect();
-        assert_eq!(labels, vec!["Gemini 5h", "Gemini Week", "Other 5h", "Other Week"]);
+        assert_eq!(labels, vec!["Gemini 5h", "Gemini Week", "Other 5h", "Other Week", "Argon Week"]);
         // utilization is percent *used*, so a 0.9998 remaining fraction is ~0.02.
         assert!(close_to(usage.windows[0].utilization, 0.13));
         assert_eq!(usage.windows[0].resets_at.as_deref(), Some("2026-08-22T14:00:00Z"));
@@ -1813,6 +1827,7 @@ mod tests {
         assert_eq!(usage.windows[2].utilization, Some(0.0));
         assert_eq!(usage.windows[2].resets_at, None);
         assert_eq!(usage.windows[3].utilization, Some(0.0));
+        assert!(close_to(usage.windows[4].utilization, 25.0));
         assert_eq!(usage.error, None);
     }
 
