@@ -179,6 +179,7 @@ pub fn windows_from_codex_payload(payload: &CodexUsagePayload) -> Vec<UsageWindo
             utilization: w.used_percent,
             resets_at: w.reset_at.map(|seconds| iso_from_ms(seconds * 1000)),
             value: None,
+            scope: None,
         })
         .collect()
 }

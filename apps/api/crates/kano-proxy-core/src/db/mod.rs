@@ -36,6 +36,7 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0002_cli_devices_delete_on_revoke.sql"),
     },
     Migration { name: "0003_api_keys_device", sql: include_str!("../../migrations/0003_api_keys_device.sql") },
+    Migration { name: "0004_scoped_bench", sql: include_str!("../../migrations/0004_scoped_bench.sql") },
 ];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -131,7 +132,7 @@ mod tests {
         .expect("existing provider");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device"]);
+        assert_eq!(applied, ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device", "0004_scoped_bench"]);
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM cli_devices").fetch_all(&pool).await.unwrap();
         assert_eq!(ids, ["clidev_live"]);
         let live = crate::db::cli::get_cli_device(&pool, "clidev_live").await.unwrap().expect("the row type reads");
@@ -170,7 +171,7 @@ mod tests {
         .expect("existing device");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0003_api_keys_device"]);
+        assert_eq!(applied, ["0003_api_keys_device", "0004_scoped_bench"]);
         let old = crate::db::keys::list_keys(&pool, &user.id).await.unwrap();
         assert_eq!(old.len(), 1);
         assert_eq!((old[0].name.as_str(), old[0].spend_limit, old[0].spend_limit_interval.as_str()), ("Production", Some(12.5), "weekly"));
@@ -185,6 +186,40 @@ mod tests {
         sqlx::query("DELETE FROM cli_devices WHERE id = 'clidev_a'").execute(&pool).await.unwrap();
         let left: Vec<String> = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id = $1").bind(&user.id).fetch_all(&pool).await.unwrap();
         assert_eq!(left, ["key_old"], "only the minted key followed its device");
+        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+    }
+
+    /// Upgrading a deployed 0003 schema: an account that is benched and carries a usage
+    /// snapshot keeps both, reads back through `AccountRow` with no scoped bench, takes a
+    /// scoped bench afterwards, and the user cascade still reaches it.
+    #[tokio::test]
+    async fn upgrading_to_0004_keeps_existing_benches_and_adds_scoped_ones() {
+        let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..3]).await else { return skip_without_db() };
+        let user = insert_user(&pool, "upgrade4@example.com").await;
+        sqlx::query(
+            "INSERT INTO upstream_accounts (id, user_id, provider, label, priority, encrypted_payload,
+                                            usage_snapshot_json, bench_until, bench_reason, created_at, updated_at)
+             VALUES ('acc_old', $1, 'antigravity', 'old', 1, 'blob', '{\"windows\":[]}',
+                     '2030-01-01T00:00:00.000Z', '429', 'x', 'x')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("existing account");
+
+        let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
+        assert_eq!(applied, ["0004_scoped_bench"]);
+        let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
+        assert_eq!((row.bench_until.as_deref(), row.bench_reason.as_deref()), (Some("2030-01-01T00:00:00.000Z"), Some("429")));
+        assert_eq!(row.usage_snapshot_json.as_deref(), Some("{\"windows\":[]}"));
+        assert_eq!(row.bench_scopes_json, None);
+
+        crate::pool::bench::mark_scope_benched(&pool, &user.id, "antigravity", "acc_old", "Argon", 60_000, "429", 0).await.unwrap();
+        let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().unwrap();
+        assert!(row.bench_scopes_json.is_some());
+        sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0);
         assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
     }
 }

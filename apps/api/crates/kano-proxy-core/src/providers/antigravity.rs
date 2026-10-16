@@ -439,6 +439,8 @@ fn collect_quota_buckets(raw: Option<&Value>, group_name: Option<&str>, out: &mu
                 utilization,
                 resets_at: entry.get("resetTime").and_then(Value::as_str).map(str::to_string),
                 value: None,
+                // The group is the quota pool; an ungrouped bucket gates every model.
+                scope: prefix.map(str::to_string),
             },
         ));
     }
@@ -822,6 +824,19 @@ pub fn adapter() -> DynAdapter {
 
 #[async_trait]
 impl ProviderAdapter for AntigravityAdapter {
+    /// Each quota group is its own pool (docs/providers.md § Antigravity), named like the
+    /// window prefixes: Argon, then any other Gemini, then everything else (Claude, GPT-OSS).
+    fn quota_scope(&self, upstream_model: &str) -> Option<&'static str> {
+        let model = upstream_model.to_lowercase();
+        Some(if model.contains("argon") {
+            "Argon"
+        } else if model.starts_with("gemini") {
+            "Gemini"
+        } else {
+            "Other"
+        })
+    }
+
     fn id(&self) -> &str {
         "antigravity"
     }
@@ -1861,6 +1876,38 @@ mod tests {
         assert_eq!(usage.error, None);
     }
 
+    #[test]
+    fn maps_each_model_to_the_quota_group_that_meters_it() {
+        let scope = |m: &str| AntigravityAdapter.quota_scope(m);
+        assert_eq!(scope("gemini-4-argon-high"), Some("Argon"));
+        assert_eq!(scope("gemini-3.8-flash-low"), Some("Gemini"));
+        assert_eq!(scope("gemini-2.5-pro"), Some("Gemini"));
+        assert_eq!(scope("claude-opus-5-5-high"), Some("Other"));
+        assert_eq!(scope("gpt-oss-120b-medium"), Some("Other"));
+    }
+
+    #[tokio::test]
+    async fn tags_grouped_windows_with_their_scope_and_leaves_ungrouped_ones_account_wide() {
+        let transport = MockTransport::new();
+        stub_quota(
+            &transport,
+            json!({
+                "buckets": [{ "displayName": "Daily Limit", "remainingFraction": 1 }],
+                "groups": [
+                    { "displayName": "GEMINI MODELS", "buckets": [{ "displayName": "Weekly Limit Remaining", "remainingFraction": 1 }] },
+                    { "displayName": "GEMINI 4 ARGON", "buckets": [{ "displayName": "Gemini 4 Argon Weekly Limit", "remainingFraction": 1 }] },
+                ]
+            }),
+            json!({}),
+        );
+        let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
+        let usage = AntigravityAdapter.fetch_usage(&cx, &account).await;
+        let scopes: Vec<(&str, Option<&str>)> = usage.windows.iter().map(|w| (w.label.as_str(), w.scope.as_deref())).collect();
+        assert_eq!(scopes, vec![("Daily Limit", None), ("Gemini Week", Some("Gemini")), ("Argon Week", Some("Argon"))]);
+        // The scope a window carries must be the scope the router computes for its models.
+        assert_eq!(AntigravityAdapter.quota_scope("gemini-4-argon-low"), usage.windows[2].scope.as_deref());
+    }
+
     #[tokio::test]
     async fn reads_quota_from_the_daily_host_and_falls_back_to_prod() {
         let transport = MockTransport::new();
@@ -1934,6 +1981,7 @@ mod tests {
                 utilization: Some(100.0),
                 resets_at: Some("2026-09-01T00:00:00Z".into()),
                 value: None,
+                scope: None,
             }]
         );
     }
@@ -1959,7 +2007,7 @@ mod tests {
         // A bare amount has no denominator, so no percentage is invented from it.
         assert_eq!(
             usage.windows,
-            vec![UsageWindow { label: "Gemini Credits".into(), utilization: None, resets_at: None, value: None }]
+            vec![UsageWindow { label: "Gemini Credits".into(), utilization: None, resets_at: None, value: None, scope: Some("Gemini".into()) }]
         );
     }
 

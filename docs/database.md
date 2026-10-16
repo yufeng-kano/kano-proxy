@@ -41,7 +41,7 @@ Migrations live in `apps/api/crates/kano-proxy-core/migrations/` and are applied
 | spend_limit_include_oauth | INTEGER | 0/1, `NOT NULL DEFAULT 1`; whether builtin-provider (subscription OAuth) traffic counts toward the limit |
 | device_id | TEXT FK | nullable; the `cli_devices` row that minted the key through `POST /cli/v1/keys` ([cli.md](./cli.md) § Keys and groups), `ON DELETE CASCADE` — revoking the device deletes its keys. `NULL` for keys created in the web UI. Indexed |
 
-Spend-limit columns added in `0004_api_key_spend_limits.sql`; `device_id` in `0003_api_keys_device.sql` (the core's own numbering, after the baseline).
+Spend-limit columns are part of the baseline; `device_id` was added in `0003_api_keys_device.sql` (the core's own numbering, after the baseline).
 
 ### `upstream_accounts`
 
@@ -61,6 +61,7 @@ Spend-limit columns added in `0004_api_key_spend_limits.sql`; `device_id` in `00
 | usage_fetching_at | TEXT | nullable; lock holder's timestamp while an upstream fetch is in flight (`NULL` = free) |
 | bench_until | TEXT | nullable; ISO time until which this account is benched (`0011_bench_and_refresh_state.sql`). `NULL` or past = not benched — expired values are compared at read, never proactively deleted. Writes are **monotonic**: a bench write only lands when it extends (`bench_until IS NULL OR bench_until < new`), so a shorter concurrent penalty can never truncate a longer one. Replaces the bench cache ([providers.md](./providers.md) § Routing module) |
 | bench_reason | TEXT | nullable; content-free cause of the current bench — the upstream status as text (`"429"`, `"524"`, …) or `"refresh_failed"`. Written with `bench_until`, nulled by unpause |
+| bench_scopes_json | TEXT | nullable; benches that cover one **quota scope** of the account instead of all of it (`0004_scoped_bench.sql`, [providers.md](./providers.md) § Routing module "Quota scopes"): `{"<scope>": {"until": "<ISO>", "reason": "429"}}`. Same rules as `bench_until` per entry — monotonic per scope, compared at read, expired entries never deleted (at most one per scope the adapter defines). Nulled by unpause |
 | refreshing_at | TEXT | nullable; OAuth refresh single-flight lock, same CAS pattern as `usage_fetching_at` (30s breakable) — see [providers.md](./providers.md) § OAuth refresh single-flight |
 | edge_strikes | INTEGER | `NOT NULL DEFAULT 0`; consecutive upstream edge-timeout (520/522/524) strikes. Incremented atomically on each edge-timeout; the 3rd within 10 minutes benches 30s and resets to 0 ([providers.md](./providers.md) § Penalties). Never written on success |
 | edge_strike_at | TEXT | nullable; time of the last edge-timeout strike. A value older than 10 minutes stales the count — the next increment restarts at 1 |

@@ -20,7 +20,7 @@ use crate::app::now_ms;
 use crate::db::accounts::record_edge_timeout_strike;
 use crate::db::custom_providers::CustomProviderRow;
 use crate::pool::acquire::{acquire, AcquiredAccount};
-use crate::pool::bench::mark_benched;
+use crate::pool::bench::{mark_benched, mark_scope_benched};
 use crate::pool::extension::{settle_lease, AttemptLease, LeaseOutcome, ReserveContext, ReserveOutcome};
 use crate::providers::types::{AdapterError, CallExtras};
 use crate::providers::{DynAdapter, ProviderId};
@@ -240,6 +240,31 @@ async fn persist_bench(cx: &AppState, candidate: &RoutingCandidate, cooldown_ms:
     }
 }
 
+/// [`persist_bench`] for one quota scope of the account (docs/providers.md § Routing module
+/// "Quota scopes") — same owner scoping, same non-fatal failure.
+async fn persist_scope_bench(cx: &AppState, candidate: &RoutingCandidate, scope: &str, cooldown_ms: i64, reason: &str) {
+    if let Err(error) = mark_scope_benched(
+        cx.pool(),
+        &candidate.account.user_id,
+        &candidate.provider,
+        &candidate.account.id,
+        scope,
+        cooldown_ms,
+        reason,
+        now_ms(),
+    )
+    .await
+    {
+        tracing::error!(
+            account_id = %candidate.account.id,
+            provider = %candidate.provider,
+            scope,
+            %error,
+            "Failed to persist scoped bench"
+        );
+    }
+}
+
 /// Edge-timeout feedback is non-fatal just like bench persistence. Every edge status remains
 /// excluded from this walk; only the atomic third strike earns a bench. `false` therefore
 /// covers strikes 1–2 and a failed write.
@@ -290,10 +315,14 @@ async fn should_fail_over_for_response(
         }
         return true;
     }
-    let Some(penalty) = penalty_for_outcome(status, headers, &candidate.account, now_ms()) else {
+    let scope = candidate.adapter.quota_scope(&candidate.upstream_model);
+    let Some(penalty) = penalty_for_outcome(status, headers, &candidate.account, scope, now_ms()) else {
         return false;
     };
-    persist_bench(cx, candidate, penalty.cooldown_ms, &status.to_string()).await;
+    match penalty.scope {
+        Some(scope) => persist_scope_bench(cx, candidate, scope, penalty.cooldown_ms, &status.to_string()).await,
+        None => persist_bench(cx, candidate, penalty.cooldown_ms, &status.to_string()).await,
+    }
     true
 }
 
@@ -320,7 +349,8 @@ pub async fn recompute_unavailable_until(cx: &AppState, tried: &[RoutingCandidat
                 continue;
             }
         };
-        if let Some(until) = crate::routing::facts::facts_for_row(&row, now).unusable_until {
+        let scope = candidate.adapter.quota_scope(&candidate.upstream_model);
+        if let Some(until) = crate::routing::facts::facts_for_row(&row, scope, now).unusable_until {
             earliest = Some(earliest.map_or(until, |e: i64| e.min(until)));
         }
     }

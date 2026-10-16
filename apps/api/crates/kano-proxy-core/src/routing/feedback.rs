@@ -29,6 +29,8 @@ const OVERLOADED_STATUS: u16 = 529;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Penalty {
     pub cooldown_ms: i64,
+    /// The quota scope the bench covers; `None` benches the whole account.
+    pub scope: Option<&'static str>,
 }
 
 /// 520/522/524 always fail over, but only record a persistent strike.
@@ -65,10 +67,10 @@ fn rate_limit_reset_header_ms(headers: &HeaderMap) -> Option<i64> {
 
 /// Earliest `resets_at` among the account's currently-exhausted (`utilization >= 100`)
 /// windows, per docs/providers.md § Routing module "Penalties".
-fn earliest_exhausted_window_reset_ms(account: &AccountRow, now_ms: i64) -> Option<i64> {
+fn earliest_exhausted_window_reset_ms(account: &AccountRow, scope: Option<&str>, now_ms: i64) -> Option<i64> {
     let snapshot = read_usage_snapshot(account)?;
     let mut earliest: Option<i64> = None;
-    for window in &snapshot.windows {
+    for window in snapshot.windows.iter().filter(|w| crate::routing::facts::window_applies(w, scope)) {
         let Some(utilization) = window.get("utilization").and_then(Value::as_f64) else { continue };
         if utilization < 100.0 {
             continue;
@@ -98,14 +100,14 @@ fn reset_hint_header_ms(headers: &HeaderMap) -> Option<i64> {
     headers.get(RATELIMIT_RESET_HINT_HEADER)?.to_str().ok()?.trim().parse::<f64>().ok().filter(|v| v.is_finite()).map(|v| v as i64)
 }
 
-fn rate_limit_cooldown_ms(headers: &HeaderMap, account: &AccountRow, now_ms: i64) -> i64 {
+fn rate_limit_cooldown_ms(headers: &HeaderMap, account: &AccountRow, scope: Option<&str>, now_ms: i64) -> i64 {
     if let Some(hint) = reset_hint_header_ms(headers) {
         return clamp_cooldown(hint - now_ms);
     }
     if let Some(header) = rate_limit_reset_header_ms(headers) {
         return clamp_cooldown(header - now_ms);
     }
-    if let Some(snapshot) = earliest_exhausted_window_reset_ms(account, now_ms) {
+    if let Some(snapshot) = earliest_exhausted_window_reset_ms(account, scope, now_ms) {
         return clamp_cooldown(snapshot - now_ms);
     }
     DEFAULT_COOLDOWN_MS
@@ -113,13 +115,21 @@ fn rate_limit_cooldown_ms(headers: &HeaderMap, account: &AccountRow, now_ms: i64
 
 /// The penalty for one upstream attempt's outcome, or `None` when the outcome is not a
 /// bench-and-try-next-candidate status — that status passes through / in-stream errors exactly
-/// as before, untouched by the routing module.
-pub fn penalty_for_outcome(status: u16, headers: &HeaderMap, account: &AccountRow, now_ms: i64) -> Option<Penalty> {
+/// as before, untouched by the routing module. `scope` is the candidate's quota scope: a 429
+/// benches that scope alone (docs/providers.md § Routing module "Quota scopes"); auth and
+/// billing failures are the credential's, so they always bench the whole account.
+pub fn penalty_for_outcome(
+    status: u16,
+    headers: &HeaderMap,
+    account: &AccountRow,
+    scope: Option<&'static str>,
+    now_ms: i64,
+) -> Option<Penalty> {
     if AUTH_BILLING_STATUSES.contains(&status) {
-        return Some(Penalty { cooldown_ms: DEFAULT_COOLDOWN_MS });
+        return Some(Penalty { cooldown_ms: DEFAULT_COOLDOWN_MS, scope: None });
     }
     if status == 429 {
-        return Some(Penalty { cooldown_ms: rate_limit_cooldown_ms(headers, account, now_ms) });
+        return Some(Penalty { cooldown_ms: rate_limit_cooldown_ms(headers, account, scope, now_ms), scope });
     }
     None
 }
@@ -181,7 +191,7 @@ mod tests {
     fn edge_timeout_statuses() {
         for status in [520u16, 522, 524] {
             assert!(is_edge_timeout_status(status));
-            assert!(penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), now()).is_none());
+            assert!(penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), None, now()).is_none());
         }
         assert!(!is_edge_timeout_status(500));
         assert!(!is_edge_timeout_status(429));
@@ -191,7 +201,7 @@ mod tests {
     fn overload_is_not_a_bench_status() {
         assert!(is_overloaded_status(529));
         assert!(!is_overloaded_status(503));
-        assert!(penalty_for_outcome(529, &HeaderMap::new(), &account_row("a", "grok"), now()).is_none());
+        assert!(penalty_for_outcome(529, &HeaderMap::new(), &account_row("a", "grok"), None, now()).is_none());
         assert!(!is_bench_status(529));
     }
 
@@ -200,8 +210,8 @@ mod tests {
         for status in [401u16, 402, 403] {
             assert!(is_bench_status(status));
             assert_eq!(
-                penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), now()),
-                Some(Penalty { cooldown_ms: 300_000 })
+                penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), None, now()),
+                Some(Penalty { cooldown_ms: 300_000, scope: None })
             );
         }
     }
@@ -209,8 +219,8 @@ mod tests {
     #[test]
     fn a_plain_429_falls_back_to_the_default_cooldown() {
         assert_eq!(
-            penalty_for_outcome(429, &HeaderMap::new(), &account_row("a", "grok"), now()),
-            Some(Penalty { cooldown_ms: 300_000 })
+            penalty_for_outcome(429, &HeaderMap::new(), &account_row("a", "grok"), None, now()),
+            Some(Penalty { cooldown_ms: 300_000, scope: None })
         );
     }
 
@@ -221,8 +231,8 @@ mod tests {
             ("anthropic-ratelimit-tokens-reset", "2026-06-01T00:05:00.000Z"),
         ]);
         assert_eq!(
-            penalty_for_outcome(429, &h, &account_row("a", "grok"), now()),
-            Some(Penalty { cooldown_ms: 300_000 })
+            penalty_for_outcome(429, &h, &account_row("a", "grok"), None, now()),
+            Some(Penalty { cooldown_ms: 300_000, scope: None })
         );
     }
 
@@ -233,8 +243,8 @@ mod tests {
             ("anthropic-ratelimit-tokens-reset", "2026-06-01T05:00:00.000Z"),
         ]);
         assert_eq!(
-            penalty_for_outcome(429, &h, &account_row("a", "grok"), now()),
-            Some(Penalty { cooldown_ms: 30_000 })
+            penalty_for_outcome(429, &h, &account_row("a", "grok"), None, now()),
+            Some(Penalty { cooldown_ms: 30_000, scope: None })
         );
     }
 
@@ -253,8 +263,34 @@ mod tests {
             .to_string(),
         );
         assert_eq!(
-            penalty_for_outcome(429, &HeaderMap::new(), &row, now()),
-            Some(Penalty { cooldown_ms: 2 * 60 * 60 * 1000 })
+            penalty_for_outcome(429, &HeaderMap::new(), &row, None, now()),
+            Some(Penalty { cooldown_ms: 2 * 60 * 60 * 1000, scope: None })
+        );
+    }
+
+    /// A 429 on an Argon request is about the Argon pool: it benches that scope, until that
+    /// scope's own exhausted window resets — not the Gemini window that happens to reset first.
+    /// An auth failure is the credential's, so it still covers the whole account.
+    #[test]
+    fn a_scoped_429_benches_its_scope_until_its_own_window_resets() {
+        let mut row = account_row("a", "antigravity");
+        row.usage_snapshot_json = Some(
+            json!({
+                "windows": [
+                    { "label": "Gemini Week", "utilization": 100, "resets_at": "2026-06-01T02:00:00.000Z", "scope": "Gemini" },
+                    { "label": "Argon Week", "utilization": 100, "resets_at": "2026-06-04T00:00:00.000Z", "scope": "Argon" },
+                ],
+                "error": null, "stale": false, "edgeBlocked": false
+            })
+            .to_string(),
+        );
+        assert_eq!(
+            penalty_for_outcome(429, &HeaderMap::new(), &row, Some("Argon"), now()),
+            Some(Penalty { cooldown_ms: 3 * 24 * 60 * 60 * 1000, scope: Some("Argon") })
+        );
+        assert_eq!(
+            penalty_for_outcome(401, &HeaderMap::new(), &row, Some("Argon"), now()),
+            Some(Penalty { cooldown_ms: 300_000, scope: None })
         );
     }
 
@@ -262,20 +298,20 @@ mod tests {
     fn cooldowns_clamp_to_zero_and_seven_days() {
         let past = headers(&[(RATELIMIT_RESET_HINT_HEADER, &(now() - 10_000).to_string())]);
         assert_eq!(
-            penalty_for_outcome(429, &past, &account_row("a", "grok"), now()),
-            Some(Penalty { cooldown_ms: 0 })
+            penalty_for_outcome(429, &past, &account_row("a", "grok"), None, now()),
+            Some(Penalty { cooldown_ms: 0, scope: None })
         );
         let far = headers(&[(RATELIMIT_RESET_HINT_HEADER, &(now() + 30 * 24 * 3_600_000).to_string())]);
         assert_eq!(
-            penalty_for_outcome(429, &far, &account_row("a", "grok"), now()),
-            Some(Penalty { cooldown_ms: MAX_COOLDOWN_MS })
+            penalty_for_outcome(429, &far, &account_row("a", "grok"), None, now()),
+            Some(Penalty { cooldown_ms: MAX_COOLDOWN_MS, scope: None })
         );
     }
 
     #[test]
     fn a_non_bench_status_earns_no_penalty() {
         for status in [200u16, 400, 404, 500, 529] {
-            assert!(penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), now()).is_none());
+            assert!(penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), None, now()).is_none());
             assert!(!is_bench_status(status));
         }
     }

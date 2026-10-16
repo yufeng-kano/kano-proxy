@@ -16,6 +16,14 @@ pub fn bench_until_from_row(row: &AccountRow, now_ms: i64) -> Option<i64> {
     (until > now_ms).then_some(until)
 }
 
+/// The current bench on one quota scope of the row (`bench_scopes_json`), read the same way as
+/// `bench_until`: expired or malformed entries read as no bench and are never deleted.
+pub fn scope_bench_until_from_row(row: &AccountRow, scope: &str, now_ms: i64) -> Option<i64> {
+    let scopes: serde_json::Value = serde_json::from_str(row.bench_scopes_json.as_deref()?).ok()?;
+    let until = parse_iso_ms(scopes.get(scope)?.get("until")?.as_str()?)?;
+    (until > now_ms).then_some(until)
+}
+
 /// Bench-until epoch-ms for one account, or `None` when no current bench exists.
 pub async fn benched_until(
     db: &PgPool,
@@ -58,11 +66,47 @@ pub async fn mark_benched(
     Ok(())
 }
 
-/// Unpause is deliberately idempotent and clears both bench fields.
+/// Extends the bench on one quota scope of an account (docs/providers.md § Routing module
+/// "Quota scopes"), with the same monotonic rule as [`mark_benched`] applied to that scope's
+/// entry alone: ISO strings in one format compare in time order, so a shorter concurrent
+/// penalty never truncates a longer one, and the other scopes' entries are left untouched.
+#[allow(clippy::too_many_arguments)]
+pub async fn mark_scope_benched(
+    db: &PgPool,
+    user_id: &str,
+    provider: &str,
+    account_id: &str,
+    scope: &str,
+    cooldown_ms: i64,
+    reason: &str,
+    now_ms: i64,
+) -> Result<(), sqlx::Error> {
+    let until = crate::db::accounts::iso_from_ms(now_ms + cooldown_ms);
+    sqlx::query(
+        "UPDATE upstream_accounts
+         SET bench_scopes_json = (COALESCE(bench_scopes_json::jsonb, '{}'::jsonb)
+                                  || jsonb_build_object($1::text, jsonb_build_object('until', $2::text, 'reason', $3::text)))::text
+         WHERE id = $4 AND user_id = $5 AND provider = $6
+           AND (bench_scopes_json IS NULL
+                OR (bench_scopes_json::jsonb -> $1::text ->> 'until') IS NULL
+                OR (bench_scopes_json::jsonb -> $1::text ->> 'until') < $2::text)",
+    )
+    .bind(scope)
+    .bind(&until)
+    .bind(reason)
+    .bind(account_id)
+    .bind(user_id)
+    .bind(provider)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Unpause is deliberately idempotent and clears every bench on the row, scoped ones included.
 pub async fn clear_bench(db: &PgPool, user_id: &str, provider: &str, account_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE upstream_accounts
-         SET bench_until = NULL, bench_reason = NULL
+         SET bench_until = NULL, bench_reason = NULL, bench_scopes_json = NULL
          WHERE id = $1 AND user_id = $2 AND provider = $3",
     )
     .bind(account_id)
@@ -104,6 +148,7 @@ mod tests {
             label: None, custom_label: None, priority: 0, encrypted_payload: String::new(),
             account_meta_json: None, usage_snapshot_json: None, usage_fetched_at: None,
             usage_fetching_at: None, bench_until: None, bench_reason: None, refreshing_at: None,
+            bench_scopes_json: None,
             edge_strikes: 0, edge_strike_at: None, created_at: String::new(), updated_at: String::new(),
         };
         assert_eq!(bench_until_from_row(&row, 1_000), None);
@@ -161,5 +206,26 @@ mod tests {
         mark_benched(&pool, &user.id, "codex", &a.id, Some(200_000), None, now).await.unwrap();
         mark_benched(&pool, &user.id, "codex", &b.id, Some(50_000), None, now).await.unwrap();
         assert_eq!(earliest_bench_expiry(&pool, &user.id, &ids, now).await.unwrap(), Some(now + 50_000));
+    }
+
+    #[tokio::test]
+    async fn a_scoped_bench_only_extends_its_own_scope_and_unpause_clears_it() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let user = insert_user(&pool, "scoped@example.com").await;
+        let row = insert_account(&pool, &user.id, "antigravity", &StoredCredential::default()).await;
+        let now = 1_000_000;
+        mark_scope_benched(&pool, &user.id, "antigravity", &row.id, "Argon", 60_000, "429", now).await.unwrap();
+        mark_scope_benched(&pool, &user.id, "antigravity", &row.id, "Argon", 1_000, "429", now).await.unwrap();
+        mark_scope_benched(&pool, &user.id, "antigravity", &row.id, "Gemini", 5_000, "429", now).await.unwrap();
+        let stored = get_account(&pool, &user.id, &row.id).await.unwrap().unwrap();
+        assert_eq!(scope_bench_until_from_row(&stored, "Argon", now), Some(now + 60_000), "a shorter penalty never truncates");
+        assert_eq!(scope_bench_until_from_row(&stored, "Gemini", now), Some(now + 5_000));
+        assert_eq!(scope_bench_until_from_row(&stored, "Other", now), None);
+        assert_eq!(bench_until_from_row(&stored, now), None, "the account itself is untouched");
+        assert_eq!(scope_bench_until_from_row(&stored, "Argon", now + 60_000), None, "expired reads as no bench");
+
+        clear_bench(&pool, &user.id, "antigravity", &row.id).await.unwrap();
+        let cleared = get_account(&pool, &user.id, &row.id).await.unwrap().unwrap();
+        assert_eq!(cleared.bench_scopes_json, None);
     }
 }

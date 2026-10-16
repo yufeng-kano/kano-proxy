@@ -11,6 +11,11 @@
 //!
 //! A malformed or missing snapshot reads as "no window fact" (fail open).
 //!
+//! Both are **quota-scoped** (docs/providers.md § Routing module "Quota scopes"): a window
+//! tagged with a scope, and a bench on a scope, apply only when the candidate's model draws on
+//! that scope. A caller with no model to scope by (`scope: None`, the Providers dot) sees only
+//! the account-wide ones.
+//!
 //! Deviation from the TypeScript: these functions are synchronous and take no `Env`/`userId`.
 //! The originals were `async` and ignored both (`void env; void userId`), and nothing in the
 //! Rust port needs an await here — every fact comes off the loaded row.
@@ -18,7 +23,7 @@
 use serde_json::Value;
 
 use crate::db::accounts::{parse_iso_ms, read_usage_snapshot, AccountRow};
-use crate::pool::bench::bench_until_from_row;
+use crate::pool::bench::{bench_until_from_row, scope_bench_until_from_row};
 use crate::routing::types::{CandidateFacts, RoutingCandidate};
 
 /// The latest `resets_at` among the account's currently-exhausted windows
@@ -26,17 +31,26 @@ use crate::routing::types::{CandidateFacts, RoutingCandidate};
 /// until every exhausted window has cleared, not just the first one. `None` when no window is
 /// currently exhausted (never fetched, none over 100%, or every over-100% window's `resets_at`
 /// already passed — the self-expiry the doc requires even off a stale snapshot).
-pub fn usage_window_unusable_until(row: &AccountRow, now_ms: i64) -> Option<i64> {
+pub fn usage_window_unusable_until(row: &AccountRow, scope: Option<&str>, now_ms: i64) -> Option<i64> {
     let snapshot = read_usage_snapshot(row)?;
-    windows_unusable_until(&snapshot.windows, now_ms)
+    windows_unusable_until(&snapshot.windows, scope, now_ms)
+}
+
+/// Whether a stored window gates a candidate drawing on `scope`: an untagged window gates
+/// everything, a tagged one only its own scope.
+pub fn window_applies(window: &Value, scope: Option<&str>) -> bool {
+    match window.get("scope").and_then(Value::as_str) {
+        None => true,
+        Some(tag) => scope == Some(tag),
+    }
 }
 
 /// Same rule against a windows array the caller already holds — the admin accounts route
 /// derives its status dot from the snapshot it is about to return, which on a refresh is newer
 /// than the one on the loaded row (docs/admin-ui.md § Providers page).
-pub fn windows_unusable_until(windows: &[Value], now_ms: i64) -> Option<i64> {
+pub fn windows_unusable_until(windows: &[Value], scope: Option<&str>, now_ms: i64) -> Option<i64> {
     let mut latest: Option<i64> = None;
-    for window in windows {
+    for window in windows.iter().filter(|w| window_applies(w, scope)) {
         let Some(utilization) = window.get("utilization").and_then(Value::as_f64) else { continue };
         if utilization < 100.0 {
             continue;
@@ -57,14 +71,16 @@ pub fn windows_unusable_until(windows: &[Value], now_ms: i64) -> Option<i64> {
 
 /// Bench-until and usage-window facts for one candidate.
 pub fn candidate_facts(candidate: &RoutingCandidate, now_ms: i64) -> CandidateFacts {
-    facts_for_row(&candidate.account, now_ms)
+    facts_for_row(&candidate.account, candidate.adapter.quota_scope(&candidate.upstream_model), now_ms)
 }
 
 /// The same rule straight off a row — what `candidate_facts` computes, for callers that hold
 /// the account row rather than a candidate.
-pub fn facts_for_row(row: &AccountRow, now_ms: i64) -> CandidateFacts {
-    let bench_until = bench_until_from_row(row, now_ms);
-    let usage_window_until = usage_window_unusable_until(row, now_ms);
+pub fn facts_for_row(row: &AccountRow, scope: Option<&str>, now_ms: i64) -> CandidateFacts {
+    let account_bench = bench_until_from_row(row, now_ms);
+    let scope_bench = scope.and_then(|s| scope_bench_until_from_row(row, s, now_ms));
+    let bench_until = account_bench.max(scope_bench);
+    let usage_window_until = usage_window_unusable_until(row, scope, now_ms);
     let unusable_until = match (bench_until, usage_window_until) {
         (None, w) => w,
         (b, None) => b,
@@ -107,6 +123,7 @@ mod tests {
             usage_fetching_at: None,
             bench_until: None,
             bench_reason: None,
+            bench_scopes_json: None,
             refreshing_at: None,
             edge_strikes: 0,
             edge_strike_at: None,
@@ -161,7 +178,7 @@ mod tests {
         row.usage_snapshot_json =
             Some(snapshot_json(json!([{ "label": "5h", "utilization": 100, "resets_at": "2026-06-01T05:00:00.000Z" }])));
         assert_eq!(
-            usage_window_unusable_until(&row, at("2026-06-01T00:00:00.000Z")),
+            usage_window_unusable_until(&row, None, at("2026-06-01T00:00:00.000Z")),
             Some(at("2026-06-01T05:00:00.000Z"))
         );
     }
@@ -172,7 +189,7 @@ mod tests {
         row.usage_snapshot_json = Some(snapshot_json(
             json!([{ "label": "5h", "utilization": 99.9, "resets_at": "2026-06-01T05:00:00.000Z" }]),
         ));
-        assert_eq!(usage_window_unusable_until(&row, at("2026-06-01T00:00:00.000Z")), None);
+        assert_eq!(usage_window_unusable_until(&row, None, at("2026-06-01T00:00:00.000Z")), None);
     }
 
     #[test]
@@ -180,17 +197,17 @@ mod tests {
         let mut row = account_row("acc_1", "claude-code");
         row.usage_snapshot_json =
             Some(snapshot_json(json!([{ "label": "5h", "utilization": 100, "resets_at": "2026-06-01T00:00:00.000Z" }])));
-        assert_eq!(usage_window_unusable_until(&row, at("2026-06-01T05:00:00.000Z")), None);
+        assert_eq!(usage_window_unusable_until(&row, None, at("2026-06-01T05:00:00.000Z")), None);
     }
 
     #[test]
     fn a_malformed_or_missing_snapshot_reads_as_no_window_fact() {
         let mut row = account_row("acc_1", "claude-code");
-        assert_eq!(usage_window_unusable_until(&row, 0), None);
+        assert_eq!(usage_window_unusable_until(&row, None, 0), None);
         row.usage_snapshot_json = Some("not json".into());
-        assert_eq!(usage_window_unusable_until(&row, 0), None);
+        assert_eq!(usage_window_unusable_until(&row, None, 0), None);
         row.usage_snapshot_json = Some(json!({ "notWindows": [] }).to_string());
-        assert_eq!(usage_window_unusable_until(&row, 0), None);
+        assert_eq!(usage_window_unusable_until(&row, None, 0), None);
     }
 
     #[test]
@@ -201,7 +218,7 @@ mod tests {
             { "label": "Week", "utilization": 100, "resets_at": "2026-06-05T00:00:00.000Z" },
         ])));
         assert_eq!(
-            usage_window_unusable_until(&row, at("2026-06-01T00:00:00.000Z")),
+            usage_window_unusable_until(&row, None, at("2026-06-01T00:00:00.000Z")),
             Some(at("2026-06-05T00:00:00.000Z"))
         );
     }
@@ -211,7 +228,7 @@ mod tests {
         let mut row = account_row("acc_1", "claude-code");
         row.usage_snapshot_json =
             Some(snapshot_json(json!([{ "label": "5h", "utilization": 100, "resets_at": null }])));
-        assert_eq!(usage_window_unusable_until(&row, at("2026-06-01T00:00:00.000Z")), None);
+        assert_eq!(usage_window_unusable_until(&row, None, at("2026-06-01T00:00:00.000Z")), None);
     }
 
     #[test]
@@ -282,5 +299,41 @@ mod tests {
         ];
         assert_eq!(earliest_unusable_until(&facts), Some(200));
         assert_eq!(earliest_unusable_until(&[]), None);
+    }
+
+    #[test]
+    fn a_scoped_window_gates_only_its_scope_and_the_scopeless_dot_ignores_it() {
+        let mut row = account_row("acc_1", "antigravity");
+        row.usage_snapshot_json = Some(snapshot_json(json!([
+            { "label": "Argon Week", "utilization": 100, "resets_at": "2026-06-05T00:00:00.000Z", "scope": "Argon" },
+            { "label": "Gemini Week", "utilization": 40, "resets_at": "2026-06-05T00:00:00.000Z", "scope": "Gemini" },
+        ])));
+        let now = at("2026-06-01T00:00:00.000Z");
+        assert_eq!(usage_window_unusable_until(&row, Some("Argon"), now), Some(at("2026-06-05T00:00:00.000Z")));
+        assert_eq!(usage_window_unusable_until(&row, Some("Gemini"), now), None);
+        assert_eq!(usage_window_unusable_until(&row, None, now), None);
+    }
+
+    #[test]
+    fn an_untagged_window_still_gates_every_scope() {
+        let mut row = account_row("acc_1", "antigravity");
+        row.usage_snapshot_json =
+            Some(snapshot_json(json!([{ "label": "5h", "utilization": 100, "resets_at": "2026-06-01T05:00:00.000Z" }])));
+        let now = at("2026-06-01T00:00:00.000Z");
+        for scope in [Some("Argon"), Some("Gemini"), None] {
+            assert_eq!(usage_window_unusable_until(&row, scope, now), Some(at("2026-06-01T05:00:00.000Z")));
+        }
+    }
+
+    #[test]
+    fn a_scoped_bench_makes_only_that_scope_unusable() {
+        let mut row = account_row("acc_1", "antigravity");
+        row.bench_scopes_json = Some(json!({ "Argon": { "until": "2026-06-02T00:00:00.000Z", "reason": "429" } }).to_string());
+        let now = at("2026-06-01T00:00:00.000Z");
+        let argon = facts_for_row(&row, Some("Argon"), now);
+        assert!(!argon.usable);
+        assert_eq!(argon.bench_until, Some(at("2026-06-02T00:00:00.000Z")));
+        assert!(facts_for_row(&row, Some("Gemini"), now).usable);
+        assert!(facts_for_row(&row, None, now).usable);
     }
 }

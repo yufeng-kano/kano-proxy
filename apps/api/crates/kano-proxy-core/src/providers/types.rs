@@ -22,6 +22,10 @@ pub struct UsageWindow {
     /// Replaces the percent caption when set — an edition's own "used / ceiling" reading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value: Option<String>,
+    /// The quota scope this window meters (docs/providers.md § Routing module "Quota
+    /// scopes"). `None` gates the whole account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 /// Computed at read time from priority order plus router facts, never stored
@@ -212,6 +216,13 @@ pub trait ProviderAdapter: Send + Sync {
     /// Must fail open on missing facts.
     fn supports_model(&self, _meta: Option<&Map<String, Value>>, _upstream_model: &str) -> bool {
         true
+    }
+
+    /// The quota scope `upstream_model` draws on, for an upstream that meters one account in
+    /// separate pools per model family (docs/providers.md § Routing module "Quota scopes").
+    /// `None` — the default — means one pool: every window and every bench covers the account.
+    fn quota_scope(&self, _upstream_model: &str) -> Option<&'static str> {
+        None
     }
 
     fn has_list_models(&self) -> bool {

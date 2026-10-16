@@ -612,7 +612,7 @@ impl ProviderAdapter for GrokAdapter {
         account.insert("email".into(), email.map(Value::String).unwrap_or(Value::Null));
         account.insert("plan_type".into(), plan_type.map(Value::String).unwrap_or(Value::Null));
         FetchedUsage {
-            windows: vec![UsageWindow { label: "Week".into(), utilization, resets_at, value: None }],
+            windows: vec![UsageWindow { label: "Week".into(), utilization, resets_at, value: None, scope: None }],
             account,
             stale: false,
             error: None,
@@ -984,7 +984,8 @@ mod tests {
                 label: "Week".into(),
                 utilization: Some(1.0),
                 resets_at: Some("2026-08-10T00:00:00Z".into()),
-                value: None
+                value: None,
+                scope: None,
             }]
         );
     }
@@ -1015,7 +1016,7 @@ mod tests {
         let usage = fetch_usage_with(json!({ "config": {} }), StatusCode::OK).await;
         assert_eq!(
             usage.windows,
-            vec![UsageWindow { label: "Week".into(), utilization: None, resets_at: None, value: None }]
+            vec![UsageWindow { label: "Week".into(), utilization: None, resets_at: None, value: None, scope: None }]
         );
     }
 

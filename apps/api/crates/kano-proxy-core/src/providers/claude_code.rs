@@ -479,6 +479,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 utilization: window.get("utilization").and_then(Value::as_f64),
                 resets_at: window.get("resets_at").and_then(Value::as_str).map(str::to_string),
                 value: None,
+                scope: None,
             });
         }
         if let Some(limits) = usage.get("limits").and_then(Value::as_array) {
@@ -501,6 +502,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                     utilization: pct,
                     resets_at: lim.get("resets_at").and_then(Value::as_str).map(str::to_string),
                     value: None,
+                    scope: None,
                 });
             }
         }
@@ -947,7 +949,7 @@ mod tests {
     }
 
     fn window(label: &str, utilization: Option<f64>, resets_at: Option<&str>) -> UsageWindow {
-        UsageWindow { label: label.into(), utilization, resets_at: resets_at.map(str::to_string), value: None }
+        UsageWindow { label: label.into(), utilization, resets_at: resets_at.map(str::to_string), value: None, scope: None }
     }
 
     #[tokio::test]

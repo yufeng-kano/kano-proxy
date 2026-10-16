@@ -395,6 +395,7 @@ pub(crate) mod test_support {
                 usage_fetching_at: None,
                 bench_until: None,
                 bench_reason: None,
+                bench_scopes_json: None,
                 refreshing_at: None,
                 edge_strikes: 0,
                 edge_strike_at: None,

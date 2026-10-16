@@ -1024,6 +1024,8 @@ pub(crate) mod tests {
         /// Used once the scripted replies run out.
         default_reply: Box<dyn Fn() -> Reply + Send + Sync>,
         messages: AtomicBool,
+        /// Meters "argon" models and everything else as two quota scopes.
+        scoped: AtomicBool,
     }
 
     impl ScriptedAdapter {
@@ -1034,6 +1036,7 @@ pub(crate) mod tests {
                 replies: Mutex::new(replies.into()),
                 default_reply: Box::new(|| Reply::Json(StatusCode::OK, json!({ "choices": [] }))),
                 messages: AtomicBool::new(false),
+                scoped: AtomicBool::new(false),
             })
         }
         /// Every call answers the same way.
@@ -1044,12 +1047,18 @@ pub(crate) mod tests {
                 replies: Mutex::new(Default::default()),
                 default_reply: Box::new(reply),
                 messages: AtomicBool::new(false),
+                scoped: AtomicBool::new(false),
             })
         }
         /// Marks the same adapter as serving the Anthropic Messages endpoint, keeping its
         /// scripted replies.
         pub(crate) fn for_messages(self: Arc<Self>) -> Arc<Self> {
             self.messages.store(true, Ordering::SeqCst);
+            self
+        }
+        /// Two quota scopes, the way Antigravity meters Argon apart from the other Geminis.
+        pub(crate) fn with_scopes(self: Arc<Self>) -> Arc<Self> {
+            self.scoped.store(true, Ordering::SeqCst);
             self
         }
         pub(crate) fn calls(&self) -> Vec<String> {
@@ -1107,6 +1116,12 @@ pub(crate) mod tests {
     impl ProviderAdapter for ScriptedAdapter {
         fn id(&self) -> &str {
             &self.id
+        }
+        fn quota_scope(&self, upstream_model: &str) -> Option<&'static str> {
+            if !self.scoped.load(Ordering::SeqCst) {
+                return None;
+            }
+            Some(if upstream_model.contains("argon") { "Argon" } else { "Gemini" })
         }
         async fn chat_completions(
             &self,
@@ -2100,6 +2115,67 @@ pub(crate) mod tests {
         .await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(adapter.calls(), ["acc_ok"], "the limited account is never called");
+    }
+
+    fn ok_chat() -> Reply {
+        Reply::Json(
+            StatusCode::OK,
+            json!({ "choices": [{ "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" }] }),
+        )
+    }
+
+    fn scoped_opts(adapter: Arc<ScriptedAdapter>, user_id: &str, model: &str) -> ChatDispatchOptions {
+        ChatDispatchOptions {
+            user_id: user_id.into(),
+            req: chat_req(&format!("antigravity/{model}"), model, false),
+            ..chat_opts(adapter, "antigravity", false)
+        }
+    }
+
+    /// docs/providers.md § Routing module "Quota scopes": a 429 on one quota scope parks that
+    /// scope only — the same account keeps serving models that draw on another one.
+    #[tokio::test]
+    async fn a_429_on_one_quota_scope_leaves_the_account_serving_the_others() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "scoped429@example.com").await;
+        seed_accounts(state.pool(), &user.id, "antigravity", &["acc_1"]).await;
+        let adapter = ScriptedAdapter::new(
+            "antigravity",
+            vec![Reply::Json(StatusCode::TOO_MANY_REQUESTS, json!({ "error": { "status": "RESOURCE_EXHAUSTED" } }))],
+        )
+        .with_scopes();
+
+        let argon = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-4-argon-high")).await;
+        assert_eq!(argon.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!is_benched(state.pool(), &user.id, "acc_1", now_ms()).await.unwrap(), "the account itself is not benched");
+
+        let again = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-4-argon-low")).await;
+        assert_eq!(again.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let flash = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-3.8-flash-high")).await;
+        assert_eq!(flash.status(), StatusCode::OK);
+        assert_eq!(adapter.calls(), ["acc_1", "acc_1"], "the second Argon request never reached upstream; Flash did");
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_scoped_window_skips_only_models_of_that_scope() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "scopedwin@example.com").await;
+        seed_accounts(state.pool(), &user.id, "antigravity", &["acc_1"]).await;
+        let snapshot = json!({
+            "windows": [{ "label": "Argon Week", "utilization": 100, "resets_at": crate::db::accounts::iso_from_ms(now_ms() + 3_600_000), "scope": "Argon" }],
+            "error": null, "stale": false, "edgeBlocked": false
+        })
+        .to_string();
+        set_snapshot(&state, "acc_1", Some(&snapshot)).await;
+        let adapter = ScriptedAdapter::always("antigravity", ok_chat).with_scopes();
+
+        let argon = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-4-argon-high")).await;
+        assert_eq!(argon.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let flash = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-3.8-flash-high")).await;
+        assert_eq!(flash.status(), StatusCode::OK);
+        assert_eq!(adapter.calls(), ["acc_1"], "only the Flash request was sent");
     }
 
     #[tokio::test]

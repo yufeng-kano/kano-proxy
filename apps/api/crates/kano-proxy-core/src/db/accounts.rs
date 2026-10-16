@@ -25,6 +25,8 @@ pub struct AccountRow {
     pub usage_fetching_at: Option<String>,
     pub bench_until: Option<String>,
     pub bench_reason: Option<String>,
+    /// Per-quota-scope benches, `{"<scope>": {"until", "reason"}}` (`pool::bench`).
+    pub bench_scopes_json: Option<String>,
     pub refreshing_at: Option<String>,
     pub edge_strikes: i32,
     pub edge_strike_at: Option<String>,
@@ -174,6 +176,7 @@ pub async fn insert_account(db: &PgPool, input: NewAccount<'_>) -> Result<Accoun
         usage_fetching_at: None,
         bench_until: None,
         bench_reason: None,
+        bench_scopes_json: None,
         refreshing_at: None,
         edge_strikes: 0,
         edge_strike_at: None,
@@ -511,6 +514,7 @@ mod tests {
             account_meta_json: Some(r#"{"plan":"pro","email":"a@b"}"#.into()),
             usage_snapshot_json: Some(r#"{"windows":[{"w":1}],"account":{"plan":"max"},"stale":true}"#.into()),
             usage_fetched_at: None, usage_fetching_at: None, bench_until: None, bench_reason: None,
+            bench_scopes_json: None,
             refreshing_at: None, edge_strikes: 0, edge_strike_at: None,
             created_at: String::new(), updated_at: String::new(),
         };

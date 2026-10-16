@@ -338,7 +338,8 @@ async fn list_accounts_route(
         account_usage(&state, row, &adapter, force, &mut view).await;
         view.label = display_label(row, view.account.as_ref());
 
-        limited_until.push(view.usage_windows.as_ref().and_then(|w| windows_unusable_until(w, now)));
+        // The dot has no model to scope by, so it reads only the account-wide windows.
+        limited_until.push(view.usage_windows.as_ref().and_then(|w| windows_unusable_until(w, None, now)));
         created_at.push(row.created_at.clone());
         fable_eligible.push(adapter.supports_model(view.account.as_ref(), FABLE_MODEL_PREFIX));
         accounts.push(view);
@@ -390,7 +391,7 @@ async fn list_accounts_route(
             stale: false,
             share: Some(shared.share.clone()),
         });
-        limited_until.push(usage_window_unusable_until(row, now));
+        limited_until.push(usage_window_unusable_until(row, None, now));
         created_at.push(row.created_at.clone());
         fable_eligible.push(adapter.supports_model(None, FABLE_MODEL_PREFIX));
     }
@@ -2395,6 +2396,7 @@ mod tests {
             usage_fetching_at: None,
             bench_until: None,
             bench_reason: None,
+            bench_scopes_json: None,
             refreshing_at: None,
             edge_strikes: 0,
             edge_strike_at: None,
@@ -2512,6 +2514,7 @@ mod tests {
             utilization: Some(42.0),
             resets_at: None,
             value: None,
+            scope: None,
         }];
         let ext = Arc::new(FakeExtension {
             shared_with_usage: Some(vec![SharedAccount {
@@ -2552,6 +2555,7 @@ mod tests {
             utilization: Some(100.0),
             resets_at: Some("2999-01-01T00:00:00.000Z".into()),
             value: Some("100 / 100".into()),
+            scope: None,
         };
         let ext = Arc::new(FakeExtension { bars: vec![bar.clone()], set_shared_priority_ok: true, ..Default::default() });
         let recorder = ext.clone();

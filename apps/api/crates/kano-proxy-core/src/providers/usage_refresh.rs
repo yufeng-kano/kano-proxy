@@ -312,7 +312,7 @@ mod tests {
         let before = crate::ids::now_iso();
         let (row, token) = setup(&pool, Some(prior_snapshot())).await;
         let adapter = StubAdapter::new(usage(
-            vec![UsageWindow { label: "5h".into(), utilization: Some(42.0), resets_at: None, value: None }],
+            vec![UsageWindow { label: "5h".into(), utilization: Some(42.0), resets_at: None, value: None, scope: None }],
             json!({ "email": "new@example.com" }),
             Some("usage degraded"),
             false,
@@ -384,7 +384,7 @@ mod tests {
         let user = insert_user(&pool, "spawned@example.com").await;
         let row = insert_account(&pool, &user.id, "grok", &StoredCredential { access_token: "tok".into(), ..Default::default() }).await;
         let adapter = Arc::new(StubAdapter::new(usage(
-            vec![UsageWindow { label: "5h".into(), utilization: Some(7.0), resets_at: None, value: None }],
+            vec![UsageWindow { label: "5h".into(), utilization: Some(7.0), resets_at: None, value: None, scope: None }],
             json!({}),
             None,
             false,
