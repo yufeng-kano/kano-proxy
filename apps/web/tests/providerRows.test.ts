@@ -133,6 +133,13 @@ it("prints a Codex credit balance in whole credits, only when upstream reported 
   })
   expect(unlimited).toContain(">Unlimited<")
 
+  // Credits without a balance still route, so the row says they exist.
+  const available = await render(AccountCard, {
+    account: codexAccount({ has_credits: true, unlimited: false, balance: null }),
+    provider: "codex",
+  })
+  expect(available).toContain(">Available<")
+
   for (const credits of [null, undefined, { has_credits: false, unlimited: false, balance: "0" }]) {
     const html = await render(AccountCard, { account: codexAccount(credits), provider: "codex" })
     expect(html).not.toContain('class="credits"')

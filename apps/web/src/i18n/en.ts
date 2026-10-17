@@ -242,6 +242,8 @@ export const en = {
   "providers.account.credits": "Credits",
   "providers.account.creditsLeft": "{credits} left",
   "providers.account.creditsUnlimited": "Unlimited",
+  // Upstream says credits exist without a balance; the Codex CLI prints the same.
+  "providers.account.creditsAvailable": "Available",
   // Codex's opt-in to keep routing on paid credits after the plan's limits.
   "providers.account.allowCredits": "Use credits after limits",
   "providers.account.allowCreditsHint": "Credits are spent only after the plan's limits run out.",

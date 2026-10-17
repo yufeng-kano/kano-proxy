@@ -198,8 +198,10 @@ const codexCredits = computed<CodexCredits | null>(() => {
  * can never be a bar (docs/admin-ui.md § Providers page). It is the amount of
  * a Credits row under the bars, and is absent whenever upstream sent none:
  * Antigravity's Google One AI balance often goes missing, and a Codex account
- * without credits gets no row rather than an invented zero. A Codex balance
- * that does not parse is upstream's text verbatim.
+ * without credits gets no row rather than an invented zero. Credits without a
+ * balance read "Available", as the Codex CLI prints them: routing counts them
+ * as usable, so the row must not go silent beside an On credits badge. A Codex
+ * balance that does not parse is upstream's text verbatim.
  */
 const creditsText = computed(() => {
   if (props.provider === "antigravity") {
@@ -211,7 +213,8 @@ const creditsText = computed(() => {
   const codex = codexCredits.value
   if (!codex) return null
   if (codex.unlimited) return t("providers.account.creditsUnlimited")
-  if (!codex.has_credits || typeof codex.balance !== "string") return null
+  if (!codex.has_credits) return null
+  if (typeof codex.balance !== "string") return t("providers.account.creditsAvailable")
   const n = Number(codex.balance)
   const parses = codex.balance.trim() !== "" && Number.isFinite(n)
   return t("providers.account.creditsLeft", { credits: parses ? creditAmount(n) : codex.balance })
