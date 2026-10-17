@@ -237,9 +237,11 @@ export const en = {
   "providers.account.usageStale": "Couldn't read usage",
   "providers.account.usageStaleDetail": "Couldn't read usage: {error}",
   // Antigravity and Codex report a credit balance beside their quota windows;
-  // it has no total, so it is a line and not a bar — docs/providers.md.
-  "providers.account.credits": "{credits} credits left",
-  "providers.account.creditsUnlimited": "Unlimited credits",
+  // it has no total, so it is a labelled row with no bar — docs/admin-ui.md.
+  // The row's label names the unit, so its amount does not repeat it.
+  "providers.account.credits": "Credits",
+  "providers.account.creditsLeft": "{credits} left",
+  "providers.account.creditsUnlimited": "Unlimited",
   // Codex's opt-in to keep routing on paid credits after the plan's limits.
   "providers.account.allowCredits": "Use credits after limits",
   "providers.account.allowCreditsHint": "Credits are spent only after the plan's limits run out.",

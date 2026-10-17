@@ -189,17 +189,19 @@ const codexCredits = computed<CodexCredits | null>(() => {
 
 /**
  * A credit balance — a real upstream number with no total and no reset, so it
- * can never be a bar (docs/admin-ui.md § Providers page). It rides alongside
- * the quota bars as a plain line, and is absent whenever upstream sent none:
+ * can never be a bar (docs/admin-ui.md § Providers page). It is the amount of
+ * a Credits row under the bars, and is absent whenever upstream sent none:
  * Antigravity's Google One AI balance often goes missing, and a Codex account
- * without credits gets no line rather than an invented zero. Codex's balance
- * is upstream's raw text: formatted as a number when it parses, else verbatim.
+ * without credits gets no row rather than an invented zero. Whole credits, as
+ * the Codex CLI rounds them: upstream sends "12345.678", and the fraction is
+ * noise beside a balance that size. A Codex balance that does not parse is
+ * upstream's text verbatim.
  */
 const creditsText = computed(() => {
   if (props.provider === "antigravity") {
     const credits = props.account.account?.credits_remaining
     return typeof credits === "number"
-      ? t("providers.account.credits", { credits: credits.toLocaleString() })
+      ? t("providers.account.creditsLeft", { credits: Math.round(credits) })
       : null
   }
   const codex = codexCredits.value
@@ -208,7 +210,7 @@ const creditsText = computed(() => {
   if (!codex.has_credits || typeof codex.balance !== "string") return null
   const n = Number(codex.balance)
   const parses = codex.balance.trim() !== "" && Number.isFinite(n)
-  return t("providers.account.credits", { credits: parses ? n : codex.balance })
+  return t("providers.account.creditsLeft", { credits: parses ? Math.round(n) : codex.balance })
 })
 
 /**
@@ -366,18 +368,20 @@ watch(
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
     </div>
     <template v-else-if="!share">
-      <!-- An expired sign-in freezes the bars at their last known values, so
-           they are muted rather than read as live. -->
-      <div v-if="windows.length" class="windows" :class="{ frozen: reauth }">
+      <!-- An expired sign-in freezes the bars and the balance at their last
+           known values, so they are muted rather than read as live. -->
+      <div v-if="windows.length || creditsText" class="windows" :class="{ frozen: reauth }">
         <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
+        <!-- The balance sits under the bars when both exist, and stands in for
+             them when the quota read came back empty. -->
+        <div v-if="creditsText" class="credits">
+          <span class="credits-label">{{ t("providers.account.credits") }}</span>
+          <span class="credits-value tabular">{{ creditsText }}</span>
+        </div>
       </div>
-      <!-- The balance sits under the bars when both exist, and stands in for
-           them when the quota read came back empty. No usage will "appear" on
-           an expired sign-in, so that row never promises it. -->
-      <p v-if="creditsText" class="no-usage">
-        {{ creditsText }}
-      </p>
-      <p v-else-if="!windows.length && !hideUsageError && !reauth" class="no-usage">
+      <!-- No usage will "appear" on an expired sign-in, so that row never
+           promises it. -->
+      <p v-else-if="!hideUsageError && !reauth" class="no-usage">
         {{ t("providers.account.noUsage") }}
       </p>
       <!-- Behind the section's gate: it changes routing and spends money, so
@@ -504,13 +508,51 @@ watch(
   flex-shrink: 0;
 }
 
+/* Label, track and amount are columns of the whole list, not of each bar:
+   UsageBar and the credits row take them as a subgrid, so every track ends at
+   the same x and the amounts line up however wide one is — an edition's
+   "$2.5 / $10" beside a plain "100%". The label column is sized for the
+   longest label any adapter emits — Antigravity's group-prefixed
+   "Gemini Week" (docs/providers.md § Antigravity) — not for a bare "5h". */
 .windows {
   display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) minmax(44px, auto);
   gap: var(--space-3);
 }
 
 .windows.frozen {
   opacity: 0.55;
+}
+
+/* A balance has no total, so no track: its amount spans the empty track
+   column, right-aligned with the bars' amounts, and so never widens their
+   column. Set like a bar's label and amount — a value, not a footnote. */
+.credits {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+
+.credits-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+
+.credits-value {
+  grid-column: 2 / -1;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+/* The amount column grows to its widest amount rather than wrapping it. */
+@media (max-width: 640px) {
+  .windows {
+    grid-template-columns: 68px minmax(0, 1fr) minmax(40px, auto);
+    column-gap: var(--space-2);
+  }
 }
 
 .no-usage {

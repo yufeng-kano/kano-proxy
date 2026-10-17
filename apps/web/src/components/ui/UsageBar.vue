@@ -10,6 +10,10 @@
  * red: on a quota, a higher number genuinely is worse. The percentage is
  * always printed beside the bar, so the escalation is emphasis, not the only
  * signal.
+ *
+ * The columns belong to the parent list (AccountCard's `.windows`), which this
+ * joins as a subgrid: every bar in a list ends at the same x however wide one
+ * amount is. Outside a grid it would collapse to one column.
  */
 import { computed } from "vue"
 import { useI18n } from "@/i18n"
@@ -58,14 +62,14 @@ const resetText = computed(() =>
 </template>
 
 <style scoped>
+/* Columns and the gap between them come from the list; only the gap between
+   the meter line and its reset line is this component's. */
 .usage {
   display: grid;
-  /* The label column is fixed so bars line up down the card. Sized for the
-     longest label any adapter emits — Antigravity's group-prefixed
-     "Gemini Week" (docs/providers.md § Antigravity) — not for a bare "5h". */
-  grid-template-columns: 78px minmax(0, 1fr) minmax(44px, auto);
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: center;
-  gap: var(--space-3);
+  row-gap: var(--space-3);
 }
 
 .usage-label {
@@ -114,8 +118,7 @@ const resetText = computed(() =>
 
 @media (max-width: 640px) {
   .usage {
-    grid-template-columns: 68px minmax(0, 1fr) 40px;
-    gap: var(--space-2);
+    row-gap: var(--space-2);
   }
 }
 </style>
