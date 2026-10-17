@@ -41,8 +41,7 @@ pub async fn fetch_claude_identity(cx: &AppState, access_token: &str) -> Identit
     let Some(json) = get_json(cx, req).await else { return Identity::default() };
     let account = json.get("account");
     let display_name = non_empty(account.and_then(|a| a.get("display_name")));
-    let email = display_name.clone().or_else(|| non_empty(account.and_then(|a| a.get("email"))));
-    Identity { email, display_name }
+    Identity { email: non_empty(account.and_then(|a| a.get("email"))), display_name }
 }
 
 /// `usage_json` is the codex usage fetch (providers/codex_usage.rs) the adapter supplies, so
@@ -71,8 +70,7 @@ pub async fn fetch_grok_identity(cx: &AppState, access_token: &str) -> Identity 
     let display_name = non_empty(json.get("name"))
         .or_else(|| non_empty(json.get("username")))
         .or_else(|| non_empty(json.get("preferred_username")));
-    let email = display_name.clone().or_else(|| non_empty(json.get("email")));
-    Identity { email, display_name }
+    Identity { email: non_empty(json.get("email")), display_name }
 }
 
 /// Google userinfo — the only identity Antigravity's scopes expose.

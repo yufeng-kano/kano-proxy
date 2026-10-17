@@ -3246,8 +3246,9 @@ mod tests {
     }
 
     /// The token exchange and the profile read a Claude Code completion makes.
-    fn stub_claude_login(transport: &Arc<MockTransport>, email: &'static str) {
+    fn stub_claude_login(transport: &Arc<MockTransport>, account: Value) {
         for _ in 0..2 {
+            let account = account.clone();
             transport.expect(move |req| {
                 if req.url == crate::auth::provider_oauth::ClaudeOAuth::TOKEN_URL {
                     Ok(UpstreamResponse::json(
@@ -3255,7 +3256,7 @@ mod tests {
                         &json!({ "access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600 }),
                     ))
                 } else if req.url.contains("/api/oauth/profile") {
-                    Ok(UpstreamResponse::json(StatusCode::OK, &json!({ "account": { "email": email } })))
+                    Ok(UpstreamResponse::json(StatusCode::OK, &json!({ "account": account })))
                 } else {
                     panic!("unexpected upstream request {}", req.url)
                 }
@@ -3307,7 +3308,7 @@ mod tests {
         assert_eq!(pending["oauth_state"], oauth_state.as_str());
 
         // Same person, different case: still the same account.
-        stub_claude_login(&transport, "SEAT@example.com");
+        stub_claude_login(&transport, json!({ "email": "SEAT@example.com" }));
         let res = complete_claude(&state, &cookie, &login_id, &oauth_state).await;
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
@@ -3354,7 +3355,7 @@ mod tests {
         let before = stored_row(&pool, &user.id, "acc_1").await;
 
         let (login_id, oauth_state) = start_claude_reconnect(&state, &cookie, "acc_1").await;
-        stub_claude_login(&transport, "other@example.com");
+        stub_claude_login(&transport, json!({ "email": "other@example.com" }));
         let res = complete_claude(&state, &cookie, &login_id, &oauth_state).await;
         assert_eq!(res.status(), StatusCode::CONFLICT);
         assert_eq!(
@@ -3365,6 +3366,24 @@ mod tests {
         assert_eq!(count(&pool, "upstream_accounts").await, 1);
         // The code is spent, so the pending login is consumed either way.
         assert_eq!(count(&pool, "oauth_login_states").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_compares_the_profile_email_not_its_display_name() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        // The usage read stores the profile's real email, so that is what the row holds.
+        seed_account(&pool, &user.id, "acc_1", "claude-code", 7, account_meta("seat@example.com")).await;
+
+        let (login_id, oauth_state) = start_claude_reconnect(&state, &cookie, "acc_1").await;
+        stub_claude_login(&transport, json!({ "email": "seat@example.com", "display_name": "Seat" }));
+        let res = complete_claude(&state, &cookie, &login_id, &oauth_state).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let meta: Value =
+            serde_json::from_str(stored_row(&pool, &user.id, "acc_1").await.account_meta_json.as_deref().unwrap()).unwrap();
+        assert_eq!((&meta["email"], &meta["display_name"]), (&json!("seat@example.com"), &json!("Seat")));
     }
 
     #[tokio::test]
@@ -3422,7 +3441,7 @@ mod tests {
 
         let (login_id, oauth_state) = start_claude_reconnect(&state, &cookie, "acc_1").await;
         remove_account(&pool, &user.id, "acc_1").await.unwrap();
-        stub_claude_login(&transport, "seat@example.com");
+        stub_claude_login(&transport, json!({ "email": "seat@example.com" }));
         let res = complete_claude(&state, &cookie, &login_id, &oauth_state).await;
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
         assert_eq!(body_json(res).await, json!({ "error": "account was removed; add it again" }));
