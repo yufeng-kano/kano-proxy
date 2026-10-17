@@ -452,6 +452,8 @@ async fn list_accounts_route(
     let mut fable_routed = false;
     for &i in &route_order {
         if accounts[i].status == "benched" || accounts[i].status == "reauth" {
+            // Not routing at all, so not routing on credits either.
+            accounts[i].on_credits = false;
             continue;
         }
         if limited_until[i].is_some() {
@@ -2949,6 +2951,7 @@ mod tests {
         // The owner opted in, Week is exhausted and the stored credits are usable: the router
         // keeps the row on credits for everyone.
         let mut row = borrowed_row("shared_codex", "user_2");
+        row.provider = "codex".into();
         row.allow_credits = true;
         row.account_meta_json = Some(json!({ "email": "owner-seat@example.com", "credits": credits }).to_string());
         row.usage_snapshot_json = Some(
@@ -2962,9 +2965,8 @@ mod tests {
             value: None,
             scope: None,
         };
-        let listed = |provider: ProviderId, show_credits: bool, email: &'static str| {
-            let mut row = row.clone();
-            row.provider = provider.as_str().into();
+        let listed = |row: AccountRow, show_credits: bool, email: &'static str| {
+            let provider = ProviderId::parse(&row.provider).unwrap();
             let ext = Arc::new(FakeExtension {
                 shared_provider: Some(provider),
                 shared_with_usage: Some(vec![SharedAccount {
@@ -2985,7 +2987,7 @@ mod tests {
 
         // Asked for: the row's own stored balance and the badge, and nothing else of the
         // identity blob, nor the opt-in.
-        let shown = listed(ProviderId::Codex, true, "user_1@example.com").await;
+        let shown = listed(row.clone(), true, "user_1@example.com").await;
         assert_eq!(shown["usage"]["credits"], credits);
         assert_eq!(shown["status"], "active");
         assert_eq!(shown["on_credits"], true);
@@ -2994,15 +2996,26 @@ mod tests {
         assert!(!shown.to_string().contains("owner-seat@example.com"));
 
         // Not asked for: neither, while the dot still follows the owner's routing.
-        let hidden = listed(ProviderId::Codex, false, "user_3@example.com").await;
+        let hidden = listed(row.clone(), false, "user_3@example.com").await;
         assert!(hidden["usage"].get("credits").is_none());
         assert_eq!(hidden["status"], "active");
         assert_eq!(hidden["on_credits"], false);
 
         // The balance is Codex's: another provider's row never carries one, even when asked.
-        let grok = listed(ProviderId::Grok, true, "user_4@example.com").await;
+        let grok = listed(AccountRow { provider: "grok".into(), ..row.clone() }, true, "user_4@example.com").await;
         assert!(grok["usage"].get("credits").is_none());
         assert_eq!(grok["on_credits"], false);
+
+        // Paused: the balance is still shown, but a row that routes nowhere is not on credits.
+        let paused = AccountRow {
+            bench_until: Some("2999-01-01T00:00:00.000Z".into()),
+            bench_reason: Some("429".into()),
+            ..row.clone()
+        };
+        let paused = listed(paused, true, "user_5@example.com").await;
+        assert_eq!(paused["usage"]["credits"], credits);
+        assert_eq!(paused["status"], "benched");
+        assert_eq!(paused["on_credits"], false);
 
         // A borrower's page never probes the owner's account.
         assert!(transport.requests().is_empty());
