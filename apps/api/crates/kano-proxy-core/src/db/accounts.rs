@@ -226,8 +226,8 @@ pub async fn update_account_payload(
 }
 
 /// Cached usage read for one account (docs/providers.md § Usage cache). `error`/`stale`/
-/// `edge_blocked` travel with the windows because the route derives `status: "unusable"` from
-/// all three — dropping them on a cache hit would silently reactivate an unusable account.
+/// `edge_blocked` travel with the windows because the route derives `status: "reauth"` from
+/// them — dropping them on a cache hit would silently reactivate a signed-out account.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageSnapshot {
     pub windows: Vec<Value>,
@@ -388,6 +388,42 @@ pub async fn release_refresh_lock(db: &PgPool, account_id: &str, token: &str) ->
         .execute(db)
         .await?;
     Ok(())
+}
+
+/// Reconnect: replaces an existing row's credential in place (docs/auth.md § Management
+/// routes). Keeps `id`, `priority`, `custom_label` and `created_at`, so group pins survive;
+/// clears the bench and the usage cache so the next read recomputes the status, and the
+/// refresh lock so a late refresh winner fails its compare-and-release instead of overwriting
+/// this credential. `external_account_id` follows the COALESCE convention. Returns whether the
+/// row still existed.
+pub async fn replace_account_credential(
+    db: &PgPool,
+    user_id: &str,
+    account_id: &str,
+    encrypted_payload: &str,
+    label: &str,
+    external_account_id: Option<&str>,
+    account_meta_json: &str,
+) -> Result<bool, sqlx::Error> {
+    let r = sqlx::query(
+        "UPDATE upstream_accounts
+         SET encrypted_payload = $1, label = $2, external_account_id = COALESCE($3, external_account_id),
+             account_meta_json = $4,
+             bench_until = NULL, bench_reason = NULL, bench_scopes_json = NULL,
+             usage_snapshot_json = NULL, usage_fetched_at = NULL, usage_fetching_at = NULL,
+             refreshing_at = NULL, updated_at = $5
+         WHERE id = $6 AND user_id = $7",
+    )
+    .bind(encrypted_payload)
+    .bind(label)
+    .bind(external_account_id)
+    .bind(account_meta_json)
+    .bind(now_iso())
+    .bind(account_id)
+    .bind(user_id)
+    .execute(db)
+    .await?;
+    Ok(r.rows_affected() > 0)
 }
 
 /// Persists display label / meta without touching secrets (COALESCE convention).

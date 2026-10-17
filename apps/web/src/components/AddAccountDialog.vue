@@ -10,6 +10,10 @@
  * elsewhere. The manual-token step is the escape hatch for credentials the
  * user already holds.
  *
+ * `reconnect` turns the same flow into Sign in again for one existing row
+ * (docs/admin-ui.md § Providers page): the login re-binds that row in place,
+ * so the manual-token step — which would add a new row — is not offered.
+ *
  * Focus trap, Escape, and the mobile bottom sheet all come from Modal — this
  * component owns only the flow.
  */
@@ -23,7 +27,12 @@ import FormField from "./ui/FormField.vue"
 import Modal from "./ui/Modal.vue"
 import TextInput from "./ui/TextInput.vue"
 
-const props = defineProps<{ provider: ProviderId; providerName: string }>()
+const props = defineProps<{
+  provider: ProviderId
+  providerName: string
+  /** The row whose expired sign-in this dialog renews, by id and display name. */
+  reconnect?: { id: string; name: string }
+}>()
 const emit = defineEmits<{ close: []; added: [] }>()
 
 const { t } = useI18n()
@@ -47,11 +56,12 @@ const importLabel = ref("")
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
 
-const title = computed(() =>
-  step.value === "import"
+const title = computed(() => {
+  if (props.reconnect) return t("addAccount.reconnect.title", { name: props.reconnect.name })
+  return step.value === "import"
     ? t("addAccount.manual.title")
-    : t("addAccount.title", { provider: props.providerName }),
-)
+    : t("addAccount.title", { provider: props.providerName })
+})
 
 const pasteSteps = computed(() =>
   props.provider === "antigravity"
@@ -78,12 +88,24 @@ function clearPoll() {
 
 onUnmounted(clearPoll)
 
+/**
+ * A re-bind the server refused for a reason it can name: `409` when the user
+ * signed in as a different account (the message names both), `404` when the
+ * row was removed meanwhile. Retrying cannot fix either, and "Couldn't finish
+ * sign-in" would hide which account to use.
+ */
+function rebindFailure(e: unknown): string | null {
+  return props.reconnect && e instanceof ApiError && (e.status === 409 || e.status === 404)
+    ? e.message
+    : null
+}
+
 async function beginOAuth() {
   busy.value = true
   error.value = null
   clearPoll()
   try {
-    const res = await startLogin(props.provider)
+    const res = await startLogin(props.provider, props.reconnect?.id)
     loginId.value = res.login_id
 
     if (PASTE_PROVIDERS.has(props.provider)) {
@@ -133,8 +155,8 @@ async function submitPasteComplete() {
     })
     emit("added")
     emit("close")
-  } catch {
-    error.value = t("addAccount.error.complete")
+  } catch (e) {
+    error.value = rebindFailure(e) ?? t("addAccount.error.complete")
   } finally {
     busy.value = false
   }
@@ -150,6 +172,13 @@ async function pollDevice() {
     emit("added")
     emit("close")
   } catch (e) {
+    const rebind = rebindFailure(e)
+    if (rebind) {
+      // Every later tick would get the same answer.
+      clearPoll()
+      error.value = rebind
+      return
+    }
     const msg = e instanceof Error ? e.message : ""
     // Not-yet-approved is the expected answer on every tick until the user
     // acts on the other page — the step already says it is waiting, so a
@@ -199,7 +228,10 @@ function backToStart() {
   <Modal :title="title" @close="emit('close')">
     <div class="body">
       <template v-if="step === 'idle'">
-        <p class="lede">{{ t("addAccount.intro", { provider: providerName }) }}</p>
+        <p v-if="reconnect" class="lede">
+          {{ t("addAccount.reconnect.intro", { name: reconnect.name, provider: providerName }) }}
+        </p>
+        <p v-else class="lede">{{ t("addAccount.intro", { provider: providerName }) }}</p>
       </template>
 
       <template v-else-if="step === 'paste'">
@@ -277,7 +309,7 @@ function backToStart() {
 
     <template #footer>
       <template v-if="step === 'idle'">
-        <AppButton variant="ghost" :disabled="busy" @click="showImport">
+        <AppButton v-if="!reconnect" variant="ghost" :disabled="busy" @click="showImport">
           {{ t("addAccount.manual") }}
         </AppButton>
         <AppButton variant="primary" :loading="busy" @click="beginOAuth">

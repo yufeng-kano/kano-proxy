@@ -73,7 +73,9 @@ export const en = {
   "status.standby": "Standby",
   "status.limited": "Limit reached",
   "status.benched": "Paused",
-  "status.unusable": "Needs attention",
+  "status.reauth": "Sign-in expired",
+  // A status value this build does not know yet.
+  "status.unknown": "Needs attention",
 
   // --- Overview (dashboard) ----------------------------------------------
   "overview.title": "Overview",
@@ -226,6 +228,14 @@ export const en = {
   "providers.account.removeTitle": "Remove this account?",
   "providers.account.removeConfirm": "Requests stop routing through it immediately.",
   "providers.account.noUsage": "Usage will appear once this account is used",
+  // The fix for "Sign-in expired", beside the dot. It keeps its word — no
+  // glyph names it — and the accessible name carries the account.
+  "providers.account.reconnect": "Sign in again",
+  "providers.account.reconnectLabel": "Sign in again as {name}",
+  // A usage read that failed for a reason other than sign-in. The visible note
+  // is short; the upstream text rides in its tooltip and accessible name.
+  "providers.account.usageStale": "Couldn't read usage",
+  "providers.account.usageStaleDetail": "Couldn't read usage: {error}",
   // Antigravity reports a credit balance beside its quota windows; it has no
   // total, so it is a line and not a bar — docs/providers.md § Antigravity.
   "providers.account.credits": "{credits} credits left",
@@ -276,6 +286,9 @@ export const en = {
   "addAccount.intro": "Sign in with your {provider} account to add it to the pool.",
   "addAccount.start": "Continue",
   "addAccount.manual": "Enter tokens manually",
+  "addAccount.reconnect.title": "Sign in again as {name}",
+  "addAccount.reconnect.intro":
+    "The sign-in for {name} has expired. Sign in with the same {provider} account; its place in the order, name and group settings stay as they are.",
   "addAccount.openAuth": "Open sign-in page",
   "addAccount.claude.step1": "Approve access on the page that opened.",
   "addAccount.claude.step2": "Copy the code you're given and paste it below.",

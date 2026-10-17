@@ -109,6 +109,8 @@ const renaming = ref<{
   account: ProviderAccount
   identity: string
 } | null>(null)
+/** The row whose expired sign-in is being renewed in place. */
+const reconnecting = ref<{ provider: ProviderId; id: string; name: string } | null>(null)
 
 /**
  * Which sections have their row actions revealed, keyed by section id (a
@@ -663,6 +665,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               @move-down="onMove(pid, i, i + 1)"
               @rename="renaming = { provider: pid, account, identity: $event }"
               @remove="onRemove(pid, account.id)"
+              @reconnect="reconnecting = { provider: pid, id: account.id, name: $event }"
             />
           </div>
 
@@ -764,6 +767,15 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       :provider-name="t(NAME_KEY[addFor])"
       @close="addFor = null"
       @added="onAdded(addFor!)"
+    />
+
+    <AddAccountDialog
+      v-if="reconnecting"
+      :provider="reconnecting.provider"
+      :provider-name="t(NAME_KEY[reconnecting.provider])"
+      :reconnect="reconnecting"
+      @close="reconnecting = null"
+      @added="onAdded(reconnecting!.provider)"
     />
 
     <RenameAccountDialog

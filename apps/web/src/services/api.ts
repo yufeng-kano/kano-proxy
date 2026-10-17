@@ -246,9 +246,14 @@ export async function removeAccount(
   )
 }
 
-export async function startLogin(provider: ProviderId): Promise<LoginStart> {
+/**
+ * With `accountId`, the login re-binds that existing row in place — same id,
+ * order, name and group pins — instead of adding an account (docs/auth.md).
+ */
+export async function startLogin(provider: ProviderId, accountId?: string): Promise<LoginStart> {
   return request<LoginStart>(`/api/providers/${provider}/login`, {
     method: "POST",
+    body: accountId ? JSON.stringify({ account_id: accountId }) : undefined,
   })
 }
 
@@ -256,7 +261,7 @@ export async function completeLogin(
   provider: ProviderId,
   loginId: string,
   body?: { code?: string; value?: string },
-): Promise<{ ok: boolean; token_id?: string }> {
+): Promise<{ ok: boolean; token_id?: string; reconnected?: boolean }> {
   return request(`/api/providers/${provider}/login/${encodeURIComponent(loginId)}/complete`, {
     method: "POST",
     body: JSON.stringify(body ?? {}),

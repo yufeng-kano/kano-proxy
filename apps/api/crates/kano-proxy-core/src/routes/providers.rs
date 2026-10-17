@@ -28,8 +28,8 @@ use crate::auth::session::SessionUser;
 use crate::crypto::token_crypto::encrypt_json;
 use crate::db::accounts::{
     acquire_usage_lock, get_account, insert_account, is_usage_fresh, iso_from_ms, list_accounts, parse_iso_ms,
-    promote_account, read_usage_snapshot, remove_account, set_account_custom_label, set_account_priorities, AccountRow,
-    NewAccount,
+    promote_account, read_usage_snapshot, remove_account, replace_account_credential, set_account_custom_label,
+    set_account_priorities, AccountRow, NewAccount,
 };
 use crate::db::oauth_states::{
     delete_expired_states, delete_state, get_provider_state, insert_provider_state, list_provider_states,
@@ -238,13 +238,12 @@ async fn account_usage(
         cached = read_usage_snapshot(row);
     }
 
-    let mark_unusable = |view: &mut AccountView, error: Option<&str>, windows: &[Value], edge_blocked: bool| {
-        if view.status != "benched"
-            && windows.is_empty()
-            && !edge_blocked
-            && error.is_some_and(looks_unauthorized)
-        {
-            view.status = "unusable";
+    // Sign-in expired (docs/providers.md § Usage cache): an unauthorized usage error, whether
+    // or not old windows survived the snapshot merge — a dead refresh token keeps them, which
+    // is what used to make this row read active. Wins over benched; a bot-wall never counts.
+    let mark_reauth = |view: &mut AccountView, error: Option<&str>, edge_blocked: bool| {
+        if !edge_blocked && error.is_some_and(looks_unauthorized) {
+            view.status = "reauth";
         }
     };
 
@@ -255,7 +254,7 @@ async fn account_usage(
         // beat us here will refresh it shortly.
         view.stale = cached.stale || !fresh;
         view.error = cached.error.clone();
-        mark_unusable(view, view.error.clone().as_deref(), &cached.windows, cached.edge_blocked);
+        mark_reauth(view, view.error.clone().as_deref(), cached.edge_blocked);
         return;
     }
     let Some(lock_token) = lock_token else { return };
@@ -268,19 +267,20 @@ async fn account_usage(
             view.account = merged_meta(view.account.take(), snap.account.as_ref());
             view.stale = snap.stale;
             view.error = snap.error.clone();
-            // A usage 403 bot-wall must NOT mark the account unusable — chat can still work.
-            mark_unusable(view, snap.error.as_deref(), &snap.windows, snap.edge_blocked);
+            // A usage 403 bot-wall must NOT mark the account reauth — chat can still work.
+            mark_reauth(view, snap.error.as_deref(), snap.edge_blocked);
         }
         Err(error) => {
             view.error = Some(error.clone());
             view.stale = true;
             // Serve the unchanged snapshot too: one upstream hiccup must not blank the usage
             // bars for the request that encountered it.
-            if let Some(prior) = read_usage_snapshot(row) {
+            let prior = read_usage_snapshot(row);
+            if let Some(prior) = &prior {
                 view.usage_windows = Some(prior.windows.clone());
                 view.account = merged_meta(view.account.take(), prior.account.as_ref());
-                mark_unusable(view, Some(error.as_str()), &prior.windows, prior.edge_blocked);
             }
+            mark_reauth(view, Some(error.as_str()), prior.is_some_and(|p| p.edge_blocked));
         }
     }
 }
@@ -316,6 +316,13 @@ async fn list_accounts_route(
 
     for row in &rows {
         let benched = bench_until_from_row(row, now).is_some();
+        // Dispatch writes the upstream status as the bench reason: a 401 bench is a dead
+        // sign-in, not a pause the operator can resume.
+        let provisional = match (benched, row.bench_reason.as_deref()) {
+            (true, Some("401")) => "reauth",
+            (true, _) => "benched",
+            (false, _) => "standby",
+        };
         let meta = row
             .account_meta_json
             .as_deref()
@@ -326,7 +333,7 @@ async fn list_accounts_route(
             priority: row.priority,
             // Provisional only — the pass after this loop assigns active / standby / limited
             // from the routing facts, in list order.
-            status: if benched { "benched" } else { "standby" },
+            status: provisional,
             label: String::new(),
             custom_label: row.custom_label.clone(),
             account: meta,
@@ -409,7 +416,7 @@ async fn list_accounts_route(
     let mut routed = false;
     let mut fable_routed = false;
     for &i in &route_order {
-        if accounts[i].status == "benched" || accounts[i].status == "unusable" {
+        if accounts[i].status == "benched" || accounts[i].status == "reauth" {
             continue;
         }
         if limited_until[i].is_some() {
@@ -702,8 +709,29 @@ fn login_expiry(state: &AppState) -> String {
     iso_from_ms(state.now_ms() + LOGIN_STATE_TTL_MS)
 }
 
-async fn login(State(state): State<AppState>, session: SessionUser, Path(provider): Path<String>) -> Response {
+async fn login(
+    State(state): State<AppState>,
+    session: SessionUser,
+    Path(provider): Path<String>,
+    body: Bytes,
+) -> Response {
     let Some(provider) = ProviderId::parse(&provider) else { return invalid_provider() };
+    // An optional `{account_id}` reconnects that existing row instead of binding a new one
+    // (docs/auth.md § Management routes). Checked before any upstream call.
+    let reconnect = match object_body(&body).get("account_id") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) => Some(id.clone()),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid account_id"),
+    };
+    if let Some(id) = &reconnect {
+        match get_account(state.pool(), &session.user.id, id).await {
+            Err(_) => return internal_error(),
+            Ok(Some(row)) if row.provider == provider.as_str() => {}
+            // Re-signing someone else's account is the owner's call, not a borrower's.
+            Ok(_) => return forbidden_or_not_found(&state, &session.user.id, provider.as_str(), id).await,
+        }
+    }
+    let reconnect = reconnect.as_deref();
     let login_id = new_id("login");
     let expires = login_expiry(&state);
 
@@ -712,21 +740,27 @@ async fn login(State(state): State<AppState>, session: SessionUser, Path(provide
     let _ = delete_expired_states(state.pool(), &now_iso()).await;
 
     match provider {
-        ProviderId::ClaudeCode => claude_login(&state, &session, provider, &login_id, &expires).await,
-        ProviderId::Codex => codex_login(&state, &session, provider, &login_id, &expires).await,
-        ProviderId::Antigravity => antigravity_login(&state, &session, provider, &login_id, &expires).await,
-        ProviderId::Grok => grok_login(&state, &session, provider, &login_id, &expires).await,
+        ProviderId::ClaudeCode => claude_login(&state, &session, provider, &login_id, &expires, reconnect).await,
+        ProviderId::Codex => codex_login(&state, &session, provider, &login_id, &expires, reconnect).await,
+        ProviderId::Antigravity => antigravity_login(&state, &session, provider, &login_id, &expires, reconnect).await,
+        ProviderId::Grok => grok_login(&state, &session, provider, &login_id, &expires, reconnect).await,
     }
 }
 
+/// `reconnect` rides in the payload as `reconnect_account_id`; every complete path either
+/// deserializes into a struct that ignores unknown keys or reads named fields off the `Value`.
 async fn store_pending(
     state: &AppState,
     session: &SessionUser,
     provider: ProviderId,
     login_id: &str,
-    payload: &Value,
+    mut payload: Value,
     expires: &str,
+    reconnect: Option<&str>,
 ) -> Option<Response> {
+    if let (Some(id), Some(map)) = (reconnect, payload.as_object_mut()) {
+        map.insert("reconnect_account_id".into(), json!(id));
+    }
     insert_provider_state(state.pool(), login_id, &session.user.id, provider.as_str(), &payload.to_string(), expires)
         .await
         .err()
@@ -739,10 +773,11 @@ async fn claude_login(
     provider: ProviderId,
     login_id: &str,
     expires: &str,
+    reconnect: Option<&str>,
 ) -> Response {
     let begun = begin_claude_authorization(state.config().claude_code_oauth_client_id.as_deref());
     let payload = serde_json::to_value(&begun.pending).expect("pending serializes");
-    if let Some(failed) = store_pending(state, session, provider, login_id, &payload, expires).await {
+    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
         return failed;
     }
     Json(json!({
@@ -759,6 +794,7 @@ async fn codex_login(
     provider: ProviderId,
     login_id: &str,
     expires: &str,
+    reconnect: Option<&str>,
 ) -> Response {
     let client_id = state
         .config()
@@ -799,7 +835,7 @@ async fn codex_login(
         if interval.fract() == 0.0 { Value::from(interval as i64) } else { Value::from(interval) };
 
     let payload = json!({ "client_id": client_id, "device_auth_id": device_auth_id, "user_code": user_code });
-    if let Some(failed) = store_pending(state, session, provider, login_id, &payload, expires).await {
+    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
         return failed;
     }
     Json(json!({
@@ -817,6 +853,7 @@ async fn antigravity_login(
     provider: ProviderId,
     login_id: &str,
     expires: &str,
+    reconnect: Option<&str>,
 ) -> Response {
     // Unlike the other three, this provider ships with no built-in client: it needs an OAuth
     // client *secret*, which is never committed here (docs/auth.md § Antigravity). Refuse
@@ -832,7 +869,7 @@ async fn antigravity_login(
     // URL (or the bare code) back.
     let begun = begin_antigravity_authorization(&client_id);
     let payload = serde_json::to_value(&begun.pending).expect("pending serializes");
-    if let Some(failed) = store_pending(state, session, provider, login_id, &payload, expires).await {
+    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
         return failed;
     }
     Json(json!({
@@ -849,6 +886,7 @@ async fn grok_login(
     provider: ProviderId,
     login_id: &str,
     expires: &str,
+    reconnect: Option<&str>,
 ) -> Response {
     let client_id = state
         .config()
@@ -874,7 +912,7 @@ async fn grok_login(
     let device_code = device.get("device_code").and_then(Value::as_str).unwrap_or_default();
     let payload =
         json!({ "client_id": client_id, "device_code": device_code, "token_endpoint": GROK_TOKEN_URL });
-    if let Some(failed) = store_pending(state, session, provider, login_id, &payload, expires).await {
+    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
         return failed;
     }
     Json(json!({
@@ -938,18 +976,26 @@ struct BoundAccount<'a> {
     meta: Value,
 }
 
-/// Persists the newly bound account and consumes the pending login row.
+/// Persists the newly bound account — or, when the login was started for an existing row,
+/// replaces that row's credential — and consumes the pending login row.
 async fn finish_login(
     state: &AppState,
     user_id: &str,
     provider: ProviderId,
     state_row_id: &str,
+    payload_json: &str,
     bound: BoundAccount<'_>,
 ) -> Response {
-    let BoundAccount { credential, label, external_account_id, meta } = bound;
-    let Ok(encrypted) = encrypt_json(state.config().token_encryption_key.as_deref(), &credential) else {
+    let Ok(encrypted) = encrypt_json(state.config().token_encryption_key.as_deref(), &bound.credential) else {
         return error(StatusCode::BAD_REQUEST, "TOKEN_ENCRYPTION_KEY not configured");
     };
+    let reconnect = serde_json::from_str::<Value>(payload_json)
+        .ok()
+        .and_then(|p| p.get("reconnect_account_id").and_then(Value::as_str).map(str::to_string));
+    if let Some(account_id) = reconnect {
+        return reconnect_account(state, user_id, provider, state_row_id, &account_id, &encrypted, bound).await;
+    }
+    let BoundAccount { label, external_account_id, meta, .. } = bound;
     let meta_json = meta.to_string();
     let row = match insert_account(
         state.pool(),
@@ -970,6 +1016,82 @@ async fn finish_login(
     };
     let _ = delete_state(state.pool(), state_row_id).await;
     Json(json!({ "ok": true, "token_id": row.id, "label": label })).into_response()
+}
+
+/// Reconnect (docs/auth.md § Management routes): the identity guard, then one in-place
+/// credential replacement that keeps the row's id, priority and custom label.
+async fn reconnect_account(
+    state: &AppState,
+    user_id: &str,
+    provider: ProviderId,
+    state_row_id: &str,
+    account_id: &str,
+    encrypted: &str,
+    bound: BoundAccount<'_>,
+) -> Response {
+    let BoundAccount { label, external_account_id, meta, .. } = bound;
+    // The upstream code is already spent, so every outcome below consumes the pending login.
+    let _ = delete_state(state.pool(), state_row_id).await;
+    let removed = || error(StatusCode::NOT_FOUND, "account was removed; add it again");
+    let row = match get_account(state.pool(), user_id, account_id).await {
+        Ok(row) => row.filter(|r| r.provider == provider.as_str()),
+        Err(_) => return internal_error(),
+    };
+    let Some(row) = row else { return removed() };
+
+    let mut stored_meta = row
+        .account_meta_json
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let email = |m: &Map<String, Value>| m.get("email").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let old_email = email(&stored_meta);
+    let new_email = meta.as_object().and_then(email);
+    let old_external = row.external_account_id.as_deref();
+    let mismatch = match (old_email.as_deref(), new_email.as_deref()) {
+        (Some(old), Some(new)) if !old.eq_ignore_ascii_case(new) => Some((new, old)),
+        _ => match (old_external, external_account_id) {
+            (Some(old), Some(new)) if old != new => Some((new, old)),
+            _ => None,
+        },
+    };
+    if let Some((new, old)) = mismatch {
+        return error(
+            StatusCode::CONFLICT,
+            &format!(
+                "Signed in as {new}, but this row is {old}. Sign in with {old}, or use Add account for a different account."
+            ),
+        );
+    }
+
+    // New keys win, but a key the login did not return (or returned as null) keeps its stored
+    // value — plan facts the Fable seat rule reads must survive a reconnect.
+    if let Value::Object(fresh) = meta {
+        for (key, value) in fresh {
+            if !value.is_null() {
+                stored_meta.insert(key, value);
+            }
+        }
+    }
+    let meta_json = Value::Object(stored_meta).to_string();
+    match replace_account_credential(
+        state.pool(),
+        user_id,
+        account_id,
+        encrypted,
+        &label,
+        external_account_id,
+        &meta_json,
+    )
+    .await
+    {
+        Ok(true) => {
+            Json(json!({ "ok": true, "token_id": account_id, "label": label, "reconnected": true })).into_response()
+        }
+        Ok(false) => removed(),
+        Err(_) => internal_error(),
+    }
 }
 
 async fn login_complete(
@@ -1031,7 +1153,7 @@ async fn claude_complete(state: &AppState, session: &SessionUser, login_id: &str
     };
     let meta = json!({ "email": identity.email, "display_name": identity.display_name });
     let bound = BoundAccount { credential, label, external_account_id: None, meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, bound).await
+    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
 }
 
 async fn codex_complete(state: &AppState, session: &SessionUser, login_id: &str) -> Response {
@@ -1134,7 +1256,7 @@ async fn codex_complete(state: &AppState, session: &SessionUser, login_id: &str)
     };
     let meta = json!({ "email": identity.email, "plan_type": identity.plan, "account_id": account_id });
     let bound = BoundAccount { credential, label, external_account_id: account_id.as_deref(), meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, bound).await
+    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
 }
 
 async fn antigravity_complete(state: &AppState, session: &SessionUser, login_id: &str, raw: &str) -> Response {
@@ -1184,7 +1306,7 @@ async fn antigravity_complete(state: &AppState, session: &SessionUser, login_id:
         "plan_type": project.as_ref().and_then(|p| p.tier_id.clone()),
     });
     let bound = BoundAccount { credential, label, external_account_id: None, meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, bound).await
+    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
 }
 
 async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) -> Response {
@@ -1243,7 +1365,7 @@ async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) 
     };
     let meta = json!({ "email": identity.email, "display_name": identity.display_name });
     let bound = BoundAccount { credential, label, external_account_id: None, meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, bound).await
+    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
 }
 
 
@@ -1251,7 +1373,7 @@ async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) 
 mod tests {
     use super::*;
     use crate::auth::session::create_session;
-    use crate::db::accounts::iso_from_ms;
+    use crate::db::accounts::{acquire_refresh_lock, iso_from_ms};
     use crate::db::test_support::{
         insert_user, skip_without_db, test_config, test_pool, test_router, test_state, TEST_TOKEN_KEY,
     };
@@ -1872,7 +1994,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cached_unusable_account_stays_unusable() {
+    async fn a_cached_reauth_account_stays_reauth() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let transport = MockTransport::new();
         let state = test_state(pool.clone(), transport.clone());
@@ -1883,12 +2005,12 @@ mod tests {
         }
 
         let live = claude_accounts(&state, &cookie, false).await;
-        assert_eq!(live["accounts"][0]["status"], "unusable");
+        assert_eq!(live["accounts"][0]["status"], "reauth");
 
         // The snapshot stores error/edgeBlocked precisely so the cached read re-derives the
         // same status instead of silently reporting "active".
         let cached = claude_accounts(&state, &cookie, false).await;
-        assert_eq!(cached["accounts"][0]["status"], "unusable");
+        assert_eq!(cached["accounts"][0]["status"], "reauth");
     }
 
     #[tokio::test]
@@ -2772,5 +2894,315 @@ mod tests {
         let credential: StoredCredential =
             crate::crypto::token_crypto::decrypt_json(Some(TEST_TOKEN_KEY), &rows[0].encrypted_payload).unwrap();
         assert_eq!(credential.access_token, "imported-token");
+    }
+
+    // --------------------------------------------------- status: "reauth" (sign-in expired)
+
+    /// A fresh cached snapshot, so the list read serves it without any upstream call.
+    async fn seed_snapshot(pool: &PgPool, id: &str, windows: Value, error: Option<&str>, edge_blocked: bool) {
+        sqlx::query("UPDATE upstream_accounts SET usage_snapshot_json = $1, usage_fetched_at = $2 WHERE id = $3")
+            .bind(
+                json!({ "windows": windows, "account": {}, "error": error, "stale": error.is_some(), "edgeBlocked": edge_blocked })
+                    .to_string(),
+            )
+            .bind(now_iso())
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    fn statuses(json: &Value) -> Vec<(String, String)> {
+        json["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| (a["id"].as_str().unwrap().to_string(), a["status"].as_str().unwrap().to_string()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn old_windows_kept_by_the_merge_do_not_hide_a_usage_401() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_1", "claude-code", 7, account_meta("seat@example.com")).await;
+        // The dead-refresh-token shape: the snapshot merge kept the last good windows.
+        seed_snapshot(&pool, "acc_1", json!([{ "label": "5h", "utilization": 10 }]), Some("usage 401"), false).await;
+
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(json["accounts"][0]["status"], "reauth");
+        assert_eq!(json["accounts"][0]["error"], "usage 401");
+        assert_eq!(json["accounts"][0]["usage"]["windows"][0]["utilization"], 10);
+    }
+
+    #[tokio::test]
+    async fn a_401_bench_reads_reauth_while_other_benches_stay_benched() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let now = state.now_ms();
+        for (id, priority, reason) in [("acc_401", 9, "401"), ("acc_429", 5, "429"), ("acc_ok", 1, "")] {
+            seed_account(&pool, &user.id, id, "claude-code", priority, account_meta("seat@example.com")).await;
+            seed_snapshot(&pool, id, json!([]), None, false).await;
+            if !reason.is_empty() {
+                crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", id, Some(60_000), Some(reason), now)
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(
+            statuses(&json),
+            pairs(&[("acc_401", "reauth"), ("acc_429", "benched"), ("acc_ok", "active")])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_usage_429_or_an_edge_blocked_error_never_reads_reauth() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_429", "claude-code", 9, account_meta("a@example.com")).await;
+        seed_snapshot(&pool, "acc_429", json!([{ "label": "5h", "utilization": 10 }]), Some("usage 429"), false).await;
+        seed_account(&pool, &user.id, "acc_edge", "claude-code", 5, account_meta("b@example.com")).await;
+        seed_snapshot(&pool, "acc_edge", json!([]), Some("usage 401 unauthorized"), true).await;
+
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(statuses(&json), pairs(&[("acc_429", "active"), ("acc_edge", "standby")]));
+    }
+
+    // ------------------------------------------- reconnect: OAuth for an existing account row
+
+    async fn start_claude_reconnect(state: &AppState, cookie: &str, account_id: &str) -> (String, String) {
+        let res = call(
+            state,
+            request("POST", "/api/providers/claude-code/login", Some(cookie), Some(json!({ "account_id": account_id }))),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let json = body_json(res).await;
+        let url = url::Url::parse(json["authorization_url"].as_str().unwrap()).unwrap();
+        let oauth_state = url.query_pairs().find(|(k, _)| k == "state").unwrap().1.into_owned();
+        (json["login_id"].as_str().unwrap().to_string(), oauth_state)
+    }
+
+    /// The token exchange and the profile read a Claude Code completion makes.
+    fn stub_claude_login(transport: &Arc<MockTransport>, email: &'static str) {
+        for _ in 0..2 {
+            transport.expect(move |req| {
+                if req.url == crate::auth::provider_oauth::ClaudeOAuth::TOKEN_URL {
+                    Ok(UpstreamResponse::json(
+                        StatusCode::OK,
+                        &json!({ "access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600 }),
+                    ))
+                } else if req.url.contains("/api/oauth/profile") {
+                    Ok(UpstreamResponse::json(StatusCode::OK, &json!({ "account": { "email": email } })))
+                } else {
+                    panic!("unexpected upstream request {}", req.url)
+                }
+            });
+        }
+    }
+
+    async fn complete_claude(state: &AppState, cookie: &str, login_id: &str, oauth_state: &str) -> Response {
+        call(
+            state,
+            request(
+                "POST",
+                &format!("/api/providers/claude-code/login/{login_id}/complete"),
+                Some(cookie),
+                Some(json!({ "code": format!("code-1#{oauth_state}") })),
+            ),
+        )
+        .await
+    }
+
+    async fn count(pool: &PgPool, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}")).fetch_one(pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_replaces_the_credential_in_place_and_keeps_the_rows_place() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let now = state.now_ms();
+        seed_account(&pool, &user.id, "acc_1", "claude-code", 7, plan("team", TEAM_PREMIUM)).await;
+        set_account_custom_label(&pool, &user.id, "acc_1", Some("Work")).await.unwrap();
+        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_1", Some(60_000), Some("401"), now)
+            .await
+            .unwrap();
+        seed_snapshot(&pool, "acc_1", json!([{ "label": "5h", "utilization": 10 }]), Some("usage 401"), false).await;
+        acquire_refresh_lock(&pool, "acc_1").await.unwrap().unwrap();
+        let before = stored_row(&pool, &user.id, "acc_1").await;
+
+        let (login_id, oauth_state) = start_claude_reconnect(&state, &cookie, "acc_1").await;
+        let pending: String = sqlx::query_scalar("SELECT payload_json FROM oauth_login_states WHERE id = $1")
+            .bind(&login_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let pending: Value = serde_json::from_str(&pending).unwrap();
+        assert_eq!(pending["reconnect_account_id"], "acc_1");
+        assert_eq!(pending["oauth_state"], oauth_state.as_str());
+
+        // Same person, different case: still the same account.
+        stub_claude_login(&transport, "SEAT@example.com");
+        let res = complete_claude(&state, &cookie, &login_id, &oauth_state).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(res).await,
+            json!({ "ok": true, "token_id": "acc_1", "label": "SEAT@example.com", "reconnected": true })
+        );
+
+        assert_eq!(count(&pool, "upstream_accounts").await, 1, "no new row");
+        assert_eq!(count(&pool, "oauth_login_states").await, 0, "the pending login is consumed");
+        let after = stored_row(&pool, &user.id, "acc_1").await;
+        assert_eq!(after.priority, before.priority);
+        assert_eq!(after.custom_label.as_deref(), Some("Work"));
+        assert_eq!(after.created_at, before.created_at);
+        assert_eq!(after.label.as_deref(), Some("SEAT@example.com"));
+        assert!(after.bench_until.is_none() && after.bench_reason.is_none() && after.bench_scopes_json.is_none());
+        assert!(after.usage_snapshot_json.is_none() && after.usage_fetched_at.is_none() && after.usage_fetching_at.is_none());
+        assert!(after.refreshing_at.is_none());
+        let credential: StoredCredential =
+            crate::crypto::token_crypto::decrypt_json(Some(TEST_TOKEN_KEY), &after.encrypted_payload).unwrap();
+        assert_eq!(credential.access_token, "at-new");
+        assert_eq!(credential.refresh_token.as_deref(), Some("rt-new"));
+        // The login's keys win; the plan facts it does not return (and its null display_name)
+        // leave the stored ones alone.
+        let meta: Value = serde_json::from_str(after.account_meta_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            meta,
+            json!({ "email": "SEAT@example.com", "plan_type": "team", "rate_limit_tier": TEAM_PREMIUM })
+        );
+
+        // The cleared cache means the next read fetches fresh usage and the status recomputes.
+        let calls = stub_claude_usage(&transport, 1, "seat@example.com");
+        let listed = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(listed["accounts"][0]["status"], "active");
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_signed_in_as_someone_else_is_409_and_leaves_the_row_untouched() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_1", "claude-code", 7, account_meta("seat@example.com")).await;
+        let before = stored_row(&pool, &user.id, "acc_1").await;
+
+        let (login_id, oauth_state) = start_claude_reconnect(&state, &cookie, "acc_1").await;
+        stub_claude_login(&transport, "other@example.com");
+        let res = complete_claude(&state, &cookie, &login_id, &oauth_state).await;
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(res).await,
+            json!({ "error": "Signed in as other@example.com, but this row is seat@example.com. Sign in with seat@example.com, or use Add account for a different account." })
+        );
+        assert_eq!(stored_row(&pool, &user.id, "acc_1").await, before);
+        assert_eq!(count(&pool, "upstream_accounts").await, 1);
+        // The code is spent, so the pending login is consumed either way.
+        assert_eq!(count(&pool, "oauth_login_states").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_codex_reconnect_to_a_different_chatgpt_account_is_409() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_codex", "codex", 7, json!({})).await;
+        sqlx::query("UPDATE upstream_accounts SET external_account_id = 'account-123' WHERE id = 'acc_codex'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let before = stored_row(&pool, &user.id, "acc_codex").await;
+        // The pending row the codex start writes for a reconnect, extra key included.
+        insert_provider_state(
+            &pool,
+            "login_reconnect",
+            &user.id,
+            "codex",
+            &json!({
+                "client_id": "codex-client",
+                "device_auth_id": "device-auth-id",
+                "user_code": "ABCD-EFGH",
+                "reconnect_account_id": "acc_codex",
+            })
+            .to_string(),
+            &iso_from_ms(crate::app::now_ms() + 60_000),
+        )
+        .await
+        .unwrap();
+        let jwt = codex_jwt(json!({ "https://api.openai.com/auth": { "chatgpt_account_id": "account-999" } }));
+        transport.respond_json(StatusCode::OK, json!({ "authorization_code": "code", "code_verifier": "verifier" }));
+        let token_body = json!({ "access_token": jwt, "refresh_token": "rt" });
+        transport.expect(move |_| Ok(UpstreamResponse::json(StatusCode::OK, &token_body)));
+        for _ in 0..2 {
+            transport.expect(|_| Ok(UpstreamResponse::from_bytes(StatusCode::FORBIDDEN, Default::default(), "walled")));
+        }
+
+        let res =
+            call(&state, request("POST", "/api/providers/codex/login/login_reconnect/complete", Some(&cookie), None)).await;
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert!(body_json(res).await["error"].as_str().unwrap().starts_with("Signed in as account-999, but this row is account-123."));
+        assert_eq!(stored_row(&pool, &user.id, "acc_codex").await, before);
+        assert_eq!(count(&pool, "upstream_accounts").await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_whose_row_was_removed_meanwhile_is_404_and_binds_nothing() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_1", "claude-code", 7, account_meta("seat@example.com")).await;
+
+        let (login_id, oauth_state) = start_claude_reconnect(&state, &cookie, "acc_1").await;
+        remove_account(&pool, &user.id, "acc_1").await.unwrap();
+        stub_claude_login(&transport, "seat@example.com");
+        let res = complete_claude(&state, &cookie, &login_id, &oauth_state).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        assert_eq!(body_json(res).await, json!({ "error": "account was removed; add it again" }));
+        assert_eq!(count(&pool, "upstream_accounts").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_start_refuses_a_row_that_is_not_the_callers_for_this_provider() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = state_with_extension(pool.clone(), transport.clone(), borrowing_extension(true));
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let other = insert_user(&pool, "user_2@example.com").await;
+        seed_account(&pool, &other.id, "acc_theirs", "claude-code", 7, account_meta("o@example.com")).await;
+        seed_account(&pool, &user.id, "acc_grok", "grok", 7, account_meta("g@example.com")).await;
+
+        for (path, id) in [
+            ("/api/providers/claude-code/login", "acc_theirs"),
+            ("/api/providers/claude-code/login", "acc_grok"),
+            ("/api/providers/claude-code/login", "acc_missing"),
+        ] {
+            let res = call(&state, request("POST", path, Some(&cookie), Some(json!({ "account_id": id })))).await;
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{id}");
+            assert_eq!(body_json(res).await, json!({ "error": "not found" }));
+        }
+        // A row shared with the caller is the owner's to re-sign.
+        let shared =
+            call(&state, request("POST", "/api/providers/grok/login", Some(&cookie), Some(json!({ "account_id": "shared_1" }))))
+                .await;
+        assert_eq!(shared.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_json(shared).await, json!({ "error": "forbidden" }));
+        let typed =
+            call(&state, request("POST", "/api/providers/claude-code/login", Some(&cookie), Some(json!({ "account_id": 7 }))))
+                .await;
+        assert_eq!(typed.status(), StatusCode::BAD_REQUEST);
+
+        assert_eq!(count(&pool, "oauth_login_states").await, 0, "no pending login was started");
+        assert!(transport.requests().is_empty(), "refused before any upstream call");
     }
 }

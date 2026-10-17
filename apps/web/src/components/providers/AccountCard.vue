@@ -8,13 +8,14 @@
  * § Providers page) — one toggle in the card header opens every row at once,
  * rather than each row carrying a pencil that restates the same affordance. A
  * resting row is identity and usage only, so the trash is never one accidental
- * click away. The status dot always ships its text label (§ Accessibility floor).
+ * click away — except Sign in again on an expired sign-in, which is the fix for
+ * what the dot reports and destroys nothing. The status dot always ships its
+ * text label (§ Accessibility floor).
  */
 import { computed } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
-import Banner from "@/components/ui/Banner.vue"
 import StatusDot from "@/components/ui/StatusDot.vue"
 import UsageBar from "@/components/ui/UsageBar.vue"
 import { useI18n } from "@/i18n"
@@ -48,6 +49,8 @@ const emit = defineEmits<{
   /** Carries the upstream identity: the dialog shows what a blank name falls back to. */
   rename: [identity: string]
   remove: []
+  /** Carries the display name: the sign-in dialog says which account to use. */
+  reconnect: [name: string]
 }>()
 
 const { t } = useI18n()
@@ -146,8 +149,8 @@ const plan = computed(() => {
  * § Providers page). Codex's usage API sits behind chatgpt.com's bot wall
  * (chat still routes); Anthropic's usage endpoint can return `usage 429`
  * on its own budget while Messages traffic is fine. The last good windows
- * stay on the bars — a banner restating the probe error is noise. Token /
- * auth failures still surface.
+ * stay on the bars — a note restating the probe error is noise. Auth
+ * failures surface as the `reauth` status instead.
  */
 const hideUsageError = computed(() => {
   const error = props.account.error
@@ -156,6 +159,24 @@ const hideUsageError = computed(() => {
 })
 
 const windows = computed(() => props.account.usage?.windows ?? [])
+
+/**
+ * The viewer's own row whose sign-in expired (docs/admin-ui.md § Providers
+ * page). The status and the Sign in again button say it; the raw probe error
+ * ("usage 401") is not printed, and the bars are last-known values.
+ */
+const reauth = computed(() => props.account.status === "reauth" && !share.value)
+
+/**
+ * Any other probe failure worth seeing: a short note on the tags line, not a
+ * banner. The last good windows stay on the bars; the upstream text is data,
+ * so it rides in the tooltip and the accessible name rather than as copy.
+ */
+const usageError = computed(() =>
+  !share.value && props.account.status !== "reauth" && !hideUsageError.value
+    ? props.account.error
+    : null,
+)
 
 /**
  * Antigravity's Google One AI credit balance — a real upstream number with no
@@ -181,6 +202,25 @@ const creditsText = computed(() => {
         <span v-if="renamed && !share" class="upstream" :title="identity">{{ identity }}</span>
         <div class="tags">
           <StatusDot :status="account.status" />
+          <!-- Outside the section's gate on purpose: it is the fix for the
+               state the dot beside it reports, and it destroys nothing. -->
+          <AppButton
+            v-if="reauth"
+            class="reconnect"
+            size="sm"
+            variant="ghost"
+            :label="t('providers.account.reconnectLabel', { name: displayName })"
+            :disabled="busy"
+            @click="emit('reconnect', displayName)"
+          >
+            {{ t("providers.account.reconnect") }}
+          </AppButton>
+          <span v-if="usageError" class="usage-error" :title="usageError">
+            <span aria-hidden="true">{{ t("providers.account.usageStale") }}</span>
+            <span class="sr-only">
+              {{ t("providers.account.usageStaleDetail", { error: usageError }) }}
+            </span>
+          </span>
           <!-- The badge marks the top of the order the move arrows edit. The
                dot beside it answers the other question — where requests go
                right now. -->
@@ -272,21 +312,20 @@ const creditsText = computed(() => {
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
     </div>
     <template v-else-if="!share">
-      <div v-if="windows.length" class="windows">
+      <!-- An expired sign-in freezes the bars at their last known values, so
+           they are muted rather than read as live. -->
+      <div v-if="windows.length" class="windows" :class="{ frozen: reauth }">
         <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
       </div>
       <!-- The balance sits under the bars when both exist, and stands in for
-           them when the quota read came back empty. -->
+           them when the quota read came back empty. No usage will "appear" on
+           an expired sign-in, so that row never promises it. -->
       <p v-if="creditsText" class="no-usage">
         {{ creditsText }}
       </p>
-      <p v-else-if="!windows.length && !hideUsageError" class="no-usage">
+      <p v-else-if="!windows.length && !hideUsageError && !reauth" class="no-usage">
         {{ t("providers.account.noUsage") }}
       </p>
-
-      <Banner v-if="account.error && !hideUsageError" tone="warn">
-        {{ account.error }}
-      </Banner>
     </template>
   </div>
 </template>
@@ -364,6 +403,28 @@ const creditsText = computed(() => {
   white-space: nowrap;
 }
 
+/* A text button, not a 28px box: it sits in a line of 20px pills and must not
+   grow the row. The underline is what says it can be pressed. */
+.tags .reconnect {
+  height: auto;
+  padding: 0;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tags .reconnect:hover {
+  background: transparent;
+  text-decoration-thickness: 2px;
+}
+
+.usage-error {
+  color: var(--warn);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
 /* Stays on the identity row at every width, right-aligned — the pencil sits
    vertically under the section's Add control, so a section has one column of
    controls down its right edge (docs/admin-ui.md § Providers page). */
@@ -377,6 +438,10 @@ const creditsText = computed(() => {
 .windows {
   display: grid;
   gap: var(--space-3);
+}
+
+.windows.frozen {
+  opacity: 0.55;
 }
 
 .no-usage {

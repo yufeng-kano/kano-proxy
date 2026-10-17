@@ -33,8 +33,10 @@ const label = computed(() => {
       return t("status.limited")
     case "benched":
       return t("status.benched")
+    case "reauth":
+      return t("status.reauth")
     default:
-      return t("status.unusable")
+      return t("status.unknown")
   }
 })
 </script>
@@ -102,7 +104,8 @@ const label = computed(() => {
   background: var(--warn);
 }
 
-.unusable .dot {
+/* The one status the operator has to act on: the sign-in expired. */
+.reauth .dot {
   background: var(--danger);
 }
 </style>

@@ -70,7 +70,7 @@ Spend-limit columns are part of the baseline; `device_id` was added in `0003_api
 
 `label` and `custom_label` are two different jobs and must not be merged: `label` is a cache of upstream identity (the accounts read overwrites it whenever the upstream email/display name changes), so a rename written there survives only until the next poll. `custom_label` is user intent — set by `PATCH /api/providers/:provider/accounts/:id`, cleared by sending `null`/`""`, and read first by the display-name resolver.
 
-**There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / limited / benched / unusable" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order, the bench columns above (`pool/bench.ts`) and the stored `usage_snapshot_json` windows (`routing/facts.ts`), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02. Bench state lived in a key-value cache until `0011` — moved to these columns because its eventual consistency made bench state flap across requests, its 1-write/sec-per-key limit made the bench key a hotspot under bursts, and the account row is already read on every dispatch, so the columns ride along with zero extra reads.)
+**There is no persisted `status` column** — `0001_init.sql` never created one. "Active / standby / limited / benched / reauth" (or, for a custom provider, the simpler "active" / "benched") is computed at read time from `priority` order, the bench columns above (`pool/bench.ts`) and the stored `usage_snapshot_json` windows (`routing/facts.ts`), never stored. (An earlier revision of this doc incorrectly listed a `status` column; fixed 2026-08-02. Bench state lived in a key-value cache until `0011` — moved to these columns because its eventual consistency made bench state flap across requests, its 1-write/sec-per-key limit made the bench key a hotspot under bursts, and the account row is already read on every dispatch, so the columns ride along with zero extra reads.)
 
 Unique optional: `(user_id, provider, external_account_id)` when known.
 
@@ -251,7 +251,7 @@ Rows past the retention window (default 90 days) are deleted by the daily cron s
 
 ### `oauth_login_states`
 
-Pending provider or Google login state (PKCE verifier, expiry). Short-lived; pruned on the path that adds rows.
+Pending provider or Google login state (PKCE verifier, expiry; `reconnect_account_id` inside `payload_json` when the login reconnects an existing account — [auth.md](./auth.md) § Management routes). Short-lived; pruned on the path that adds rows.
 
 ## Caches
 

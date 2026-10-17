@@ -7,6 +7,9 @@ export type ProviderId = "claude-code" | "codex" | "grok" | "antigravity"
  * `active_no_fable` / `active_fable` exist only on Claude Code pools: the
  * first usable account when its seat cannot serve Fable, and the first
  * usable Fable-eligible account below it — where Fable traffic goes.
+ * `reauth` is an expired sign-in (usage probe 401, or paused by an upstream
+ * 401): only signing in again fixes it, and any windows it still carries are
+ * the last known values.
  */
 export type AccountStatus =
   | "active"
@@ -15,7 +18,7 @@ export type AccountStatus =
   | "standby"
   | "limited"
   | "benched"
-  | "unusable"
+  | "reauth"
 
 export type User = {
   id: string

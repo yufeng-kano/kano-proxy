@@ -64,9 +64,11 @@ export const CACHE_TTL_MS = 120_000
  * (the Groups picker's pin handle) — a v11 entry has none, so the picker
  * would render an empty rail until the TTL expired. v13: log rows grew
  * `account_removed` / `account_shared_by` and keep a removed record's last
- * name — a v12 entry would read a stored name as a live account.
+ * name — a v12 entry would read a stored name as a live account. v14: account
+ * status `unusable` became `reauth` — a v13 entry would paint an expired
+ * sign-in as an unknown status with no Sign in again until the TTL expired.
  */
-const CACHE_SCHEMA_VERSION = 13
+const CACHE_SCHEMA_VERSION = 14
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
