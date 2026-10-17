@@ -69,9 +69,11 @@ export const CACHE_TTL_MS = 120_000
  * sign-in as an unknown status with no Sign in again until the TTL expired.
  * v15: accounts grew `allow_credits` / `on_credits` and Codex's
  * `account.credits` — a v14 entry has none, so an opted-in row would paint
- * its credits switch off until the TTL expired.
+ * its credits switch off until the TTL expired. v16: a shared Codex row may
+ * carry `usage.credits` and `on_credits` — a v15 entry has neither, so a
+ * member's row would miss its balance and On credits until the TTL expired.
  */
-const CACHE_SCHEMA_VERSION = 15
+const CACHE_SCHEMA_VERSION = 16
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

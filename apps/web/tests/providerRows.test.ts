@@ -103,31 +103,113 @@ it("signs in again without offering the manual-token step, which would add a new
   expect(add).toContain("Enter tokens manually")
 })
 
-it("prints a Codex credit balance only when upstream reported one", async () => {
+it("prints a Codex credit balance in whole credits, only when upstream reported one", async () => {
+  // Upstream's fraction is noise beside a balance this size; the Codex CLI rounds it too.
   const balance = await render(AccountCard, {
-    account: codexAccount({ has_credits: true, unlimited: false, balance: "1234.5" }),
+    account: codexAccount({ has_credits: true, unlimited: false, balance: "12345.678" }),
     provider: "codex",
   })
-  expect(balance).toContain("1,234.5 credits left")
+  expect(balance).toContain(">12,346 left<")
+  expect(balance).not.toContain("12,345.678")
+
+  // Under one credit the fraction is the whole balance: rounding would print 0
+  // on a row that still routes on it.
+  const small = await render(AccountCard, {
+    account: codexAccount({ has_credits: true, unlimited: false, balance: "0.4" }),
+    provider: "codex",
+  })
+  expect(small).toContain(">0.4 left<")
 
   // Not a number: upstream's text is shown as is, never coerced to NaN or 0.
   const raw = await render(AccountCard, {
     account: codexAccount({ has_credits: true, unlimited: false, balance: "n/a" }),
     provider: "codex",
   })
-  expect(raw).toContain("n/a credits left")
+  expect(raw).toContain(">n/a left<")
 
   const unlimited = await render(AccountCard, {
     account: codexAccount({ has_credits: true, unlimited: true, balance: null }),
     provider: "codex",
   })
-  expect(unlimited).toContain("Unlimited credits")
+  expect(unlimited).toContain(">Unlimited<")
+
+  // Credits without a balance still route, so the row says they exist.
+  const available = await render(AccountCard, {
+    account: codexAccount({ has_credits: true, unlimited: false, balance: null }),
+    provider: "codex",
+  })
+  expect(available).toContain(">Available<")
 
   for (const credits of [null, undefined, { has_credits: false, unlimited: false, balance: "0" }]) {
     const html = await render(AccountCard, { account: codexAccount(credits), provider: "codex" })
-    expect(html).not.toContain("credits left")
-    expect(html).not.toContain("Unlimited credits")
+    expect(html).not.toContain('class="credits"')
   }
+})
+
+it("keeps the balance in the bars' list: muted with them on an expired sign-in, alone without them", async () => {
+  const credits = { has_credits: true, unlimited: false, balance: "41.5" }
+  const expiredRow = await render(AccountCard, {
+    account: codexAccount(credits, { status: "reauth", error: "usage 401" }),
+    provider: "codex",
+  })
+  expect(expiredRow).toMatch(/class="[^"]*\bfrozen\b[^"]*"[\s\S]*class="credits"/)
+
+  const noBars = await render(AccountCard, {
+    account: codexAccount(credits, { usage: null }),
+    provider: "codex",
+  })
+  expect(noBars).toContain(">42 left<")
+  expect(noBars).not.toContain("Usage will appear")
+
+  // Neither bars nor balance: the usual empty state, not an empty list.
+  const empty = await render(AccountCard, {
+    account: codexAccount(null, { usage: null }),
+    provider: "codex",
+  })
+  expect(empty).toContain("Usage will appear")
+  expect(empty).not.toContain('class="windows"')
+})
+
+it("prints Antigravity's balance in the same Credits row", async () => {
+  const html = await render(AccountCard, {
+    account: account({ account: { email: "owner@example.com", credits_remaining: 1500 } }),
+    provider: "antigravity",
+  })
+  expect(html).toContain(">1,500 left<")
+})
+
+it("shows a borrower the owner's balance only where the edition handed it", async () => {
+  const share = { teamId: "t", teamName: "Team", ownerLabel: "Owner" }
+  // A member the edition shows the account's own windows: the balance comes with them.
+  const handed = await render(AccountCard, {
+    account: account({
+      account: null,
+      share,
+      usage: {
+        windows: [{ label: "Week", utilization: 100, resets_at: null }],
+        credits: { has_credits: true, unlimited: false, balance: "41.5" },
+      },
+      on_credits: true,
+    }),
+    provider: "codex",
+    editing: true,
+  })
+  expect(handed).toContain(">42 left<")
+  expect(handed).toContain("On credits")
+  // Spending the owner's credits stays the owner's switch.
+  expect(handed).not.toContain("Use credits after limits")
+
+  // A member who sees only their own allowance gets no balance.
+  const withheld = await render(AccountCard, {
+    account: account({
+      account: null,
+      share,
+      usage: { windows: [{ label: "Usage", utilization: 25, resets_at: null, value: "$2.5 / $10" }] },
+    }),
+    provider: "codex",
+  })
+  expect(withheld).toContain("$2.5 / $10")
+  expect(withheld).not.toContain('class="credits"')
 })
 
 it("offers the credits opt-in only to the owner of a Codex row with credits, behind the gate", async () => {

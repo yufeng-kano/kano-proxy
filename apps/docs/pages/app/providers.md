@@ -41,7 +41,8 @@ A row shows:
 | **Active · no Fable** | Claude Code only. The next request goes here, but this seat cannot serve Fable models. |
 | **Active · Fable** | Claude Code only. Fable requests go here, because the account above it cannot serve them. |
 
-- **Usage bars**, one per usage window the provider reports, such as **5h** and **Week**, each with the percentage used and when it resets. Antigravity shows **Gemini 5h** and **Gemini Week**, then **Argon Week** on Google AI Pro, where Gemini 4 Argon has its own weekly quota, then **Other 5h** and **Other Week**, and a line such as `1,500 credits left` when Google reports a balance. A new account shows **Usage will appear once this account is used**.
+- **Usage bars**, one per usage window the provider reports, such as **5h** and **Week**, each with the percentage used and when it resets. Antigravity shows **Gemini 5h** and **Gemini Week**, then **Argon Week** on Google AI Pro, where Gemini 4 Argon has its own weekly quota, then **Other 5h** and **Other Week**. A new account shows **Usage will appear once this account is used**.
+- **Credits**, a row under the bars when Codex or Antigravity reports a credit balance, such as `1,500 left` or `Unlimited`. A balance has no total, so it has no bar.
 
 ### Custom endpoints
 

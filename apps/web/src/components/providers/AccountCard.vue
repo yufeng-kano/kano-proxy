@@ -97,8 +97,10 @@ const renamed = computed(() => !!props.account.custom_label)
 
 /**
  * A row the viewer borrows from another user rather than owns
- * (docs/admin-ui.md § Providers page). It arrives with no usage surface at
- * all — no windows, no probe error, no upstream identity blob — and the only
+ * (docs/admin-ui.md § Providers page). It arrives with no probe error and no
+ * upstream identity blob; its usage is whatever the edition hands the
+ * borrower (their allowance, and where the edition shows them, the account's
+ * windows and Codex balance). The only
  * mutation a borrower may make on it is Move up / down, which reorders it
  * inside their own pool; Rename, Resume and Remove are the owner's alone and
  * answer 403, so they are not rendered here.
@@ -180,36 +182,53 @@ const usageError = computed(() =>
     : null,
 )
 
-/** Codex's credit balance, when upstream reported one in the identity blob. */
+/**
+ * Codex's credit balance, when upstream reported one: in the identity blob on
+ * an own row, and on a shared row, which has none, only where the edition
+ * handed it with the account's windows (docs/admin-ui.md § Providers page).
+ */
 const codexCredits = computed<CodexCredits | null>(() => {
   if (props.provider !== "codex") return null
-  const credits = props.account.account?.credits
+  const credits = share.value ? props.account.usage?.credits : props.account.account?.credits
   return credits && typeof credits === "object" ? (credits as CodexCredits) : null
 })
 
 /**
  * A credit balance — a real upstream number with no total and no reset, so it
- * can never be a bar (docs/admin-ui.md § Providers page). It rides alongside
- * the quota bars as a plain line, and is absent whenever upstream sent none:
+ * can never be a bar (docs/admin-ui.md § Providers page). It is the amount of
+ * a Credits row under the bars, and is absent whenever upstream sent none:
  * Antigravity's Google One AI balance often goes missing, and a Codex account
- * without credits gets no line rather than an invented zero. Codex's balance
- * is upstream's raw text: formatted as a number when it parses, else verbatim.
+ * without credits gets no row rather than an invented zero. Credits without a
+ * balance read "Available", as the Codex CLI prints them: routing counts them
+ * as usable, so the row must not go silent beside an On credits badge. A Codex
+ * balance that does not parse is upstream's text verbatim.
  */
 const creditsText = computed(() => {
   if (props.provider === "antigravity") {
     const credits = props.account.account?.credits_remaining
     return typeof credits === "number"
-      ? t("providers.account.credits", { credits: credits.toLocaleString() })
+      ? t("providers.account.creditsLeft", { credits: creditAmount(credits) })
       : null
   }
   const codex = codexCredits.value
   if (!codex) return null
   if (codex.unlimited) return t("providers.account.creditsUnlimited")
-  if (!codex.has_credits || typeof codex.balance !== "string") return null
+  if (!codex.has_credits) return null
+  if (typeof codex.balance !== "string") return t("providers.account.creditsAvailable")
   const n = Number(codex.balance)
   const parses = codex.balance.trim() !== "" && Number.isFinite(n)
-  return t("providers.account.credits", { credits: parses ? n : codex.balance })
+  return t("providers.account.creditsLeft", { credits: parses ? creditAmount(n) : codex.balance })
 })
+
+/**
+ * Whole credits from one credit up, as the Codex CLI rounds them: upstream
+ * sends "12345.678", and the fraction is noise beside a balance that size.
+ * Under one credit the fraction is the whole balance, so it stays — rounding
+ * would print 0 on a row that still routes on it.
+ */
+function creditAmount(n: number): number {
+  return n >= 1 ? Math.round(n) : n
+}
 
 /**
  * The opt-in to keep routing on credits after the plan's limits: the owner's
@@ -358,44 +377,41 @@ watch(
 
     <!-- A shared row never reads the owner's usage surface itself — no probe
          error, and nothing here ever asks upstream about someone else's
-         account. What it shows are the bars the edition hands it: the
-         borrower's own allowance on this row, plus the account's stored
-         windows where its owner chose to show them. Without any, the usage
-         area is simply absent. -->
-    <div v-if="share && windows.length" class="windows">
+         account. What it shows is what the edition hands it: the borrower's
+         own allowance on this row, plus the account's stored windows and
+         Codex balance where its owner chose to show them. Without any, the
+         usage area is simply absent. An expired sign-in, which only an own
+         row reports, freezes the bars and the balance at their last known
+         values, so they are muted rather than read as live. -->
+    <div v-if="windows.length || creditsText" class="windows" :class="{ frozen: reauth }">
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
-    </div>
-    <template v-else-if="!share">
-      <!-- An expired sign-in freezes the bars at their last known values, so
-           they are muted rather than read as live. -->
-      <div v-if="windows.length" class="windows" :class="{ frozen: reauth }">
-        <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
-      </div>
       <!-- The balance sits under the bars when both exist, and stands in for
-           them when the quota read came back empty. No usage will "appear" on
-           an expired sign-in, so that row never promises it. -->
-      <p v-if="creditsText" class="no-usage">
-        {{ creditsText }}
-      </p>
-      <p v-else-if="!windows.length && !hideUsageError && !reauth" class="no-usage">
-        {{ t("providers.account.noUsage") }}
-      </p>
-      <!-- Behind the section's gate: it changes routing and spends money, so
-           it sits with the pool's other edits rather than on the resting row. -->
-      <label v-if="showAllowCredits" class="check">
-        <input
-          ref="allowCreditsBox"
-          type="checkbox"
-          :checked="account.allow_credits"
-          :disabled="busy"
-          @change="emit('allowCredits', ($event.target as HTMLInputElement).checked)"
-        />
-        <span class="check-text">
-          <span class="check-title">{{ t("providers.account.allowCredits") }}</span>
-          <span class="check-hint">{{ t("providers.account.allowCreditsHint") }}</span>
-        </span>
-      </label>
-    </template>
+           them when the quota read came back empty. -->
+      <div v-if="creditsText" class="credits">
+        <span class="credits-label">{{ t("providers.account.credits") }}</span>
+        <span class="credits-value tabular">{{ creditsText }}</span>
+      </div>
+    </div>
+    <!-- Usage never "appears" on a shared row or on an expired sign-in, so
+         neither promises it. -->
+    <p v-else-if="!share && !hideUsageError && !reauth" class="no-usage">
+      {{ t("providers.account.noUsage") }}
+    </p>
+    <!-- Behind the section's gate: it changes routing and spends money, so
+         it sits with the pool's other edits rather than on the resting row. -->
+    <label v-if="showAllowCredits" class="check">
+      <input
+        ref="allowCreditsBox"
+        type="checkbox"
+        :checked="account.allow_credits"
+        :disabled="busy"
+        @change="emit('allowCredits', ($event.target as HTMLInputElement).checked)"
+      />
+      <span class="check-text">
+        <span class="check-title">{{ t("providers.account.allowCredits") }}</span>
+        <span class="check-hint">{{ t("providers.account.allowCreditsHint") }}</span>
+      </span>
+    </label>
   </div>
 </template>
 
@@ -504,13 +520,51 @@ watch(
   flex-shrink: 0;
 }
 
+/* Label, track and amount are columns of the whole list, not of each bar:
+   UsageBar and the credits row take them as a subgrid, so every track ends at
+   the same x and the amounts line up however wide one is — an edition's
+   "$2.5 / $10" beside a plain "100%". The label column is sized for the
+   longest label any adapter emits — Antigravity's group-prefixed
+   "Gemini Week" (docs/providers.md § Antigravity) — not for a bare "5h". */
 .windows {
   display: grid;
+  grid-template-columns: 78px minmax(0, 1fr) minmax(44px, auto);
   gap: var(--space-3);
 }
 
 .windows.frozen {
   opacity: 0.55;
+}
+
+/* A balance has no total, so no track: its amount spans the empty track
+   column, right-aligned with the bars' amounts, and so never widens their
+   column. Set like a bar's label and amount — a value, not a footnote. */
+.credits {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+
+.credits-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  color: var(--text-secondary);
+}
+
+.credits-value {
+  grid-column: 2 / -1;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  text-align: right;
+}
+
+/* The amount column grows to its widest amount rather than wrapping it. */
+@media (max-width: 640px) {
+  .windows {
+    grid-template-columns: 68px minmax(0, 1fr) minmax(40px, auto);
+    column-gap: var(--space-2);
+  }
 }
 
 .no-usage {
