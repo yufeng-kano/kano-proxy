@@ -11,6 +11,10 @@
 //!
 //! A malformed or missing snapshot reads as "no window fact" (fail open).
 //!
+//! **Credit spillover** (docs/providers.md § Codex "Credit spillover"): a row with
+//! `allow_credits` whose stored facts carry usable `credits` has no window fact at all — it
+//! keeps routing on paid credits. Benches still apply.
+//!
 //! Both are **quota-scoped** (docs/providers.md § Routing module "Quota scopes"): a window
 //! tagged with a scope, and a bench on a scope, apply only when the candidate's model draws on
 //! that scope. A caller with no model to scope by (`scope: None`, the Providers dot) sees only
@@ -20,9 +24,9 @@
 //! The originals were `async` and ignored both (`void env; void userId`), and nothing in the
 //! Rust port needs an await here — every fact comes off the loaded row.
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use crate::db::accounts::{parse_iso_ms, read_usage_snapshot, AccountRow};
+use crate::db::accounts::{account_profile_meta, parse_iso_ms, read_usage_snapshot, AccountRow};
 use crate::pool::bench::{bench_until_from_row, scope_bench_until_from_row};
 use crate::routing::types::{CandidateFacts, RoutingCandidate};
 
@@ -32,8 +36,29 @@ use crate::routing::types::{CandidateFacts, RoutingCandidate};
 /// currently exhausted (never fetched, none over 100%, or every over-100% window's `resets_at`
 /// already passed — the self-expiry the doc requires even off a stale snapshot).
 pub fn usage_window_unusable_until(row: &AccountRow, scope: Option<&str>, now_ms: i64) -> Option<i64> {
+    if row.allow_credits && credits_usable(account_profile_meta(row).as_ref()) {
+        return None;
+    }
     let snapshot = read_usage_snapshot(row)?;
     windows_unusable_until(&snapshot.windows, scope, now_ms)
+}
+
+/// Whether the stored `credits` fact can carry an account past an exhausted window:
+/// `unlimited`, or `has_credits` with a balance that is absent or parses to more than zero.
+/// Missing or malformed credits are not usable (this gate spends money, so it fails closed).
+pub fn credits_usable(meta: Option<&Map<String, Value>>) -> bool {
+    let Some(credits) = meta.and_then(|m| m.get("credits")).and_then(Value::as_object) else { return false };
+    if credits.get("unlimited").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    if credits.get("has_credits").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    match credits.get("balance") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => s.trim().parse::<f64>().is_ok_and(|b| b > 0.0),
+        _ => false,
+    }
 }
 
 /// Whether a stored window gates a candidate drawing on `scope`: an untagged window gates
@@ -127,6 +152,7 @@ mod tests {
             refreshing_at: None,
             edge_strikes: 0,
             edge_strike_at: None,
+            allow_credits: false,
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
         }
@@ -323,6 +349,68 @@ mod tests {
         for scope in [Some("Argon"), Some("Gemini"), None] {
             assert_eq!(usage_window_unusable_until(&row, scope, now), Some(at("2026-06-01T05:00:00.000Z")));
         }
+    }
+
+    fn on_credits_row(allow_credits: bool, credits: Value) -> AccountRow {
+        let mut row = account_row("acc_1", "codex");
+        row.allow_credits = allow_credits;
+        row.usage_snapshot_json = Some(
+            json!({
+                "windows": [{ "label": "Week", "utilization": 100, "resets_at": "2026-06-05T00:00:00.000Z" }],
+                "account": { "credits": credits },
+                "error": null, "stale": false, "edgeBlocked": false,
+            })
+            .to_string(),
+        );
+        row
+    }
+
+    #[test]
+    fn an_exhausted_window_does_not_park_an_opted_in_account_with_usable_credits() {
+        let now = at("2026-06-01T00:00:00.000Z");
+        let row = on_credits_row(true, json!({ "has_credits": true, "unlimited": false, "balance": "12.5" }));
+        assert_eq!(
+            facts_for_row(&row, None, now),
+            CandidateFacts { usable: true, unusable_until: None, bench_until: None, usage_window_until: None }
+        );
+        let unlimited = on_credits_row(true, json!({ "has_credits": false, "unlimited": true, "balance": null }));
+        assert!(facts_for_row(&unlimited, None, now).usable);
+        let no_balance = on_credits_row(true, json!({ "has_credits": true, "unlimited": false, "balance": null }));
+        assert!(facts_for_row(&no_balance, None, now).usable);
+    }
+
+    #[test]
+    fn credits_never_unpark_an_account_that_did_not_opt_in() {
+        let now = at("2026-06-01T00:00:00.000Z");
+        let row = on_credits_row(false, json!({ "has_credits": true, "unlimited": true, "balance": "100" }));
+        let facts = facts_for_row(&row, None, now);
+        assert!(!facts.usable);
+        assert_eq!(facts.usage_window_until, Some(at("2026-06-05T00:00:00.000Z")));
+    }
+
+    #[test]
+    fn an_opted_in_account_without_usable_credits_stays_limited() {
+        let now = at("2026-06-01T00:00:00.000Z");
+        for credits in [
+            json!({ "has_credits": false, "unlimited": false, "balance": "50" }),
+            json!({ "has_credits": true, "unlimited": false, "balance": "0" }),
+            json!({ "has_credits": true, "unlimited": false, "balance": "-1" }),
+            json!({ "has_credits": true, "unlimited": false, "balance": "n/a" }),
+            Value::Null,
+        ] {
+            let row = on_credits_row(true, credits.clone());
+            assert!(!facts_for_row(&row, None, now).usable, "{credits}");
+        }
+    }
+
+    #[test]
+    fn a_bench_still_parks_an_account_running_on_credits() {
+        let now = at("2026-06-01T00:00:00.000Z");
+        let mut row = on_credits_row(true, json!({ "has_credits": true, "unlimited": false, "balance": "12.5" }));
+        row.bench_until = Some(iso_from_ms(now + 300_000));
+        let facts = facts_for_row(&row, None, now);
+        assert!(!facts.usable);
+        assert_eq!((facts.bench_until, facts.usage_window_until), (Some(now + 300_000), None));
     }
 
     #[test]

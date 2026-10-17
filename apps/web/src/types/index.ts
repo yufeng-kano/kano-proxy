@@ -55,6 +55,27 @@ export type ProviderAccount = {
    * are the owner's alone and answer 403.
    */
   share?: { teamId: string; teamName: string; ownerLabel: string }
+  /**
+   * The owner opted this row into routing on paid credits once its plan limits
+   * are used up (docs/admin-ui.md § Providers page). Codex only; always false
+   * on a shared row.
+   */
+  allow_credits: boolean
+  /**
+   * Routable only because of credits: a plan window is exhausted and credits
+   * are allowed and available. The status is then active/standby, not limited.
+   */
+  on_credits: boolean
+}
+
+/**
+ * Codex's credit balance as upstream reports it, under `account.credits`.
+ * `balance` is the raw upstream string (a number as text).
+ */
+export type CodexCredits = {
+  has_credits: boolean
+  unlimited: boolean
+  balance: string | null
 }
 
 /**

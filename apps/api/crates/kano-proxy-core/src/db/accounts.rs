@@ -30,6 +30,8 @@ pub struct AccountRow {
     pub refreshing_at: Option<String>,
     pub edge_strikes: i32,
     pub edge_strike_at: Option<String>,
+    /// Opt-in to credit spillover (docs/providers.md § Codex "Credit spillover").
+    pub allow_credits: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -122,6 +124,38 @@ pub async fn set_account_custom_label(
     Ok(r.rows_affected() > 0)
 }
 
+/// The operator's own settings on one account, written in one statement
+/// (`PATCH /api/providers/:provider/accounts/:id`, docs/auth.md). `None` keeps a column as
+/// stored, so sending one field never rewrites the other; `Some(None)` clears `custom_label`.
+/// `provider`, when given, must match the row. Returns the stored `(custom_label,
+/// allow_credits)`, or `None` when the caller owns no such row.
+pub async fn update_account_settings(
+    db: &PgPool,
+    user_id: &str,
+    account_id: &str,
+    provider: Option<&str>,
+    custom_label: Option<Option<&str>>,
+    allow_credits: Option<bool>,
+) -> Result<Option<(Option<String>, bool)>, sqlx::Error> {
+    sqlx::query_as(
+        "UPDATE upstream_accounts
+         SET custom_label = CASE WHEN $1 THEN $2 ELSE custom_label END,
+             allow_credits = COALESCE($3, allow_credits),
+             updated_at = $4
+         WHERE id = $5 AND user_id = $6 AND ($7::text IS NULL OR provider = $7)
+         RETURNING custom_label, allow_credits",
+    )
+    .bind(custom_label.is_some())
+    .bind(custom_label.flatten())
+    .bind(allow_credits)
+    .bind(now_iso())
+    .bind(account_id)
+    .bind(user_id)
+    .bind(provider)
+    .fetch_optional(db)
+    .await
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NewAccount<'a> {
     pub user_id: &'a str,
@@ -180,6 +214,7 @@ pub async fn insert_account(db: &PgPool, input: NewAccount<'_>) -> Result<Accoun
         refreshing_at: None,
         edge_strikes: 0,
         edge_strike_at: None,
+        allow_credits: false,
         created_at: ts.clone(),
         updated_at: ts,
     })
@@ -551,7 +586,7 @@ mod tests {
             usage_snapshot_json: Some(r#"{"windows":[{"w":1}],"account":{"plan":"max"},"stale":true}"#.into()),
             usage_fetched_at: None, usage_fetching_at: None, bench_until: None, bench_reason: None,
             bench_scopes_json: None,
-            refreshing_at: None, edge_strikes: 0, edge_strike_at: None,
+            refreshing_at: None, edge_strikes: 0, edge_strike_at: None, allow_credits: false,
             created_at: String::new(), updated_at: String::new(),
         };
         let snap = read_usage_snapshot(&row).unwrap();

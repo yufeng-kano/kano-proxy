@@ -149,7 +149,8 @@ mod tests {
             account_meta_json: None, usage_snapshot_json: None, usage_fetched_at: None,
             usage_fetching_at: None, bench_until: None, bench_reason: None, refreshing_at: None,
             bench_scopes_json: None,
-            edge_strikes: 0, edge_strike_at: None, created_at: String::new(), updated_at: String::new(),
+            edge_strikes: 0, edge_strike_at: None, allow_credits: false, created_at: String::new(),
+            updated_at: String::new(),
         };
         assert_eq!(bench_until_from_row(&row, 1_000), None);
         row.bench_until = Some(iso_from_ms(2_000));

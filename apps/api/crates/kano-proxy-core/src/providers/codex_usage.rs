@@ -56,6 +56,11 @@ pub struct CodexUsagePayload {
     pub account_id: Option<String>,
     #[serde(default)]
     pub rate_limit: Option<CodexRateLimit>,
+    /// `credits: {has_credits, unlimited, balance, …} | null` (docs/providers.md § Codex
+    /// "Credit spillover"). Kept as raw JSON so an unexpected field type never fails the whole
+    /// usage parse; [`credits_meta`] reads it leniently.
+    #[serde(default)]
+    pub credits: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -182,6 +187,20 @@ pub fn windows_from_codex_payload(payload: &CodexUsagePayload) -> Vec<UsageWindo
             scope: None,
         })
         .collect()
+}
+
+/// The `credits` value stored in the account facts: `{has_credits, unlimited, balance}` with
+/// wrong types read as absent (`false` / `null`), or `null` when the payload has none — an
+/// explicit null, so a credit pool that disappears upstream overwrites the stored one.
+pub fn credits_meta(payload: &CodexUsagePayload) -> Value {
+    let Some(credits) = payload.credits.as_ref().and_then(Value::as_object) else { return Value::Null };
+    let flag = |key: &str| credits.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let balance = match credits.get("balance") {
+        Some(Value::String(s)) => Value::String(s.clone()),
+        Some(Value::Number(n)) => Value::String(n.to_string()),
+        _ => Value::Null,
+    };
+    serde_json::json!({ "has_credits": flag("has_credits"), "unlimited": flag("unlimited"), "balance": balance })
 }
 
 pub fn window_label(seconds: Option<i64>) -> String {
@@ -392,6 +411,23 @@ mod tests {
             "secondary_window": null,
         } }));
         assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn credits_are_read_leniently_and_a_missing_pool_is_an_explicit_null() {
+        let credits = |value: Value| credits_meta(&payload(value));
+        assert_eq!(
+            credits(json!({ "credits": { "has_credits": true, "unlimited": false, "balance": "12.50", "approx_local_messages": [1, 2] } })),
+            json!({ "has_credits": true, "unlimited": false, "balance": "12.50" })
+        );
+        // A wrong type is absent, not a parse failure of the whole usage payload.
+        assert_eq!(
+            credits(json!({ "credits": { "has_credits": "yes", "unlimited": null, "balance": 3 } })),
+            json!({ "has_credits": false, "unlimited": false, "balance": "3" })
+        );
+        assert_eq!(credits(json!({ "credits": null })), Value::Null);
+        assert_eq!(credits(json!({})), Value::Null);
+        assert_eq!(credits(json!({ "credits": "unexpected" })), Value::Null);
     }
 
     #[test]

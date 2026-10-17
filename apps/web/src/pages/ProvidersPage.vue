@@ -38,6 +38,7 @@ import {
   deleteCustomProvider,
   reorderAccounts,
   removeAccount,
+  setAccountAllowCredits,
   setProviderStrategy,
   unpauseAccount,
   unpauseCustomProvider,
@@ -312,6 +313,24 @@ async function onMove(provider: ProviderId, from: number, to: number) {
     accountOrderAnnouncement.value = ""
     // The pool may have changed under the list this move was computed from.
     await loadProvider(provider, { forceNetwork: true })
+  } finally {
+    busyId.value = null
+  }
+}
+
+/**
+ * The owner's opt-in to route on credits after the plan's limits. The reload
+ * reads the stored choice back without forcing a usage probe, like a move; a
+ * refusal leaves the row's data untouched, so the card puts its box back.
+ */
+async function onAllowCredits(provider: ProviderId, id: string, allow: boolean) {
+  busyId.value = id
+  actionError.value = null
+  try {
+    await setAccountAllowCredits(provider, id, allow)
+    await loadProvider(provider, { forceNetwork: true })
+  } catch {
+    actionError.value = t("providers.error.allowCredits")
   } finally {
     busyId.value = null
   }
@@ -666,6 +685,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               @rename="renaming = { provider: pid, account, identity: $event }"
               @remove="onRemove(pid, account.id)"
               @reconnect="reconnecting = { provider: pid, id: account.id, name: $event }"
+              @allow-credits="onAllowCredits(pid, account.id, $event)"
             />
           </div>
 

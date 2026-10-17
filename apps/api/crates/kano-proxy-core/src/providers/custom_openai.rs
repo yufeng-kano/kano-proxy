@@ -399,6 +399,7 @@ pub(crate) mod test_support {
                 refreshing_at: None,
                 edge_strikes: 0,
                 edge_strike_at: None,
+                allow_credits: false,
                 created_at: "2026-01-01T00:00:00.000Z".into(),
                 updated_at: "2026-01-01T00:00:00.000Z".into(),
             },

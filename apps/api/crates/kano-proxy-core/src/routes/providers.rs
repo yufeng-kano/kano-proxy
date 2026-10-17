@@ -28,8 +28,8 @@ use crate::auth::session::SessionUser;
 use crate::crypto::token_crypto::encrypt_json;
 use crate::db::accounts::{
     acquire_usage_lock, get_account, insert_account, is_usage_fresh, iso_from_ms, list_accounts, parse_iso_ms,
-    promote_account, read_usage_snapshot, remove_account, replace_account_credential, set_account_custom_label,
-    set_account_priorities, AccountRow, NewAccount,
+    promote_account, read_usage_snapshot, remove_account, replace_account_credential, set_account_priorities,
+    update_account_settings, AccountRow, NewAccount,
 };
 use crate::db::oauth_states::{
     delete_expired_states, delete_state, get_provider_state, insert_provider_state, list_provider_states,
@@ -50,7 +50,7 @@ use crate::providers::registry::get_adapter;
 use crate::providers::types::{DynAdapter, UsageWindow};
 use crate::providers::usage_refresh::fetch_and_persist_usage;
 use crate::providers::ProviderId;
-use crate::routing::facts::{usage_window_unusable_until, windows_unusable_until};
+use crate::routing::facts::{credits_usable, usage_window_unusable_until, windows_unusable_until};
 use crate::routing::strategy::DEFAULT_STRATEGY;
 use crate::upstream::UpstreamRequest;
 use crate::AppState;
@@ -142,6 +142,11 @@ struct AccountView {
     error: Option<String>,
     stale: bool,
     share: Option<crate::pool::ShareInfo>,
+    /// The row's own opt-in; always `false` on a shared row (the owner's setting).
+    allow_credits: bool,
+    /// Routable only because of credits: opted in, credits usable, an account-wide window
+    /// exhausted (docs/providers.md § Routing module status surfaces).
+    on_credits: bool,
 }
 
 impl AccountView {
@@ -156,6 +161,8 @@ impl AccountView {
             "usage": self.usage_windows.as_ref().map(|w| json!({ "windows": w })),
             "error": self.error,
             "stale": self.stale,
+            "allow_credits": self.allow_credits,
+            "on_credits": self.on_credits,
         });
         if let Some(share) = &self.share {
             out["share"] = json!({
@@ -341,12 +348,18 @@ async fn list_accounts_route(
             error: None,
             stale: false,
             share: None,
+            allow_credits: row.allow_credits,
+            on_credits: false,
         };
         account_usage(&state, row, &adapter, force, &mut view).await;
         view.label = display_label(row, view.account.as_ref());
 
-        // The dot has no model to scope by, so it reads only the account-wide windows.
-        limited_until.push(view.usage_windows.as_ref().and_then(|w| windows_unusable_until(w, None, now)));
+        // The dot has no model to scope by, so it reads only the account-wide windows. An
+        // exhausted one does not limit a row that spills over to usable credits — the same rule
+        // the router applies (routing::facts::usage_window_unusable_until).
+        let exhausted = view.usage_windows.as_ref().and_then(|w| windows_unusable_until(w, None, now));
+        view.on_credits = exhausted.is_some() && row.allow_credits && credits_usable(view.account.as_ref());
+        limited_until.push(if view.on_credits { None } else { exhausted });
         created_at.push(row.created_at.clone());
         fable_eligible.push(adapter.supports_model(view.account.as_ref(), FABLE_MODEL_PREFIX));
         accounts.push(view);
@@ -397,6 +410,8 @@ async fn list_accounts_route(
             error: None,
             stale: false,
             share: Some(shared.share.clone()),
+            allow_credits: false,
+            on_credits: false,
         });
         limited_until.push(usage_window_unusable_until(row, None, now));
         created_at.push(row.created_at.clone());
@@ -484,29 +499,50 @@ async fn patch_account(
     Path((provider, id)): Path<(String, String)>,
     body: Bytes,
 ) -> Response {
-    let Some(body) = parse_body(&body) else {
-        return error(StatusCode::BAD_REQUEST, "invalid custom_label");
+    let Some(Value::Object(body)) = parse_body(&body) else {
+        return error(StatusCode::BAD_REQUEST, "invalid body");
     };
-    let custom_label = match body.get("custom_label") {
-        Some(Value::Null) | None => None,
+    // Outer `None` = field absent, keep the stored value; `Some(None)` = clear.
+    let custom_label: Option<Option<String>> = match body.get("custom_label") {
+        None => None,
+        Some(Value::Null) => Some(None),
         Some(Value::String(s)) => {
             let trimmed = s.trim();
             if trimmed.is_empty() {
-                None
+                Some(None)
             } else if trimmed.chars().count() > 64 {
                 return error(StatusCode::BAD_REQUEST, "custom_label too long");
             } else {
-                Some(trimmed.to_string())
+                Some(Some(trimmed.to_string()))
             }
         }
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid custom_label"),
     };
+    let allow_credits = match body.get("allow_credits") {
+        None => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid allow_credits"),
+    };
+    if custom_label.is_none() && allow_credits.is_none() {
+        return error(StatusCode::BAD_REQUEST, "nothing to update");
+    }
+    // Spillover spends paid credits and needs the adapter's stored `credits` fact, so only an
+    // adapter that declares it may opt in (docs/providers.md § Codex "Credit spillover").
+    if allow_credits.is_some()
+        && !ProviderId::parse(&provider).is_some_and(|p| get_adapter(p).supports_credit_spillover())
+    {
+        return error(StatusCode::BAD_REQUEST, "allow_credits is not supported for this provider");
+    }
 
-    match set_account_custom_label(state.pool(), &session.user.id, &id, custom_label.as_deref()).await {
+    let provider_scope = allow_credits.is_some().then_some(provider.as_str());
+    let label = custom_label.as_ref().map(Option::as_deref);
+    match update_account_settings(state.pool(), &session.user.id, &id, provider_scope, label, allow_credits).await {
         Err(_) => internal_error(),
-        Ok(true) => Json(json!({ "ok": true, "custom_label": custom_label })).into_response(),
-        // A row the viewer borrows exists, but renaming it is the owner's right.
-        Ok(false) => forbidden_or_not_found(&state, &session.user.id, &provider, &id).await,
+        Ok(Some((custom_label, allow_credits))) => {
+            Json(json!({ "ok": true, "custom_label": custom_label, "allow_credits": allow_credits })).into_response()
+        }
+        // A row the viewer borrows exists, but changing it is the owner's right.
+        Ok(None) => forbidden_or_not_found(&state, &session.user.id, &provider, &id).await,
     }
 }
 
@@ -1373,7 +1409,7 @@ async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) 
 mod tests {
     use super::*;
     use crate::auth::session::create_session;
-    use crate::db::accounts::{acquire_refresh_lock, iso_from_ms};
+    use crate::db::accounts::{acquire_refresh_lock, iso_from_ms, set_account_custom_label};
     use crate::db::test_support::{
         insert_user, skip_without_db, test_config, test_pool, test_router, test_state, TEST_TOKEN_KEY,
     };
@@ -1538,7 +1574,7 @@ mod tests {
         )
         .await;
         assert_eq!(patch.status(), StatusCode::OK);
-        assert_eq!(body_json(patch).await, json!({ "ok": true, "custom_label": "Work Claude" }));
+        assert_eq!(body_json(patch).await, json!({ "ok": true, "custom_label": "Work Claude", "allow_credits": false }));
 
         let after = stored_row(&pool, &user.id, "acc_1").await;
         assert_eq!(after.custom_label.as_deref(), Some("Work Claude"));
@@ -1603,7 +1639,7 @@ mod tests {
         );
         let cleared = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": null })))).await;
         assert_eq!(cleared.status(), StatusCode::OK);
-        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null }));
+        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false }));
         let listed = call(&state, request("GET", "/api/providers/claude-code/accounts", Some(&cookie), None)).await;
         let json = body_json(listed).await;
         assert_eq!(json["accounts"][0]["label"], "fallback@example.com");
@@ -1615,7 +1651,7 @@ mod tests {
         );
         let cleared = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": "" })))).await;
         assert_eq!(cleared.status(), StatusCode::OK);
-        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null }));
+        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false }));
         let listed = call(&state, request("GET", "/api/providers/claude-code/accounts?refresh=true", Some(&cookie), None)).await;
         let json = body_json(listed).await;
         assert_eq!(json["accounts"][0]["label"], "fallback@example.com");
@@ -1652,6 +1688,224 @@ mod tests {
         // And the whole group requires a session.
         let anon = call(&state, request("PATCH", uri, None, Some(json!({ "custom_label": "no session" })))).await;
         assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ------------------------------------------- PATCH /:provider/accounts/:id allow_credits
+
+    #[tokio::test]
+    async fn allow_credits_on_an_own_codex_row_persists_without_touching_custom_label() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_1", "codex", 7, account_meta("seat@example.com")).await;
+        let uri = "/api/providers/codex/accounts/acc_1";
+        call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": "Work" })))).await;
+        let before = stored_row(&pool, &user.id, "acc_1").await;
+        assert!(!before.allow_credits, "spillover defaults off");
+
+        let on = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "allow_credits": true })))).await;
+        assert_eq!(on.status(), StatusCode::OK);
+        assert_eq!(body_json(on).await, json!({ "ok": true, "custom_label": "Work", "allow_credits": true }));
+        let after = stored_row(&pool, &user.id, "acc_1").await;
+        assert!(after.allow_credits);
+        assert_eq!(after.custom_label.as_deref(), Some("Work"));
+        assert_eq!((after.label, after.priority, after.encrypted_payload), (before.label, before.priority, before.encrypted_payload));
+
+        // And the reverse: a rename alone leaves the opt-in as stored.
+        let renamed = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": null })))).await;
+        assert_eq!(body_json(renamed).await, json!({ "ok": true, "custom_label": null, "allow_credits": true }));
+        assert!(stored_row(&pool, &user.id, "acc_1").await.allow_credits);
+
+        let both =
+            call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": "Both", "allow_credits": false })))).await;
+        assert_eq!(body_json(both).await, json!({ "ok": true, "custom_label": "Both", "allow_credits": false }));
+
+        for (body, message) in [
+            (json!({}), "nothing to update"),
+            (json!({ "allow_credits": "yes" }), "invalid allow_credits"),
+            (json!([true]), "invalid body"),
+        ] {
+            let res = call(&state, request("PATCH", uri, Some(&cookie), Some(body))).await;
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(body_json(res).await, json!({ "error": message }));
+        }
+        let row = stored_row(&pool, &user.id, "acc_1").await;
+        assert_eq!((row.custom_label.as_deref(), row.allow_credits), (Some("Both"), false));
+    }
+
+    #[tokio::test]
+    async fn allow_credits_is_refused_on_a_provider_without_spillover() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_claude", "claude-code", 7, account_meta("seat@example.com")).await;
+
+        let res = call(
+            &state,
+            request("PATCH", "/api/providers/claude-code/accounts/acc_claude", Some(&cookie), Some(json!({ "allow_credits": true, "custom_label": "x" }))),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(res).await, json!({ "error": "allow_credits is not supported for this provider" }));
+        let row = stored_row(&pool, &user.id, "acc_claude").await;
+        assert_eq!((row.custom_label, row.allow_credits), (None, false), "a refused body writes nothing");
+
+        // A codex path cannot flip a claude-code row either.
+        let crossed = call(
+            &state,
+            request("PATCH", "/api/providers/codex/accounts/acc_claude", Some(&cookie), Some(json!({ "allow_credits": true }))),
+        )
+        .await;
+        assert_eq!(crossed.status(), StatusCode::NOT_FOUND);
+        assert!(!stored_row(&pool, &user.id, "acc_claude").await.allow_credits);
+    }
+
+    #[tokio::test]
+    async fn allow_credits_on_a_shared_codex_row_is_403() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let mut row = borrowed_row("shared_codex", "user_2");
+        row.provider = "codex".into();
+        let ext = Arc::new(FakeExtension {
+            shared_provider: Some(ProviderId::Codex),
+            shared: vec![SharedAccount { account: row, priority: 3, share: share_info(), usage: None }],
+            ..Default::default()
+        });
+        let state = state_with_extension(pool.clone(), MockTransport::new(), ext);
+        let (_, cookie) = signed_in(&state, "user_1@example.com").await;
+
+        let res = call(
+            &state,
+            request("PATCH", "/api/providers/codex/accounts/shared_codex", Some(&cookie), Some(json!({ "allow_credits": true }))),
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_json(res).await, json!({ "error": "forbidden" }));
+    }
+
+    // ------------------------------------------------ GET /codex/accounts credit spillover
+
+    /// A codex row whose credential carries a ChatGPT account id, so `fetch_usage` really calls
+    /// the (stubbed) `/wham/usage`.
+    async fn seed_codex_account(pool: &PgPool, user_id: &str, id: &str, priority: i32, allow_credits: bool) {
+        seed_account(pool, user_id, id, "codex", priority, account_meta(&format!("{id}@example.com"))).await;
+        let blob = encrypt_json(
+            Some(TEST_TOKEN_KEY),
+            &StoredCredential { access_token: "tok_test".into(), account_id: Some(format!("chatgpt_{id}")), ..Default::default() },
+        )
+        .unwrap();
+        sqlx::query("UPDATE upstream_accounts SET encrypted_payload = $1, allow_credits = $2 WHERE id = $3")
+            .bind(blob)
+            .bind(allow_credits)
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// `/wham/usage` with an exhausted weekly window and the given `credits`.
+    fn stub_codex_usage(transport: &Arc<MockTransport>, rounds: usize, credits: Value) {
+        let reset_at = (crate::app::now_ms() + 3 * 24 * 60 * 60 * 1000) / 1000;
+        for _ in 0..rounds {
+            let credits = credits.clone();
+            transport.expect(move |req| {
+                assert!(req.url.ends_with("/wham/usage"), "unexpected upstream request {}", req.url);
+                Ok(UpstreamResponse::json(
+                    StatusCode::OK,
+                    &json!({
+                        "plan_type": "plus",
+                        "rate_limit": { "allowed": false, "limit_reached": true, "primary_window": {
+                            "used_percent": 100, "limit_window_seconds": 604800, "reset_at": reset_at } },
+                        "credits": credits,
+                    }),
+                ))
+            });
+        }
+    }
+
+    async fn codex_accounts(state: &AppState, cookie: &str, refresh: bool) -> Value {
+        let uri = if refresh { "/api/providers/codex/accounts?refresh=true" } else { "/api/providers/codex/accounts" };
+        body_json(call(state, request("GET", uri, Some(cookie), None)).await).await
+    }
+
+    fn credit_rows(json: &Value) -> Vec<(String, String, bool, bool)> {
+        json["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["id"].as_str().unwrap().to_string(),
+                    a["status"].as_str().unwrap().to_string(),
+                    a["allow_credits"].as_bool().unwrap(),
+                    a["on_credits"].as_bool().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_codex_row_routes_on_stored_credits_only_when_it_opted_in() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_codex_account(&pool, &user.id, "acc_opted", 9, true).await;
+        seed_codex_account(&pool, &user.id, "acc_plain", 1, false).await;
+        stub_codex_usage(&transport, 2, json!({ "has_credits": true, "unlimited": false, "balance": "25.5", "approx_cloud_messages": [3, 5] }));
+
+        let json = codex_accounts(&state, &cookie, false).await;
+        assert_eq!(
+            credit_rows(&json),
+            vec![
+                ("acc_opted".to_string(), "active".to_string(), true, true),
+                ("acc_plain".to_string(), "limited".to_string(), false, false),
+            ]
+        );
+        let stored = json!({ "has_credits": true, "unlimited": false, "balance": "25.5" });
+        assert_eq!(json["accounts"][0]["account"]["credits"], stored);
+        let meta: Value = serde_json::from_str(stored_row(&pool, &user.id, "acc_opted").await.account_meta_json.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["credits"], stored, "credits land in account_meta_json");
+
+        // The router agrees with the dot: the opted-in row is usable, the other is not.
+        let now = state.now_ms();
+        assert!(crate::routing::facts::facts_for_row(&stored_row(&pool, &user.id, "acc_opted").await, None, now).usable);
+        assert!(!crate::routing::facts::facts_for_row(&stored_row(&pool, &user.id, "acc_plain").await, None, now).usable);
+
+        // Upstream drops the credit pool: the explicit null overwrites the stored one, so the
+        // opted-in row is limited again rather than spending credits it no longer has.
+        stub_codex_usage(&transport, 2, Value::Null);
+        let json = codex_accounts(&state, &cookie, true).await;
+        assert_eq!(
+            credit_rows(&json),
+            vec![
+                ("acc_opted".to_string(), "limited".to_string(), true, false),
+                ("acc_plain".to_string(), "limited".to_string(), false, false),
+            ]
+        );
+        let meta: Value = serde_json::from_str(stored_row(&pool, &user.id, "acc_opted").await.account_meta_json.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["credits"], Value::Null);
+        assert!(!crate::routing::facts::facts_for_row(&stored_row(&pool, &user.id, "acc_opted").await, None, now).usable);
+    }
+
+    #[tokio::test]
+    async fn an_opted_in_row_without_usable_credits_stays_limited() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_codex_account(&pool, &user.id, "acc_none", 9, true).await;
+        seed_codex_account(&pool, &user.id, "acc_zero", 8, true).await;
+        stub_codex_usage(&transport, 1, json!({ "has_credits": false, "unlimited": false, "balance": "40" }));
+        stub_codex_usage(&transport, 1, json!({ "has_credits": true, "unlimited": false, "balance": "0" }));
+
+        let json = codex_accounts(&state, &cookie, false).await;
+        assert_eq!(
+            credit_rows(&json),
+            vec![
+                ("acc_none".to_string(), "limited".to_string(), true, false),
+                ("acc_zero".to_string(), "limited".to_string(), true, false),
+            ]
+        );
     }
 
     // ------------------------------------------------------------------- Codex device OAuth
@@ -2522,6 +2776,7 @@ mod tests {
             refreshing_at: None,
             edge_strikes: 0,
             edge_strike_at: None,
+            allow_credits: false,
             created_at: NOW.into(),
             updated_at: NOW.into(),
         }
@@ -2530,6 +2785,8 @@ mod tests {
     /// A `PoolExtension` whose calls are recorded; every method defaults to "nothing shared".
     #[derive(Default)]
     struct FakeExtension {
+        /// The provider the shared rows belong to; `None` means grok.
+        shared_provider: Option<ProviderId>,
         shared: Vec<SharedAccount>,
         shared_with_usage: Option<Vec<SharedAccount>>,
         bars: Vec<UsageWindow>,
@@ -2547,7 +2804,7 @@ mod tests {
             options: ListSharedOptions,
         ) -> anyhow::Result<Vec<SharedAccount>> {
             self.calls.lock().unwrap().push(("list_shared".into(), viewer_user_id.into(), options.usage as i32));
-            if provider != ProviderId::Grok {
+            if provider != self.shared_provider.unwrap_or(ProviderId::Grok) {
                 return Ok(Vec::new());
             }
             if options.usage {

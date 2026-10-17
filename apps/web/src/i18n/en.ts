@@ -236,9 +236,15 @@ export const en = {
   // is short; the upstream text rides in its tooltip and accessible name.
   "providers.account.usageStale": "Couldn't read usage",
   "providers.account.usageStaleDetail": "Couldn't read usage: {error}",
-  // Antigravity reports a credit balance beside its quota windows; it has no
-  // total, so it is a line and not a bar — docs/providers.md § Antigravity.
+  // Antigravity and Codex report a credit balance beside their quota windows;
+  // it has no total, so it is a line and not a bar — docs/providers.md.
   "providers.account.credits": "{credits} credits left",
+  "providers.account.creditsUnlimited": "Unlimited credits",
+  // Codex's opt-in to keep routing on paid credits after the plan's limits.
+  "providers.account.allowCredits": "Use credits after limits",
+  "providers.account.allowCreditsHint": "Credits are spent only after the plan's limits run out.",
+  // Beside the status: this row is routable only because it spends credits.
+  "providers.account.onCredits": "On credits",
   "providers.account.plan": "{plan} plan",
   // A row another user shares with this one: it names who lends it, because
   // that is the only thing on the row the viewer does not own.
@@ -258,6 +264,7 @@ export const en = {
   "providers.error.remove": "Couldn't remove the account",
   "providers.error.rename": "Couldn't rename the account",
   "providers.error.strategy": "Couldn't change the routing strategy",
+  "providers.error.allowCredits": "Couldn't change credit use",
 
   // --- Routing strategy ---------------------------------------------------
   // How a pool or a group decides what a request runs on. One option ships

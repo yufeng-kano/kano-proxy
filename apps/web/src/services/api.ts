@@ -236,6 +236,21 @@ export async function renameAccount(
   )
 }
 
+/**
+ * The owner's opt-in to keep routing to the account on paid credits once its
+ * plan limits are used up. Same PATCH as rename, sent without `custom_label`.
+ */
+export async function setAccountAllowCredits(
+  provider: ProviderId,
+  id: string,
+  allow: boolean,
+): Promise<void> {
+  await request<{ ok: boolean }>(
+    `/api/providers/${provider}/accounts/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify({ allow_credits: allow }) },
+  )
+}
+
 export async function removeAccount(
   provider: ProviderId,
   id: string,

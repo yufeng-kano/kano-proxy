@@ -12,14 +12,14 @@
  * what the dot reports and destroys nothing. The status dot always ships its
  * text label (§ Accessibility floor).
  */
-import { computed } from "vue"
+import { computed, ref, watch } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import StatusDot from "@/components/ui/StatusDot.vue"
 import UsageBar from "@/components/ui/UsageBar.vue"
 import { useI18n } from "@/i18n"
-import type { ProviderAccount } from "@/types"
+import type { CodexCredits, ProviderAccount } from "@/types"
 
 const props = defineProps<{
   account: ProviderAccount
@@ -51,6 +51,8 @@ const emit = defineEmits<{
   remove: []
   /** Carries the display name: the sign-in dialog says which account to use. */
   reconnect: [name: string]
+  /** The owner's new choice for routing on credits after the plan's limits. */
+  allowCredits: [allow: boolean]
 }>()
 
 const { t } = useI18n()
@@ -178,19 +180,67 @@ const usageError = computed(() =>
     : null,
 )
 
+/** Codex's credit balance, when upstream reported one in the identity blob. */
+const codexCredits = computed<CodexCredits | null>(() => {
+  if (props.provider !== "codex") return null
+  const credits = props.account.account?.credits
+  return credits && typeof credits === "object" ? (credits as CodexCredits) : null
+})
+
 /**
- * Antigravity's Google One AI credit balance — a real upstream number with no
- * total and no reset, so it can never be a bar (docs/providers.md
- * § Antigravity). It rides alongside the quota bars as a plain line, and is
- * frequently absent: Google often sends the usage floor without the balance.
+ * A credit balance — a real upstream number with no total and no reset, so it
+ * can never be a bar (docs/admin-ui.md § Providers page). It rides alongside
+ * the quota bars as a plain line, and is absent whenever upstream sent none:
+ * Antigravity's Google One AI balance often goes missing, and a Codex account
+ * without credits gets no line rather than an invented zero. Codex's balance
+ * is upstream's raw text: formatted as a number when it parses, else verbatim.
  */
 const creditsText = computed(() => {
-  if (props.provider !== "antigravity") return null
-  const credits = props.account.account?.credits_remaining
-  return typeof credits === "number"
-    ? t("providers.account.credits", { credits: credits.toLocaleString() })
-    : null
+  if (props.provider === "antigravity") {
+    const credits = props.account.account?.credits_remaining
+    return typeof credits === "number"
+      ? t("providers.account.credits", { credits: credits.toLocaleString() })
+      : null
+  }
+  const codex = codexCredits.value
+  if (!codex) return null
+  if (codex.unlimited) return t("providers.account.creditsUnlimited")
+  if (!codex.has_credits || typeof codex.balance !== "string") return null
+  const n = Number(codex.balance)
+  const parses = codex.balance.trim() !== "" && Number.isFinite(n)
+  return t("providers.account.credits", { credits: parses ? n : codex.balance })
 })
+
+/**
+ * The opt-in to keep routing on credits after the plan's limits: the owner's
+ * alone (a shared row answers 403), and only where there are credits to spend.
+ * An opted-in row keeps the control after its balance runs out, so the choice
+ * can always be undone.
+ */
+const showAllowCredits = computed(
+  () =>
+    !!props.editing &&
+    !share.value &&
+    props.provider === "codex" &&
+    (!!codexCredits.value?.has_credits ||
+      !!codexCredits.value?.unlimited ||
+      props.account.allow_credits),
+)
+
+/**
+ * The native checkbox flips itself on click, and Vue patches nothing back
+ * when the bound value never changed — so once the write settles, the box is
+ * put back to whatever the reloaded row says (a failure reverts it).
+ */
+const allowCreditsBox = ref<HTMLInputElement | null>(null)
+watch(
+  () => props.busy,
+  (busy) => {
+    if (!busy && allowCreditsBox.value) {
+      allowCreditsBox.value.checked = props.account.allow_credits
+    }
+  },
+)
 </script>
 
 <template>
@@ -202,6 +252,10 @@ const creditsText = computed(() => {
         <span v-if="renamed && !share" class="upstream" :title="identity">{{ identity }}</span>
         <div class="tags">
           <StatusDot :status="account.status" />
+          <!-- The dot says the row is routable; this says what that costs. -->
+          <Badge v-if="account.on_credits" tone="warn">
+            {{ t("providers.account.onCredits") }}
+          </Badge>
           <!-- Outside the section's gate on purpose: it is the fix for the
                state the dot beside it reports, and it destroys nothing. -->
           <AppButton
@@ -326,6 +380,21 @@ const creditsText = computed(() => {
       <p v-else-if="!windows.length && !hideUsageError && !reauth" class="no-usage">
         {{ t("providers.account.noUsage") }}
       </p>
+      <!-- Behind the section's gate: it changes routing and spends money, so
+           it sits with the pool's other edits rather than on the resting row. -->
+      <label v-if="showAllowCredits" class="check">
+        <input
+          ref="allowCreditsBox"
+          type="checkbox"
+          :checked="account.allow_credits"
+          :disabled="busy"
+          @change="emit('allowCredits', ($event.target as HTMLInputElement).checked)"
+        />
+        <span class="check-text">
+          <span class="check-title">{{ t("providers.account.allowCredits") }}</span>
+          <span class="check-hint">{{ t("providers.account.allowCreditsHint") }}</span>
+        </span>
+      </label>
     </template>
   </div>
 </template>
@@ -447,6 +516,36 @@ const creditsText = computed(() => {
 .no-usage {
   margin: 0;
   color: var(--faint);
+  font-size: var(--text-xs);
+}
+
+/* Same checkbox spec as the key dialog's: box, then label over its hint. */
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  cursor: pointer;
+}
+
+.check input {
+  flex-shrink: 0;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+
+.check-text {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.check-title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.check-hint {
+  color: var(--muted);
   font-size: var(--text-xs);
 }
 </style>

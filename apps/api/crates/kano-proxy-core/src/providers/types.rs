@@ -225,6 +225,13 @@ pub trait ProviderAdapter: Send + Sync {
         None
     }
 
+    /// Whether an account may opt in to keep routing on paid credits past an exhausted usage
+    /// window (docs/providers.md § Codex "Credit spillover"). Gates `allow_credits` writes; the
+    /// adapter must store `credits` in the account facts for the flag to have any effect.
+    fn supports_credit_spillover(&self) -> bool {
+        false
+    }
+
     fn has_list_models(&self) -> bool {
         false
     }

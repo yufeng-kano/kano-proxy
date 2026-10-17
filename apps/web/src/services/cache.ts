@@ -67,8 +67,11 @@ export const CACHE_TTL_MS = 120_000
  * name — a v12 entry would read a stored name as a live account. v14: account
  * status `unusable` became `reauth` — a v13 entry would paint an expired
  * sign-in as an unknown status with no Sign in again until the TTL expired.
+ * v15: accounts grew `allow_credits` / `on_credits` and Codex's
+ * `account.credits` — a v14 entry has none, so an opted-in row would paint
+ * its credits switch off until the TTL expired.
  */
-const CACHE_SCHEMA_VERSION = 14
+const CACHE_SCHEMA_VERSION = 15
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

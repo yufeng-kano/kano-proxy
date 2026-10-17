@@ -55,18 +55,21 @@ Spend-limit columns are part of the baseline; `device_id` was added in `0003_api
 | custom_label | TEXT | nullable; the operator's own name for this account. Wins over `label` for display and is **never** overwritten by the upstream sync (`0005_account_custom_label.sql`) |
 | priority | INTEGER | higher = preferred; promote bumps, a reorder renumbers the pool `n..1` |
 | encrypted_payload | TEXT | AES-GCM blob: tokens + provider fields. For a custom provider this is just `{access_token: <api key>}` |
-| account_meta_json | TEXT | email, plan, non-secret. For a custom provider: `{key_mask: "sk-abc…f3a2"}` (see [providers.md](./providers.md)) |
+| account_meta_json | TEXT | email, plan, non-secret. For a custom provider: `{key_mask: "sk-abc…f3a2"}` (see [providers.md](./providers.md)). For codex also `credits: {has_credits, unlimited, balance} \| null` from the last successful usage read ([providers.md](./providers.md) § Codex "Credit spillover") |
 | usage_snapshot_json | TEXT | nullable; last successful usage read — `{windows, error, stale, edgeBlocked}` (`0006_account_usage_cache.sql`) |
 | usage_fetched_at | TEXT | nullable; when `usage_snapshot_json` was written. Drives the 2 min server-side TTL |
 | usage_fetching_at | TEXT | nullable; lock holder's timestamp while an upstream fetch is in flight (`NULL` = free) |
 | bench_until | TEXT | nullable; ISO time until which this account is benched (`0011_bench_and_refresh_state.sql`). `NULL` or past = not benched — expired values are compared at read, never proactively deleted. Writes are **monotonic**: a bench write only lands when it extends (`bench_until IS NULL OR bench_until < new`), so a shorter concurrent penalty can never truncate a longer one. Replaces the bench cache ([providers.md](./providers.md) § Routing module) |
 | bench_reason | TEXT | nullable; content-free cause of the current bench — the upstream status as text (`"429"`, `"524"`, …) or `"refresh_failed"`. Written with `bench_until`, nulled by unpause |
 | bench_scopes_json | TEXT | nullable; benches that cover one **quota scope** of the account instead of all of it (`0004_scoped_bench.sql`, [providers.md](./providers.md) § Routing module "Quota scopes"): `{"<scope>": {"until": "<ISO>", "reason": "429"}}`. Same rules as `bench_until` per entry — monotonic per scope, compared at read, expired entries never deleted (at most one per scope the adapter defines). Nulled by unpause |
+| allow_credits | BOOLEAN | `NOT NULL DEFAULT FALSE`; the owner's opt-in to **credit spillover** (`0005_account_allow_credits.sql`, [providers.md](./providers.md) § Codex "Credit spillover"): when true and the stored `credits` read usable, an exhausted usage window no longer makes the account unusable. Written only by `PATCH /api/providers/:provider/accounts/:id`, and only for a provider whose adapter supports spillover (`codex` today). Reconnect, unpause and the usage refresh leave it alone |
 | refreshing_at | TEXT | nullable; OAuth refresh single-flight lock, same CAS pattern as `usage_fetching_at` (30s breakable) — see [providers.md](./providers.md) § OAuth refresh single-flight |
 | edge_strikes | INTEGER | `NOT NULL DEFAULT 0`; consecutive upstream edge-timeout (520/522/524) strikes. Incremented atomically on each edge-timeout; the 3rd within 10 minutes benches 30s and resets to 0 ([providers.md](./providers.md) § Penalties). Never written on success |
 | edge_strike_at | TEXT | nullable; time of the last edge-timeout strike. A value older than 10 minutes stales the count — the next increment restarts at 1 |
 | created_at | TEXT | |
 | updated_at | TEXT | |
+
+`allow_credits` is `BOOLEAN` rather than the `INTEGER` 0/1 the baseline's older flags use: it is new, Postgres-only, and reads straight into a Rust `bool`. Its `0005` is the core's own numbering after the baseline, not the pre-baseline `0005_account_custom_label.sql` named in the table above.
 
 `label` and `custom_label` are two different jobs and must not be merged: `label` is a cache of upstream identity (the accounts read overwrites it whenever the upstream email/display name changes), so a rename written there survives only until the next poll. `custom_label` is user intent — set by `PATCH /api/providers/:provider/accounts/:id`, cleared by sending `null`/`""`, and read first by the display-name resolver.
 

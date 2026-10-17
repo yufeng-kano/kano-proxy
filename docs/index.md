@@ -12,7 +12,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [api.md](./api.md) | Public LLM routes (`/openai/v1` Chat Completions + Responses API, `/anthropic`), errors, served-upstream headers, reasoning, audio (input & transcriptions), cache |
 | [auth.md](./auth.md) | Google OIDC admin, client API keys, OAuth account binding |
 | [database.md](./database.md) | Schema, secrets handling, migrations |
-| [providers.md](./providers.md) | Per-provider pools, routing module + strategies, failover, usage windows, manual unpause, adapters, turn-scoped Codex reasoning replay |
+| [providers.md](./providers.md) | Per-provider pools, routing module + strategies, failover, usage windows, opt-in Codex credit spillover, manual unpause, adapters, turn-scoped Codex reasoning replay |
 | [pricing.md](./pricing.md) | Estimated per-request cost (LiteLLM + OpenRouter tables), per-key spend limits, `usage.cost` on Chat Completions responses |
 | [cli.md](./cli.md) | The official `kano-proxy` CLI (device login, Rust/ratatui): `tunnel` — the reverse tunnel exposing local LLMs as first-class providers; `agent` — sets up Claude Code / Codex CLI against the proxy through a model group and a device-minted key, and restores them |
 | [admin-ui.md](./admin-ui.md) | Web UI: design restraint (the house style), shell layout, pages, responsive rules, cache-first UX |

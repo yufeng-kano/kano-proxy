@@ -37,6 +37,10 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
     },
     Migration { name: "0003_api_keys_device", sql: include_str!("../../migrations/0003_api_keys_device.sql") },
     Migration { name: "0004_scoped_bench", sql: include_str!("../../migrations/0004_scoped_bench.sql") },
+    Migration {
+        name: "0005_account_allow_credits",
+        sql: include_str!("../../migrations/0005_account_allow_credits.sql"),
+    },
 ];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -132,7 +136,7 @@ mod tests {
         .expect("existing provider");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device", "0004_scoped_bench"]);
+        assert_eq!(applied, ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits"]);
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM cli_devices").fetch_all(&pool).await.unwrap();
         assert_eq!(ids, ["clidev_live"]);
         let live = crate::db::cli::get_cli_device(&pool, "clidev_live").await.unwrap().expect("the row type reads");
@@ -171,7 +175,7 @@ mod tests {
         .expect("existing device");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0003_api_keys_device", "0004_scoped_bench"]);
+        assert_eq!(applied, ["0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits"]);
         let old = crate::db::keys::list_keys(&pool, &user.id).await.unwrap();
         assert_eq!(old.len(), 1);
         assert_eq!((old[0].name.as_str(), old[0].spend_limit, old[0].spend_limit_interval.as_str()), ("Production", Some(12.5), "weekly"));
@@ -208,7 +212,7 @@ mod tests {
         .expect("existing account");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0004_scoped_bench"]);
+        assert_eq!(applied, ["0004_scoped_bench", "0005_account_allow_credits"]);
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert_eq!((row.bench_until.as_deref(), row.bench_reason.as_deref()), (Some("2030-01-01T00:00:00.000Z"), Some("429")));
         assert_eq!(row.usage_snapshot_json.as_deref(), Some("{\"windows\":[]}"));
@@ -217,6 +221,42 @@ mod tests {
         crate::pool::bench::mark_scope_benched(&pool, &user.id, "antigravity", "acc_old", "Argon", 60_000, "429", 0).await.unwrap();
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().unwrap();
         assert!(row.bench_scopes_json.is_some());
+        sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0);
+        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+    }
+
+    /// Upgrading a deployed 0004 schema: an existing codex account with a label, stored facts,
+    /// a usage snapshot and a scoped bench keeps all of them, reads back opted out of credit
+    /// spillover, can opt in afterwards, and the user cascade still reaches it.
+    #[tokio::test]
+    async fn upgrading_to_0005_keeps_existing_accounts_opted_out_of_credit_spillover() {
+        let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..4]).await else { return skip_without_db() };
+        let user = insert_user(&pool, "upgrade5@example.com").await;
+        sqlx::query(
+            "INSERT INTO upstream_accounts (id, user_id, provider, label, custom_label, priority, encrypted_payload,
+                                            account_meta_json, usage_snapshot_json, bench_scopes_json, created_at, updated_at)
+             VALUES ('acc_old', $1, 'codex', 'old', 'Mine', 3, 'blob',
+                     '{\"credits\":{\"has_credits\":true,\"unlimited\":false,\"balance\":\"9\"}}', '{\"windows\":[]}',
+                     '{\"x\":{\"until\":\"2030-01-01T00:00:00.000Z\",\"reason\":\"429\"}}', 'x', 'x')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("existing account");
+
+        let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
+        assert_eq!(applied, ["0005_account_allow_credits"]);
+        let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
+        assert!(!row.allow_credits, "existing accounts never start spending credits");
+        assert_eq!((row.custom_label.as_deref(), row.priority), (Some("Mine"), 3));
+        assert!(row.account_meta_json.is_some() && row.usage_snapshot_json.is_some() && row.bench_scopes_json.is_some());
+
+        let stored = crate::db::accounts::update_account_settings(&pool, &user.id, "acc_old", Some("codex"), None, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(stored, Some((Some("Mine".to_string()), true)));
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);

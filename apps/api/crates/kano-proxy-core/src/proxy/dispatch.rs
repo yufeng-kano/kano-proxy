@@ -2117,6 +2117,40 @@ pub(crate) mod tests {
         assert_eq!(adapter.calls(), ["acc_ok"], "the limited account is never called");
     }
 
+    /// docs/providers.md § Codex "Credit spillover": an opted-in account with usable credits
+    /// keeps serving past its exhausted window, and when upstream refuses anyway the 429 still
+    /// benches it and the walk moves on — the bench path is unchanged.
+    #[tokio::test]
+    async fn an_opted_in_account_on_credits_is_walked_and_a_429_still_benches_it() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "credits@example.com").await;
+        seed_accounts(state.pool(), &user.id, "codex", &["acc_credits", "acc_ok"]).await;
+        let resets_at = crate::db::accounts::iso_from_ms(now_ms() + 3_600_000);
+        let snapshot = json!({
+            "windows": [{ "label": "Week", "utilization": 100, "resets_at": resets_at }],
+            "account": { "credits": { "has_credits": true, "unlimited": false, "balance": "10" } },
+            "error": null, "stale": false, "edgeBlocked": false
+        })
+        .to_string();
+        set_snapshot(&state, "acc_credits", Some(&snapshot)).await;
+        sqlx::query("UPDATE upstream_accounts SET allow_credits = TRUE WHERE id = 'acc_credits'")
+            .execute(state.pool())
+            .await
+            .unwrap();
+        let adapter = ScriptedAdapter::new(
+            "codex",
+            vec![ok_chat(), Reply::Json(StatusCode::TOO_MANY_REQUESTS, json!({ "error": { "message": "limit" } })), ok_chat()],
+        );
+
+        let first = dispatch_chat_completions(&state, ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "codex", false) }).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let second = dispatch_chat_completions(&state, ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "codex", false) }).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(adapter.calls(), ["acc_credits", "acc_credits", "acc_ok"]);
+        assert!(is_benched(state.pool(), &user.id, "acc_credits", now_ms()).await.unwrap(), "the refusal benches as before");
+    }
+
     fn ok_chat() -> Reply {
         Reply::Json(
             StatusCode::OK,

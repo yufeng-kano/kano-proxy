@@ -38,7 +38,7 @@ use super::codex_reasoning_cache::{
     write_codex_reasoning_replay, CodexReasoningReplayEntry,
 };
 use super::codex_replay_history::{codex_input_hashes, codex_replay_turn, replay_codex_history};
-use super::codex_usage::{fetch_codex_usage_json, windows_from_codex_payload};
+use super::codex_usage::{credits_meta, fetch_codex_usage_json, windows_from_codex_payload};
 use super::refresh::refresh_oauth_credential;
 use super::types::{
     AdapterError, AffinityIds, CallExtras, ChatCompletionRequest, DynAdapter, FetchedUsage, ListedModels,
@@ -776,6 +776,10 @@ impl ProviderAdapter for CodexAdapter {
         "codex"
     }
 
+    fn supports_credit_spillover(&self) -> bool {
+        true
+    }
+
     async fn refresh_if_needed(&self, cx: &AppState, account: AcquiredAccount) -> Result<AcquiredAccount, AdapterError> {
         Ok(refresh_codex(cx, account).await)
     }
@@ -812,12 +816,16 @@ impl ProviderAdapter for CodexAdapter {
         };
 
         if let (true, Some(payload)) = (result.ok, result.payload.as_ref()) {
+            let mut account = account_value(
+                payload.email.clone().or_else(|| acc.credential.email.clone()),
+                Some(payload.plan_type.clone()),
+            );
+            // Only a successful read carries `credits`, null included, so a failed one keeps
+            // the last known value (docs/providers.md § Codex "Credit spillover").
+            account.insert("credits".into(), credits_meta(payload));
             return FetchedUsage {
                 windows: windows_from_codex_payload(payload),
-                account: account_value(
-                    payload.email.clone().or_else(|| acc.credential.email.clone()),
-                    Some(payload.plan_type.clone()),
-                ),
+                account,
                 stale: false,
                 error: None,
                 edge_blocked: false,
