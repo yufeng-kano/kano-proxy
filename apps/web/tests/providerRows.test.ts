@@ -163,6 +163,40 @@ it("prints Antigravity's balance in the same Credits row", async () => {
   expect(html).toContain(">1,500 left<")
 })
 
+it("shows a borrower the owner's balance only where the edition handed it", async () => {
+  const share = { teamId: "t", teamName: "Team", ownerLabel: "Owner" }
+  // A member the edition shows the account's own windows: the balance comes with them.
+  const handed = await render(AccountCard, {
+    account: account({
+      account: null,
+      share,
+      usage: {
+        windows: [{ label: "Week", utilization: 100, resets_at: null }],
+        credits: { has_credits: true, unlimited: false, balance: "41.5" },
+      },
+      on_credits: true,
+    }),
+    provider: "codex",
+    editing: true,
+  })
+  expect(handed).toContain(">42 left<")
+  expect(handed).toContain("On credits")
+  // Spending the owner's credits stays the owner's switch.
+  expect(handed).not.toContain("Use credits after limits")
+
+  // A member who sees only their own allowance gets no balance.
+  const withheld = await render(AccountCard, {
+    account: account({
+      account: null,
+      share,
+      usage: { windows: [{ label: "Usage", utilization: 25, resets_at: null, value: "$2.5 / $10" }] },
+    }),
+    provider: "codex",
+  })
+  expect(withheld).toContain("$2.5 / $10")
+  expect(withheld).not.toContain('class="credits"')
+})
+
 it("offers the credits opt-in only to the owner of a Codex row with credits, behind the gate", async () => {
   const withCredits = codexAccount({ has_credits: true, unlimited: false, balance: "41.5" })
   const label = "Use credits after limits"

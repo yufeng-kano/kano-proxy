@@ -180,10 +180,14 @@ const usageError = computed(() =>
     : null,
 )
 
-/** Codex's credit balance, when upstream reported one in the identity blob. */
+/**
+ * Codex's credit balance, when upstream reported one: in the identity blob on
+ * an own row, and on a shared row, which has none, only where the edition
+ * handed it with the account's windows (docs/admin-ui.md § Providers page).
+ */
 const codexCredits = computed<CodexCredits | null>(() => {
   if (props.provider !== "codex") return null
-  const credits = props.account.account?.credits
+  const credits = share.value ? props.account.usage?.credits : props.account.account?.credits
   return credits && typeof credits === "object" ? (credits as CodexCredits) : null
 })
 
@@ -360,46 +364,41 @@ watch(
 
     <!-- A shared row never reads the owner's usage surface itself — no probe
          error, and nothing here ever asks upstream about someone else's
-         account. What it shows are the bars the edition hands it: the
-         borrower's own allowance on this row, plus the account's stored
-         windows where its owner chose to show them. Without any, the usage
-         area is simply absent. -->
-    <div v-if="share && windows.length" class="windows">
+         account. What it shows is what the edition hands it: the borrower's
+         own allowance on this row, plus the account's stored windows and
+         Codex balance where its owner chose to show them. Without any, the
+         usage area is simply absent. An expired sign-in, which only an own
+         row reports, freezes the bars and the balance at their last known
+         values, so they are muted rather than read as live. -->
+    <div v-if="windows.length || creditsText" class="windows" :class="{ frozen: reauth }">
       <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
-    </div>
-    <template v-else-if="!share">
-      <!-- An expired sign-in freezes the bars and the balance at their last
-           known values, so they are muted rather than read as live. -->
-      <div v-if="windows.length || creditsText" class="windows" :class="{ frozen: reauth }">
-        <UsageBar v-for="(w, i) in windows" :key="i" :window="w" />
-        <!-- The balance sits under the bars when both exist, and stands in for
-             them when the quota read came back empty. -->
-        <div v-if="creditsText" class="credits">
-          <span class="credits-label">{{ t("providers.account.credits") }}</span>
-          <span class="credits-value tabular">{{ creditsText }}</span>
-        </div>
+      <!-- The balance sits under the bars when both exist, and stands in for
+           them when the quota read came back empty. -->
+      <div v-if="creditsText" class="credits">
+        <span class="credits-label">{{ t("providers.account.credits") }}</span>
+        <span class="credits-value tabular">{{ creditsText }}</span>
       </div>
-      <!-- No usage will "appear" on an expired sign-in, so that row never
-           promises it. -->
-      <p v-else-if="!hideUsageError && !reauth" class="no-usage">
-        {{ t("providers.account.noUsage") }}
-      </p>
-      <!-- Behind the section's gate: it changes routing and spends money, so
-           it sits with the pool's other edits rather than on the resting row. -->
-      <label v-if="showAllowCredits" class="check">
-        <input
-          ref="allowCreditsBox"
-          type="checkbox"
-          :checked="account.allow_credits"
-          :disabled="busy"
-          @change="emit('allowCredits', ($event.target as HTMLInputElement).checked)"
-        />
-        <span class="check-text">
-          <span class="check-title">{{ t("providers.account.allowCredits") }}</span>
-          <span class="check-hint">{{ t("providers.account.allowCreditsHint") }}</span>
-        </span>
-      </label>
-    </template>
+    </div>
+    <!-- Usage never "appears" on a shared row or on an expired sign-in, so
+         neither promises it. -->
+    <p v-else-if="!share && !hideUsageError && !reauth" class="no-usage">
+      {{ t("providers.account.noUsage") }}
+    </p>
+    <!-- Behind the section's gate: it changes routing and spends money, so
+         it sits with the pool's other edits rather than on the resting row. -->
+    <label v-if="showAllowCredits" class="check">
+      <input
+        ref="allowCreditsBox"
+        type="checkbox"
+        :checked="account.allow_credits"
+        :disabled="busy"
+        @change="emit('allowCredits', ($event.target as HTMLInputElement).checked)"
+      />
+      <span class="check-text">
+        <span class="check-title">{{ t("providers.account.allowCredits") }}</span>
+        <span class="check-hint">{{ t("providers.account.allowCreditsHint") }}</span>
+      </span>
+    </label>
   </div>
 </template>
 

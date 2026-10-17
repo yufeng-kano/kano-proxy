@@ -27,9 +27,9 @@ use crate::auth::provider_oauth::{
 use crate::auth::session::SessionUser;
 use crate::crypto::token_crypto::encrypt_json;
 use crate::db::accounts::{
-    acquire_usage_lock, get_account, insert_account, is_usage_fresh, iso_from_ms, list_accounts, parse_iso_ms,
-    promote_account, read_usage_snapshot, remove_account, replace_account_credential, set_account_priorities,
-    update_account_settings, AccountRow, NewAccount,
+    account_profile_meta, acquire_usage_lock, get_account, insert_account, is_usage_fresh, iso_from_ms, list_accounts,
+    parse_iso_ms, promote_account, read_usage_snapshot, remove_account, replace_account_credential,
+    set_account_priorities, update_account_settings, AccountRow, NewAccount,
 };
 use crate::db::oauth_states::{
     delete_expired_states, delete_state, get_provider_state, insert_provider_state, list_provider_states,
@@ -139,6 +139,9 @@ struct AccountView {
     custom_label: Option<String>,
     account: Option<Map<String, Value>>,
     usage_windows: Option<Vec<Value>>,
+    /// A shared Codex row's stored `credits`, when the edition handed them with the account's
+    /// windows. Always `None` on an own row, whose credits ride in `account`.
+    usage_credits: Option<Value>,
     error: Option<String>,
     stale: bool,
     share: Option<crate::pool::ShareInfo>,
@@ -158,7 +161,10 @@ impl AccountView {
             "label": self.label,
             "custom_label": self.custom_label,
             "account": self.account,
-            "usage": self.usage_windows.as_ref().map(|w| json!({ "windows": w })),
+            "usage": self.usage_windows.as_ref().map(|w| match &self.usage_credits {
+                Some(credits) => json!({ "windows": w, "credits": credits }),
+                None => json!({ "windows": w }),
+            }),
             "error": self.error,
             "stale": self.stale,
             "allow_credits": self.allow_credits,
@@ -345,6 +351,7 @@ async fn list_accounts_route(
             custom_label: row.custom_label.clone(),
             account: meta,
             usage_windows: None,
+            usage_credits: None,
             error: None,
             stale: false,
             share: None,
@@ -384,11 +391,20 @@ async fn list_accounts_route(
     }
 
     // Rows shared with the viewer, collected after the viewer's own pool and merged into
-    // routing order below. **No usage surface**: windows, probe errors and the upstream
-    // identity blob belong to the owner's page, not the borrower's, and nothing here ever
-    // triggers an upstream usage call for someone else's account.
+    // routing order below. **No usage surface of the core's own**: probe errors and the
+    // upstream identity blob belong to the owner's page, nothing here ever triggers an upstream
+    // usage call for someone else's account, and what the borrower does see is what the
+    // extension hands them.
     for shared in shared_accounts(&state, user_id, Some(provider), ListSharedOptions { usage: true }).await {
         let row = &shared.account;
+        // The extension hands a borrower the owner's credits only where it also shows them the
+        // account's own windows, and then the row says it routes on them as an own row would:
+        // the same rule, read off the stored facts this row's dot reads.
+        let usage_credits = shared.usage.as_ref().and_then(|u| u.credits.clone());
+        let on_credits = usage_credits.is_some()
+            && row.allow_credits
+            && credits_usable(account_profile_meta(row).as_ref())
+            && read_usage_snapshot(row).and_then(|s| windows_unusable_until(&s.windows, None, now)).is_some();
         accounts.push(AccountView {
             id: row.id.clone(),
             priority: shared.priority,
@@ -402,16 +418,17 @@ async fn list_accounts_route(
                 .to_string(),
             custom_label: row.custom_label.clone(),
             account: None,
-            // The extension's own bars for the borrower (an allowance), never the owner's
-            // upstream windows.
+            // The extension's own bars for the borrower (an allowance), and the account's stored
+            // windows only where the edition shows them.
             usage_windows: shared.usage.as_ref().map(|u| {
                 u.windows.iter().map(|w| serde_json::to_value(w).expect("usage window serializes")).collect()
             }),
+            usage_credits,
             error: None,
             stale: false,
             share: Some(shared.share.clone()),
             allow_credits: false,
-            on_credits: false,
+            on_credits,
         });
         limited_until.push(usage_window_unusable_until(row, None, now));
         created_at.push(row.created_at.clone());
@@ -2900,7 +2917,7 @@ mod tests {
                 account: borrowed_row("shared_1", "user_2"),
                 priority: 3,
                 share: share_info(),
-                usage: Some(AccountUsage { windows: windows.clone() }),
+                usage: Some(AccountUsage { windows: windows.clone(), credits: None }),
             }]),
             set_shared_priority_ok: true,
             ..Default::default()
@@ -2919,6 +2936,64 @@ mod tests {
             .unwrap()
             .iter()
             .any(|(name, viewer, usage)| name == "list_shared" && viewer == &user.id && *usage == 1));
+    }
+
+    #[tokio::test]
+    async fn a_shared_codex_row_shows_credits_and_on_credits_only_where_the_extension_hands_them() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let credits = json!({ "has_credits": true, "unlimited": false, "balance": "25.5" });
+        // The owner opted in, Week is exhausted and the stored credits are usable: the router
+        // keeps the row on credits for everyone.
+        let mut row = borrowed_row("shared_codex", "user_2");
+        row.provider = "codex".into();
+        row.allow_credits = true;
+        row.account_meta_json = Some(json!({ "credits": credits }).to_string());
+        row.usage_snapshot_json = Some(
+            json!({ "windows": [{ "label": "Week", "utilization": 100.0, "resets_at": "2999-01-01T00:00:00.000Z" }] })
+                .to_string(),
+        );
+        let week = UsageWindow {
+            label: "Week".into(),
+            utilization: Some(100.0),
+            resets_at: Some("2999-01-01T00:00:00.000Z".into()),
+            value: None,
+            scope: None,
+        };
+        let listed = |credits: Option<Value>, email: &'static str| {
+            let ext = Arc::new(FakeExtension {
+                shared_provider: Some(ProviderId::Codex),
+                shared_with_usage: Some(vec![SharedAccount {
+                    account: row.clone(),
+                    priority: 3,
+                    share: share_info(),
+                    usage: Some(AccountUsage { windows: vec![week.clone()], credits }),
+                }]),
+                ..Default::default()
+            });
+            let state = state_with_extension(pool.clone(), transport.clone(), ext);
+            async move {
+                let (_, cookie) = signed_in(&state, email).await;
+                codex_accounts(&state, &cookie, false).await["accounts"][0].clone()
+            }
+        };
+
+        // Handed with the windows: the balance and the badge, still no identity blob or opt-in.
+        let shown = listed(Some(credits.clone()), "user_1@example.com").await;
+        assert_eq!(shown["usage"]["credits"], credits);
+        assert_eq!(shown["status"], "active");
+        assert_eq!(shown["on_credits"], true);
+        assert_eq!(shown["allow_credits"], false);
+        assert_eq!(shown["account"], Value::Null);
+
+        // Not handed: neither, while the dot still follows the owner's routing.
+        let hidden = listed(None, "user_3@example.com").await;
+        assert!(hidden["usage"].get("credits").is_none());
+        assert_eq!(hidden["status"], "active");
+        assert_eq!(hidden["on_credits"], false);
+
+        // A borrower's page never probes the owner's account.
+        assert!(transport.requests().is_empty());
     }
 
     #[tokio::test]

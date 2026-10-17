@@ -44,15 +44,21 @@ export type ProviderAccount = {
   /** The user's own name for this account; null = falls back to upstream identity. */
   custom_label: string | null
   account: Record<string, unknown> | null
-  usage: { windows: UsageWindow[] } | null
+  /**
+   * `credits` appears only on a shared Codex row, where the edition hands the
+   * owner's stored balance along with the account's windows; an own row's
+   * credits ride in `account`.
+   */
+  usage: { windows: UsageWindow[]; credits?: CodexCredits | null } | null
   error: string | null
   stale: boolean
   /**
    * Present only on a row the viewer borrows from another user, on editions
    * that installed a pool extension (docs/admin-ui.md § Providers page). Such
-   * a row carries no usage surface at all — `usage`, `error` and `account` are
-   * null — and only Primary may be pressed on it; Rename, Resume and Remove
-   * are the owner's alone and answer 403.
+   * a row has no usage surface of the core's own — `error` and `account` are
+   * null, and `usage` is whatever the edition hands the borrower — and only
+   * Move up / Move down may be pressed on it; Rename, Resume and Remove are the
+   * owner's alone and answer 403.
    */
   share?: { teamId: string; teamName: string; ownerLabel: string }
   /**
@@ -64,6 +70,7 @@ export type ProviderAccount = {
   /**
    * Routable only because of credits: a plan window is exhausted and credits
    * are allowed and available. The status is then active/standby, not limited.
+   * On a shared row, only where the edition handed its credits.
    */
   on_credits: boolean
 }

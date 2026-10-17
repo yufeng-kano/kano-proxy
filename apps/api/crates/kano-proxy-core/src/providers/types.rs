@@ -45,6 +45,10 @@ pub enum AccountStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsage {
     pub windows: Vec<UsageWindow>,
+    /// A Codex account's stored `credits` facts, handed to a borrower only where the edition
+    /// also shows them the account's own windows (docs/cloud-edition.md § Pool extension).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credits: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
