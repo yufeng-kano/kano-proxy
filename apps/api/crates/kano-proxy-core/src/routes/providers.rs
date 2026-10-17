@@ -139,8 +139,8 @@ struct AccountView {
     custom_label: Option<String>,
     account: Option<Map<String, Value>>,
     usage_windows: Option<Vec<Value>>,
-    /// A shared Codex row's stored `credits`, when the edition handed them with the account's
-    /// windows. Always `None` on an own row, whose credits ride in `account`.
+    /// A shared Codex row's stored `credits`, where the edition shows them to this viewer.
+    /// Always `None` on an own row, whose credits ride in `account`.
     usage_credits: Option<Value>,
     error: Option<String>,
     stale: bool,
@@ -397,14 +397,17 @@ async fn list_accounts_route(
     // extension hands them.
     for shared in shared_accounts(&state, user_id, Some(provider), ListSharedOptions { usage: true }).await {
         let row = &shared.account;
-        // The extension hands a borrower the owner's credits only where it also shows them the
-        // account's own windows, and then the row says it routes on them as an own row would:
-        // the same rule, read off the stored facts this row's dot reads.
-        let usage_credits = shared.usage.as_ref().and_then(|u| u.credits.clone());
-        let on_credits = usage_credits.is_some()
-            && row.allow_credits
-            && credits_usable(account_profile_meta(row).as_ref())
-            && read_usage_snapshot(row).and_then(|s| windows_unusable_until(&s.windows, None, now)).is_some();
+        // The extension decides whether this borrower sees the owner's credits; the balance is
+        // the row's own stored facts, and Codex's alone (docs/cloud-edition.md § Pool extension).
+        let show_credits = provider == ProviderId::Codex && shared.usage.as_ref().is_some_and(|u| u.show_credits);
+        let usage_credits = show_credits
+            .then(|| account_profile_meta(row).and_then(|meta| meta.get("credits").cloned()).filter(Value::is_object))
+            .flatten();
+        // As on an own row: an account-wide window is exhausted, yet the router's own rule keeps
+        // the row usable, which only its credits can.
+        let limited = usage_window_unusable_until(row, None, now);
+        let exhausted = read_usage_snapshot(row).and_then(|s| windows_unusable_until(&s.windows, None, now));
+        let on_credits = usage_credits.is_some() && exhausted.is_some() && limited.is_none();
         accounts.push(AccountView {
             id: row.id.clone(),
             priority: shared.priority,
@@ -430,7 +433,7 @@ async fn list_accounts_route(
             allow_credits: false,
             on_credits,
         });
-        limited_until.push(usage_window_unusable_until(row, None, now));
+        limited_until.push(limited);
         created_at.push(row.created_at.clone());
         fable_eligible.push(adapter.supports_model(None, FABLE_MODEL_PREFIX));
     }
@@ -2917,7 +2920,7 @@ mod tests {
                 account: borrowed_row("shared_1", "user_2"),
                 priority: 3,
                 share: share_info(),
-                usage: Some(AccountUsage { windows: windows.clone(), credits: None }),
+                usage: Some(AccountUsage { windows: windows.clone(), show_credits: false }),
             }]),
             set_shared_priority_ok: true,
             ..Default::default()
@@ -2939,16 +2942,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_shared_codex_row_shows_credits_and_on_credits_only_where_the_extension_hands_them() {
+    async fn a_shared_codex_row_shows_credits_and_on_credits_only_where_the_extension_asks() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let transport = MockTransport::new();
         let credits = json!({ "has_credits": true, "unlimited": false, "balance": "25.5" });
         // The owner opted in, Week is exhausted and the stored credits are usable: the router
         // keeps the row on credits for everyone.
         let mut row = borrowed_row("shared_codex", "user_2");
-        row.provider = "codex".into();
         row.allow_credits = true;
-        row.account_meta_json = Some(json!({ "credits": credits }).to_string());
+        row.account_meta_json = Some(json!({ "email": "owner-seat@example.com", "credits": credits }).to_string());
         row.usage_snapshot_json = Some(
             json!({ "windows": [{ "label": "Week", "utilization": 100.0, "resets_at": "2999-01-01T00:00:00.000Z" }] })
                 .to_string(),
@@ -2960,37 +2962,47 @@ mod tests {
             value: None,
             scope: None,
         };
-        let listed = |credits: Option<Value>, email: &'static str| {
+        let listed = |provider: ProviderId, show_credits: bool, email: &'static str| {
+            let mut row = row.clone();
+            row.provider = provider.as_str().into();
             let ext = Arc::new(FakeExtension {
-                shared_provider: Some(ProviderId::Codex),
+                shared_provider: Some(provider),
                 shared_with_usage: Some(vec![SharedAccount {
-                    account: row.clone(),
+                    account: row,
                     priority: 3,
                     share: share_info(),
-                    usage: Some(AccountUsage { windows: vec![week.clone()], credits }),
+                    usage: Some(AccountUsage { windows: vec![week.clone()], show_credits }),
                 }]),
                 ..Default::default()
             });
             let state = state_with_extension(pool.clone(), transport.clone(), ext);
             async move {
                 let (_, cookie) = signed_in(&state, email).await;
-                codex_accounts(&state, &cookie, false).await["accounts"][0].clone()
+                let uri = format!("/api/providers/{}/accounts", provider.as_str());
+                body_json(call(&state, request("GET", &uri, Some(&cookie), None)).await).await["accounts"][0].clone()
             }
         };
 
-        // Handed with the windows: the balance and the badge, still no identity blob or opt-in.
-        let shown = listed(Some(credits.clone()), "user_1@example.com").await;
+        // Asked for: the row's own stored balance and the badge, and nothing else of the
+        // identity blob, nor the opt-in.
+        let shown = listed(ProviderId::Codex, true, "user_1@example.com").await;
         assert_eq!(shown["usage"]["credits"], credits);
         assert_eq!(shown["status"], "active");
         assert_eq!(shown["on_credits"], true);
         assert_eq!(shown["allow_credits"], false);
         assert_eq!(shown["account"], Value::Null);
+        assert!(!shown.to_string().contains("owner-seat@example.com"));
 
-        // Not handed: neither, while the dot still follows the owner's routing.
-        let hidden = listed(None, "user_3@example.com").await;
+        // Not asked for: neither, while the dot still follows the owner's routing.
+        let hidden = listed(ProviderId::Codex, false, "user_3@example.com").await;
         assert!(hidden["usage"].get("credits").is_none());
         assert_eq!(hidden["status"], "active");
         assert_eq!(hidden["on_credits"], false);
+
+        // The balance is Codex's: another provider's row never carries one, even when asked.
+        let grok = listed(ProviderId::Grok, true, "user_4@example.com").await;
+        assert!(grok["usage"].get("credits").is_none());
+        assert_eq!(grok["on_credits"], false);
 
         // A borrower's page never probes the owner's account.
         assert!(transport.requests().is_empty());

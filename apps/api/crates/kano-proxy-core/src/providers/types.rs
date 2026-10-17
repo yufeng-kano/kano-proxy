@@ -45,10 +45,11 @@ pub enum AccountStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccountUsage {
     pub windows: Vec<UsageWindow>,
-    /// A Codex account's stored `credits` facts, handed to a borrower only where the edition
-    /// also shows them the account's own windows (docs/cloud-edition.md § Pool extension).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credits: Option<Value>,
+    /// Show a borrower the account's own credit balance and whether it routes on it, both read
+    /// by the core off the row's stored facts. An edition sets it only where it also shows the
+    /// account's own windows (docs/cloud-edition.md § Pool extension).
+    #[serde(default)]
+    pub show_credits: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

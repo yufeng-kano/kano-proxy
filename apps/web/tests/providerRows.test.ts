@@ -112,6 +112,14 @@ it("prints a Codex credit balance in whole credits, only when upstream reported 
   expect(balance).toContain(">12,346 left<")
   expect(balance).not.toContain("12,345.678")
 
+  // Under one credit the fraction is the whole balance: rounding would print 0
+  // on a row that still routes on it.
+  const small = await render(AccountCard, {
+    account: codexAccount({ has_credits: true, unlimited: false, balance: "0.4" }),
+    provider: "codex",
+  })
+  expect(small).toContain(">0.4 left<")
+
   // Not a number: upstream's text is shown as is, never coerced to NaN or 0.
   const raw = await render(AccountCard, {
     account: codexAccount({ has_credits: true, unlimited: false, balance: "n/a" }),

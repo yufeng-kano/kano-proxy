@@ -97,8 +97,10 @@ const renamed = computed(() => !!props.account.custom_label)
 
 /**
  * A row the viewer borrows from another user rather than owns
- * (docs/admin-ui.md § Providers page). It arrives with no usage surface at
- * all — no windows, no probe error, no upstream identity blob — and the only
+ * (docs/admin-ui.md § Providers page). It arrives with no probe error and no
+ * upstream identity blob; its usage is whatever the edition hands the
+ * borrower (their allowance, and where the edition shows them, the account's
+ * windows and Codex balance). The only
  * mutation a borrower may make on it is Move up / down, which reorders it
  * inside their own pool; Rename, Resume and Remove are the owner's alone and
  * answer 403, so they are not rendered here.
@@ -196,16 +198,14 @@ const codexCredits = computed<CodexCredits | null>(() => {
  * can never be a bar (docs/admin-ui.md § Providers page). It is the amount of
  * a Credits row under the bars, and is absent whenever upstream sent none:
  * Antigravity's Google One AI balance often goes missing, and a Codex account
- * without credits gets no row rather than an invented zero. Whole credits, as
- * the Codex CLI rounds them: upstream sends "12345.678", and the fraction is
- * noise beside a balance that size. A Codex balance that does not parse is
- * upstream's text verbatim.
+ * without credits gets no row rather than an invented zero. A Codex balance
+ * that does not parse is upstream's text verbatim.
  */
 const creditsText = computed(() => {
   if (props.provider === "antigravity") {
     const credits = props.account.account?.credits_remaining
     return typeof credits === "number"
-      ? t("providers.account.creditsLeft", { credits: Math.round(credits) })
+      ? t("providers.account.creditsLeft", { credits: creditAmount(credits) })
       : null
   }
   const codex = codexCredits.value
@@ -214,8 +214,18 @@ const creditsText = computed(() => {
   if (!codex.has_credits || typeof codex.balance !== "string") return null
   const n = Number(codex.balance)
   const parses = codex.balance.trim() !== "" && Number.isFinite(n)
-  return t("providers.account.creditsLeft", { credits: parses ? Math.round(n) : codex.balance })
+  return t("providers.account.creditsLeft", { credits: parses ? creditAmount(n) : codex.balance })
 })
+
+/**
+ * Whole credits from one credit up, as the Codex CLI rounds them: upstream
+ * sends "12345.678", and the fraction is noise beside a balance that size.
+ * Under one credit the fraction is the whole balance, so it stays — rounding
+ * would print 0 on a row that still routes on it.
+ */
+function creditAmount(n: number): number {
+  return n >= 1 ? Math.round(n) : n
+}
 
 /**
  * The opt-in to keep routing on credits after the plan's limits: the owner's
