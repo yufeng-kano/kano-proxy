@@ -21,6 +21,7 @@ use bytes::Bytes;
 use serde_json::{json, Map, Value};
 
 use crate::providers::ProviderId;
+use crate::proxy::anthropic_client_tools;
 use crate::proxy::gemini_wire::{
     anthropic_stop_reason, block_reason, first_finish_reason, gemini_parts, has_no_candidates,
     inline_data_of, normalize_gemini_usage, open_with_user_turn, random_hex, sanitize_json_schema,
@@ -277,12 +278,14 @@ fn map_anthropic_tools(tools: Option<&Value>, dialect: SchemaDialect) -> Option<
     let tools = tools?.as_array()?;
     let mut declarations: Vec<Value> = Vec::new();
     for tool in tools {
-        if !tool.is_object() {
+        let Some(tool) = tool.as_object() else {
             continue;
-        }
+        };
+        // The bash and text editor tools come back with their parameters. Any other
+        // Anthropic-defined tool (`type: "web_search_20250305"` and friends) has no
+        // function schema and no Gemini equivalent — skip, never forge one.
+        let tool = anthropic_client_tools::with_schema(tool);
         let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
-        // Anthropic server-side tools (`type: "web_search_20250305"` and friends)
-        // have no function schema and no Gemini equivalent — skip, never forge one.
         let Some(input_schema) = tool.get("input_schema").filter(|s| truthy(s)) else {
             continue;
         };
@@ -1656,6 +1659,25 @@ mod tests {
             json!({ "functionCallingConfig": { "mode": "ANY", "allowedFunctionNames": ["search"] } })
         );
         assert_eq!(out["generationConfig"]["stopSequences"], json!(["STOP"]));
+    }
+
+    #[test]
+    fn declares_the_text_editor_with_its_parameters() {
+        let out = request(json!({
+            "messages": [{ "role": "user", "content": "x" }],
+            "tools": [{ "type": "text_editor_20250728", "name": "str_replace_based_edit_tool" }],
+            "tool_choice": { "type": "tool", "name": "str_replace_based_edit_tool" }
+        }));
+        let declaration = &out["tools"][0]["functionDeclarations"][0];
+        assert_eq!(declaration["name"], "str_replace_based_edit_tool");
+        let parameters = &declaration["parameters"];
+        assert_eq!(parameters["properties"]["command"]["enum"], json!(["view", "create", "str_replace", "insert"]));
+        assert_eq!(parameters["properties"]["view_range"]["items"], json!({ "type": "integer" }));
+        assert_eq!(parameters["required"], json!(["command", "path"]));
+        assert_eq!(
+            out["toolConfig"],
+            json!({ "functionCallingConfig": { "mode": "ANY", "allowedFunctionNames": ["str_replace_based_edit_tool"] } })
+        );
     }
 
     // ── geminiResponseToAnthropic ──────────────────────────────────────────

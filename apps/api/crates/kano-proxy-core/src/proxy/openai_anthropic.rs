@@ -17,6 +17,7 @@ use std::io;
 use rand::RngCore;
 use serde_json::{json, Map, Value};
 
+use crate::proxy::anthropic_client_tools;
 use crate::proxy::backpressure::{backpressured_byte_stream, Emitter};
 use crate::proxy::sse_lines::read_sse_lines_default;
 use crate::upstream::transport::ByteStream;
@@ -456,13 +457,16 @@ pub fn anthropic_to_openai_chat_request(body: &Map<String, Value>) -> AnthropicT
                 tools.push(tool.clone());
                 continue;
             }
+            // The bash and text editor tools come back with their parameters and convert below.
+            let map = anthropic_client_tools::with_schema(map);
             let has_input_schema = map.contains_key("input_schema");
             let tool_type = map.get("type").and_then(Value::as_str);
             if let Some(tool_type) = tool_type {
                 if tool_type != "custom" && !has_input_schema {
-                    // Anthropic server-side tool (web_search_*, bash_*, text_editor_*,
-                    // computer_*, code_execution_*, …). Grok/codex cannot execute these, so
-                    // drop it rather than forward a fake empty-schema function.
+                    // Any other Anthropic-defined tool: server-side (web_search_*,
+                    // code_execution_*, …), which grok/codex cannot execute, or a client tool
+                    // whose parameters are not written out (computer_*, memory_*). Drop it
+                    // rather than forward a fake empty-schema function.
                     continue;
                 }
             }

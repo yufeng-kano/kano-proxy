@@ -14,6 +14,7 @@ use serde_json::{json, Map, Value};
 
 use crate::providers::grok_encrypted_content::is_valid_grok_encrypted_content;
 use crate::providers::ProviderId;
+use crate::proxy::anthropic_client_tools;
 use crate::proxy::sse_lines::read_sse_lines_default;
 use crate::utils::reasoning::{map_reasoning, parse_reasoning_effort, ReasoningEffort};
 
@@ -416,11 +417,13 @@ fn map_anthropic_tools_to_responses(tools: &[Value]) -> Vec<Value> {
             out.push(Value::Object(item));
             continue;
         }
+        // The bash and text editor tools come back with their parameters and convert below.
+        let t = anthropic_client_tools::with_schema(t);
         let has_input_schema = t.contains_key("input_schema");
         let tool_type = t.get("type").and_then(Value::as_str);
         if let Some(tool_type) = tool_type {
             if tool_type != "custom" && !has_input_schema {
-                // Server-side Anthropic tools — drop (same as Chat Completions convert).
+                // Any other Anthropic-defined tool — drop (same as Chat Completions convert).
                 continue;
             }
         }
@@ -1772,6 +1775,21 @@ mod tests {
             r.body["tools"],
             json!([{ "type": "function", "name": "lookup", "description": "d", "parameters": { "type": "object", "properties": {} } }])
         );
+    }
+
+    #[test]
+    fn converts_the_bash_tool_with_its_parameters() {
+        let r = convert(
+            json!({
+                "messages": [{ "role": "user", "content": "hi" }],
+                "tools": [{ "type": "bash_20250124", "name": "bash" }]
+            }),
+            None,
+        );
+        let tool = &r.body["tools"][0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["name"], "bash");
+        assert_eq!(tool["parameters"]["properties"]["command"]["type"], "string");
     }
 
     #[test]

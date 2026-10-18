@@ -1344,9 +1344,26 @@ fn passes_an_already_openai_shaped_tool_through_unchanged() {
 }
 
 #[test]
-fn drops_server_tools_alongside_a_client_tool_in_the_same_request() {
+fn converts_the_bash_and_text_editor_tools_with_their_parameters() {
     let out = chat_request(json!({ "tools": [
         { "type": "bash_20250124", "name": "bash" },
+        { "type": "text_editor_20250728", "name": "str_replace_based_edit_tool", "max_characters": 10000 }
+    ]}));
+    let tools = out.tools.expect("tools");
+    assert_eq!(tools.as_array().map(Vec::len), Some(2), "{tools}");
+    assert_eq!(tools[0]["type"], "function");
+    assert_eq!(tools[0]["function"]["name"], "bash");
+    assert_eq!(tools[0]["function"]["parameters"]["properties"]["restart"]["type"], "boolean");
+    assert_eq!(tools[1]["function"]["name"], "str_replace_based_edit_tool");
+    assert!(tools[1]["function"]["description"].as_str().is_some_and(|d| !d.is_empty()), "{tools}");
+    assert_eq!(tools[1]["function"]["parameters"]["required"], json!(["command", "path"]));
+}
+
+#[test]
+fn drops_server_tools_alongside_a_client_tool_in_the_same_request() {
+    let out = chat_request(json!({ "tools": [
+        { "type": "code_execution_20250825", "name": "code_execution" },
+        { "type": "computer_20250124", "name": "computer", "display_width_px": 1024, "display_height_px": 768 },
         { "name": "lookup", "input_schema": { "type": "object", "properties": {} } }
     ]}));
     assert_eq!(

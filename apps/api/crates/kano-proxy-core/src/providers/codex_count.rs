@@ -11,6 +11,8 @@
 
 use serde_json::Value;
 
+use crate::proxy::anthropic_client_tools;
+
 fn push_block_text(out: &mut Vec<String>, block: &Value) {
     if let Some(text) = block.as_str() {
         if !text.is_empty() {
@@ -86,6 +88,8 @@ pub fn anthropic_count_texts(body: &Value) -> Vec<String> {
     }
     for tool in body.get("tools").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
         let Some(tool) = tool.as_object() else { continue };
+        // The bash and text editor tools count with the parameters the conversion sends.
+        let tool = anthropic_client_tools::with_schema(tool);
         if let Some(name) = tool.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             out.push(name.to_string());
         }
@@ -157,6 +161,17 @@ mod tests {
                 r#"{"type":"object"}"#,
             ]
         );
+    }
+
+    #[test]
+    fn counts_the_bash_tool_with_the_parameters_the_conversion_sends() {
+        let texts = anthropic_count_texts(&json!({
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [{ "type": "bash_20250124", "name": "bash" }],
+        }));
+        assert_eq!(texts.len(), 4, "{texts:?}");
+        assert_eq!(texts[1], "bash");
+        assert!(texts[3].contains(r#""restart""#), "{texts:?}");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Protocol conversion, SSE handling and dispatch (docs/api.md).
 
+pub mod anthropic_client_tools;
 pub mod backpressure;
 pub mod codex_openai;
 pub mod dispatch;
