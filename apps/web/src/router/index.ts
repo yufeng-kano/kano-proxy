@@ -20,6 +20,8 @@ const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli"
 export interface RouterOptions {
   /** `false` leaves `/changelog` out, so it falls through to the catch-all (ShellOptions.changelog). */
   changelog?: boolean
+  /** Where a signed-out visitor on the bare root goes instead of login (WebExtensions.landing). */
+  landing?: string
   history?: RouterHistory
 }
 
@@ -152,6 +154,10 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
     }
 
     if (!isAuthenticated.value) {
+      // The bare root is a visit with no destination in mind, so an edition may
+      // meet it with its landing page. Any other path is a deep link: sign in
+      // first, then come back to it.
+      if (options.landing && isBoot && entryPath === "/") return options.landing
       return { name: "login", query: { redirect: to.fullPath } }
     }
 

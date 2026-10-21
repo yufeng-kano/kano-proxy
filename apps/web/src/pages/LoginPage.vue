@@ -16,6 +16,7 @@ import { useRoute } from "vue-router"
 import { useAuth } from "@/composables/useAuth"
 import Banner from "@/components/ui/Banner.vue"
 import { SITE } from "@/config/site"
+import { useWebExtensions } from "@/extensions"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import { PROVIDERS, type ProviderId } from "@/types"
@@ -23,6 +24,8 @@ import { PROVIDERS, type ProviderId } from "@/types"
 const { t } = useI18n()
 const { goLogin, error } = useAuth()
 const route = useRoute()
+/** The edition's landing page and footer links (docs/cloud-edition.md § Web shell); the standalone build has neither. */
+const { landing, loginLinks = [] } = useWebExtensions()
 
 /** The guard's intended destination, carried through the OAuth round trip. */
 function signIn() {
@@ -62,7 +65,11 @@ const year = String(new Date().getFullYear())
   <div class="login-page">
     <aside class="login-brand">
       <div class="login-brand-inner">
-        <div class="login-logo">
+        <RouterLink v-if="landing" :to="landing" class="login-logo">
+          <span class="login-mark" aria-hidden="true">k</span>
+          <span class="login-wordmark">{{ SITE.name }}</span>
+        </RouterLink>
+        <div v-else class="login-logo">
           <span class="login-mark" aria-hidden="true">k</span>
           <span class="login-wordmark">{{ SITE.name }}</span>
         </div>
@@ -123,6 +130,9 @@ const year = String(new Date().getFullYear())
         <span class="login-footer-links">
           <!-- Plain anchor, not RouterLink: /docs/ is the static docs site, outside the router. -->
           <a class="login-contact" href="/docs/">{{ t("nav.docs") }}</a>
+          <a v-for="link in loginLinks" :key="link.href" class="login-contact" :href="link.href">
+            {{ link.label }}
+          </a>
           <a
             v-if="SITE.contactEmail"
             class="login-contact"
@@ -224,6 +234,9 @@ body:has(.login-page) {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  /* A link when the edition has a landing page; it keeps the panel's text colour. */
+  color: inherit;
+  text-decoration: none;
 }
 
 .login-mark {
@@ -378,7 +391,8 @@ body:has(.login-page) {
 
 .login-footer-links {
   display: flex;
-  gap: var(--space-4);
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
 }
 
 .login-contact {
