@@ -96,4 +96,9 @@ Extension routes passed in `routes` read two `meta` flags the same way core rout
 - `bare: true` renders the page outside the shell, with no sidebar, header or nav, like the CLI authorize view ([admin-ui.md](./admin-ui.md) § CLI authorize view). The route stays session-gated unless it is also `public`.
 - `restorable: false` keeps the path out of the persisted last route, so a reopened tab never lands on it ([admin-ui.md](./admin-ui.md) § View preferences). Use it for a page that only makes sense with its one-shot query, such as an authorize page.
 
+Two more fields shape what a signed-out visitor meets. The standalone build sets neither, so its visitors go straight to sign-in.
+
+- `landing` is the path of a `public` route the edition passes in `routes`: its landing page. A signed-out visitor who opens the bare root lands there instead of on the sign-in page, and the sign-in page's logo links to it. Any other path is a deep link and still goes through sign-in, and a signed-in visitor on the root still lands in the app. Mark the route `restorable: false` as well, or a signed-in user who opened it would be returned there on the next visit ([admin-ui.md](./admin-ui.md) § View preferences).
+- `loginLinks` adds `{ label, href }` links to the sign-in page's footer after Documentation, such as the edition's terms and privacy notice. They are plain anchors, so an `href` may leave the app.
+
 The public documentation site is extended the same way, from the edition's own VitePress project ([docs-site.md](./docs-site.md) § Editions).

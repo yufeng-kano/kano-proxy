@@ -35,11 +35,24 @@ export interface ShellOptions {
   docs?: "sidebar" | "accountMenu"
 }
 
+/** A link in the sign-in page's footer, after Documentation: an edition's terms or privacy notice. */
+export interface FooterLink {
+  label: string
+  href: string
+}
+
 export interface WebExtensions {
   routes?: RouteRecordRaw[]
   navigation?: readonly NavigationItem[]
   accountMenu?: readonly AccountMenuItem[]
   shell?: ShellOptions
+  /**
+   * Path of a `public` route in `routes`, the edition's landing page. A
+   * signed-out visitor on the bare root lands there instead of on sign-in;
+   * deep links still go through sign-in (docs/cloud-edition.md § Web shell).
+   */
+  landing?: string
+  loginLinks?: readonly FooterLink[]
 }
 
 export const webExtensionsKey: InjectionKey<WebExtensions> = Symbol("webExtensions")

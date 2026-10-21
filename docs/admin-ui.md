@@ -6,7 +6,7 @@ Vue 3 + Vite + TypeScript, served as static files from the same hostname as the 
 
 | Route | Content |
 |-------|---------|
-| `/` | Redirect to overview or login |
+| `/` | Redirect to overview or login; an edition with a landing page sends a signed-out visitor there instead ([cloud-edition.md](./cloud-edition.md) § Web shell) |
 | `/login` | Google sign-in (split brand panel + sign-in panel) |
 | `/overview` | Usage and cache-rate dashboard over `request_logs` |
 | `/logs` | Per-request log explorer over `request_logs` — newest first, cursor-paged |
@@ -383,10 +383,10 @@ The one page allowed to scroll the content region: release notes are prose, read
 ## Login page
 
 - Two-column split: dark brand panel (left) + sign-in panel (right). Collapses to a single column below **860px**, where the brand panel becomes a compact header strip.
-- Brand panel content: enlarged `k` mark, product pitch, and the provider list sourced from the shared `PROVIDERS` constant in `apps/web/src/types/index.ts` (single source of truth with Providers/Models — do not retype provider names; their display names and blurbs come from the message catalog).
+- Brand panel content: enlarged `k` mark, product pitch, and the provider list sourced from the shared `PROVIDERS` constant in `apps/web/src/types/index.ts` (single source of truth with Providers/Models — do not retype provider names; their display names and blurbs come from the message catalog). When the edition has a landing page, the mark and wordmark link to it.
 - Sign-in button follows Google Sign-In branding: white surface, `#dadce0` border, official four-color G mark inlined as SVG (no CDN/remote asset). Dark theme uses Google's dark variant (`#131314` surface, `#8e918f` border).
 - Auth errors render in-panel via the shared banner style.
-- Site footer pinned to the bottom of the sign-in panel: `© <year> <site name>` on the left, a **Docs** link (`/docs/`, catalog key `nav.docs`) and the contact `mailto:` link on the right. The year is computed at render so it never goes stale.
+- Site footer pinned to the bottom of the sign-in panel: `© <year> <site name>` on the left, a **Docs** link (`/docs/`, catalog key `nav.docs`), the edition's `loginLinks` (its terms and privacy notice) and the contact `mailto:` link on the right. The year is computed at render so it never goes stale.
 - Footer values come from `apps/web/src/config/site.ts`. The contact address is deploy-specific and read from **`VITE_CONTACT_EMAIL`**. There is **no fallback address** — when unset, `contactEmail` is empty and the link is not rendered, so a stale default can never ship.
 - `SITE.name` is the display brand for every user-facing surface: login wordmark, footer copyright, and the signed-in sidebar. `index.html` repeats it in `<title>` and the Open Graph tags because the static shell renders before the app boots, and repeats the login pitch as the `description` — keep those in sync when renaming or rewording. The `sk-kano-proxy-` API key prefix and the `kano-proxy:*` browser-storage keys are wire/storage identifiers and are **not** renamed with the brand.
 - Login-specific CSS lives in `LoginPage.vue` `<style scoped>`, not in `styles.css`.
