@@ -33,6 +33,7 @@ use crate::proxy::dispatch_walk::{
     recompute_unavailable_until, walk_candidates, CandidateCaller, CandidateSource, WalkOpts, WalkOutcome,
     WalkProgress,
 };
+use crate::proxy::echo_model::{echo_model_body, echo_model_stream};
 use crate::proxy::sse::{
     stream_with_eager_producer, stream_with_keepalive, PipeOpts, StreamCloseReason, StreamKeepaliveOpts,
     DEFAULT_KEEPALIVE_INTERVAL,
@@ -854,6 +855,7 @@ struct MessagesCaller {
     body: Map<String, Value>,
     headers: HeaderMap,
     endpoint: AnthropicEndpoint,
+    echo_model: Option<String>,
 }
 
 #[async_trait]
@@ -876,14 +878,32 @@ impl CandidateCaller for MessagesCaller {
         let mut body = self.body.clone();
         body.insert("model".into(), Value::String(candidate.upstream_model.clone()));
         let body = Value::Object(body);
-        match self.endpoint {
+        let response = match self.endpoint {
             AnthropicEndpoint::Messages => {
-                candidate.adapter.messages(cx, acquired, &body, &self.headers, extras).await
+                candidate.adapter.messages(cx, acquired, &body, &self.headers, extras).await?
             }
             AnthropicEndpoint::CountTokens => {
-                candidate.adapter.count_tokens(cx, acquired, &body, &self.headers, extras).await
+                return candidate.adapter.count_tokens(cx, acquired, &body, &self.headers, extras).await;
             }
+        };
+        let Some(model) = self.echo_model.clone() else { return Ok(response) };
+        if !response.status().is_success() {
+            return Ok(response);
         }
+        // A group endpoint answers under the name the client sent (docs/api.md § Group
+        // endpoints). The body is wrapped lazily, so the walk still sees the upstream's headers
+        // as they arrive.
+        let event_stream = is_event_stream(&response);
+        let (mut parts, body) = response.into_parts();
+        parts.headers.remove(header::CONTENT_LENGTH);
+        let body = if event_stream {
+            Body::from_stream(echo_model_stream(Box::pin(body_stream(body)), model))
+        } else {
+            Body::from_stream(futures::stream::once(async move {
+                axum::body::to_bytes(body, usize::MAX).await.map(|bytes| echo_model_body(bytes, &model))
+            }))
+        };
+        Ok(Response::from_parts(parts, body))
     }
 }
 
@@ -907,6 +927,9 @@ pub struct AnthropicDispatchOptions {
     pub strategy: Option<String>,
     pub is_builtin: Option<bool>,
     pub custom_provider: Option<CustomProviderRow>,
+    /// The group model name the client sent, answered back in place of the upstream's own id —
+    /// group endpoints' native passthrough only (docs/api.md § Group endpoints).
+    pub echo_model: Option<String>,
 }
 
 fn body_wants_stream(body: &Map<String, Value>) -> bool {
@@ -976,6 +999,7 @@ pub async fn dispatch_anthropic_messages(cx: &AppState, opts: AnthropicDispatchO
             body: opts.body.clone(),
             headers: opts.headers.clone(),
             endpoint,
+            echo_model: opts.echo_model.clone(),
         }),
         wire: Arc::new(AnthropicWire),
         capture_usage: endpoint != AnthropicEndpoint::CountTokens,

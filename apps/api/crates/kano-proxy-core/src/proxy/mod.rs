@@ -7,6 +7,7 @@ pub mod dispatch;
 pub mod dispatch_anthropic_via_openai;
 pub mod dispatch_audio;
 pub mod dispatch_walk;
+pub mod echo_model;
 pub mod gemini_anthropic;
 pub mod gemini_openai;
 pub mod gemini_wire;
