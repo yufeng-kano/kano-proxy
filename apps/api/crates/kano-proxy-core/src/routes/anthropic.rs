@@ -188,6 +188,7 @@ pub async fn handle_anthropic_messages(
                 strategy: Some(resolved.strategy.clone()),
                 is_builtin: Some(resolved.primary.is_builtin),
                 custom_provider: resolved.primary.custom_provider.clone(),
+                echo_model: resolved.group_name.is_some().then(|| resolved.raw.clone()),
                 ..Default::default()
             },
         )
@@ -707,6 +708,65 @@ mod tests {
         let response = f.router().oneshot(f.get("/g/nope/anthropic/v1/models")).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(body_json(response).await["error"]["type"], "not_found_error");
+    }
+
+    #[tokio::test]
+    async fn a_group_native_passthrough_answers_under_the_group_name() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.account("claude-code").await;
+        f.group("team", "claude-sonnet-5.5", &["claude-code/claude-sonnet-5-5"]).await;
+        let mut served = anthropic_ok();
+        served["model"] = json!("claude-sonnet-5-5");
+
+        f.mock.respond_json(StatusCode::OK, served.clone());
+        let response = f
+            .router()
+            .oneshot(f.post(
+                "/g/team/anthropic/v1/messages",
+                json!({ "model": "claude-sonnet-5.5", "max_tokens": 16, "messages": user_message() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-kano-upstream-model"], "claude-sonnet-5-5");
+        let json = body_json(response).await;
+        assert_eq!(json["model"], "claude-sonnet-5.5");
+        assert_eq!(json["content"][0]["text"], "hello");
+        assert_eq!(f.mock.requests()[0].json()["model"], "claude-sonnet-5-5");
+
+        f.mock.respond_sse(
+            StatusCode::OK,
+            "event: message_start\n\
+             data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-5-5\",\"usage\":{\"input_tokens\":9}}}\n\n\
+             event: message_stop\n\
+             data: {\"type\":\"message_stop\"}\n\n",
+        );
+        let response = f
+            .router()
+            .oneshot(f.post(
+                "/g/team/anthropic/v1/messages",
+                json!({ "model": "claude-sonnet-5.5", "max_tokens": 16, "stream": true, "messages": user_message() }),
+            ))
+            .await
+            .unwrap();
+        let events = sse_events(&drain_sse(response).await);
+        assert_eq!(events[0]["message"]["model"], "claude-sonnet-5.5");
+        assert_eq!(events[0]["message"]["usage"]["input_tokens"], 9);
+        assert_eq!(events.last().unwrap()["type"], "message_stop");
+        let rows = f.logs(2).await;
+        assert!(rows.iter().all(|row| row["model"] == "claude-code/claude-sonnet-5-5"));
+
+        // The shared base keeps the upstream's own id.
+        f.mock.respond_json(StatusCode::OK, served);
+        let response = f
+            .router()
+            .oneshot(f.post(
+                "/anthropic/v1/messages",
+                json!({ "model": "claude-code/claude-sonnet-5-5", "max_tokens": 16, "messages": user_message() }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(body_json(response).await["model"], "claude-sonnet-5-5");
     }
 
     // ---- count_tokens (docs/api.md § count_tokens) ----
