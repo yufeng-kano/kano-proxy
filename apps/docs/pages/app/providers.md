@@ -28,7 +28,7 @@ A row shows:
 
 - **The account name.** The email or username the provider reports, or a name you gave it with Rename. A renamed account still shows the provider's identity underneath.
 - **Primary.** The first account in the pool's order. It keeps this badge while it is limited or paused, so you can see that traffic has moved away from it.
-- **The plan**, such as `Pro plan`, when the provider reports one.
+- **The plan**, such as `Pro plan`, when the provider reports one. Claude uses Anthropic's names since October 30, 2026: the old Max 5x reads `Max plan` and the old Max 20x reads `Ultra plan`.
 - **A status**, always with a word beside the dot:
 
 | Status | Meaning |
@@ -41,7 +41,7 @@ A row shows:
 | **Active · no Fable** | Claude Code only. The next request goes here, but this seat cannot serve Fable models. |
 | **Active · Fable** | Claude Code only. Fable requests go here, because the account above it cannot serve them. |
 
-- **Usage bars**, one per usage window the provider reports, such as **5h** and **Week**, each with the percentage used and when it resets. Antigravity shows **Gemini 5h** and **Gemini Week**, then **Argon Week** on Google AI Pro, where Gemini 4 Argon has its own weekly quota, then **Other 5h** and **Other Week**. A new account shows **Usage will appear once this account is used**.
+- **Usage bars**, one per usage window the provider reports, such as **5h** and **Week**, each with the percentage used and when it resets. A verified Claude Ultra account has no 5-hour limit, so it shows only its weekly bars. Antigravity shows **Gemini 5h** and **Gemini Week**, then **Argon Week** on Google AI Pro, where Gemini 4 Argon has its own weekly quota, then **Other 5h** and **Other Week**. A new account shows **Usage will appear once this account is used**.
 - **Credits**, a row under the bars when Codex or Antigravity reports a credit balance, such as `1,500 left` or `Unlimited`. A balance has no total, so it has no bar.
 
 ### Custom endpoints

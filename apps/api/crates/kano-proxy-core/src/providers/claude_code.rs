@@ -265,8 +265,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
 
     // A standard Team seat has no Fable: Anthropic answers with a bare 429 that the pool would
     // otherwise treat as a rate limit and bench the whole account for 300s. Team Premium
-    // reports the Max 5x tier string — the same test Claude Code CLI 2.1.259's
-    // isTeamPremiumSubscriber runs. Every other case, including a missing profile, fails open.
+    // reports the Max plan's tier string (default_claude_max_5x; the plan was Max 5x until
+    // 2026-10-30) — the same test Claude Code CLI 2.1.259's isTeamPremiumSubscriber runs. Every other case, including a missing profile, fails open.
     fn supports_model(&self, meta: Option<&Map<String, Value>>, upstream_model: &str) -> bool {
         if !upstream_model.starts_with(FABLE_MODEL_PREFIX) {
             return true;
@@ -474,6 +474,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         let mut windows: Vec<UsageWindow> = Vec::new();
         for (key, label) in [("five_hour", "5h"), ("seven_day", "Week")] {
             let Some(window) = usage.get(key).filter(|v| !v.is_null()) else { continue };
+            // An explicitly null `utilization` is a limit that does not apply (a verified Ultra
+            // account's 5-hour limit, 2026-10-30): Claude Code's /usage hides that window too.
+            if window.get("utilization").is_some_and(Value::is_null) {
+                continue;
+            }
             windows.push(UsageWindow {
                 label: label.to_string(),
                 utilization: window.get("utilization").and_then(Value::as_f64),
@@ -524,6 +529,17 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         }
         if let Some(tier) = org.and_then(|o| o.get("rate_limit_tier")).and_then(Value::as_str).filter(|s| !s.is_empty()) {
             profile_account.insert("rate_limit_tier".into(), json!(tier));
+        }
+        // Anthropic's own name for the plan ("Ultra" since the 2026-10-30 rename; the ids above
+        // did not change). Unlike the ids it may simply be absent, so an organization without a
+        // usable one stores null: a stored name must not outlive a plan change.
+        if let Some(org) = org.filter(|o| o.is_object()) {
+            let name = org
+                .get("plan_display_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && s.chars().count() <= 40);
+            profile_account.insert("plan_display_name".into(), name.map_or(Value::Null, |n| json!(n)));
         }
         FetchedUsage { windows, account: profile_account, stale: false, error: None, edge_blocked: false }
     }
@@ -647,7 +663,7 @@ mod tests {
         // The same seat serves every non-Fable model.
         assert!(adapter.supports_model(Some(&team_standard), "claude-sonnet-5"));
         assert!(adapter.supports_model(Some(&team_standard), "claude-opus-5"));
-        // Team Premium reports the Max 5x tier string and stays eligible.
+        // Team Premium reports the Max plan's tier string (Max 5x before the rename) and stays eligible.
         let premium = meta(json!({ "plan_type": "claude_team", "rate_limit_tier": "default_claude_max_5x" }));
         assert!(adapter.supports_model(Some(&premium), "claude-fable-5-1"));
         // Max plans are eligible regardless of tier.
@@ -1052,10 +1068,61 @@ mod tests {
             }),
         )
         .await;
+        // An organization without a plan name clears a stored one rather than leaving it.
         assert_eq!(
             Value::Object(usage.account),
-            json!({ "email": "user@example.com", "plan_type": "claude_max", "rate_limit_tier": "tier_4" })
+            json!({ "email": "user@example.com", "plan_type": "claude_max", "rate_limit_tier": "tier_4", "plan_display_name": null })
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_usage_keeps_the_plan_name_and_skips_a_limit_that_does_not_apply() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        // A verified Ultra account has no 5-hour limit (2026-10-30). No such response has been
+        // seen, so every shape Claude Code's /usage hides is skipped: null, and null utilization.
+        for five_hour in [json!(null), json!({ "utilization": null, "resets_at": null })] {
+            let usage = usage_for(
+                &pool,
+                json!({ "five_hour": five_hour, "seven_day": { "utilization": 34, "resets_at": "2026-11-07T00:00:00Z" } }),
+                json!({}),
+            )
+            .await;
+            assert_eq!(usage.windows, vec![window("Week", Some(34.0), Some("2026-11-07T00:00:00Z"))], "{five_hour}");
+        }
+
+        let usage = usage_for(
+            &pool,
+            json!({ "seven_day": { "utilization": 34, "resets_at": "2026-11-07T00:00:00Z" } }),
+            json!({
+                "account": { "email": "user@example.com" },
+                "organization": {
+                    "organization_type": "claude_max",
+                    "rate_limit_tier": "default_claude_max_20x",
+                    "plan_display_name": "Ultra",
+                },
+            }),
+        )
+        .await;
+        assert_eq!(usage.windows, vec![window("Week", Some(34.0), Some("2026-11-07T00:00:00Z"))]);
+        assert_eq!(usage.account.get("plan_display_name"), Some(&json!("Ultra")));
+        assert_eq!(usage.account.get("rate_limit_tier"), Some(&json!("default_claude_max_20x")));
+
+        // Not a short plain string: stored as no name, never half-trusted.
+        for name in [json!(""), json!("   "), json!("x".repeat(41)), json!(42)] {
+            let usage = usage_for(
+                &pool,
+                json!({ "seven_day": { "utilization": 1 } }),
+                json!({ "organization": { "organization_type": "claude_max", "plan_display_name": name } }),
+            )
+            .await;
+            assert_eq!(usage.account.get("plan_display_name"), Some(&Value::Null), "{name}");
+        }
+
+        // No organization at all (a failed or empty profile read) writes no plan facts, so the
+        // merge into `account_meta_json` leaves the stored ones as they were.
+        let usage = usage_for(&pool, json!({ "seven_day": { "utilization": 1 } }), json!({})).await;
+        assert!(!usage.account.contains_key("plan_display_name"));
+        assert!(!usage.account.contains_key("plan_type"));
     }
 
     #[tokio::test]
