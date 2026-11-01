@@ -277,3 +277,27 @@ it("marks a row that routes only on credits, without opening the gate", async ()
   const off = await render(AccountCard, { account: codexAccount(credits), provider: "codex" })
   expect(off).not.toContain("On credits")
 })
+
+it("names a Claude Max row by its tier, as Anthropic has since the 2026-10-30 rename", async () => {
+  const badge = async (meta: Record<string, unknown>) => {
+    const html = await render(AccountCard, {
+      account: account({ account: { email: "owner@example.com", ...meta } }),
+      provider: "claude-code",
+    })
+    return html.match(/([^<>]+) plan</)?.[1] ?? null
+  }
+  // The ids did not change with the names: the old Max 20x reads Ultra, the old Max 5x reads Max.
+  expect(await badge({ plan_type: "claude_max", rate_limit_tier: "default_claude_max_20x" })).toBe("Ultra")
+  expect(await badge({ plan_type: "claude_max", rate_limit_tier: "default_claude_max_5x" })).toBe("Max")
+  expect(await badge({ rate_limit_tier: "default_claude_max_20x" })).toBe("Ultra")
+  // Team Premium shares the Max tier string and stays a Team plan.
+  expect(await badge({ plan_type: "claude_team", rate_limit_tier: "default_claude_max_5x" })).toBe("Team")
+  expect(await badge({ plan_type: "claude_pro" })).toBe("Pro")
+  // Upstream's own name wins; a cleared one (null) falls back to the tier.
+  expect(
+    await badge({ plan_type: "claude_team", rate_limit_tier: "default_claude_max_5x", plan_display_name: "Team Premium" }),
+  ).toBe("Team Premium")
+  expect(
+    await badge({ plan_type: "claude_max", rate_limit_tier: "default_claude_max_20x", plan_display_name: null }),
+  ).toBe("Ultra")
+})

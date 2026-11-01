@@ -84,7 +84,7 @@ Must work for coding agents:
 
 | Provider | Windows |
 |----------|---------|
-| Claude | 5h %, Week %, optional scoped weekly rows |
+| Claude | 5h % (none on a verified Ultra account), Week %, optional scoped weekly rows |
 | Codex | Dynamic windows from upstream (5h and/or Week; omit missing) |
 | Grok | Weekly % from subscription billing surface (unofficial; stale on failure) |
 | Custom endpoints | None — static API keys have no usage/billing surface to poll; the admin UI shows only a status dot (active/benched) |

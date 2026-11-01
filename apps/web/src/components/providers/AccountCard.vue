@@ -113,7 +113,7 @@ const sharedBy = computed(() =>
 
 /**
  * Prettify raw upstream plan ids for display:
- * "claude_pro" → "Pro", "default_claude_max_20x" → "Max 20x", "plus" → "Plus".
+ * "claude_pro" → "Pro", "claude_team" → "Team", "plus" → "Plus".
  */
 function formatPlan(raw: string): string {
   const tokens = raw
@@ -139,12 +139,27 @@ function formatPlan(raw: string): string {
     .join(" ")
 }
 
+/**
+ * Anthropic renamed its Max plans on 2026-10-30 (Max 5x → Max, Max 20x →
+ * Ultra) and kept the ids, so on a `claude_max` row only the tier says which
+ * plan it is (docs/providers.md § Claude Code "Plan label").
+ */
+const CLAUDE_MAX_TIER_PLANS: Record<string, string> = {
+  default_claude_max_5x: "Max",
+  default_claude_max_20x: "Ultra",
+}
+
 const plan = computed(() => {
   const meta = props.account.account ?? {}
-  const raw =
-    (typeof meta.plan_type === "string" && meta.plan_type) ||
-    (typeof meta.rate_limit_tier === "string" && meta.rate_limit_tier) ||
-    null
+  // Upstream's own name for the plan wins over anything derived from ids.
+  if (typeof meta.plan_display_name === "string" && meta.plan_display_name) return meta.plan_display_name
+  const planType = typeof meta.plan_type === "string" && meta.plan_type ? meta.plan_type : null
+  const tier = typeof meta.rate_limit_tier === "string" && meta.rate_limit_tier ? meta.rate_limit_tier : null
+  // Team Premium shares the Max tier string but is a Team plan, so only a Max
+  // row (or one whose plan type is missing) is named by its tier.
+  const tierPlan = tier && Object.hasOwn(CLAUDE_MAX_TIER_PLANS, tier) ? CLAUDE_MAX_TIER_PLANS[tier] : null
+  if (tierPlan && (planType === "claude_max" || !planType)) return tierPlan
+  const raw = planType || tier
   return raw ? formatPlan(raw) : null
 })
 

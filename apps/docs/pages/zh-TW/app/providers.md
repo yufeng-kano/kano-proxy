@@ -28,7 +28,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 
 - **帳號名稱**：供應商回報的 email 或使用者名稱，或是你用 Rename 取的名字。改過名的帳號，底下仍會顯示供應商那邊的身分。
 - **Primary**：帳號池順序中的第一個。它被限制或暫停時仍保留這個標記，讓你看得出流量已經離開它。
-- **方案**：例如 `Pro plan`，供應商有回報時才顯示。
+- **方案**：例如 `Pro plan`，供應商有回報時才顯示。Claude 用的是 Anthropic 從 2026 年 10 月 30 日起的名稱：原本的 Max 5x 顯示為 `Max plan`，原本的 Max 20x 顯示為 `Ultra plan`。
 - **狀態**：圓點旁一定附文字。
 
 | 狀態 | 意思 |
@@ -41,7 +41,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 | **Active · no Fable** | 只有 Claude Code 會出現。下一個請求會送到這裡，但這個席位不能用 Fable 模型。 |
 | **Active · Fable** | 只有 Claude Code 會出現。Fable 的請求會送到這裡，因為上面那個帳號不能用 Fable。 |
 
-- **用量條**：供應商回報幾個用量區間就有幾條，例如 **5h** 和 **Week**，各自顯示已用百分比和重置時間。Antigravity 依序是 **Gemini 5h**、**Gemini Week**，Google AI Pro 方案接著是 Gemini 4 Argon 專屬的週額度 **Argon Week**，最後是 **Other 5h**、**Other Week**。剛加入的帳號會顯示 **Usage will appear once this account is used**。
+- **用量條**：供應商回報幾個用量區間就有幾條，例如 **5h** 和 **Week**，各自顯示已用百分比和重置時間。通過驗證的 Claude Ultra 帳號沒有 5 小時限制，所以只有週額度的用量條。Antigravity 依序是 **Gemini 5h**、**Gemini Week**，Google AI Pro 方案接著是 Gemini 4 Argon 專屬的週額度 **Argon Week**，最後是 **Other 5h**、**Other Week**。剛加入的帳號會顯示 **Usage will appear once this account is used**。
 - **Credits**：Codex 或 Antigravity 回報點數餘額時，用量條下方會多一列，例如 `1,500 left` 或 `Unlimited`。餘額沒有總量，所以不畫成用量條。
 
 ### Custom endpoints
