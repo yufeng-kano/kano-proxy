@@ -48,7 +48,7 @@ const DESCRIPTION_EN =
 const DESCRIPTION_ZH = "接上你已付費的 AI 訂閱，讓任何 OpenAI 或 Anthropic 相容的客戶端都指向同一個網址。"
 
 type Labels = Record<
-  | "start" | "gettingStarted" | "app" | "agents" | "cli" | "cliInstall" | "cliAgents"
+  | "start" | "gettingStarted" | "risks" | "app" | "agents" | "cli" | "cliInstall" | "cliAgents"
   | "cliLocal" | "reference" | "endpoints" | "routing" | "errors",
   string
 >
@@ -57,6 +57,7 @@ const LABELS: { en: Labels; "zh-TW": Labels } = {
   en: {
     start: "Get started",
     gettingStarted: "Getting started",
+    risks: "Risks and terms",
     app: "The app",
     agents: "Coding agents",
     cli: "CLI",
@@ -71,6 +72,7 @@ const LABELS: { en: Labels; "zh-TW": Labels } = {
   "zh-TW": {
     start: "開始",
     gettingStarted: "開始使用",
+    risks: "風險與條款",
     app: "介面說明",
     agents: "Coding agent 設定",
     cli: "CLI",
@@ -110,7 +112,13 @@ function sidebar(locale: "en" | "zh-TW", appPages: DefaultTheme.SidebarItem[]): 
   const t = LABELS[locale]
   const p = locale === "en" ? "" : "/zh-TW"
   return [
-    { text: t.start, items: [{ text: t.gettingStarted, link: `${p}/guide/getting-started` }] },
+    {
+      text: t.start,
+      items: [
+        { text: t.gettingStarted, link: `${p}/guide/getting-started` },
+        { text: t.risks, link: `${p}/guide/risks` },
+      ],
+    },
     {
       text: t.app,
       items: [...APP_PAGES.map(([text, slug]) => ({ text, link: `${p}/app/${slug}` })), ...appPages],

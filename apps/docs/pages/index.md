@@ -20,7 +20,7 @@ features:
   - title: Two API shapes, one key
     details: Call every connected provider through an OpenAI-compatible base or an Anthropic Messages base. Same key and same model ids on both.
   - title: Your subscriptions, pooled
-    details: Connect Claude Code, Codex, Grok, or Antigravity accounts, or your own OpenAI- or Anthropic-compatible endpoint. When one account runs out, the next one answers.
+    details: Connect Claude Code, Codex, Grok, or Antigravity accounts, or your own OpenAI- or Anthropic-compatible endpoint. When one account returns an error or is unavailable, the next one answers.
   - title: Every request on record
     details: Overview and Logs show which key sent each request, which account answered, the tokens it used, and its estimated cost.
 ---

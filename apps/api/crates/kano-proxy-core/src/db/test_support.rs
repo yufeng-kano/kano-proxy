@@ -128,7 +128,20 @@ pub fn test_router(state: AppState) -> axum::Router {
     crate::build_router(state, Extensions::default())
 }
 
+/// A user who has accepted the core usage notice, as [`test_state`] asks for, so session routes
+/// answer them (docs/auth.md § Usage notice).
 pub async fn insert_user(pool: &PgPool, email: &str) -> UserRow {
+    let mut user = insert_user_without_notice(pool, email).await;
+    let version = crate::auth::notice::USAGE_NOTICE_DATE;
+    let accepted_at = crate::db::users::accept_notice(pool, &user.id, version).await.expect("accept notice");
+    user.notice_version = Some(version.to_string());
+    user.notice_accepted_at = Some(accepted_at);
+    user
+}
+
+/// A user straight from Google sign-in, before the usage notice. Writes only baseline columns,
+/// so it also works on the schema an upgrade test starts from.
+pub async fn insert_user_without_notice(pool: &PgPool, email: &str) -> UserRow {
     let profile = GoogleProfile { sub: format!("sub-{email}"), email: email.into(), name: Some("Test User".into()), picture: None };
     crate::db::users::upsert_google_user(pool, &profile).await.expect("insert user")
 }

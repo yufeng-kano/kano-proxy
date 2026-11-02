@@ -42,4 +42,7 @@ pub struct Extensions {
     pub pool_extension: Option<Arc<dyn PoolExtension>>,
     /// Service name reported by `GET /health`; the core reports `kano-proxy`.
     pub service_name: Option<&'static str>,
+    /// Date (`YYYY-MM-DD`) of the edition's own terms, which users accept on the usage notice
+    /// page; a new date asks everyone again (docs/auth.md § Usage notice).
+    pub terms_date: Option<&'static str>,
 }

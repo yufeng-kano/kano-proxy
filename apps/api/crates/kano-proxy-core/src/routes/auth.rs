@@ -1,4 +1,5 @@
-//! `/api/auth` — Google sign-in, sign-out and "who am I" (//! docs/auth.md). The callback sets the session cookie and sends the browser back to the SPA
+//! `/api/auth` — Google sign-in, sign-out, "who am I" and accepting the usage notice
+//! (docs/auth.md). The callback sets the session cookie and sends the browser back to the SPA
 //! root, so the SPA's own boot restores the view the user was last on.
 
 use axum::extract::{Query, State};
@@ -13,8 +14,9 @@ use serde_json::json;
 use crate::auth::google::{begin_google_login, complete_google_login};
 use crate::auth::session::{
     cookie_session_id, create_session, destroy_session, is_secure_request, logout_cookie, MaybeSessionUser,
+    UngatedSessionUser,
 };
-use crate::db::users::upsert_google_user;
+use crate::db::users::{accept_notice, upsert_google_user};
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -23,6 +25,7 @@ pub fn routes() -> Router<AppState> {
         .route("/callback", get(callback))
         .route("/logout", post(logout))
         .route("/me", get(me))
+        .route("/notice", post(notice))
 }
 
 async fn login(State(state): State<AppState>) -> Response {
@@ -85,7 +88,7 @@ async fn logout(State(state): State<AppState>, parts: Parts) -> Response {
     ([(header::SET_COOKIE, cookie)], Json(json!({ "ok": true }))).into_response()
 }
 
-async fn me(MaybeSessionUser(session): MaybeSessionUser) -> Response {
+async fn me(State(state): State<AppState>, MaybeSessionUser(session): MaybeSessionUser) -> Response {
     match session {
         // Only the profile fields the SPA renders — never the google_sub or timestamps.
         Some(found) => Json(json!({
@@ -94,18 +97,55 @@ async fn me(MaybeSessionUser(session): MaybeSessionUser) -> Response {
                 "email": found.user.email,
                 "name": found.user.name,
                 "picture_url": found.user.picture_url,
-            }
+            },
+            "notice": state.notice().status(&found.user),
         }))
         .into_response(),
         None => (StatusCode::UNAUTHORIZED, Json(json!({ "user": null }))).into_response(),
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct NoticeAcceptance {
+    version: String,
+}
+
+/// Records the acceptance of the version the page showed. A different version means the notice
+/// changed while the page was open, and the user has not seen the current text.
+async fn notice(
+    State(state): State<AppState>,
+    UngatedSessionUser(session): UngatedSessionUser,
+    Json(body): Json<NoticeAcceptance>,
+) -> Response {
+    let notice = state.notice();
+    if body.version != notice.version {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "notice_changed" }))).into_response();
+    }
+    let mut user = session.user;
+    if !notice.accepted_by(&user) {
+        match accept_notice(state.pool(), &user.id, &notice.version).await {
+            Ok(accepted_at) => {
+                user.notice_version = Some(notice.version.clone());
+                user.notice_accepted_at = Some(accepted_at);
+            }
+            Err(err) => {
+                tracing::error!(error = %err, "usage notice acceptance not saved");
+                return server_error("notice not saved");
+            }
+        }
+    }
+    Json(json!({ "notice": notice.status(&user) })).into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::session::COOKIE_NAME;
-    use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_router, test_state};
+    use crate::auth::notice::USAGE_NOTICE_DATE;
+    use crate::db::test_support::{
+        insert_api_key, insert_user, insert_user_without_notice, skip_without_db, test_config, test_pool, test_router,
+        test_state,
+    };
     use crate::upstream::MockTransport;
     use axum::body::Body;
     use axum::http::Request;
@@ -268,5 +308,160 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn signed_in_cookie(state: &AppState, user_id: &str) -> String {
+        let (_, cookie) = create_session(state, user_id, false).await.unwrap();
+        cookie.split(';').next().unwrap().to_string()
+    }
+
+    fn get_with(uri: &str, cookie: &str) -> Request<Body> {
+        Request::builder().uri(uri).header(header::COOKIE, cookie).body(Body::empty()).unwrap()
+    }
+
+    fn accept(cookie: Option<&str>, version: &str) -> Request<Body> {
+        let mut builder =
+            Request::builder().method("POST").uri("/api/auth/notice").header(header::CONTENT_TYPE, "application/json");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        builder.body(Body::from(json!({ "version": version }).to_string())).unwrap()
+    }
+
+    async fn acceptances(state: &AppState, user_id: &str) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT version, accepted_at FROM notice_acceptances WHERE user_id = $1 ORDER BY version")
+            .bind(user_id)
+            .fetch_all(state.pool())
+            .await
+            .unwrap()
+    }
+
+    /// A user fresh from sign-in reaches `me`, sign-out and the acceptance itself, and nothing
+    /// else, until they accept the version they were shown.
+    #[tokio::test]
+    async fn session_routes_wait_for_the_notice() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user_without_notice(state.pool(), "new@example.com").await;
+        let cookie = signed_in_cookie(&state, &user.id).await;
+        let router = test_router(state.clone());
+
+        let response = router.clone().oneshot(get_with("/api/keys", &cookie)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(body_json(response).await, json!({ "error": "notice_required" }));
+
+        let response = router.clone().oneshot(get_with("/api/auth/me", &cookie)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["user"]["email"], "new@example.com");
+        assert_eq!(json["notice"], json!({ "version": USAGE_NOTICE_DATE, "updated": USAGE_NOTICE_DATE, "accepted": false }));
+
+        // A page left open across a change offers a version that is no longer current.
+        let response = router.clone().oneshot(accept(Some(&cookie), "2000-01-01")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(response).await, json!({ "error": "notice_changed" }));
+        assert!(acceptances(&state, &user.id).await.is_empty());
+        assert_eq!(router.clone().oneshot(get_with("/api/keys", &cookie)).await.unwrap().status(), StatusCode::FORBIDDEN);
+
+        let response = router.clone().oneshot(accept(Some(&cookie), USAGE_NOTICE_DATE)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            body_json(response).await,
+            json!({ "notice": { "version": USAGE_NOTICE_DATE, "updated": USAGE_NOTICE_DATE, "accepted": true } })
+        );
+        let stored = crate::db::users::find_user_by_id(state.pool(), &user.id).await.unwrap().unwrap();
+        assert_eq!(stored.notice_version.as_deref(), Some(USAGE_NOTICE_DATE));
+        let recorded = acceptances(&state, &user.id).await;
+        assert_eq!(recorded, [(USAGE_NOTICE_DATE.to_string(), stored.notice_accepted_at.clone().unwrap())]);
+        assert_eq!(router.clone().oneshot(get_with("/api/keys", &cookie)).await.unwrap().status(), StatusCode::OK);
+
+        // Accepting again changes nothing on record.
+        let response = router.clone().oneshot(accept(Some(&cookie), USAGE_NOTICE_DATE)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(acceptances(&state, &user.id).await, recorded);
+        let again = crate::db::users::find_user_by_id(state.pool(), &user.id).await.unwrap().unwrap();
+        assert_eq!(again.notice_accepted_at, stored.notice_accepted_at);
+    }
+
+    #[tokio::test]
+    async fn a_user_who_has_not_accepted_can_still_sign_out() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user_without_notice(state.pool(), "leaving@example.com").await;
+        let cookie = signed_in_cookie(&state, &user.id).await;
+        let response = test_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/logout")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().contains("Max-Age=0"));
+    }
+
+    #[tokio::test]
+    async fn accepting_needs_a_session() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let response = test_router(state).oneshot(accept(None, USAGE_NOTICE_DATE)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body_json(response).await, json!({ "error": "unauthorized" }));
+    }
+
+    /// New edition terms ask a user who accepted only the core notice again, and the history
+    /// keeps both acceptances.
+    #[tokio::test]
+    async fn new_edition_terms_ask_again() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = AppState::builder(test_config(), pool)
+            .transport(MockTransport::new())
+            .background_work(false)
+            .terms_date(Some("2099-01-31"))
+            .build();
+        let user = insert_user(state.pool(), "terms@example.com").await;
+        let cookie = signed_in_cookie(&state, &user.id).await;
+        let router = test_router(state.clone());
+        let version = format!("{USAGE_NOTICE_DATE}+2099-01-31");
+
+        assert_eq!(router.clone().oneshot(get_with("/api/keys", &cookie)).await.unwrap().status(), StatusCode::FORBIDDEN);
+        let json = body_json(router.clone().oneshot(get_with("/api/auth/me", &cookie)).await.unwrap()).await;
+        assert_eq!(json["notice"], json!({ "version": version, "updated": "2099-01-31", "accepted": false }));
+
+        // The core notice alone is not what this app asks for.
+        let response = router.clone().oneshot(accept(Some(&cookie), USAGE_NOTICE_DATE)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let response = router.clone().oneshot(accept(Some(&cookie), &version)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(router.clone().oneshot(get_with("/api/keys", &cookie)).await.unwrap().status(), StatusCode::OK);
+        let versions: Vec<String> = acceptances(&state, &user.id).await.into_iter().map(|(v, _)| v).collect();
+        assert_eq!(versions, [USAGE_NOTICE_DATE.to_string(), version]);
+    }
+
+    /// Keys issued before the notice keep working: the model routes never look at it
+    /// (operator decision 2026-11-02, docs/auth.md § Usage notice).
+    #[tokio::test]
+    async fn api_keys_do_not_wait_for_the_notice() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user_without_notice(state.pool(), "key-only@example.com").await;
+        let (_, key) = insert_api_key(state.pool(), &user.id).await;
+        let response = test_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/openai/v1/models")
+                    .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body_json(response).await, json!({ "object": "list", "data": [] }));
     }
 }

@@ -53,6 +53,12 @@ export interface WebExtensions {
    */
   landing?: string
   loginLinks?: readonly FooterLink[]
+  /**
+   * The edition's documents a user agrees to on the usage notice page, such as its terms and
+   * privacy notice. The checkbox then reads "… and agree to the <links>" (docs/cloud-edition.md
+   * § Web shell). The standalone build has none.
+   */
+  noticeTerms?: readonly FooterLink[]
 }
 
 export const webExtensionsKey: InjectionKey<WebExtensions> = Symbol("webExtensions")

@@ -17,7 +17,6 @@
 - Usage-balanced / weighted routing across model-group targets (groups ship ordered-priority only; balancing needs stickiness first — see [providers.md](./providers.md))
 - Embeddings / image generation / audio **output** (audio **input** via `/openai/v1/chat/completions` and speech-to-text **audio transcriptions** via `/openai/v1/audio/transcriptions` on custom OpenAI providers are supported — see [api.md](./api.md))
 - Staging environment
-- ToS / legal warning copy in UI
 - Content logging or prompt audit storage
 - Inventing Anthropic `cache_control` on OpenAI→Claude conversion
 - Inventing Grok sticky headers (`x-grok-conv-id` etc.)
@@ -30,6 +29,14 @@
   - Binds zero or more upstream accounts per provider
   - Issues **multiple** client API keys (no expiry; revoke by delete)
   - Sees only their accounts, keys, and usage
+
+## Usage notice
+
+Every user accepts a short usage notice before the web app does anything else, and again when it changes (operator decision 2026-11-02, replacing the earlier non-goal "no ToS or legal warning copy in the UI"). It says that Kano Proxy is unofficial, that it signs in to subscription accounts the way each provider's own CLI does and this may break the provider's terms, that providers have restricted accounts used this way, that users connect only accounts they hold, that upstream endpoints are undocumented, and that the software comes without warranty. The notice changes no feature: every provider, pool and route works as before.
+
+- The gate and its versioning: [auth.md](./auth.md) § Usage notice
+- The page: [admin-ui.md](./admin-ui.md) § Usage notice page
+- The longer public explanation: the docs site's **Risks and terms** page ([docs-site.md](./docs-site.md) § Content)
 
 ## Providers (MVP = all)
 

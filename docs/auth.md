@@ -30,11 +30,24 @@ GOOGLE_REDIRECT_URI=http://127.0.0.1:8787/api/auth/callback
 | GET | `/api/auth/login` | Redirect to Google |
 | GET | `/api/auth/callback` | Exchange code, create session, 302 to `APP_URL/` |
 | POST | `/api/auth/logout` | Clear session |
-| GET | `/api/auth/me` | Current user profile |
+| GET | `/api/auth/me` | Current user profile and usage-notice status |
+| POST | `/api/auth/notice` | Accept the current usage notice (§ Usage notice) |
 
 Anyone with a Google account may register on first login (insert user row).
 
 The callback redirects to the SPA root (`APP_URL/`), not to a specific page: landing on bare `/` is what lets the app restore the route the user was last on instead of dropping everyone on one fixed page (see [admin-ui.md](./admin-ui.md) § View preferences). Never leave the user on an API path — that is an API, not a UI.
+
+### Usage notice
+
+A signed-in user accepts the usage notice before any other session route answers ([product.md](./product.md) § Usage notice, operator decision 2026-11-02). The text lives in the web catalog (`notice.*`, [admin-ui.md](./admin-ui.md) § Usage notice page); the server only knows its version.
+
+- **Version.** `USAGE_NOTICE_DATE` in `auth/notice.rs` is the date of the notice's current text, `YYYY-MM-DD`. Change it in the same commit that changes the text. An edition with its own terms passes their date with `AppStateBuilder::terms_date` (`Extensions::terms_date` for `AppState::new`), also `YYYY-MM-DD`; a malformed date stops the server at start. The version is then `<notice date>+<terms date>`, otherwise the notice date alone. Changing either date asks every user to accept again.
+- **Record.** Accepting sets `users.notice_version` and `users.notice_accepted_at`, and adds a row to `notice_acceptances`, which keeps every version a user accepted and when ([database.md](./database.md)). Users who existed before the notice have no version, so they accept at their next web sign-in.
+- **Gate.** The `SessionUser` extractor answers `403 {"error":"notice_required"}` when the user's `notice_version` is not the current version. Every route that takes `SessionUser` sits behind it, an edition's routes included. `UngatedSessionUser` skips the check and is used only by `/api/auth/notice`; `MaybeSessionUser` (`/api/auth/me`, an edition's optional-session pages) never rejects. Sign-in, the callback and logout read no session user at all.
+- **Not gated.** API keys, CLI device tokens and the model routes (`/openai`, `/anthropic`, `/g/…`, `/cli/v1`) do not look at the notice. A key issued before the notice keeps working (operator decision 2026-11-02). Creating keys on the Access page, approving a new CLI device and connecting subscription accounts go through session routes, so a user who has not accepted cannot do them. A CLI device approved earlier keeps its token, so it can still mint its own keys and register local providers through `/cli/v1`.
+- **Removing waits too.** Revoking keys and devices, removing accounts and an edition's billing or team actions are session routes as well, so they also answer `403` until the user accepts. A user who will not accept signs out and asks the operator to revoke or delete for them.
+- **`GET /api/auth/me`** answers `{ user, notice }` when signed in. `notice` is `{ version, updated, accepted }`: `version` as above, `updated` the later of the two dates (what the page prints), `accepted` whether the user's stored version equals `version`.
+- **`POST /api/auth/notice`** takes `{ "version": "<version>" }`, the version the page showed. No session: `401`. A version other than the current one: `409 {"error":"notice_changed"}`, so a page left open across a change never accepts text the user did not see. Accepting the version already accepted writes nothing. Answers `{ notice }` as in `me`.
 
 ## CORS
 

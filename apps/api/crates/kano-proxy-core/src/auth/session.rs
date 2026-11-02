@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+use crate::auth::notice::notice_required_response;
 use crate::crypto::session::{clear_session_cookie, session_cookie, unverified_session_id, verified_session_id};
 use crate::db::sessions;
 use crate::db::users::{find_user_by_id, UserRow};
@@ -103,28 +104,48 @@ pub async fn session_middleware(State(state): State<AppState>, mut req: Request,
     next.run(req).await
 }
 
-/// Extractor for a route that requires a signed-in admin. Rejects with the admin 401 body.
-/// Works with or without [`session_middleware`] in front: it reads the extension when one is
-/// there and otherwise loads the session itself.
+/// The signed-in user whatever their usage-notice state. Works with or without
+/// [`session_middleware`] in front: it reads the extension when one is there and otherwise
+/// loads the session itself.
+async fn signed_in_user(parts: &mut Parts, state: &AppState) -> Option<SessionUser> {
+    if let Some(found) = parts.extensions.get::<SessionUser>() {
+        return Some(found.clone());
+    }
+    let loaded = load_session_user(state, cookie_header(parts)).await?;
+    parts.extensions.insert(loaded.clone());
+    Some(loaded)
+}
+
+/// Extractor for a route that requires a signed-in admin who accepted the current usage notice
+/// (docs/auth.md § Usage notice). Rejects with the admin 401 body without a session, and with
+/// `403 notice_required` before acceptance.
 impl FromRequestParts<AppState> for SessionUser {
     type Rejection = Response;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        if let Some(found) = parts.extensions.get::<SessionUser>() {
-            return Ok(found.clone());
+        let found = signed_in_user(parts, state).await.ok_or_else(unauthorized_response)?;
+        if !state.notice().accepted_by(&found.user) {
+            return Err(notice_required_response());
         }
-        match load_session_user(state, cookie_header(parts)).await {
-            Some(loaded) => {
-                parts.extensions.insert(loaded.clone());
-                Ok(loaded)
-            }
-            None => Err(unauthorized_response()),
-        }
+        Ok(found)
+    }
+}
+
+/// A signed-in admin who may not have accepted the usage notice yet. Only for the route that
+/// records the acceptance (`POST /api/auth/notice`); everything else takes [`SessionUser`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct UngatedSessionUser(pub SessionUser);
+
+impl FromRequestParts<AppState> for UngatedSessionUser {
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        signed_in_user(parts, state).await.map(UngatedSessionUser).ok_or_else(unauthorized_response)
     }
 }
 
 /// Extractor that never rejects — for surfaces that render differently when signed in
-/// (`GET /api/auth/me`).
+/// (`GET /api/auth/me`). Ungated: `me` is where the SPA learns the notice is due.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaybeSessionUser(pub Option<SessionUser>);
 
@@ -132,7 +153,7 @@ impl FromRequestParts<AppState> for MaybeSessionUser {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
-        Ok(MaybeSessionUser(SessionUser::from_request_parts(parts, state).await.ok()))
+        Ok(MaybeSessionUser(signed_in_user(parts, state).await))
     }
 }
 

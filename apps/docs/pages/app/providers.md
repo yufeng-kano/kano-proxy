@@ -62,7 +62,7 @@ In edit mode a subscription section shows **Strategy** in its header. **Ordered*
 
 ### Connect a subscription account
 
-1. Choose the plus button (**Add account**) in the provider's card.
+1. Choose the plus button (**Add account**) in the provider's card. The dialog opens with a short warning: using a subscription account outside the provider's own app may break its terms. Its **Risks and terms** link opens [Risks and terms](/guide/risks).
 2. Choose **Continue**. The provider's own sign-in page opens in a new tab. If your browser blocked it, choose **Open sign-in page**.
 3. Finish the sign-in the way the dialog describes for that provider:
    - **Claude Code.** Approve access, copy the authorization code you are given, paste it into the dialog, then choose **Finish**.

@@ -1,7 +1,7 @@
 # Kano Proxy
 
 <p align="center">
-  <strong>Turn your AI subscriptions into unified OpenAI- & Anthropic-compatible APIs.</strong>
+  <strong>One OpenAI- and Anthropic-compatible endpoint for the AI accounts you connect.</strong>
 </p>
 
 <p align="center">
@@ -13,26 +13,34 @@
   <img src="https://img.shields.io/badge/PostgreSQL-storage-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/Docker_Compose-self--hosted-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose" />
   <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
-  <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Anthropic API" />
+  <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square" alt="Anthropic API" />
   <img src="https://img.shields.io/badge/Privacy-Zero_Prompt_Logging-059669?style=flat-square" alt="Privacy" />
   <img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="License" />
 </p>
 
+> [!WARNING]
+> **Unofficial project. Read before use.**
+>
+> - Kano Proxy is not affiliated with or endorsed by Anthropic, OpenAI, Google or xAI.
+> - To use a subscription account, it signs in and sends requests the way the provider's own CLI does. This may break that provider's terms, and providers have restricted or banned accounts used this way.
+> - Connect only accounts you hold. Most providers forbid sharing an account or reselling access. You are responsible for following each provider's terms.
+> - Provided as is, without warranty, under the MIT License. Details: [Risks and terms](./apps/docs/pages/guide/risks.md).
+
 ---
 
-**Kano Proxy** is a self-hosted, multi-tenant proxy for developers and coding agents. Bind your personal AI subscription accounts (Claude Code, ChatGPT Codex, SuperGrok, Google AI Pro/Ultra), bring your own OpenAI-/Anthropic-compatible endpoints, or expose the LLM running on your laptop — then pool everything with automatic failover and call it through standard OpenAI and Anthropic APIs.
+**Kano Proxy** is a self-hosted, multi-tenant proxy for developers and coding agents. Connect your own AI accounts (Claude Code, ChatGPT Codex, SuperGrok, Google AI Pro/Ultra), bring your own OpenAI- or Anthropic-compatible endpoints, or expose the LLM running on your laptop, then call them through standard OpenAI and Anthropic APIs.
 
 One Rust server and a PostgreSQL database, run with docker compose on a machine you control. Your upstream OAuth credentials never leave the server; clients only use isolated, project-issued API keys.
 
 > **Want to use it right away?**
-> A hosted instance is live at [kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com).
+> A hosted instance is live at [kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com). It asks you to accept the same notice when you sign in.
 
 ---
 
 ## Key Features
 
 - **Mix & Match Any Model in Any Agent** — Run **GPT & Gemini inside Claude Code**, or run **Claude & Grok inside Cursor, Cline and the Codex CLI**. Full bidirectional protocol translation (Chat Completions, Responses API and Anthropic Messages) means your tools are no longer locked to a single model provider.
-- **Multi-Account Pooling & Failover** — Pool multiple accounts per provider. Hit a rate limit (429/403)? Kano benches that account and fails over to the next available one.
+- **Failover** — Order several accounts or endpoints per provider. When one returns an error or is unavailable, Kano benches it and moves the request to the next.
 - **Model Groups as Virtual Endpoints** — Each group gets its own base URL (`/g/<slug>/openai/v1`, `/g/<slug>/anthropic`) where your model names expand to ordered `provider/model` targets: per-client model mapping and cross-provider failover in one mechanism.
 - **Bring Your Own Endpoints** — Register any OpenAI- or Anthropic-compatible API (base URL + key) and it behaves like a built-in provider on both surfaces.
 - **Local LLMs, No Public URL** — The `kano-proxy` CLI dials out over WebSocket and serves Ollama, LM Studio, vLLM or llama.cpp on your machine as a first-class provider. No cloudflared, no ngrok, no port forwarding.
@@ -155,10 +163,10 @@ The local models now answer as `<slug>/<model>` on every base URL above and can 
 
 | Provider | Upstream Source | Multi-Account Pool |
 |---|---|:---:|
-| <img src="https://img.shields.io/badge/Claude_Code-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Claude Code" height="20" /> | Anthropic Claude Pro / Team OAuth | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
+| <img src="https://img.shields.io/badge/Claude_Code-D97706?style=flat-square" alt="Claude Code" height="20" /> | Anthropic Claude Pro / Team OAuth | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
 | <img src="https://img.shields.io/badge/ChatGPT_Codex-00A67E?style=flat-square" alt="Codex" height="20" /> | ChatGPT Plus / Team / Pro (Codex Backend) | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
-| <img src="https://img.shields.io/badge/xAI_Grok-000000?style=flat-square&logo=x&logoColor=white" alt="Grok" height="20" /> | xAI SuperGrok OAuth | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
-| <img src="https://img.shields.io/badge/Google_Antigravity-4285F4?style=flat-square&logo=google&logoColor=white" alt="Antigravity" height="20" /> | Google AI Pro / Ultra (CloudCode API) | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
+| <img src="https://img.shields.io/badge/xAI_Grok-000000?style=flat-square" alt="Grok" height="20" /> | xAI SuperGrok OAuth | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
+| <img src="https://img.shields.io/badge/Google_Antigravity-4285F4?style=flat-square" alt="Antigravity" height="20" /> | Google AI Pro / Ultra (CloudCode API) | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
 | <img src="https://img.shields.io/badge/Custom_Endpoints-6366F1?style=flat-square&logo=fastapi&logoColor=white" alt="Custom Endpoints" height="20" /> | Any OpenAI- or Anthropic-compatible API | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
 | <img src="https://img.shields.io/badge/Local_LLMs_(CLI)-0891B2?style=flat-square&logo=ollama&logoColor=white" alt="Local LLMs" height="20" /> | Ollama, LM Studio, vLLM, llama.cpp on your machine, via the `kano-proxy` CLI tunnel | <img src="https://img.shields.io/badge/Supported-10B981?style=flat-square" alt="Supported" height="18" /> |
 
@@ -192,6 +200,7 @@ Configuration, TLS, migrations and releases are in [docs/deployment.md](./docs/d
 
 ## Documentation
 
+- [Risks and terms](./apps/docs/pages/guide/risks.md)
 - [Product Goals & Model Naming](./docs/product.md)
 - [API Reference & Protocol Mapping](./docs/api.md)
 - [Authentication & Account Pools](./docs/auth.md)

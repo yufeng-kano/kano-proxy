@@ -50,6 +50,15 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
         meta: { public: true, titleKey: "login.signIn" },
       },
       {
+        // The usage notice a signed-in user accepts before any other page
+        // (docs/admin-ui.md § Usage notice page). Bare like sign-in, and never
+        // restored: it means nothing once accepted.
+        path: "/notice",
+        name: "notice",
+        component: () => import("@/pages/NoticePage.vue"),
+        meta: { bare: true, restorable: false, titleKey: "notice.title" },
+      },
+      {
         path: "/overview",
         name: "overview",
         component: () => import("@/pages/OverviewPage.vue"),
@@ -141,7 +150,7 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
   const entryPath = typeof window === "undefined" ? "/" : window.location.pathname
 
   router.beforeEach(async (to) => {
-    const { ensureSession, isAuthenticated } = useAuth()
+    const { ensureSession, isAuthenticated, noticeRequired } = useAuth()
     await ensureSession()
     const isBoot = isBootNavigation
     isBootNavigation = false
@@ -159,6 +168,20 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
       // first, then come back to it.
       if (options.landing && isBoot && entryPath === "/") return options.landing
       return { name: "login", query: { redirect: to.fullPath } }
+    }
+
+    // The usage notice comes before every other page. Where the user was going
+    // waits in `?redirect=` — including a sign-in that started from a deep link
+    // (the CLI authorize view), which would otherwise be lost here.
+    if (noticeRequired.value) {
+      if (to.name === "notice") return true
+      const stashed = isBoot && entryPath === "/" ? takeLoginRedirect() : null
+      return { name: "notice", query: { redirect: stashed ?? to.fullPath } }
+    }
+    if (to.name === "notice") {
+      const target = typeof to.query.redirect === "string" && to.query.redirect.startsWith("/") ? to.query.redirect : "/"
+      // A redirect back onto /notice would loop.
+      return router.resolve(target).name === "notice" ? "/" : target
     }
 
     // A sign-in that started from a guarded deep link (e.g. the CLI authorize

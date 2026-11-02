@@ -296,6 +296,9 @@ export const en = {
   "addAccount.title": "Add {provider} account",
   "addAccount.intro": "Sign in with your {provider} account to add it to the pool.",
   "addAccount.start": "Continue",
+  "addAccount.warning":
+    "Using a subscription account outside the provider's own app may break its terms, and accounts used this way have been restricted or banned.",
+  "addAccount.warningLink": "Risks and terms",
   "addAccount.manual": "Enter tokens manually",
   "addAccount.reconnect.title": "Sign in again as {name}",
   "addAccount.reconnect.intro":
@@ -705,4 +708,36 @@ export const en = {
     "Connect the AI subscriptions you already pay for, then point any OpenAI- or Anthropic-compatible client at a single URL.",
   "login.copyright": "© {year} {name}",
   "login.error": "Couldn't sign you in",
+  "login.signedInAs": "Signed in as",
+
+  // --- Usage notice (docs/admin-ui.md § Usage notice page) -----------------
+  // Changing these words means changing USAGE_NOTICE_DATE in the API
+  // (auth/notice.rs) in the same commit, so everyone is asked again.
+  "notice.title": "Before you continue",
+  "notice.lede": "Kano Proxy is an unofficial, independent project. Read this once. We ask again only when it changes.",
+  "notice.affiliation.lead": "Not affiliated.",
+  "notice.affiliation.body":
+    "Kano Proxy is not affiliated with or endorsed by Anthropic, OpenAI, Google or xAI. Their names and marks belong to them.",
+  "notice.signIn.lead": "It signs in like the official tools.",
+  "notice.signIn.body":
+    "To use a subscription account, Kano Proxy signs in and sends requests the way each provider's own command-line tool does. Doing this outside the provider's app may break that provider's terms.",
+  "notice.restricted.lead": "Accounts can be restricted.",
+  "notice.restricted.body":
+    "Providers have limited, suspended and permanently banned accounts used this way, without warning.",
+  "notice.ownAccounts.lead": "Use your own accounts.",
+  "notice.ownAccounts.body":
+    "Connect only accounts you hold and judge you may use this way. Most providers forbid sharing an account or reselling access. If you do, that is your responsibility.",
+  "notice.endpoints.lead": "Endpoints can stop working.",
+  "notice.endpoints.body":
+    "The provider endpoints Kano Proxy uses are not publicly documented and can change at any time.",
+  "notice.asIs.lead": "Provided as is.",
+  "notice.asIs.body":
+    "The software and service come without warranty. You are responsible for the accounts and keys you connect and how you use them.",
+  "notice.agree": "I have read this notice.",
+  "notice.agreeTo": "I have read this notice and agree to the",
+  "notice.continue": "Agree and continue",
+  "notice.signOut": "Sign out",
+  "notice.updated": "Notice updated {date}",
+  "notice.error.changed": "This notice changed while the page was open. Read it again before you agree.",
+  "notice.error.save": "Couldn't save your answer. Try again.",
 } as const

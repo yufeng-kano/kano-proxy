@@ -2,6 +2,7 @@
 
 pub mod google;
 pub mod session;
+pub mod notice;
 pub mod api_key_auth;
 pub mod spend_limit;
 pub mod pkce;

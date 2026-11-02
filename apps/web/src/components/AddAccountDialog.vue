@@ -232,6 +232,11 @@ function backToStart() {
           {{ t("addAccount.reconnect.intro", { name: reconnect.name, provider: providerName }) }}
         </p>
         <p v-else class="lede">{{ t("addAccount.intro", { provider: providerName }) }}</p>
+        <!-- docs/admin-ui.md § Providers page: every sign-in to a subscription account says this first. -->
+        <Banner tone="warn">
+          {{ t("addAccount.warning") }}
+          <a class="warning-link" href="/docs/guide/risks" target="_blank" rel="noopener">{{ t("addAccount.warningLink") }}</a>
+        </Banner>
       </template>
 
       <template v-else-if="step === 'paste'">
@@ -349,6 +354,12 @@ function backToStart() {
 </template>
 
 <style scoped>
+.warning-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .body {
   display: flex;
   flex-direction: column;

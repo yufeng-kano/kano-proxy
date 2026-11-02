@@ -15,6 +15,20 @@ Migrations live in `apps/api/crates/kano-proxy-core/migrations/` and are applied
 | picture_url | TEXT | nullable |
 | created_at | TEXT | ISO |
 | updated_at | TEXT | ISO |
+| notice_version | TEXT | nullable. The usage-notice version the user last accepted ([auth.md](./auth.md) § Usage notice); NULL until the first acceptance |
+| notice_accepted_at | TEXT | nullable. ISO time of that acceptance |
+
+### `notice_acceptances`
+
+Every usage-notice version a user accepted, kept so an earlier acceptance is not lost when the notice changes. Written only by `POST /api/auth/notice`, in the same transaction as the two `users` columns. Deleted with the user.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| user_id | TEXT FK | `users.id`, `ON DELETE CASCADE` |
+| version | TEXT | the accepted version |
+| accepted_at | TEXT | ISO |
+
+Primary key `(user_id, version)`. Added by `0006_usage_notice.sql`.
 
 ### `sessions`
 

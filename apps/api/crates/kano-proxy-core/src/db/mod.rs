@@ -41,6 +41,7 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         name: "0005_account_allow_credits",
         sql: include_str!("../../migrations/0005_account_allow_credits.sql"),
     },
+    Migration { name: "0006_usage_notice", sql: include_str!("../../migrations/0006_usage_notice.sql") },
 ];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -108,7 +109,7 @@ pub async fn pending(pool: &PgPool, table: &str, migrations: &[Migration]) -> an
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::test_support::{insert_user, skip_without_db, test_pool_at};
+    use crate::db::test_support::{insert_user_without_notice, skip_without_db, test_pool_at};
 
     /// A fresh-database run proves nothing about a deployed one: start from the 0001 schema
     /// with a live device, a revoked one and a provider the revoked one registered, upgrade,
@@ -116,7 +117,7 @@ mod tests {
     #[tokio::test]
     async fn upgrading_to_0002_drops_revoked_devices_and_keeps_the_rest() {
         let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..1]).await else { return skip_without_db() };
-        let user = insert_user(&pool, "upgrade@example.com").await;
+        let user = insert_user_without_notice(&pool, "upgrade@example.com").await;
         sqlx::query(
             "INSERT INTO cli_devices (id, user_id, name, refresh_token_hash, created_at, revoked_at) VALUES
                ('clidev_live', $1, 'live', 'h1', '2026-09-01T00:00:00.000Z', NULL),
@@ -136,7 +137,10 @@ mod tests {
         .expect("existing provider");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits"]);
+        assert_eq!(
+            applied,
+            ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice"]
+        );
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM cli_devices").fetch_all(&pool).await.unwrap();
         assert_eq!(ids, ["clidev_live"]);
         let live = crate::db::cli::get_cli_device(&pool, "clidev_live").await.unwrap().expect("the row type reads");
@@ -156,7 +160,7 @@ mod tests {
     #[tokio::test]
     async fn upgrading_to_0003_keeps_existing_keys_and_adds_the_device_link() {
         let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..2]).await else { return skip_without_db() };
-        let user = insert_user(&pool, "upgrade3@example.com").await;
+        let user = insert_user_without_notice(&pool, "upgrade3@example.com").await;
         sqlx::query(
             "INSERT INTO api_keys (id, user_id, name, key_prefix, key_hash, created_at, spend_limit, spend_limit_interval, spend_limit_include_oauth)
              VALUES ('key_old', $1, 'Production', 'sk-kano-proxy-abcdef', 'hash_old', '2026-09-01T00:00:00.000Z', 12.5, 'weekly', 0)",
@@ -175,7 +179,7 @@ mod tests {
         .expect("existing device");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits"]);
+        assert_eq!(applied, ["0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice"]);
         let old = crate::db::keys::list_keys(&pool, &user.id).await.unwrap();
         assert_eq!(old.len(), 1);
         assert_eq!((old[0].name.as_str(), old[0].spend_limit, old[0].spend_limit_interval.as_str()), ("Production", Some(12.5), "weekly"));
@@ -199,7 +203,7 @@ mod tests {
     #[tokio::test]
     async fn upgrading_to_0004_keeps_existing_benches_and_adds_scoped_ones() {
         let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..3]).await else { return skip_without_db() };
-        let user = insert_user(&pool, "upgrade4@example.com").await;
+        let user = insert_user_without_notice(&pool, "upgrade4@example.com").await;
         sqlx::query(
             "INSERT INTO upstream_accounts (id, user_id, provider, label, priority, encrypted_payload,
                                             usage_snapshot_json, bench_until, bench_reason, created_at, updated_at)
@@ -212,7 +216,7 @@ mod tests {
         .expect("existing account");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0004_scoped_bench", "0005_account_allow_credits"]);
+        assert_eq!(applied, ["0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice"]);
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert_eq!((row.bench_until.as_deref(), row.bench_reason.as_deref()), (Some("2030-01-01T00:00:00.000Z"), Some("429")));
         assert_eq!(row.usage_snapshot_json.as_deref(), Some("{\"windows\":[]}"));
@@ -233,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn upgrading_to_0005_keeps_existing_accounts_opted_out_of_credit_spillover() {
         let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..4]).await else { return skip_without_db() };
-        let user = insert_user(&pool, "upgrade5@example.com").await;
+        let user = insert_user_without_notice(&pool, "upgrade5@example.com").await;
         sqlx::query(
             "INSERT INTO upstream_accounts (id, user_id, provider, label, custom_label, priority, encrypted_payload,
                                             account_meta_json, usage_snapshot_json, bench_scopes_json, created_at, updated_at)
@@ -247,7 +251,7 @@ mod tests {
         .expect("existing account");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0005_account_allow_credits"]);
+        assert_eq!(applied, ["0005_account_allow_credits", "0006_usage_notice"]);
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert!(!row.allow_credits, "existing accounts never start spending credits");
         assert_eq!((row.custom_label.as_deref(), row.priority), (Some("Mine"), 3));
@@ -259,6 +263,31 @@ mod tests {
         assert_eq!(stored, Some((Some("Mine".to_string()), true)));
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0);
+        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+    }
+
+    /// Upgrading a deployed 0005 schema: an existing user and their session keep every column
+    /// and read as never having accepted the notice, so the gate asks them at the next sign-in;
+    /// an acceptance then lands in both places, and the user cascade reaches the history row.
+    #[tokio::test]
+    async fn upgrading_to_0006_leaves_existing_users_to_accept_the_notice() {
+        let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..5]).await else { return skip_without_db() };
+        let user = insert_user_without_notice(&pool, "upgrade6@example.com").await;
+        let session = crate::db::sessions::insert_session(&pool, &user.id, "2030-01-01T00:00:00.000Z").await.expect("existing session");
+
+        let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
+        assert_eq!(applied, ["0006_usage_notice"]);
+        let row = crate::db::users::find_user_by_id(&pool, &user.id).await.unwrap().expect("the row type reads");
+        assert_eq!((row.email.as_str(), row.created_at.as_str()), ("upgrade6@example.com", user.created_at.as_str()));
+        assert_eq!((row.notice_version, row.notice_accepted_at), (None, None), "nobody has accepted yet");
+        assert!(crate::db::sessions::get_session(&pool, &session).await.unwrap().is_some(), "sessions survive the upgrade");
+
+        let accepted_at = crate::db::users::accept_notice(&pool, &user.id, "2026-11-02").await.unwrap();
+        let row = crate::db::users::find_user_by_id(&pool, &user.id).await.unwrap().unwrap();
+        assert_eq!((row.notice_version.as_deref(), row.notice_accepted_at.as_deref()), (Some("2026-11-02"), Some(accepted_at.as_str())));
+        sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notice_acceptances").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
         assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
     }

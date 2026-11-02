@@ -20,6 +20,7 @@ import type {
   RoutingStrategy,
   SpendLimitInterval,
   UsageDays,
+  UsageNotice,
   UsageSummary,
   User,
 } from "@/types"
@@ -106,20 +107,37 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       typeof (data as { error: unknown }).error === "string"
         ? (data as { error: string }).error
         : `Request failed (${res.status})`
+    // The usage notice changed while the app was open: everything waits until the new
+    // text is accepted (docs/admin-ui.md § Usage notice page). The notice page itself
+    // only calls ungated routes, so it never lands here.
+    if (res.status === 403 && msg === "notice_required" && window.location.pathname !== "/notice") {
+      const here = window.location.pathname + window.location.search
+      window.location.assign(`/notice?redirect=${encodeURIComponent(here)}`)
+    }
     throw new ApiError(res.status, msg, data)
   }
 
   return data as T
 }
 
-export async function fetchMe(): Promise<User | null> {
+export type Me = { user: User; notice: UsageNotice }
+
+export async function fetchMe(): Promise<Me | null> {
   try {
-    const data = await request<{ user: User | null }>("/api/auth/me")
-    return data.user
+    return await request<Me>("/api/auth/me")
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) return null
     throw e
   }
+}
+
+/** Accepts the notice version the page showed; `409 notice_changed` if it is no longer current. */
+export async function acceptNotice(version: string): Promise<UsageNotice> {
+  const data = await request<{ notice: UsageNotice }>("/api/auth/notice", {
+    method: "POST",
+    body: JSON.stringify({ version }),
+  })
+  return data.notice
 }
 
 export async function logout(): Promise<void> {

@@ -47,7 +47,7 @@ The site is organised by what the reader is doing, and the sidebar follows the a
 | Sidebar group | Pages | Covers |
 |---------------|-------|--------|
 | (home) | `index.md` | What the proxy does, the three things a reader can do next |
-| Get started | `guide/getting-started.md` | Sign in, connect one provider, set up one agent with the CLI, check the request in Logs |
+| Get started | `guide/getting-started.md`, `guide/risks.md` | Sign in, connect one provider, set up one agent with the CLI, check the request in Logs; **Risks and terms**: what the usage notice says, at more length, and where each provider's terms are |
 | The app | `app/overview.md`, `app/logs.md`, `app/providers.md`, `app/models.md`, `app/groups.md`, `app/access.md` | One page per page of the app, same names and order as the app's sidebar |
 | Coding agents | `agents/<tool>.md` | One page per coding agent: Claude Code, Codex CLI, Cursor, Cline, OpenCode, Gemini CLI |
 | CLI | `cli/install.md`, `cli/agents.md`, `cli/local-models.md` | Install, sign a device in and update; `agent setup`, `restore`, `list`; exposing a local model server ([cli.md](./cli.md)) |
@@ -65,6 +65,8 @@ Every page of **The app** has the same shape:
 Pages and controls are named exactly as the app labels them, in bold. The app ships English only ([i18n.md](./i18n.md)), so `zh-TW/` pages name them in English too, as the reader sees them, and the sidebar lists the app pages under their English names in both locales. A page written from memory drifts; each one is written against the page's source (`apps/web/src/pages/` and its components, `apps/web/src/i18n/`) and changes when that page changes. No screenshots: they go stale with every UI change and would need fixture data.
 
 Every agent page has the same shape: one sentence on whether and how well the tool works through the proxy; setup with the CLI (`kano-proxy agent setup`) when the CLI supports the tool; setup by hand; how to check it works; limits; the source it was checked against. Explanations of why a setting is needed sit in a collapsed `::: details` block below the step that needs them, so the steps read straight through.
+
+**Risks and terms** (`guide/risks.md`) repeats the usage notice's points with a sentence or two each, then lists each subscription provider's terms with links. It does not characterise any provider's terms beyond what the notice says: it points the reader to the source. Like an agent page, it ends with the date its links were checked. It changes when the notice changes.
 
 Rules for the agent pages:
 
@@ -121,4 +123,5 @@ A private edition ([cloud-edition.md](./cloud-edition.md)) documents features th
 ## Links into the docs
 
 - Login page footer: a "Documentation" link beside the contact address.
+- Add account dialog: its warning banner links **Risks and terms** (`/docs/guide/risks`, new tab) ([admin-ui.md](./admin-ui.md) § Providers page). The usage notice's own text links nothing but the edition's terms, in a new tab so the ticked box stays: the notice is the whole text the user agrees to, so it does not send them elsewhere to read more. The sign-in footer under it keeps its usual links (Docs, the edition's links, the contact address).
 - Signed-in sidebar: a "Documentation" entry above Changelog, opening in a new tab. Both use the `nav.docs` catalog key. An edition may move the sidebar entry into the account menu ([admin-ui.md](./admin-ui.md) § Layout: edition options).

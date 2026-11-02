@@ -11,13 +11,15 @@ Sign in, connect one provider, point one tool at the proxy, and check that the r
 
 Open `https://<your-domain>/login` and choose **Continue with Google**. There is no password. The providers, keys, and logs you see belong to your account.
 
+The first time, the app shows a short usage notice. Read it, tick the box, and choose **Agree and continue**. It asks again only when the notice changes. [Risks and terms](/guide/risks) explains each point.
+
 ## 2. Connect a provider
 
 1. Open **Providers** in the sidebar.
 2. Pick a provider, for example Claude Code, and choose **Add account**.
 3. Sign in to that provider in the window that opens. This is the provider's own sign-in, for a subscription you already pay for.
 
-The account then appears on **Providers** with its usage. You can add more than one account per provider; when one runs out, requests move to the next. Custom endpoints and local models are connected on the same page. See [Providers](/app/providers).
+The account then appears on **Providers** with its usage. You can add more than one account per provider. When one returns an error or is unavailable, the request moves to the next. Custom endpoints and local models are connected on the same page. See [Providers](/app/providers).
 
 ## 3. Set up a coding agent
 
@@ -80,5 +82,5 @@ Open **Logs**. Your request appears at the top within seconds, with the model, t
 ## Next
 
 - [The app](/app/overview): what each page shows and does.
-- [How requests are routed](/reference/routing): how the proxy picks an account and what happens when one runs out.
+- [How requests are routed](/reference/routing): how the proxy picks an account and what happens when one cannot take a request.
 - [Groups](/app/groups): give a tool its own model names, or fall back across providers.
