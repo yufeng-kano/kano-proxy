@@ -27,6 +27,15 @@ export type User = {
   picture_url: string | null
 }
 
+/** The usage notice as `GET /api/auth/me` reports it (docs/auth.md § Usage notice). */
+export type UsageNotice = {
+  /** What `POST /api/auth/notice` must send back: the version this text belongs to. */
+  version: string
+  /** `YYYY-MM-DD`, the date the page prints. */
+  updated: string
+  accepted: boolean
+}
+
 export type UsageWindow = {
   label: string
   utilization: number | null

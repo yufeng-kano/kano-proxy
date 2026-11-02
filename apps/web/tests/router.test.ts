@@ -6,13 +6,23 @@ import { readPrefs, setLastPath } from "@/services/prefs"
 // A session without a server, signed in unless a test signs out, and the pages
 // without their component trees: the tests are about which path the router
 // records, replays and redirects to.
-const session = vi.hoisted(() => ({ signedIn: true }))
+const session = vi.hoisted(() => ({ signedIn: true, noticeDue: false, stashed: null as string | null }))
 vi.mock("@/composables/useAuth", () => ({
-  useAuth: () => ({ ensureSession: async () => null, isAuthenticated: { value: session.signedIn } }),
-  takeLoginRedirect: () => null,
+  useAuth: () => ({
+    ensureSession: async () => null,
+    isAuthenticated: { value: session.signedIn },
+    noticeRequired: { value: session.signedIn && session.noticeDue },
+  }),
+  // One-shot, like the real sessionStorage read.
+  takeLoginRedirect: () => {
+    const stashed = session.stashed
+    session.stashed = null
+    return stashed
+  },
 }))
 vi.mock("@/pages/OverviewPage.vue", () => ({ default: { render: () => null } }))
 vi.mock("@/pages/LoginPage.vue", () => ({ default: { render: () => null } }))
+vi.mock("@/pages/NoticePage.vue", () => ({ default: { render: () => null } }))
 
 const page = { render: () => null }
 // An edition's authorize page only works with its one-shot query; a plain
@@ -26,6 +36,8 @@ const extensionRoutes: RouteRecordRaw[] = [
 
 beforeEach(() => {
   session.signedIn = true
+  session.noticeDue = false
+  session.stashed = null
   const store = new Map<string, string>()
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => store.get(k) ?? null,
@@ -81,4 +93,38 @@ it("keeps a signed-in root in the app, with the landing page one link away and n
   await router.push("/home")
   expect(router.currentRoute.value.path).toBe("/home")
   expect(readPrefs().lastPath).toBe("/overview")
+})
+
+it("sends a signed-in user to the usage notice before any page, keeping where they were going", async () => {
+  session.noticeDue = true
+  let router = await boot({}, "/team")
+  expect(router.currentRoute.value.path).toBe("/notice")
+  expect(router.currentRoute.value.query.redirect).toBe("/team")
+
+  router = await boot()
+  expect(router.currentRoute.value.query.redirect).toBe("/overview")
+  // Moving on is not possible until it is accepted.
+  await router.push("/team")
+  expect(router.currentRoute.value.path).toBe("/notice")
+  expect(readPrefs().lastPath).not.toBe("/notice")
+})
+
+it("keeps a sign-in's deep link, such as the CLI authorize view, for after the notice", async () => {
+  session.noticeDue = true
+  session.stashed = "/cli/authorize?request=abc"
+  const router = await boot()
+  expect(router.currentRoute.value.path).toBe("/notice")
+  expect(router.currentRoute.value.query.redirect).toBe("/cli/authorize?request=abc")
+})
+
+it("forwards /notice to its destination once accepted, never back onto itself", async () => {
+  expect((await boot({}, "/notice?redirect=/team")).currentRoute.value.path).toBe("/team")
+  expect((await boot({}, "/notice?redirect=/notice")).currentRoute.value.path).toBe("/overview")
+  expect((await boot({}, "/notice")).currentRoute.value.path).toBe("/overview")
+  expect((await boot({}, "/notice?redirect=https://elsewhere.test")).currentRoute.value.path).toBe("/overview")
+})
+
+it("sends a signed-out visitor on /notice through sign-in", async () => {
+  session.signedIn = false
+  expect((await boot({}, "/notice")).currentRoute.value.fullPath).toBe("/login?redirect=/notice")
 })

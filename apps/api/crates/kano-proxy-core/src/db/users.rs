@@ -15,6 +15,10 @@ pub struct UserRow {
     pub picture_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// The usage-notice version last accepted; `None` until the first acceptance
+    /// (docs/auth.md § Usage notice).
+    pub notice_version: Option<String>,
+    pub notice_accepted_at: Option<String>,
 }
 
 /// The Google profile fields the upsert reads (`sub`, `email`, optional `name`/`picture`).
@@ -86,7 +90,34 @@ pub async fn upsert_google_user(db: &PgPool, profile: &GoogleProfile) -> Result<
         picture_url: profile.picture.clone(),
         created_at: ts.clone(),
         updated_at: ts,
+        notice_version: None,
+        notice_accepted_at: None,
     })
+}
+
+/// Records that `user_id` accepted `version`: the two columns the session gate reads and the
+/// history row, in one transaction. Returns the acceptance time it stored.
+pub async fn accept_notice(db: &PgPool, user_id: &str, version: &str) -> Result<String, sqlx::Error> {
+    let ts = now_iso();
+    let mut tx = db.begin().await?;
+    sqlx::query("UPDATE users SET notice_version = $1, notice_accepted_at = $2 WHERE id = $3")
+        .bind(version)
+        .bind(&ts)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    // A version accepted before (a rolled-back notice asked again) keeps its first date.
+    sqlx::query(
+        "INSERT INTO notice_acceptances (user_id, version, accepted_at) VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, version) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(version)
+    .bind(&ts)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(ts)
 }
 
 #[cfg(test)]

@@ -15,13 +15,15 @@ import { useI18n } from "@/i18n"
 
 const route = useRoute()
 const { t } = useI18n()
-const { loading, isAuthenticated } = useAuth()
+const { loading, isAuthenticated, noticeRequired } = useAuth()
 
 // `bare` routes (the CLI authorize view) render without the shell even when
 // signed in — a blank page with one centered card (docs/admin-ui.md § CLI
-// authorize view).
+// authorize view). Nor does a user who has yet to accept the usage notice get
+// one: the shell's own requests would all answer 403 before the router has
+// finished sending them to /notice (docs/admin-ui.md § Usage notice page).
 const showShell = computed(
-  () => isAuthenticated.value && route.name !== "login" && !route.meta.bare,
+  () => isAuthenticated.value && !noticeRequired.value && route.name !== "login" && !route.meta.bare,
 )
 /** Session unresolved and not on login: the router is still deciding where to go. */
 const showBoot = computed(

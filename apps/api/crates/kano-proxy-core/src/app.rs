@@ -13,6 +13,7 @@ use sqlx::PgPool;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
+use crate::auth::notice::UsageNotice;
 use crate::cache::Cache;
 use crate::config::CoreConfig;
 use crate::extensions::{Extensions, RequestPolicy};
@@ -36,6 +37,8 @@ pub struct Inner {
     pub pool_extension: Option<Arc<dyn PoolExtension>>,
     pub tunnels: TunnelRegistry,
     pub service_name: &'static str,
+    /// The usage notice signed-in users must have accepted (docs/auth.md § Usage notice).
+    pub notice: UsageNotice,
     /// Whether request handling may spawn deferred work that reaches upstreams (the usage
     /// refresh the Worker ran under `waitUntil`). Tests disable it so their mock transports
     /// see exactly the requests the handler itself made.
@@ -52,12 +55,13 @@ pub struct AppStateBuilder {
     pool_extension: Option<Arc<dyn PoolExtension>>,
     tunnels: Option<TunnelRegistry>,
     service_name: &'static str,
+    terms_date: Option<&'static str>,
     background_work: bool,
 }
 
 impl AppStateBuilder {
     pub fn new(config: CoreConfig, pool: PgPool) -> Self {
-        Self { config, pool, transport: None, cache: None, request_policy: None, pool_extension: None, tunnels: None, service_name: "kano-proxy", background_work: true }
+        Self { config, pool, transport: None, cache: None, request_policy: None, pool_extension: None, tunnels: None, service_name: "kano-proxy", terms_date: None, background_work: true }
     }
     pub fn transport(mut self, transport: Arc<dyn UpstreamTransport>) -> Self {
         self.transport = Some(transport);
@@ -84,6 +88,12 @@ impl AppStateBuilder {
         self.service_name = name;
         self
     }
+    /// The edition's terms date, `YYYY-MM-DD` ([`Extensions::terms_date`]); `build` panics on
+    /// any other shape.
+    pub fn terms_date(mut self, date: Option<&'static str>) -> Self {
+        self.terms_date = date;
+        self
+    }
     pub fn background_work(mut self, enabled: bool) -> Self {
         self.background_work = enabled;
         self
@@ -100,6 +110,7 @@ impl AppStateBuilder {
                 pool_extension: self.pool_extension,
                 tunnels: self.tunnels.unwrap_or_default(),
                 service_name: self.service_name,
+                notice: UsageNotice::new(self.terms_date),
                 background_work: self.background_work,
             }),
         }
@@ -116,7 +127,11 @@ impl AppState {
             .request_policy(ext.request_policy.clone())
             .pool_extension(ext.pool_extension.clone())
             .service_name(ext.service_name.unwrap_or("kano-proxy"))
+            .terms_date(ext.terms_date)
             .build()
+    }
+    pub fn notice(&self) -> &UsageNotice {
+        &self.inner.notice
     }
     pub fn config(&self) -> &CoreConfig {
         &self.inner.config

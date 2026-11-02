@@ -20,7 +20,7 @@ features:
   - title: 兩種 API 格式，一把金鑰
     details: 用 OpenAI 相容端點或 Anthropic Messages 端點呼叫所有已連接的供應商。兩邊用同一把金鑰、同一組模型 id。
   - title: 訂閱帳號集中成帳號池
-    details: 連接 Claude Code、Codex、Grok、Antigravity 帳號，或接上自己的 OpenAI、Anthropic 相容端點。一個帳號額度用完，就換下一個回應。
+    details: 連接 Claude Code、Codex、Grok、Antigravity 帳號，或接上自己的 OpenAI、Anthropic 相容端點。某個帳號回傳錯誤或無法使用時，就換下一個回應。
   - title: 每個請求都有紀錄
     details: Overview 與 Logs 會列出每個請求來自哪把金鑰、由哪個帳號回應、用了多少 token、估算花費多少。
 ---

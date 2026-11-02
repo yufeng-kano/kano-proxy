@@ -11,13 +11,15 @@ description: 登入、連接供應商、用 kano-proxy CLI 設定 coding agent �
 
 打開 `https://<your-domain>/login`，選 **Continue with Google**。沒有密碼。你看到的供應商、金鑰和紀錄都屬於你自己的帳號。
 
+第一次登入時，畫面會先顯示一份簡短的使用說明。讀完後勾選方塊，再按 **Agree and continue**。之後只有說明改版時才會再問。每一點的細節見[風險與條款](/zh-TW/guide/risks)。
+
 ## 2. 連接供應商
 
 1. 從側邊欄打開 **Providers**。
 2. 選一個供應商，例如 Claude Code，再按 **Add account**。
 3. 在跳出的視窗登入該供應商。這是供應商自己的登入流程，用的是你已經付費的訂閱。
 
-完成後，帳號會出現在 **Providers**，並顯示用量。同一個供應商可以加好幾個帳號，一個用完，請求就會換到下一個。自訂端點和本機模型也在同一頁連接，詳見 [Providers](/zh-TW/app/providers)。
+完成後，帳號會出現在 **Providers**，並顯示用量。同一個供應商可以加好幾個帳號。某個帳號回傳錯誤或無法使用時，請求會換到下一個。自訂端點和本機模型也在同一頁連接，詳見 [Providers](/zh-TW/app/providers)。
 
 ## 3. 設定 coding agent
 
@@ -80,5 +82,5 @@ curl https://<your-domain>/anthropic/v1/messages \
 ## 接下來
 
 - [介面說明](/zh-TW/app/overview)：每一頁顯示什麼、能做什麼。
-- [請求如何分配](/zh-TW/reference/routing)：proxy 怎麼挑帳號，帳號用完時會發生什麼。
+- [請求如何分配](/zh-TW/reference/routing)：proxy 怎麼挑帳號，帳號接不了請求時會發生什麼。
 - [Groups](/zh-TW/app/groups)：替工具取自己的模型名稱，或跨供應商備援。

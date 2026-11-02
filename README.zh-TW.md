@@ -1,7 +1,7 @@
 # Kano Proxy
 
 <p align="center">
-  <strong>將你的 AI 訂閱轉化為標準 OpenAI 與 Anthropic API 介面。</strong>
+  <strong>把你連接的 AI 帳號，整合成一個相容 OpenAI 與 Anthropic 的端點。</strong>
 </p>
 
 <p align="center">
@@ -13,26 +13,34 @@
   <img src="https://img.shields.io/badge/PostgreSQL-storage-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/Docker_Compose-self--hosted-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose" />
   <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
-  <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Anthropic API" />
+  <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square" alt="Anthropic API" />
   <img src="https://img.shields.io/badge/隱私-零對話日誌-059669?style=flat-square" alt="隱私" />
   <img src="https://img.shields.io/badge/授權-MIT-blue?style=flat-square" alt="授權" />
 </p>
 
+> [!WARNING]
+> **非官方專案，使用前請先閱讀。**
+>
+> - Kano Proxy 與 Anthropic、OpenAI、Google、xAI 沒有關係，也沒有獲得它們背書。
+> - 為了使用訂閱帳號，它會照各家官方 CLI 的方式登入和送出請求。這可能違反該供應商的條款，也已經有供應商限制或封鎖這樣使用的帳號。
+> - 只連接你自己持有的帳號。多數供應商禁止分享帳號或轉售存取權。遵守各家條款是你的責任。
+> - 本軟體依 MIT 授權、依現狀提供，不附任何保證。詳見[風險與條款](./apps/docs/pages/zh-TW/guide/risks.md)。
+
 ---
 
-**Kano Proxy** 是一套自架、多租戶的代理系統，專為開發者與編程代理（Coding Agents）打造。綁定你的 AI 訂閱帳號（Claude Code、ChatGPT Codex、SuperGrok、Google AI Pro/Ultra）、串接任何相容 OpenAI / Anthropic 的第三方端點，或把自己電腦上跑的本地 LLM 也接進來，全部匯集成具備自動容錯移轉（Failover）的帳號池，再透過標準的 OpenAI 與 Anthropic API 呼叫。
+**Kano Proxy** 是一套自架、多租戶的代理系統，專為開發者與編程代理（Coding Agents）打造。連接你自己的 AI 帳號（Claude Code、ChatGPT Codex、SuperGrok、Google AI Pro/Ultra）、串接任何相容 OpenAI 或 Anthropic 的端點，或把自己電腦上跑的本地 LLM 接進來，再透過標準的 OpenAI 與 Anthropic API 呼叫。
 
 一支 Rust 伺服器加一個 PostgreSQL，用 docker compose 跑在自己掌控的機器上。上游 OAuth 憑證僅保留在伺服器端，客戶端只需使用系統核發的專屬 API Key。
 
 > **想直接使用？**
-> 線上託管版本已上線：[kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com)。
+> 線上託管版本已上線：[kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com)。登入時會請你同意同一份說明。
 
 ---
 
 ## 核心特色
 
 - **在任意 Coding Agent 自由混用模型** — 直接在 **Claude Code 裡跑 GPT 與 Gemini**，或在 **Cursor、Cline、Codex CLI 裡跑 Claude 與 Grok**。Chat Completions、Responses API 與 Anthropic Messages 三種協議雙向即時轉譯，工具不再被單一供應商綁死。
-- **多帳號池與自動切換** — 每個供應商可綁定多個帳號。遇到 Rate Limit（429/403）時，系統暫時停用該帳號並自動移轉至下一個可用帳號。
+- **容錯移轉** — 每個供應商可排列多個帳號或端點。某一個出錯或無法使用時，系統暫時停用它，把請求移到下一個。
 - **模型群組即虛擬端點** — 每個群組有自己的 Base URL（`/g/<slug>/openai/v1`、`/g/<slug>/anthropic`），群組內的模型名稱展開成有序的 `provider/model` 目標清單：客戶端模型對應與跨供應商容錯，一個機制搞定。
 - **自帶端點** — 註冊任何相容 OpenAI / Anthropic 的 API（Base URL + Key），它就和內建供應商一樣可在兩種協議上使用。
 - **本地 LLM 不需公開網址** — `kano-proxy` CLI 主動對外建立 WebSocket 連線，把你電腦上的 Ollama、LM Studio、vLLM 或 llama.cpp 變成正式的供應商。不需 cloudflared、ngrok 或開通連接埠。
@@ -155,10 +163,10 @@ kano-proxy tunnel start  # 每個已註冊的供應商一條對外 WebSocket
 
 | 供應商 | 上游來源 | 多帳號池支援 |
 |---|---|:---:|
-| <img src="https://img.shields.io/badge/Claude_Code-D97706?style=flat-square&logo=anthropic&logoColor=white" alt="Claude Code" height="20" /> | Anthropic Claude Pro / Team OAuth | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
+| <img src="https://img.shields.io/badge/Claude_Code-D97706?style=flat-square" alt="Claude Code" height="20" /> | Anthropic Claude Pro / Team OAuth | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
 | <img src="https://img.shields.io/badge/ChatGPT_Codex-00A67E?style=flat-square" alt="Codex" height="20" /> | ChatGPT Plus / Team / Pro (Codex Backend) | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-| <img src="https://img.shields.io/badge/xAI_Grok-000000?style=flat-square&logo=x&logoColor=white" alt="Grok" height="20" /> | xAI SuperGrok OAuth | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-| <img src="https://img.shields.io/badge/Google_Antigravity-4285F4?style=flat-square&logo=google&logoColor=white" alt="Antigravity" height="20" /> | Google AI Pro / Ultra (CloudCode API) | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
+| <img src="https://img.shields.io/badge/xAI_Grok-000000?style=flat-square" alt="Grok" height="20" /> | xAI SuperGrok OAuth | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
+| <img src="https://img.shields.io/badge/Google_Antigravity-4285F4?style=flat-square" alt="Antigravity" height="20" /> | Google AI Pro / Ultra (CloudCode API) | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
 | <img src="https://img.shields.io/badge/Custom_Endpoints-6366F1?style=flat-square&logo=fastapi&logoColor=white" alt="Custom Endpoints" height="20" /> | 任何相容 OpenAI / Anthropic 的 API | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
 | <img src="https://img.shields.io/badge/Local_LLMs_(CLI)-0891B2?style=flat-square&logo=ollama&logoColor=white" alt="Local LLMs" height="20" /> | 你電腦上的 Ollama、LM Studio、vLLM、llama.cpp，透過 `kano-proxy` CLI 通道 | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
 
@@ -192,6 +200,7 @@ cd apps/docs && pnpm install && pnpm build
 
 ## 完整文件
 
+- [風險與條款](./apps/docs/pages/zh-TW/guide/risks.md)
 - [產品目標與模型命名](./docs/product.md)
 - [API 參考與協議映射](./docs/api.md)
 - [身份認證與帳號池機制](./docs/auth.md)

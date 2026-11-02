@@ -1,5 +1,5 @@
 import { computed, ref } from "vue"
-import { fetchMe, loginUrl, logout as apiLogout } from "@/services/api"
+import { acceptNotice as apiAcceptNotice, fetchMe, loginUrl, logout as apiLogout } from "@/services/api"
 
 const LOGIN_REDIRECT_KEY = "kano-proxy:login-redirect"
 
@@ -15,23 +15,29 @@ export function takeLoginRedirect(): string | null {
 }
 import { clearDataCaches } from "@/services/cache"
 import { clearNavigationPrefs } from "@/services/prefs"
-import type { User } from "@/types"
+import type { UsageNotice, User } from "@/types"
 
 const user = ref<User | null>(null)
+const notice = ref<UsageNotice | null>(null)
 const loading = ref(true)
 const error = ref<string | null>(null)
 let bootstrapped = false
 
 export function useAuth() {
   const isAuthenticated = computed(() => !!user.value)
+  /** Signed in but not yet agreed to the current usage notice (docs/auth.md § Usage notice). */
+  const noticeRequired = computed(() => !!user.value && notice.value?.accepted !== true)
 
   async function refresh() {
     loading.value = true
     error.value = null
     try {
-      user.value = await fetchMe()
+      const me = await fetchMe()
+      user.value = me?.user ?? null
+      notice.value = me?.notice ?? null
     } catch (e) {
       user.value = null
+      notice.value = null
       error.value = e instanceof Error ? e.message : "Failed to load session"
     } finally {
       loading.value = false
@@ -56,7 +62,12 @@ export function useAuth() {
       // chart view) survive sign-out. See docs/admin-ui.md § View preferences.
       clearNavigationPrefs()
       user.value = null
+      notice.value = null
     }
+  }
+
+  async function acceptNotice(version: string) {
+    notice.value = await apiAcceptNotice(version)
   }
 
   /**
@@ -81,12 +92,15 @@ export function useAuth() {
 
   return {
     user,
+    notice,
     loading,
     error,
     isAuthenticated,
+    noticeRequired,
     refresh,
     ensureSession,
     logout,
+    acceptNotice,
     goLogin,
   }
 }
