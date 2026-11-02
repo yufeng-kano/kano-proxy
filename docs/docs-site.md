@@ -123,5 +123,5 @@ A private edition ([cloud-edition.md](./cloud-edition.md)) documents features th
 ## Links into the docs
 
 - Login page footer: a "Documentation" link beside the contact address.
-- Add account dialog: its warning banner links **Risks and terms** (`/docs/guide/risks`, new tab) ([admin-ui.md](./admin-ui.md) § Providers page). The usage notice page itself links nothing but the edition's terms: the notice is the whole text the user agrees to, so it does not send them elsewhere to read more.
+- Add account dialog: its warning banner links **Risks and terms** (`/docs/guide/risks`, new tab) ([admin-ui.md](./admin-ui.md) § Providers page). The usage notice's own text links nothing but the edition's terms, in a new tab so the ticked box stays: the notice is the whole text the user agrees to, so it does not send them elsewhere to read more. The sign-in footer under it keeps its usual links (Docs, the edition's links, the contact address).
 - Signed-in sidebar: a "Documentation" entry above Changelog, opening in a new tab. Both use the `nav.docs` catalog key. An edition may move the sidebar entry into the account menu ([admin-ui.md](./admin-ui.md) § Layout: edition options).
