@@ -16,7 +16,7 @@ import { useI18n, type MessageKey } from "@/i18n"
 import { ApiError } from "@/services/api"
 
 const { t, locale, format } = useI18n()
-const { user, notice, acceptNotice, refresh, logout } = useAuth()
+const { user, notice, acceptNotice, logout } = useAuth()
 const { noticeTerms = [] } = useWebExtensions()
 const route = useRoute()
 const router = useRouter()
@@ -33,7 +33,8 @@ const POINTS: readonly { lead: MessageKey; body: MessageKey }[] = [
 
 const agreed = ref(false)
 const saving = ref(false)
-const failure = ref<"changed" | "save" | null>(null)
+/** `?changed=1` is the reload a `409` asked for (see `agree`). */
+const failure = ref<"changed" | "save" | null>(route.query.changed ? "changed" : null)
 
 /**
  * The edition's documents joined as the locale lists them ("A and B"), with
@@ -72,13 +73,14 @@ async function agree() {
     await router.replace(redirect.value)
   } catch (e) {
     if (e instanceof ApiError && e.status === 409) {
-      // The text changed while this page was open: show the new one and ask again.
-      await refresh()
-      agreed.value = false
-      failure.value = "changed"
-    } else {
-      failure.value = "save"
+      // The notice changed while this page was open. Its text comes with the web build, so this
+      // page still shows the old wording: load it again for the new one, and say why.
+      const url = new URL(window.location.href)
+      url.searchParams.set("changed", "1")
+      window.location.replace(url.toString())
+      return
     }
+    failure.value = "save"
   } finally {
     saving.value = false
   }
