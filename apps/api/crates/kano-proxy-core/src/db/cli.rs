@@ -337,6 +337,7 @@ pub async fn insert_cli_provider(
         .await?;
     let sort_order = max + 1;
     let models_updated_at = input.models_json.map(|_| ts.clone());
+    let mut tx = db.begin().await?;
     let r = sqlx::query(
         "INSERT INTO cli_providers
          (id, user_id, device_id, slug, name, format, models_json, models_updated_at, model_filter_json, sort_order, created_at, updated_at)
@@ -358,11 +359,20 @@ pub async fn insert_cli_provider(
     .bind(sort_order)
     .bind(&ts)
     .bind(MAX_CUSTOM_PROVIDERS_PER_USER)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
     if r.rows_affected() == 0 {
         return Ok(None);
     }
+    // A settings row already under this slug outlived a provider before this one (a write that
+    // raced its delete): a new provider starts with its switches off (docs/database.md
+    // § provider_settings). Same transaction, so no write can land on the new row in between.
+    sqlx::query("DELETE FROM provider_settings WHERE user_id = $1 AND provider = $2")
+        .bind(input.user_id)
+        .bind(input.slug)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(Some(CliProviderRow {
         id,
         user_id: input.user_id.to_string(),
@@ -390,13 +400,24 @@ pub async fn rename_cli_provider(db: &PgPool, user_id: &str, id: &str, name: &st
     Ok(r.rows_affected() > 0)
 }
 
+/// Deletes the provider row and its `provider_settings` row in one transaction, so a later
+/// provider under the same slug starts with its request-edit switches off (docs/database.md
+/// § `provider_settings`).
 pub async fn delete_cli_provider(db: &PgPool, user_id: &str, id: &str) -> Result<bool, sqlx::Error> {
-    let r = sqlx::query("DELETE FROM cli_providers WHERE id = $1 AND user_id = $2")
+    let mut tx = db.begin().await?;
+    let slug: Option<String> = sqlx::query_scalar("DELETE FROM cli_providers WHERE id = $1 AND user_id = $2 RETURNING slug")
         .bind(id)
         .bind(user_id)
-        .execute(db)
+        .fetch_optional(&mut *tx)
         .await?;
-    Ok(r.rows_affected() > 0)
+    let Some(slug) = slug else { return Ok(false) };
+    sqlx::query("DELETE FROM provider_settings WHERE user_id = $1 AND provider = $2")
+        .bind(user_id)
+        .bind(&slug)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 /// The agent-reported catalog — stored whole; the expose filter applies at read time only.

@@ -7,8 +7,11 @@
  * but carries a static key instead of a usage window: the details are the
  * model prefix, the base URL, the token-count URL when one is configured, and
  * the key mask (never the key itself — see docs/admin-ui.md § Data freshness).
+ * Its request-edit switches are its own, like any provider's; the row reports
+ * a flip and the page writes it.
  */
 import { computed, ref } from "vue"
+import RequestEditSwitches from "@/components/providers/RequestEditSwitches.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
@@ -16,7 +19,7 @@ import Banner from "@/components/ui/Banner.vue"
 import StatusDot from "@/components/ui/StatusDot.vue"
 import { useI18n } from "@/i18n"
 import { testCustomProvider } from "@/services/api"
-import type { CustomProvider, CustomProviderTestResult } from "@/types"
+import type { CustomProvider, CustomProviderTestResult, ProviderSettings } from "@/types"
 
 const props = defineProps<{
   provider: CustomProvider
@@ -38,6 +41,7 @@ const emit = defineEmits<{
   resume: []
   edit: []
   remove: []
+  settings: [patch: Partial<ProviderSettings>]
   moveUp: []
   moveDown: []
   dragStart: []
@@ -149,6 +153,8 @@ async function runTest() {
         <div class="tags">
           <StatusDot :status="provider.status" />
           <Badge>{{ formatLabel }}</Badge>
+          <Badge v-if="provider.strip_fast_mode">{{ t("providers.edits.fastModeOn") }}</Badge>
+          <Badge v-if="provider.strip_claude_code_line">{{ t("providers.edits.lineOn") }}</Badge>
           <!-- A word, not a tint: the drag state has to survive a color-blind
                reader and a high-contrast mode. -->
           <span v-if="dragging" class="moving">{{ t("custom.reorder.moving") }}</span>
@@ -166,7 +172,6 @@ async function runTest() {
         <template v-if="reorderable">
           <AppButton
             icon-only
-            size="sm"
             variant="ghost"
             :label="t('custom.reorder.moveUp', { name: provider.name })"
             :disabled="busy || !canMoveUp"
@@ -176,7 +181,6 @@ async function runTest() {
           </AppButton>
           <AppButton
             icon-only
-            size="sm"
             variant="ghost"
             :label="t('custom.reorder.moveDown', { name: provider.name })"
             :disabled="busy || !canMoveDown"
@@ -188,7 +192,6 @@ async function runTest() {
         <AppButton
           v-if="provider.status === 'benched'"
           icon-only
-          size="sm"
           variant="ghost"
           :label="t('custom.resumeEndpoint', { name: provider.name })"
           :disabled="busy || testing"
@@ -197,7 +200,6 @@ async function runTest() {
           <template #icon><ActionIcon name="play" /></template>
         </AppButton>
         <AppButton
-          size="sm"
           :label="t('custom.testEndpoint', { name: provider.name })"
           :loading="testing"
           :disabled="busy"
@@ -207,7 +209,6 @@ async function runTest() {
         </AppButton>
         <AppButton
           icon-only
-          size="sm"
           variant="ghost"
           :label="t('custom.editEndpoint', { name: provider.name })"
           :disabled="busy || testing"
@@ -217,7 +218,6 @@ async function runTest() {
         </AppButton>
         <AppButton
           icon-only
-          size="sm"
           variant="danger"
           :label="t('custom.removeEndpoint', { name: provider.name })"
           :disabled="busy || testing"
@@ -253,6 +253,19 @@ async function runTest() {
         <dd><code class="mono">{{ provider.key_mask ?? "—" }}</code></dd>
       </div>
     </dl>
+
+    <!-- Behind the section's gate, like the row's actions: this endpoint's
+         own pair, the same two a builtin section has. -->
+    <div v-if="editing" class="edits">
+      <RequestEditSwitches
+        :strip-fast-mode="!!provider.strip_fast_mode"
+        :strip-claude-code-line="!!provider.strip_claude_code_line"
+        :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
+        :line-hint="t('providers.edits.lineHintEndpoint')"
+        :busy="busy"
+        @change="emit('settings', $event)"
+      />
+    </div>
 
     <Banner v-if="testResult" :tone="testResult.ok ? 'ok' : 'error'">
       <div class="result">
@@ -372,6 +385,13 @@ async function runTest() {
   margin: 0;
   min-width: 0;
   font-size: var(--text-xs);
+}
+
+.edits {
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
 }
 
 .truncate {

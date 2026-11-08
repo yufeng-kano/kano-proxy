@@ -132,6 +132,18 @@ pub enum AudioInput {
 pub struct CallExtras {
     pub api_key_id: Option<String>,
     pub first_byte_timeout: Option<std::time::Duration>,
+    /// This candidate's provider switches. The dispatch caller has already applied them to the
+    /// body; an adapter only reads them where it adds content of its own (claude-code's line).
+    pub edits: RequestEdits,
+}
+
+/// One candidate's request-edit switches (docs/providers.md § Request edits), resolved by the
+/// dispatch walk from `provider_settings` — the borrower's, plus the owner's fast-mode switch on
+/// a shared row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestEdits {
+    pub strip_fast_mode: bool,
+    pub strip_claude_code_line: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

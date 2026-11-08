@@ -13,6 +13,7 @@ pub mod gemini_openai;
 pub mod gemini_wire;
 pub mod grok_anthropic;
 pub mod openai_anthropic;
+pub mod request_edits;
 pub mod request_json;
 pub mod responses_openai;
 pub mod sse;

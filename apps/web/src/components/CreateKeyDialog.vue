@@ -295,31 +295,6 @@ const title = computed(() => {
   font-size: var(--text-sm);
 }
 
-/* Styled to TextInput's control spec — the one native select in the app. */
-.select {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-
-.select:focus {
-  border-color: var(--ring-border);
-  box-shadow: var(--ring);
-  outline: none;
-}
-
-.select:disabled {
-  background: var(--surface-2);
-  color: var(--muted);
-  cursor: not-allowed;
-}
-
 /* Same row shape as CustomProviderDialog's mode radios, minus the border —
    one checkbox does not need a card. */
 .check {
@@ -355,12 +330,5 @@ const title = computed(() => {
   margin: 0;
   color: var(--muted);
   font-size: var(--text-xs);
-}
-
-@media (pointer: coarse) {
-  .select {
-    height: 40px;
-    font-size: var(--text-md);
-  }
 }
 </style>

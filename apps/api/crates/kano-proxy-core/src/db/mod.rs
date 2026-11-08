@@ -42,6 +42,10 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0005_account_allow_credits.sql"),
     },
     Migration { name: "0006_usage_notice", sql: include_str!("../../migrations/0006_usage_notice.sql") },
+    Migration {
+        name: "0007_provider_request_edits",
+        sql: include_str!("../../migrations/0007_provider_request_edits.sql"),
+    },
 ];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -139,7 +143,14 @@ mod tests {
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
         assert_eq!(
             applied,
-            ["0002_cli_devices_delete_on_revoke", "0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice"]
+            [
+                "0002_cli_devices_delete_on_revoke",
+                "0003_api_keys_device",
+                "0004_scoped_bench",
+                "0005_account_allow_credits",
+                "0006_usage_notice",
+                "0007_provider_request_edits",
+            ]
         );
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM cli_devices").fetch_all(&pool).await.unwrap();
         assert_eq!(ids, ["clidev_live"]);
@@ -179,7 +190,16 @@ mod tests {
         .expect("existing device");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0003_api_keys_device", "0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice"]);
+        assert_eq!(
+            applied,
+            [
+                "0003_api_keys_device",
+                "0004_scoped_bench",
+                "0005_account_allow_credits",
+                "0006_usage_notice",
+                "0007_provider_request_edits",
+            ]
+        );
         let old = crate::db::keys::list_keys(&pool, &user.id).await.unwrap();
         assert_eq!(old.len(), 1);
         assert_eq!((old[0].name.as_str(), old[0].spend_limit, old[0].spend_limit_interval.as_str()), ("Production", Some(12.5), "weekly"));
@@ -216,7 +236,10 @@ mod tests {
         .expect("existing account");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice"]);
+        assert_eq!(
+            applied,
+            ["0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice", "0007_provider_request_edits"]
+        );
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert_eq!((row.bench_until.as_deref(), row.bench_reason.as_deref()), (Some("2030-01-01T00:00:00.000Z"), Some("429")));
         assert_eq!(row.usage_snapshot_json.as_deref(), Some("{\"windows\":[]}"));
@@ -251,7 +274,7 @@ mod tests {
         .expect("existing account");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0005_account_allow_credits", "0006_usage_notice"]);
+        assert_eq!(applied, ["0005_account_allow_credits", "0006_usage_notice", "0007_provider_request_edits"]);
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert!(!row.allow_credits, "existing accounts never start spending credits");
         assert_eq!((row.custom_label.as_deref(), row.priority), (Some("Mine"), 3));
@@ -277,7 +300,7 @@ mod tests {
         let session = crate::db::sessions::insert_session(&pool, &user.id, "2030-01-01T00:00:00.000Z").await.expect("existing session");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0006_usage_notice"]);
+        assert_eq!(applied, ["0006_usage_notice", "0007_provider_request_edits"]);
         let row = crate::db::users::find_user_by_id(&pool, &user.id).await.unwrap().expect("the row type reads");
         assert_eq!((row.email.as_str(), row.created_at.as_str()), ("upgrade6@example.com", user.created_at.as_str()));
         assert_eq!((row.notice_version, row.notice_accepted_at), (None, None), "nobody has accepted yet");
@@ -288,6 +311,37 @@ mod tests {
         assert_eq!((row.notice_version.as_deref(), row.notice_accepted_at.as_deref()), (Some("2026-11-02"), Some(accepted_at.as_str())));
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notice_acceptances").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 0);
+        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+    }
+
+    /// Upgrading a deployed 0006 schema: an existing settings row keeps its strategy and reads
+    /// with both request-edit switches off, a switch write afterwards leaves the strategy, and
+    /// the user cascade still reaches the row.
+    #[tokio::test]
+    async fn upgrading_to_0007_keeps_existing_provider_settings_with_both_switches_off() {
+        let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..6]).await else { return skip_without_db() };
+        let user = insert_user_without_notice(&pool, "upgrade7@example.com").await;
+        sqlx::query(
+            "INSERT INTO provider_settings (user_id, provider, strategy, updated_at)
+             VALUES ($1, 'codex', 'ordered', '2026-11-01T00:00:00.000Z'), ($1, 'my-endpoint', 'ordered', '2026-11-01T00:00:00.000Z')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("existing settings");
+
+        let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
+        assert_eq!(applied, ["0007_provider_request_edits"]);
+        for provider in ["codex", "my-endpoint"] {
+            let row = crate::db::provider_settings::get_provider_settings(&pool, &user.id, provider).await.unwrap();
+            assert_eq!(row, crate::db::provider_settings::ProviderSettings::default(), "{provider}");
+        }
+        let fast = crate::db::provider_settings::ProviderSettingsUpdate { strip_fast_mode: Some(true), ..Default::default() };
+        let stored = crate::db::provider_settings::update_provider_settings(&pool, &user.id, "codex", fast).await.unwrap();
+        assert_eq!((stored.strategy.as_str(), stored.strip_fast_mode, stored.strip_claude_code_line), ("ordered", true, false));
+        sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_settings").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
         assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
     }

@@ -269,6 +269,27 @@ export const en = {
   "providers.error.rename": "Couldn't rename the account",
   "providers.error.strategy": "Couldn't change the routing strategy",
   "providers.error.allowCredits": "Couldn't change credit use",
+  "providers.error.settings": "Couldn't change the setting",
+
+  // --- Request edits ------------------------------------------------------
+  // Per-provider switches that change what Kano Proxy forwards upstream
+  // (docs/providers.md § Request edits). The same two on every surface; the
+  // line under each says what it does to this provider, and the header tags
+  // say which are on while the edit gate is closed.
+  "providers.edits.fastMode": "Remove fast mode",
+  "providers.edits.fastModeHint": "Requests go at standard speed. Accounts you share follow this too.",
+  "providers.edits.fastModeHintClaude":
+    "Requests go at standard speed. Claude bills fast mode to usage credits. Accounts you share follow this too.",
+  "providers.edits.fastModeHintEndpoint": "Requests to this endpoint go at standard speed.",
+  "providers.edits.line": "Remove the Claude Code line",
+  "providers.edits.lineHintClaude":
+    "Drops Claude Code's identity line, “You are Claude Code, Anthropic's official CLI for Claude.”, from system prompts, and Kano Proxy stops adding it. Claude may refuse or bill requests without it. Shared accounts drop it only when the owner and the borrower both turn this on.",
+  "providers.edits.lineHint":
+    "Drops Claude Code's identity line, “You are Claude Code, Anthropic's official CLI for Claude.”, from system prompts sent to {provider}. Shared accounts drop it only when the owner and the borrower both turn this on.",
+  "providers.edits.lineHintEndpoint":
+    "Drops Claude Code's identity line, “You are Claude Code, Anthropic's official CLI for Claude.”, from system prompts sent to this endpoint.",
+  "providers.edits.fastModeOn": "Fast mode removed",
+  "providers.edits.lineOn": "Claude Code line removed",
 
   // --- Routing strategy ---------------------------------------------------
   // How a pool or a group decides what a request runs on. One option ships
@@ -432,6 +453,7 @@ export const en = {
   "custom.error.resume": "Couldn't resume the endpoint",
   "custom.error.remove": "Couldn't remove the endpoint",
   "custom.error.load": "Couldn't load your endpoints",
+  "custom.error.settings": "Couldn't change the endpoint's setting",
 
   // --- Models -------------------------------------------------------------
   "models.title": "Models",
@@ -618,6 +640,7 @@ export const en = {
   "cli.error.rename": "Couldn't rename the provider",
   "cli.error.renameDevice": "Couldn't rename the device",
   "cli.error.remove": "Couldn't remove the provider",
+  "cli.error.settings": "Couldn't change the provider's setting",
   // --- CLI authorize view --------------------------------------------------
   "cli.authorize.title": "Authorize CLI device",
   "cli.authorize.question": "Sign in the device \"{device}\"?",

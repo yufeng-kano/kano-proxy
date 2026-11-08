@@ -206,13 +206,20 @@ The callable models of a group, 1–20 per group, each with its own ordered targ
 
 ### `provider_settings`
 
-Per-user, per-provider-pool routing config ([providers.md](./providers.md) § Routing module) — the pool-level counterpart of `model_groups.strategy`, governing **direct** `provider/model` calls. Added in `0010_routing_strategy.sql`. `provider` is a builtin id **or** a custom provider's slug (same convention as `upstream_accounts.provider`); no FK to `custom_providers` — a row for a deleted slug is inert, mirroring how account rows are handled. **A missing row means `ordered`** — rows are created lazily on first write, never backfilled.
+Per-user, per-provider settings. Two jobs:
+
+- The pool's routing **strategy** ([providers.md](./providers.md) § Routing module), the pool-level counterpart of `model_groups.strategy`, governing **direct** `provider/model` calls. Added in `0010_routing_strategy.sql` (pre-baseline; part of `0001_core_baseline.sql` now).
+- The two **request-edit switches** ([providers.md](./providers.md) § Request edits), which govern every call a candidate of that provider makes, group endpoints included. Added in `0007_provider_request_edits.sql`.
+
+`provider` is a builtin id, a custom provider's slug **or** a CLI provider's slug (same convention as `upstream_accounts.provider`); no FK to `custom_providers` / `cli_providers`. Deleting a custom endpoint or CLI provider deletes its row in the same transaction (since `0007`), and creating one deletes any row already under its slug in the insert's transaction, so a new provider always starts with both switches off, even after a settings write that raced the old provider's delete. A row orphaned before `0007` holds only default values and is inert. **A missing row means `ordered` with both switches off** — rows are created lazily on first write, never backfilled. A write upserts only the columns it was sent, so a strategy write never resets a switch and a switch write never resets the strategy.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | user_id | TEXT | `ON DELETE CASCADE` → `users.id`; PK part |
-| provider | TEXT | builtin id or custom slug; PK part |
+| provider | TEXT | builtin id, custom slug or CLI slug; PK part |
 | strategy | TEXT | `NOT NULL DEFAULT 'ordered'`; same value set and forward-compat rule as `model_groups.strategy` |
+| strip_fast_mode | BOOLEAN | `NOT NULL DEFAULT FALSE`; **Remove fast mode**. The write route rejects it for `grok` / `antigravity`, which never forward a fast-mode field |
+| strip_claude_code_line | BOOLEAN | `NOT NULL DEFAULT FALSE`; **Remove the Claude Code line** |
 | updated_at | TEXT | ISO |
 
 `PRIMARY KEY (user_id, provider)`.

@@ -11,19 +11,20 @@
  *
  * The poll runs only while the page is visible — see `syncToVisibility`.
  */
-import { computed, onMounted, onUnmounted, ref } from "vue"
+import { computed, onMounted, onUnmounted, reactive, ref } from "vue"
 import AddAccountDialog from "@/components/AddAccountDialog.vue"
 import CustomProviderDialog from "@/components/CustomProviderDialog.vue"
 import RenameAccountDialog from "@/components/RenameAccountDialog.vue"
 import AccountCard from "@/components/providers/AccountCard.vue"
 import CliSection from "@/components/providers/CliSection.vue"
 import CustomProviderCard from "@/components/providers/CustomProviderCard.vue"
+import RequestEditSwitches from "@/components/providers/RequestEditSwitches.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
+import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
 import EmptyState from "@/components/ui/EmptyState.vue"
-import FormField from "@/components/ui/FormField.vue"
 import PageHeader from "@/components/ui/PageHeader.vue"
 import SectionNav from "@/components/ui/SectionNav.vue"
 import type { SectionItem } from "@/components/ui/SectionNav.vue"
@@ -39,9 +40,9 @@ import {
   reorderAccounts,
   removeAccount,
   setAccountAllowCredits,
-  setProviderStrategy,
   unpauseAccount,
   unpauseCustomProvider,
+  updateProviderSettings,
 } from "@/services/api"
 import { invalidateModelCaches } from "@/services/cache"
 import { getProvidersPrefs, setProvidersPrefs } from "@/services/prefs"
@@ -52,13 +53,14 @@ import {
   type CustomProvider,
   type ProviderAccount,
   type ProviderId,
+  type ProviderSettings,
   type RoutingStrategy,
 } from "@/types"
 
 const { t } = useI18n()
 const confirm = useConfirm()
 const { user } = useAuth()
-const { byProvider, setUserId, loadAll, loadProvider, setStrategy, CACHE_TTL_MS } = useAccounts()
+const { byProvider, setUserId, loadAll, loadProvider, setSettings, CACHE_TTL_MS } = useAccounts()
 const customProviders = useCustomProviders()
 const cli = useCli()
 
@@ -87,6 +89,23 @@ const STRATEGY_KEY: Record<RoutingStrategy, MessageKey> = {
 
 const STRATEGY_HINT_KEY: Record<RoutingStrategy, MessageKey> = {
   ordered: "strategy.pool.ordered",
+}
+
+/**
+ * The line under each pool's "Remove fast mode". A pool without an entry has
+ * no such switch: Grok and Antigravity never forward fast mode, and the server
+ * refuses the write for them (docs/providers.md § Request edits).
+ */
+const FAST_MODE_HINT_KEY: Partial<Record<ProviderId, MessageKey>> = {
+  "claude-code": "providers.edits.fastModeHintClaude",
+  codex: "providers.edits.fastModeHint",
+}
+
+/** Claude Code's line also says the proxy stops adding it there; the others name the pool. */
+function lineHint(provider: ProviderId): string {
+  return provider === "claude-code"
+    ? t("providers.edits.lineHintClaude")
+    : t("providers.edits.lineHint", { provider: t(NAME_KEY[provider]) })
 }
 
 /** The custom-endpoints tab is not a `ProviderId`, so it gets its own id. */
@@ -363,8 +382,11 @@ function strategyOf(provider: ProviderId): RoutingStrategy {
   return byProvider[provider].data?.strategy ?? DEFAULT_ROUTING_STRATEGY
 }
 
-/** Which pool is mid-write; its select stays put until the server answers. */
-const strategyBusy = ref<ProviderId | null>(null)
+/**
+ * The pools with a settings write in flight; their controls stay put until the
+ * server answers. Per pool, so one section's answer never re-enables another's.
+ */
+const settingsBusy = reactive<Partial<Record<ProviderId, boolean>>>({})
 
 /**
  * Saves on change, and paints what the server stored rather than what was
@@ -379,10 +401,10 @@ async function onStrategyChange(provider: ProviderId, event: Event) {
   const next = el.value as RoutingStrategy
   if (next === previous) return
 
-  strategyBusy.value = provider
+  settingsBusy[provider] = true
   actionError.value = null
   try {
-    setStrategy(provider, await setProviderStrategy(provider, next))
+    setSettings(provider, await updateProviderSettings(provider, { strategy: next }))
     // Same reason as the rollback below: if the stored value is not the one
     // that was sent, the bound value never changed and nothing is patched back.
     el.value = strategyOf(provider)
@@ -390,7 +412,24 @@ async function onStrategyChange(provider: ProviderId, event: Event) {
     actionError.value = t("providers.error.strategy")
     el.value = previous
   } finally {
-    strategyBusy.value = null
+    delete settingsBusy[provider]
+  }
+}
+
+/**
+ * A request-edit switch flipped. Same shape as the strategy write: paint what
+ * the server stored, report a refusal in the page's banner, and the switch
+ * puts its own box back once `settingsBusy` clears.
+ */
+async function onSettingsChange(provider: ProviderId, patch: Partial<ProviderSettings>) {
+  settingsBusy[provider] = true
+  actionError.value = null
+  try {
+    setSettings(provider, await updateProviderSettings(provider, patch))
+  } catch {
+    actionError.value = t("providers.error.settings")
+  } finally {
+    delete settingsBusy[provider]
   }
 }
 
@@ -521,6 +560,19 @@ async function onResumeCustom(provider: CustomProvider) {
   }
 }
 
+/** An endpoint's own switches, keyed by its slug like every provider's settings. */
+async function onCustomSettings(provider: CustomProvider, patch: Partial<ProviderSettings>) {
+  customBusyId.value = provider.id
+  actionError.value = null
+  try {
+    customProviders.setSettings(provider.id, await updateProviderSettings(provider.slug, patch))
+  } catch {
+    actionError.value = t("custom.error.settings")
+  } finally {
+    customBusyId.value = null
+  }
+}
+
 async function onRemoveCustomProvider(provider: CustomProvider) {
   const confirmed = await confirm({
     title: t("custom.removeTitle", { name: provider.name }),
@@ -591,33 +643,24 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
         {{ accountOrderAnnouncement }}
       </span>
 
-      <AppCard v-for="pid in visibleProviders" :key="pid" :title="t(NAME_KEY[pid])">
+      <AppCard
+        v-for="pid in visibleProviders"
+        :key="pid"
+        :title="t(NAME_KEY[pid])"
+        toolbar-wash
+      >
+        <!-- A switch that is on says so beside the title, gate open or
+             closed: a setting is never hidden behind the control that
+             changes it (docs/admin-ui.md § Providers page). -->
+        <template #heading>
+          <Badge v-if="byProvider[pid].data?.strip_fast_mode">
+            {{ t("providers.edits.fastModeOn") }}
+          </Badge>
+          <Badge v-if="byProvider[pid].data?.strip_claude_code_line">
+            {{ t("providers.edits.lineOn") }}
+          </Badge>
+        </template>
         <template #actions>
-          <!-- Section-level config, so it appears with the section's other
-               config affordances when the gate opens — never on a row. It
-               renders with one option on purpose: it is the seam future
-               strategies appear in, and it tells the operator the pool has a
-               routing policy at all (docs/admin-ui.md § Providers page). -->
-          <FormField
-            v-if="isEditing(pid)"
-            v-slot="field"
-            class="strategy"
-            :label="t('strategy.label')"
-            :hint="t(STRATEGY_HINT_KEY[strategyOf(pid)])"
-          >
-            <select
-              :id="field.id"
-              class="select"
-              :value="strategyOf(pid)"
-              :aria-describedby="field.describedBy"
-              :disabled="strategyBusy === pid"
-              @change="onStrategyChange(pid, $event)"
-            >
-              <option v-for="option in ROUTING_STRATEGIES" :key="option" :value="option">
-                {{ t(STRATEGY_KEY[option]) }}
-              </option>
-            </select>
-          </FormField>
           <!-- Icon-only ghost: this page is read far more often than it is
                added to, so the create affordance sits at icon weight. Hidden
                while the gate is open — editing the pool and adding to it are
@@ -625,7 +668,6 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           <AppButton
             v-if="!isEditing(pid)"
             icon-only
-            size="sm"
             variant="ghost"
             :label="t('providers.addAccount')"
             @click="addFor = pid"
@@ -633,12 +675,12 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
             <template #icon><ActionIcon name="plus" /></template>
           </AppButton>
           <!-- One gate for the whole section. aria-pressed: the same control
-               opens and closes it, so its state must be audible as one. -->
+               opens and closes it, so its state must be audible as one; solid
+               while open, so it is visible as one too. -->
           <AppButton
             v-if="byProvider[pid].data?.accounts.length"
             icon-only
-            size="sm"
-            variant="ghost"
+            :variant="isEditing(pid) ? 'primary' : 'secondary'"
             :label="
               isEditing(pid)
                 ? t('providers.section.doneEditing', { section: t(NAME_KEY[pid]) })
@@ -649,6 +691,43 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           >
             <template #icon><ActionIcon :name="isEditing(pid) ? 'check' : 'edit'" /></template>
           </AppButton>
+        </template>
+
+        <!-- Section-level config, between the header and the rows while the
+             gate is open — never on a row. The strategy select renders with
+             one option on purpose: it is the seam future strategies appear
+             in, and it tells the operator the pool has a routing policy at
+             all (docs/admin-ui.md § Providers page). -->
+        <template v-if="isEditing(pid)" #toolbar>
+          <div class="settings">
+            <div class="setting-row">
+              <label class="setting-label" :for="`strategy-${pid}`">{{ t("strategy.label") }}</label>
+              <select
+                :id="`strategy-${pid}`"
+                class="select setting-select"
+                :value="strategyOf(pid)"
+                :aria-describedby="`strategy-hint-${pid}`"
+                :disabled="settingsBusy[pid]"
+                @change="onStrategyChange(pid, $event)"
+              >
+                <option v-for="option in ROUTING_STRATEGIES" :key="option" :value="option">
+                  {{ t(STRATEGY_KEY[option]) }}
+                </option>
+              </select>
+              <span :id="`strategy-hint-${pid}`" class="setting-hint">
+                {{ t(STRATEGY_HINT_KEY[strategyOf(pid)]) }}
+              </span>
+            </div>
+            <hr class="settings-rule" />
+            <RequestEditSwitches
+              :strip-fast-mode="!!byProvider[pid].data?.strip_fast_mode"
+              :strip-claude-code-line="!!byProvider[pid].data?.strip_claude_code_line"
+              :fast-mode-hint="FAST_MODE_HINT_KEY[pid] && t(FAST_MODE_HINT_KEY[pid]!)"
+              :line-hint="lineHint(pid)"
+              :busy="settingsBusy[pid]"
+              @change="onSettingsChange(pid, $event)"
+            />
+          </div>
         </template>
 
         <div class="section-body">
@@ -703,7 +782,6 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           <AppButton
             v-if="!isEditing(CUSTOM)"
             icon-only
-            size="sm"
             variant="ghost"
             :label="t('custom.add')"
             @click="openCreateCustomDialog"
@@ -713,8 +791,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           <AppButton
             v-if="customProviders.state.data?.length"
             icon-only
-            size="sm"
-            variant="ghost"
+            :variant="isEditing(CUSTOM) ? 'primary' : 'secondary'"
             :label="
               isEditing(CUSTOM)
                 ? t('providers.section.doneEditing', { section: t('provider.custom.name') })
@@ -754,6 +831,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               @resume="onResumeCustom(provider)"
               @edit="openEditCustomDialog(provider)"
               @remove="onRemoveCustomProvider(provider)"
+              @settings="onCustomSettings(provider, $event)"
               @move-up="moveCustomProvider(index, index - 1)"
               @move-down="moveCustomProvider(index, index + 1)"
               @drag-start="onCustomDragStart(provider.id)"
@@ -835,45 +913,44 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
   gap: var(--space-3);
 }
 
-/* Narrow enough that the pool's name still owns the header line, and capped by
-   the header itself on small screens where the actions wrap onto their own row. */
-.strategy {
-  width: 200px;
+/* The section's settings block: the strategy row, a hairline, then the
+   request-edit switches — one column, so each control sits under the last. */
+.settings {
+  display: grid;
+  gap: var(--space-4);
+}
+
+/* Label, select and the line saying what the choice does, on one row that
+   wraps under the label on a narrow screen. */
+.setting-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.setting-label {
+  width: 96px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+.setting-select {
+  width: 220px;
   max-width: 100%;
 }
 
-/* The app's control spec, same as the other selects in the app (the key
-   dialog's interval, the group dialog's re-pick). */
-.select {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
+.setting-hint {
+  color: var(--muted);
   font-size: var(--text-sm);
 }
 
-.select:focus {
-  border-color: var(--ring-border);
-  box-shadow: var(--ring);
-  outline: none;
-}
-
-.select:disabled {
-  background: var(--surface-2);
-  color: var(--muted);
-  cursor: not-allowed;
-}
-
-/* 16px type so iOS Safari does not zoom the page when the select takes focus. */
-@media (pointer: coarse) {
-  .select {
-    height: 40px;
-    font-size: var(--text-md);
-  }
+.settings-rule {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
 }
 
 /* The card body's own padding already spaces the first and last row, so the

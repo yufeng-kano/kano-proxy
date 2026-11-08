@@ -92,7 +92,7 @@ const bindings = computed(() => {
   justify-content: center;
   gap: var(--space-2);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   font-weight: var(--weight-medium);
   white-space: nowrap;
   cursor: pointer;

@@ -5,12 +5,16 @@
  * lives on the Access page beside the keys it mints. No create flow: creation
  * is `kano-proxy tunnel add`'s job, and the empty state says so. Row actions
  * sit behind the card's edit gate, same convention as the page's other
- * sections.
+ * sections, and so do each provider's request-edit switches, in one block
+ * under the table.
  *
  * Data comes from the shared useCli singleton; the page owns loading and
- * polling, this component only renders and mutates.
+ * polling, this component only renders and mutates. Its handle is scoped to
+ * the signed-in user like the page's, so what it writes back lands in that
+ * user's cache.
  */
 import { computed, ref } from "vue"
+import RequestEditSwitches from "@/components/providers/RequestEditSwitches.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
@@ -22,19 +26,24 @@ import EmptyState from "@/components/ui/EmptyState.vue"
 import FormField from "@/components/ui/FormField.vue"
 import Modal from "@/components/ui/Modal.vue"
 import TextInput from "@/components/ui/TextInput.vue"
+import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
-import { deleteCliProvider, renameCliProvider } from "@/services/api"
-import type { CliProvider } from "@/types"
+import { deleteCliProvider, renameCliProvider, updateProviderSettings } from "@/services/api"
+import type { CliProvider, ProviderSettings } from "@/types"
 
 const { t, format } = useI18n()
 const confirm = useConfirm()
-const { state, load } = useCli()
+const { user } = useAuth()
+const { state, load, setUserId, setSettings } = useCli()
+setUserId(user.value?.id ?? null)
 
 const error = ref<string | null>(null)
 const editing = ref(false)
 const busyId = ref<string | null>(null)
+/** The provider with a switch write in flight. Not `busyId`: that one spins the row's Remove. */
+const settingsBusyId = ref<string | null>(null)
 
 const renaming = ref<CliProvider | null>(null)
 const renameValue = ref("")
@@ -93,6 +102,19 @@ async function onRemove(provider: CliProvider) {
   }
 }
 
+/** A provider's own switches, keyed by its slug like every provider's settings. */
+async function onSettings(provider: CliProvider, patch: Partial<ProviderSettings>) {
+  settingsBusyId.value = provider.id
+  error.value = null
+  try {
+    setSettings(provider.id, await updateProviderSettings(provider.slug, patch))
+  } catch {
+    error.value = t("cli.error.settings")
+  } finally {
+    settingsBusyId.value = null
+  }
+}
+
 function modelsCell(provider: CliProvider): string {
   if (!provider.models_updated_at && provider.models.length === 0) return t("cli.providers.noModels")
   return t("cli.providers.model.count", { count: provider.models.length })
@@ -116,8 +138,7 @@ function modelsCell(provider: CliProvider): string {
       <AppButton
         v-if="providers.length"
         icon-only
-        size="sm"
-        variant="ghost"
+        :variant="editing ? 'primary' : 'secondary'"
         :label="
           editing
             ? t('providers.section.doneEditing', { section: t('cli.providers.title') })
@@ -151,6 +172,8 @@ function modelsCell(provider: CliProvider): string {
             <Badge tone="neutral">
               {{ row.format === "anthropic" ? t("custom.dialog.formatAnthropic") : t("custom.dialog.formatOpenAI") }}
             </Badge>
+            <Badge v-if="row.strip_fast_mode">{{ t("providers.edits.fastModeOn") }}</Badge>
+            <Badge v-if="row.strip_claude_code_line">{{ t("providers.edits.lineOn") }}</Badge>
           </span>
         </div>
       </template>
@@ -179,7 +202,6 @@ function modelsCell(provider: CliProvider): string {
         <div class="row-actions">
           <AppButton
             icon-only
-            size="sm"
             variant="ghost"
             :label="t('cli.providers.renameName', { name: row.name })"
             @click="openRename(row)"
@@ -188,7 +210,6 @@ function modelsCell(provider: CliProvider): string {
           </AppButton>
           <AppButton
             icon-only
-            size="sm"
             variant="danger"
             :label="t('cli.providers.removeName', { name: row.name })"
             :loading="busyId === row.id"
@@ -199,6 +220,32 @@ function modelsCell(provider: CliProvider): string {
         </div>
       </template>
     </DataTable>
+
+    <!-- Under the table rather than in it: two switches with a line each do
+         not fit a cell. One group per provider, named after it, since every
+         group offers the same two switches. -->
+    <div v-if="editing && providers.length" class="edits">
+      <div
+        v-for="row in providers"
+        :key="row.id"
+        class="edit"
+        role="group"
+        :aria-label="row.name"
+      >
+        <span class="edit-name">
+          {{ row.name }}
+          <code class="mono slug">{{ row.slug }}/*</code>
+        </span>
+        <RequestEditSwitches
+          :strip-fast-mode="!!row.strip_fast_mode"
+          :strip-claude-code-line="!!row.strip_claude_code_line"
+          :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
+          :line-hint="t('providers.edits.lineHintEndpoint')"
+          :busy="settingsBusyId === row.id"
+          @change="onSettings(row, $event)"
+        />
+      </div>
+    </div>
   </AppCard>
 
   <Modal v-if="renaming" :title="t('cli.rename.title')" @close="renaming = null">
@@ -241,6 +288,7 @@ function modelsCell(provider: CliProvider): string {
 .meta {
   display: inline-flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
@@ -283,6 +331,36 @@ function modelsCell(provider: CliProvider): string {
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-1);
+}
+
+.edits {
+  display: grid;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+.edit {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+}
+
+.edit + .edit {
+  border-top: 1px solid var(--border);
+}
+
+.edit-name {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+
+@media (max-width: 640px) {
+  .edit {
+    padding: var(--space-4);
+  }
 }
 
 .rename-form {

@@ -6,7 +6,7 @@ import {
   readAccountsCache,
   writeAccountsCache,
 } from "@/services/cache"
-import type { AccountsResponse, ProviderId, RoutingStrategy } from "@/types"
+import type { AccountsResponse, ProviderId, ProviderSettings } from "@/types"
 
 type ProviderState = {
   data: AccountsResponse | null
@@ -97,15 +97,15 @@ export function useAccounts() {
   }
 
   /**
-   * Records the strategy a write just saved. The whole payload is re-cached
-   * with it, so the next cache-first paint shows the new value instead of the
-   * one the last read happened to carry — a re-fetch would cost an upstream
-   * usage round trip to learn one field the response already told us.
+   * Records the settings a write just saved. The whole payload is re-cached
+   * with them, so the next cache-first paint shows the new values instead of
+   * the ones the last read happened to carry — a re-fetch would cost an
+   * upstream usage round trip to learn fields the response already told us.
    */
-  function setStrategy(provider: ProviderId, strategy: RoutingStrategy) {
+  function setSettings(provider: ProviderId, settings: ProviderSettings) {
     const data = byProvider[provider].data
     if (!data) return
-    data.strategy = strategy
+    Object.assign(data, settings)
     writeAccountsCache(userId.value, provider, data)
   }
 
@@ -119,7 +119,7 @@ export function useAccounts() {
     setUserId,
     loadProvider,
     loadAll,
-    setStrategy,
+    setSettings,
     invalidateLocal,
     CACHE_TTL_MS,
   }

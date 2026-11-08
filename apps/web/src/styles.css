@@ -7,8 +7,8 @@
  *
  * Component styles live with their components (`components/ui/*.vue`). This
  * file holds only what has no component to belong to: the token blocks, the
- * document reset, and the two utilities (`.sr-only`, `.mono`) that any of them
- * may need.
+ * document reset, the utilities (`.sr-only`, `.mono`) that any of them may
+ * need, and `.select`, the one native control without a component of its own.
  */
 
 :root {
@@ -113,6 +113,9 @@
   /* Focus indicator — needs 3:1 against --surface per WCAG 1.4.11. */
   --ring-border: #71717a;
   --ring: 0 0 0 3px rgb(24 24 27 / 6%);
+  /* The select's own arrow, stroked in --muted. A data URI cannot read a
+     custom property, so the color is spelled out here and in the dark block. */
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2352525b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   --overlay: rgb(0 0 0 / 35%);
   --shadow: 0 1px 2px rgb(0 0 0 / 4%), 0 4px 12px rgb(0 0 0 / 4%);
   --shadow-lg: 0 16px 40px rgb(0 0 0 / 12%);
@@ -133,6 +136,9 @@
   /* --- Radius ----------------------------------------------------------- */
   --radius-xs: 4px;
   --radius-sm: 6px;
+  /* Buttons, text inputs and selects: one corner for every control, so a row
+     mixing them lines up (docs/admin-ui.md § One control spec). */
+  --radius-control: 8px;
   --radius: 10px;
   --radius-lg: 14px;
   --radius-full: 999px;
@@ -238,6 +244,7 @@
     /* Focus indicator — needs 3:1 against --surface per WCAG 1.4.11. */
     --ring-border: #71717a;
     --ring: 0 0 0 3px rgb(250 250 250 / 10%);
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23a1a1aa' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
     --overlay: rgb(0 0 0 / 60%);
     --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 4px 12px rgb(0 0 0 / 25%);
     --shadow-lg: 0 16px 40px rgb(0 0 0 / 50%);
@@ -349,6 +356,59 @@ a {
 /* Numbers that sit in a column must not jitter between values. */
 .tabular {
   font-variant-numeric: tabular-nums;
+}
+
+/* --- Select --------------------------------------------------------------
+   Every native <select> in the app, at TextInput's spec: 34px, the control
+   radius, one --border-strong line, the same focus ring. The browser's arrow
+   is off and the control draws its own, so it looks the same in every browser
+   and both themes. A caller sets only width, or a denser size where a row
+   needs one. */
+.select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 32px 0 var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface) var(--select-chevron) no-repeat right 10px center / 14px 14px;
+  color: var(--text);
+  font-size: var(--text-sm);
+  appearance: none;
+  cursor: pointer;
+  transition:
+    border-color var(--duration-fast) var(--ease),
+    box-shadow var(--duration-fast) var(--ease);
+}
+
+.select:focus {
+  border-color: var(--ring-border);
+  box-shadow: var(--ring);
+  /* The border and ring already meet the focus bar, as on TextInput. */
+  outline: none;
+}
+
+.select:disabled {
+  background-color: var(--surface-2);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* 16px type so iOS Safari does not zoom the page when the select takes focus. */
+@media (pointer: coarse) {
+  .select {
+    height: 40px;
+    font-size: var(--text-md);
+  }
+}
+
+/* Forced colors drop background images, chevron included, so the native arrow
+   comes back rather than leaving a select that reads as a text field. */
+@media (forced-colors: active) {
+  .select {
+    padding-right: var(--space-3);
+    appearance: auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

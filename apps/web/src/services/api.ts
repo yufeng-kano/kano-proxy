@@ -17,6 +17,7 @@ import type {
   ModelGroupModelInput,
   ModelsResponse,
   ProviderId,
+  ProviderSettings,
   RoutingStrategy,
   SpendLimitInterval,
   UsageDays,
@@ -202,19 +203,25 @@ export async function listAccounts(
 }
 
 /**
- * Sets the pool's routing strategy (docs/auth.md). `ordered` is the only value
- * the server accepts today; anything else is a 400. Returns the stored value so
- * the caller paints what was saved rather than what it sent.
+ * Writes some of a provider's settings (docs/auth.md): the pool's routing
+ * strategy and the request-edit switches. Keys left out keep their stored
+ * value. `provider` is a builtin id or a custom or CLI provider's slug.
+ * Returns what the server stored, so the caller paints that rather than what
+ * it sent.
  */
-export async function setProviderStrategy(
-  provider: ProviderId,
-  strategy: RoutingStrategy,
-): Promise<RoutingStrategy> {
-  const data = await request<{ ok: boolean; strategy: RoutingStrategy }>(
-    `/api/providers/${provider}`,
-    { method: "PATCH", body: JSON.stringify({ strategy }) },
+export async function updateProviderSettings(
+  provider: string,
+  patch: Partial<ProviderSettings>,
+): Promise<ProviderSettings> {
+  const data = await request<{ ok: boolean } & ProviderSettings>(
+    `/api/providers/${encodeURIComponent(provider)}`,
+    { method: "PATCH", body: JSON.stringify(patch) },
   )
-  return data.strategy
+  return {
+    strategy: data.strategy,
+    strip_fast_mode: data.strip_fast_mode,
+    strip_claude_code_line: data.strip_claude_code_line,
+  }
 }
 
 /**

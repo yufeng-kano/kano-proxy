@@ -6,7 +6,7 @@ import {
   readCustomProvidersCache,
   writeCustomProvidersCache,
 } from "@/services/cache"
-import type { CustomProvider } from "@/types"
+import type { CustomProvider, ProviderSettings } from "@/types"
 
 type CustomProvidersState = {
   data: CustomProvider[] | null
@@ -114,11 +114,25 @@ export function useCustomProviders() {
     state.fromCache = false
   }
 
+  /**
+   * Records the switches a settings write just saved on that endpoint's row,
+   * and re-caches the list: the write's response is the stored truth, and a
+   * re-fetch whose failure kept the old cache would paint the switch back.
+   */
+  function setSettings(id: string, settings: ProviderSettings) {
+    const row = state.data?.find((p) => p.id === id)
+    if (!row || !state.data) return
+    row.strip_fast_mode = settings.strip_fast_mode
+    row.strip_claude_code_line = settings.strip_claude_code_line
+    writeCustomProvidersCache(userId.value, state.data)
+  }
+
   return {
     state,
     setUserId,
     load,
     reorder,
+    setSettings,
     invalidateLocal,
     CACHE_TTL_MS,
   }

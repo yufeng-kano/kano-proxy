@@ -1008,4 +1008,128 @@ mod provider_shape_tests {
         assert_eq!(body_json(response).await, json!({ "input_tokens": 77 }));
         assert!(f.mock.requests()[0].url.ends_with("/v1internal:countTokens"), "{}", f.mock.requests()[0].url);
     }
+
+}
+
+/// Per-candidate request edits on the Anthropic surface (docs/providers.md § Request edits).
+#[cfg(test)]
+mod request_edit_tests {
+    use super::super::resolve_request::test_support::{fixture, Fixture};
+    use crate::db::test_support::skip_without_db;
+    use axum::http::StatusCode;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    fn user_message() -> serde_json::Value {
+        json!([{ "role": "user", "content": "hi" }])
+    }
+
+    fn anthropic_ok() -> serde_json::Value {
+        json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "hello" }],
+            "usage": { "input_tokens": 9, "output_tokens": 2 }
+        })
+    }
+
+    async fn custom_gateway(f: &Fixture) {
+        f.custom_provider("mygw", "openai", "https://upstream.example.com/v1").await;
+    }
+
+
+    const CC_LINE: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+    const BILLING: &str = "x-anthropic-billing-header: cc_version=2.1.319; cc_entrypoint=cli;";
+
+    async fn switches(f: &Fixture, provider: &str, fast: bool, line: bool) {
+        let update = crate::db::provider_settings::ProviderSettingsUpdate {
+            strip_fast_mode: Some(fast),
+            strip_claude_code_line: Some(line),
+            ..Default::default()
+        };
+        crate::db::provider_settings::update_provider_settings(f.state.pool(), &f.user.id, provider, update).await.unwrap();
+    }
+
+    fn claude_code_body(model: &str) -> serde_json::Value {
+        json!({
+            "model": model,
+            "max_tokens": 16,
+            "speed": "fast",
+            "system": [
+                { "type": "text", "text": BILLING },
+                { "type": "text", "text": CC_LINE },
+                { "type": "text", "text": "rules" },
+            ],
+            "messages": user_message(),
+        })
+    }
+
+    #[tokio::test]
+    async fn each_candidate_of_a_group_gets_only_its_own_providers_edits() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.account("claude-code").await;
+        f.custom_provider("mygw", "anthropic", "https://upstream.example.com").await;
+        f.group("team", "fast", &["claude-code/claude-opus-5", "mygw/local-model"]).await;
+        switches(&f, "claude-code", true, true).await;
+        // The first candidate is rate limited, so the walk moves on to the endpoint.
+        f.mock.respond_json(StatusCode::TOO_MANY_REQUESTS, json!({ "type": "error" }));
+        f.mock.respond_json(StatusCode::OK, anthropic_ok());
+
+        let response =
+            f.router().oneshot(f.post("/g/team/anthropic/v1/messages", claude_code_body("fast"))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = f.mock.requests();
+        assert_eq!(calls.len(), 2);
+        let claude = calls[0].json();
+        assert!(claude.get("speed").is_none());
+        assert_eq!(
+            claude["system"],
+            json!([{ "type": "text", "text": BILLING }, { "type": "text", "text": "rules" }]),
+            "no client copy and no proxy copy of the line"
+        );
+        let endpoint = calls[1].json();
+        assert_eq!(endpoint["speed"], "fast", "the endpoint's own switches are off");
+        assert_eq!(endpoint["system"], claude_code_body("x")["system"]);
+    }
+
+    #[tokio::test]
+    async fn count_tokens_gets_the_same_edits() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.account("claude-code").await;
+        switches(&f, "claude-code", true, false).await;
+        f.mock.respond_json(StatusCode::OK, json!({ "input_tokens": 3 }));
+
+        let response = f
+            .router()
+            .oneshot(f.post("/anthropic/v1/messages/count_tokens", claude_code_body("claude-code/claude-opus-5")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = f.mock.requests()[0].json();
+        assert!(sent.get("speed").is_none());
+        assert_eq!(sent["system"], claude_code_body("x")["system"], "the line switch is off, the client's line stays once");
+    }
+
+    #[tokio::test]
+    async fn a_converted_request_loses_the_line_from_the_system_message_it_becomes() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        switches(&f, "mygw", true, true).await;
+        f.mock.respond_json(
+            StatusCode::OK,
+            json!({
+                "id": "chatcmpl_1",
+                "object": "chat.completion",
+                "choices": [{ "index": 0, "message": { "role": "assistant", "content": "hello" }, "finish_reason": "stop" }],
+            }),
+        );
+
+        let response = f.router().oneshot(f.post("/anthropic/v1/messages", claude_code_body("mygw/local-model"))).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let sent = f.mock.requests()[0].json();
+        assert_eq!(sent["messages"][0], json!({ "role": "system", "content": format!("{BILLING}\n\nrules") }));
+        assert!(!sent.to_string().contains(CC_LINE));
+    }
 }
