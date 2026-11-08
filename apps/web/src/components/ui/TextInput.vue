@@ -7,7 +7,7 @@ withDefaults(
   defineProps<{
     modelValue: string
     id?: string
-    type?: "text" | "password" | "url" | "search"
+    type?: "text" | "password" | "url" | "search" | "datetime-local"
     placeholder?: string
     describedBy?: string
     invalid?: boolean
