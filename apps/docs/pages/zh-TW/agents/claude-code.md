@@ -97,10 +97,11 @@ Gateway model discovery 只保留含 `claude` 或 `anthropic` 的 id。Claude �
 
 ## 限制
 
-- Fast mode 與 WebFetch 的安全檢查會直接連 Anthropic，不看 base URL。
+- Claude Code 會直接向 `api.anthropic.com` 檢查 fast mode 能不能用，不走 `ANTHROPIC_BASE_URL`。如果這台機器從沒檢查成功過，只設了 `ANTHROPIC_AUTH_TOKEN`（也就是上面的設定），也沒有登入 claude.ai，它就不會送出這個檢查，`/fast` 會顯示 `Fast mode has been disabled by your organization`。設定 `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1` 就能使用。改用 `ANTHROPIC_API_KEY` 時，`/fast` 會說 fast mode 無法使用，這時要設的是 `CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1`。如果用 token 時也登入了 claude.ai，或這台機器留有之前檢查成功的結果，不設這些變數 `/fast` 也可能可以用。fast mode 的請求會和其他請求一樣經過 proxy。Claude 訂閱的 fast mode 會用額外用量點數計費。要讓某個供應商維持標準速度，在 [Providers](/zh-TW/app/providers#轉送前的修改) 勾選它的 **Remove fast mode**。
+- WebFetch 工具的網域安全檢查會直接連 `api.anthropic.com`。如果你的網路擋了這個網域，在設定裡加上 `skipWebFetchPreflight: true`。
 - Claude 桌面版 app 不讀這些變數。它有自己的第三方推論設定表單，把同一組 base URL 和 key 填進去即可。
 - VS Code 擴充套件從 `claudeCode.environmentVariables` 設定讀取這些變數，不讀 shell。
 
 ## 查證來源
 
-Claude Code 文件，2026-09-04：[Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)、[Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)、[Model configuration](https://code.claude.com/docs/en/model-config)。
+Claude Code 文件，2026-09-04：[Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)、[Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)、[Model configuration](https://code.claude.com/docs/en/model-config)。2026-11-08，fast mode 與 WebFetch 檢查：[Fast mode](https://code.claude.com/docs/en/fast-mode)、[Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)。

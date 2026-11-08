@@ -97,10 +97,11 @@ Gateway model discovery keeps only ids containing `claude` or `anthropic`. Claud
 
 ## Limits
 
-- Fast mode and the WebFetch safety check call Anthropic directly and ignore the base URL.
+- Claude Code checks whether fast mode is available with a request straight to `api.anthropic.com`, not `ANTHROPIC_BASE_URL`. On a machine where the check never succeeded, with only `ANTHROPIC_AUTH_TOKEN` as set above and no claude.ai login, it skips the check, and `/fast` reports `Fast mode has been disabled by your organization`. `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1` lets it through. With `ANTHROPIC_API_KEY` instead, `/fast` reports fast mode unavailable, and the variable is `CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS=1`. With a claude.ai login alongside the token, or a successful check cached from before, `/fast` can work with no variable set. Fast-mode requests go through the proxy like any other. A Claude subscription bills fast mode to usage credits. To keep a provider at standard speed, select its **Remove fast mode** box on [Providers](/app/providers#request-edits).
+- The WebFetch tool's domain safety check calls `api.anthropic.com` directly. If your network blocks that host, set `skipWebFetchPreflight: true` in your settings.
 - The Claude desktop app ignores these variables. It has its own third-party inference form, where the same base URL and key go.
 - The VS Code extension reads them from the `claudeCode.environmentVariables` setting instead of the shell.
 
 ## Checked against
 
-Claude Code documentation, 2026-09-04: [Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect), [Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol), [Model configuration](https://code.claude.com/docs/en/model-config).
+Claude Code documentation, 2026-09-04: [Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect), [Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol), [Model configuration](https://code.claude.com/docs/en/model-config). 2026-11-08, for fast mode and the WebFetch check: [Fast mode](https://code.claude.com/docs/en/fast-mode), [Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect).
