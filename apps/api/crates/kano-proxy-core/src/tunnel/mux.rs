@@ -483,6 +483,8 @@ impl Stream for ResponseBody {
         match this.rx.poll_recv(cx) {
             Poll::Ready(Some(Ok(chunk))) => {
                 let len = chunk.len();
+                // Renamed `try_update` in Rust 1.95: switch once the workspace's rust-version reaches it.
+                #[allow(deprecated)]
                 let _ = this.buffered.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(v.saturating_sub(len)));
                 Poll::Ready(Some(Ok(chunk)))
             }

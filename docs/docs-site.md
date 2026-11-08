@@ -20,6 +20,8 @@ The admin UI is a client-rendered SPA behind a login wall; search engines and li
 
 The docs are served from the **same hostname** as the admin UI, under `/docs/`. The web image (`deploy/web/Dockerfile`) builds the web app, builds the docs, and copies the docs output into `apps/web/dist/docs/`; that single directory is what its nginx serves.
 
+**No page dates.** VitePress can date each page from `git log` (`lastUpdated`), but the web image has no history to read: `.git` is dockerignored and the build stage has no git binary. So `defineDocsConfig` leaves `lastUpdated` off unless an edition turns it on.
+
 **SPA fallback and the docs.** The static server answers an unknown path under `/docs/` with VitePress's own `404.html` and a real `404` status, and every other unknown path with the SPA's `index.html`. A blanket rewrite to `index.html` would swallow the documentation pages, so the two rules are separate and `/docs/` is matched first. Extensionless docs URLs (`/docs/guide/x`) resolve to `x.html`, which is what VitePress's own links expect.
 
 Checked by hand after the v4.7.0 deploy: `/docs/` and a docs page return 200 with their own titles, `/keys` returns the SPA shell with `noindex`, `/docs/no-such-page` returns 404. `/robots.txt` also carries `noindex` from the `/*` rule; harmless, since the file is read, not indexed.
@@ -93,7 +95,7 @@ Only `/docs/*`, `/login` and `/llms.txt` are meant to be indexed. The admin rout
 | `apps/web/public/robots.txt` | site root | Allows crawling, except the API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/cli/v1/`, `/agent/`): those are routed to the API server and never reach nginx, so the header cannot mark them, and an API surface is what `Disallow` is for. Its `Sitemap:` line points at `/docs/sitemap.xml` through the origin placeholder (§ The real hostname); without an origin the line is removed |
 | `apps/web/index.html` | SPA shell | `description`, Open Graph and Twitter card tags, so a shared link to the app gets a preview card. Copy repeats the login pitch from the message catalog; keep them in sync |
 | Router `afterEach` | SPA | Sets `document.title` to `<page> · <site name>` from the route's `titleKey` (a catalog key), so tabs and history are readable. `<html lang>` is already set by `setLocale()` ([i18n.md](./i18n.md)) |
-| `site.ts` | docs | Per page: `<title>`, `description`, `og:title`, `og:description`, `og:url`, `og:locale`, a `canonical` link to itself and `hreflang` links to its `en` and `zh-TW` twins plus `x-default` (English), so each language is indexed once and searchers see their own. `sitemap.xml` under `/docs/`. The 404 page gets none of the URL tags |
+| `site.ts` | docs | Per page: `<title>`, `description`, `og:title`, `og:description`, `og:url`, `og:locale`, a `canonical` link to itself and `hreflang` links to its `en` and `zh-TW` twins plus `x-default` (English), so each language is indexed once and searchers see their own. `sitemap.xml` under `/docs/`, without `lastmod`, since pages carry no dates (§ Location and build). The 404 page gets none of the URL tags |
 
 Not done, on purpose: `apple-touch-icon` and a web manifest (nobody installs an admin panel to a home screen), an `og:image` (no social card has been designed), and any structured data.
 
@@ -115,7 +117,7 @@ A private edition ([cloud-edition.md](./cloud-edition.md)) documents features th
 
 - Its `.vitepress/config.ts` imports `defineDocsConfig` from this package's `site.ts` and passes the sidebar groups and nav entries for its pages, which are appended after the core's. A page describing one of the edition's own app pages goes under `app/` and into `appPages`, which appends it to the core's **The app** group, so the sidebar keeps matching the app. Its theme re-exports this package's theme so the origin fill still runs.
 - Its source tree is **assembled at build time**: the core's `*.md` files copied first, the edition's pages copied over them into the same `guide/`, `agents/`, `zh-TW/…` layout. An edition page may not have the path of a core page; the core's text is the core's to change.
-- The assembled copy has no git history, so the edition passes `lastUpdated: false` instead of letting every page date itself to the build.
+- The assembled copy has no git history either, so `lastUpdated` stays off, as on the core site (§ Location and build).
 - The content rules above apply unchanged: an English page has its `zh-TW/` twin in the same change, placeholders only for secrets and hosts, no invented model ids.
 
 `site.ts` and the theme entry are build integration points for editions, like the web app's `@` alias; nothing else under `apps/docs/.vitepress/` is.
