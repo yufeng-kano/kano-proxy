@@ -35,9 +35,9 @@ export interface DocsEditionOptions {
   /** Top-nav entries appended after the core's, per locale. */
   nav?: { en?: DefaultTheme.NavItem[]; "zh-TW"?: DefaultTheme.NavItem[] }
   /**
-   * VitePress dates a page from `git log`. An edition that builds from an
-   * assembled copy of the pages has no history for them, so it turns this off
-   * rather than dating every page to the build.
+   * VitePress dates a page from `git log`. Off by default: the web image builds
+   * without the repository's history (`.git` is dockerignored and the build
+   * stage has no git), and an edition's assembled copy of the pages has none.
    */
   lastUpdated?: boolean
 }
@@ -170,7 +170,7 @@ export function defineDocsConfig(edition: DocsEditionOptions = {}): UserConfig<D
     base: "/docs/",
     title: SITE_NAME,
     cleanUrls: true,
-    lastUpdated: edition.lastUpdated ?? true,
+    lastUpdated: edition.lastUpdated ?? false,
     // Same mark as the admin UI's favicon (apps/web/index.html). Not
     // base-prefixed automatically, so the path is written in full.
     head: [
