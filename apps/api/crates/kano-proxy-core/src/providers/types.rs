@@ -138,8 +138,8 @@ pub struct CallExtras {
 }
 
 /// One candidate's request-edit switches (docs/providers.md § Request edits), resolved by the
-/// dispatch walk from `provider_settings` — the borrower's, plus the owner's fast-mode switch on
-/// a shared row.
+/// dispatch walk from `provider_settings`. On a shared row both people's switches count: fast
+/// mode comes off when the borrower or the owner asks, the line only when both do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RequestEdits {
     pub strip_fast_mode: bool,
