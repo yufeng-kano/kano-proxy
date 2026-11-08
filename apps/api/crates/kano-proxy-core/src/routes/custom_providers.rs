@@ -20,6 +20,7 @@ use crate::db::accounts::{
     NewAccount,
 };
 use crate::db::cli::{count_cli_providers, get_cli_provider_by_slug};
+use crate::db::provider_settings::get_provider_settings;
 use crate::db::custom_providers::{
     count_custom_providers, delete_custom_provider, get_custom_provider_by_id, get_custom_provider_by_slug,
     insert_custom_provider, list_custom_providers, rename_custom_provider_slug, reorder_custom_providers,
@@ -106,6 +107,7 @@ fn key_mask_from_account(row: Option<&AccountRow>) -> Option<String> {
 
 async fn to_list_item(state: &AppState, user_id: &str, row: &CustomProviderRow) -> Result<Value, sqlx::Error> {
     let accounts = list_accounts(state.pool(), user_id, &row.slug).await?;
+    let settings = get_provider_settings(state.pool(), user_id, &row.slug).await?;
     Ok(json!({
         "id": row.id,
         "slug": row.slug,
@@ -122,6 +124,10 @@ async fn to_list_item(state: &AppState, user_id: &str, row: &CustomProviderRow) 
         // null if the account row is somehow missing.
         "account_id": accounts.first().map(|a| a.id.clone()),
         "status": compute_status(&accounts, state.now_ms()),
+        // The endpoint's request-edit switches (docs/providers.md § Request edits), written
+        // through `PATCH /api/providers/:slug`.
+        "strip_fast_mode": settings.strip_fast_mode,
+        "strip_claude_code_line": settings.strip_claude_code_line,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }))
@@ -1133,9 +1139,13 @@ mod tests {
         let provider = created(&state, &cookie, json!({})).await;
         let id = provider["id"].as_str().unwrap().to_string();
         let account_id = provider["account_id"].as_str().unwrap().to_string();
-        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "my-endpoint", "ordered").await.unwrap();
-        // An orphaned settings row under the target slug must not block the rename.
-        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "renamed-endpoint", "ordered").await.unwrap();
+        use crate::db::provider_settings::{update_provider_settings, ProviderSettingsUpdate};
+        let line = ProviderSettingsUpdate { strip_claude_code_line: Some(true), ..Default::default() };
+        update_provider_settings(&pool, &user.id, "my-endpoint", line).await.unwrap();
+        // An orphaned settings row under the target slug must not block the rename, and its
+        // switch must not reach the renamed endpoint.
+        let fast = ProviderSettingsUpdate { strip_fast_mode: Some(true), ..Default::default() };
+        update_provider_settings(&pool, &user.id, "renamed-endpoint", fast).await.unwrap();
         let group = call(
             &state,
             request(
@@ -1175,6 +1185,7 @@ mod tests {
         assert_eq!(json["name"], "Renamed");
         assert_eq!(json["account_id"], account_id, "the key row moves, it is not recreated");
         assert_eq!(json["key_mask"], mask_api_key("sk-new-key-after-rename"));
+        assert_eq!((json["strip_fast_mode"].clone(), json["strip_claude_code_line"].clone()), (json!(false), json!(true)), "the switches follow the slug");
 
         assert!(stored_accounts(&pool, &user.id, "my-endpoint").await.is_empty());
         let moved = stored_accounts(&pool, &user.id, "renamed-endpoint").await;
@@ -1359,6 +1370,8 @@ mod tests {
 
         let id = created(&state, &cookie, json!({})).await["id"].as_str().unwrap().to_string();
         assert_eq!(stored_accounts(&pool, &user.id, "my-endpoint").await.len(), 1);
+        let line = crate::db::provider_settings::ProviderSettingsUpdate { strip_claude_code_line: Some(true), ..Default::default() };
+        crate::db::provider_settings::update_provider_settings(&pool, &user.id, "my-endpoint", line).await.unwrap();
 
         let (_, other_cookie) = signed_in(&state, "user_2@example.com").await;
         let theirs = call(&state, request("DELETE", &format!("/api/custom-providers/{id}"), Some(&other_cookie), None)).await;
@@ -1371,6 +1384,8 @@ mod tests {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM custom_providers").fetch_one(&pool).await.unwrap();
         assert_eq!(count, 0);
         assert!(stored_accounts(&pool, &user.id, "my-endpoint").await.is_empty());
+        let settings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_settings").fetch_one(&pool).await.unwrap();
+        assert_eq!(settings, 0, "a later endpoint under the same slug starts with its switches off");
     }
 
     // ---------------------------------------------------------- POST /:id/unpause

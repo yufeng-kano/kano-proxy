@@ -18,6 +18,12 @@ defineProps<{
   title?: string
   flush?: boolean
   fill?: boolean
+  /**
+   * Paints the toolbar on the `--surface-2` wash, at body padding: for a block
+   * of section settings (Providers' strategy and switches) rather than a
+   * filter, so it reads as part of the section and not as its first row.
+   */
+  toolbarWash?: boolean
 }>()
 
 /**
@@ -61,7 +67,7 @@ defineSlots<{
       </div>
     </header>
 
-    <div v-if="$slots.toolbar" class="card-toolbar">
+    <div v-if="$slots.toolbar" class="card-toolbar" :class="{ wash: toolbarWash }">
       <slot name="toolbar" />
     </div>
 
@@ -136,6 +142,11 @@ defineSlots<{
   border-bottom: 1px solid var(--border);
 }
 
+.card-toolbar.wash {
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-2);
+}
+
 .card-body {
   min-height: 0;
   padding: var(--space-5);
@@ -182,6 +193,7 @@ defineSlots<{
   }
 
   .card-toolbar,
+  .card-toolbar.wash,
   .card-body {
     padding: var(--space-4);
   }

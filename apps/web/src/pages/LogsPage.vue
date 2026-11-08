@@ -532,34 +532,6 @@ function typeLabel(row: RequestLogRow): string {
   min-width: 0;
 }
 
-/* The app's control spec, same as the other selects in the app (the key
-   dialog's interval, the provider strategy). */
-.select {
-  width: 100%;
-  min-width: 0;
-  height: 34px;
-  padding: 0 var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-
-.select:focus {
-  border-color: var(--ring-border);
-  box-shadow: var(--ring);
-  outline: none;
-}
-
-/* 16px type so iOS Safari does not zoom the page when the select takes focus. */
-@media (pointer: coarse) {
-  .select {
-    height: 40px;
-    font-size: var(--text-md);
-  }
-}
-
 /* --- Rows --------------------------------------------------------------- */
 
 /*

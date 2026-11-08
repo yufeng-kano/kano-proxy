@@ -28,6 +28,7 @@ use crate::logging::usage_capture::{NormalizedUsage, UsageSniffer};
 use crate::pricing::litellm::{model_price, ModelPrice};
 use crate::pool::extension::{borrower_safe_headers, settle_lease, AttemptLease, LeaseOutcome};
 use crate::providers::types::{AdapterError, CallExtras, ChatCompletionRequest, DynAdapter};
+use crate::proxy::request_edits::{edit_anthropic_body, edit_chat_request};
 use crate::providers::ProviderId;
 use crate::proxy::dispatch_walk::{
     recompute_unavailable_until, walk_candidates, CandidateCaller, CandidateSource, WalkOpts, WalkOutcome,
@@ -770,7 +771,8 @@ impl CandidateCaller for ChatCaller {
         acquired: &crate::pool::AcquiredAccount,
         extras: &CallExtras,
     ) -> Result<Response, AdapterError> {
-        let req = ChatCompletionRequest { upstream_model: candidate.upstream_model.clone(), ..self.req.clone() };
+        let mut req = ChatCompletionRequest { upstream_model: candidate.upstream_model.clone(), ..self.req.clone() };
+        edit_chat_request(&mut req, extras.edits);
         candidate.adapter.chat_completions(cx, acquired, &req, extras).await
     }
 }
@@ -873,10 +875,11 @@ impl CandidateCaller for MessagesCaller {
         acquired: &crate::pool::AcquiredAccount,
         extras: &CallExtras,
     ) -> Result<Response, AdapterError> {
-        // `body` with `.model` rewritten to the candidate's own upstream id — cache_control and
-        // everything else pass through untouched.
+        // `body` with `.model` rewritten to the candidate's own upstream id and this candidate's
+        // request edits applied — cache_control and everything else pass through untouched.
         let mut body = self.body.clone();
         body.insert("model".into(), Value::String(candidate.upstream_model.clone()));
+        edit_anthropic_body(&mut body, extras.edits);
         let body = Value::Object(body);
         let response = match self.endpoint {
             AnthropicEndpoint::Messages => {

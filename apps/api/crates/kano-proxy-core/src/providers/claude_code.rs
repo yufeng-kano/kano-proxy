@@ -23,13 +23,20 @@ use crate::proxy::openai_anthropic::{
     add_conversion_cache_control, anthropic_sse_to_openai_stream, anthropic_to_openai_response, move_retired_output_format,
     openai_to_anthropic_messages, AnthropicMessagesInput,
 };
+use crate::proxy::request_edits::CLAUDE_CODE_LINES;
 use crate::upstream::{UpstreamRequest, UpstreamResponse};
 use crate::utils::reasoning::map_reasoning;
 use crate::AppState;
 
 const ANTHROPIC_API: &str = "https://api.anthropic.com";
 const OAUTH_TOKEN: &str = "https://console.anthropic.com/v1/oauth/token";
-const REQUIRED_SYSTEM: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
+/// Claude Code's interactive line, the one the "Remove the Claude Code line" switch removes too.
+const REQUIRED_SYSTEM: &str = CLAUDE_CODE_LINES[1];
+/// What Claude Code's interactive line and its Agent SDK variant both start with: a client
+/// system that already has it needs no second copy.
+const CLAUDE_CODE_LINE_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude";
+/// Claude Code 2.1.319's first system block (`x-anthropic-billing-header: cc_version=…;`).
+const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
 
 const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
@@ -158,37 +165,38 @@ pub fn resolve_beta_header(client_beta: Option<&str>, has_output_config: bool) -
     }
 }
 
-/// Idempotent fixed system prepend (docs/providers.md § Claude Code).
+/// Idempotent fixed system line (docs/providers.md § Claude Code "Required system line"): added
+/// unless the system already opens with Claude Code's own line, where "opens" skips a leading
+/// billing-header block, which Anthropic requires first and unchanged. A line further down does
+/// not count: the upstream reads the identity at the front.
 fn prepend_required_system(body: &Map<String, Value>) -> Map<String, Value> {
     let required = json!({ "type": "text", "text": REQUIRED_SYSTEM });
+    let mut out = body.clone();
     match body.get("system") {
         Some(Value::String(sys)) => {
-            if sys.starts_with(REQUIRED_SYSTEM) {
-                return body.clone();
+            if !sys.starts_with(CLAUDE_CODE_LINE_PREFIX) {
+                out.insert("system".into(), json!([required, { "type": "text", "text": sys }]));
             }
-            let mut out = body.clone();
-            out.insert("system".into(), json!([required, { "type": "text", "text": sys }]));
-            out
         }
         Some(Value::Array(sys)) => {
-            let first = sys.first();
-            let is_prepended = first.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("text")
-                && first.and_then(|b| b.get("text")).and_then(Value::as_str) == Some(REQUIRED_SYSTEM);
-            if is_prepended {
-                return body.clone();
+            fn text_of(block: &Value) -> Option<&str> {
+                if block.get("type").and_then(Value::as_str) != Some("text") {
+                    return None;
+                }
+                block.get("text").and_then(Value::as_str)
             }
-            let mut blocks = vec![required];
-            blocks.extend(sys.iter().cloned());
-            let mut out = body.clone();
-            out.insert("system".into(), Value::Array(blocks));
-            out
+            let at = usize::from(sys.first().and_then(text_of).is_some_and(|t| t.starts_with(BILLING_HEADER_PREFIX)));
+            if !sys.get(at).and_then(text_of).is_some_and(|text| text.starts_with(CLAUDE_CODE_LINE_PREFIX)) {
+                let mut blocks = sys.clone();
+                blocks.insert(at, required);
+                out.insert("system".into(), Value::Array(blocks));
+            }
         }
         _ => {
-            let mut out = body.clone();
             out.insert("system".into(), json!([required]));
-            out
         }
     }
+    out
 }
 
 /// The upstream response as the client sees it on a passthrough surface: status and headers
@@ -224,7 +232,9 @@ async fn forward_to_anthropic(
 ) -> Result<Response, AdapterError> {
     let acc = refresh_claude(cx, account.clone()).await;
     let raw = body.as_object().cloned().unwrap_or_default();
-    let prepended = prepend_required_system(&raw);
+    // With "Remove the Claude Code line" on, the caller already removed the client's copies and
+    // the proxy adds none of its own (docs/providers.md § Request edits).
+    let prepended = if extras.edits.strip_claude_code_line { raw } else { prepend_required_system(&raw) };
     let patched = move_retired_output_format(&prepended).into_owned();
     let client_beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
     let has_output_config = patched.contains_key("output_config");
@@ -376,11 +386,15 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             top_p: req.top_p,
         });
         // Proxy-placed cache breakpoints (docs/api.md § Prompt cache), applied after the fixed
-        // prepend so the system marker lands on the last block.
-        let with_system = add_conversion_cache_control(
-            &prepend_required_system(&anthropic_body),
-            req.prompt_cache_key.as_deref().is_some_and(|k| !k.is_empty()),
-        );
+        // prepend so the system marker lands on the last block. No prepend with "Remove the
+        // Claude Code line" on (docs/providers.md § Request edits).
+        let system = if extras.edits.strip_claude_code_line {
+            anthropic_body
+        } else {
+            prepend_required_system(&anthropic_body)
+        };
+        let with_system =
+            add_conversion_cache_control(&system, req.prompt_cache_key.as_deref().is_some_and(|k| !k.is_empty()));
         let betas = [CONVERSION_BETAS[0], CONVERSION_BETAS[1], EFFORT_BETA].join(",");
         let mut upstream = UpstreamRequest::post(format!("{ANTHROPIC_API}/v1/messages"))
             .json(&Value::Object(with_system))
@@ -755,6 +769,74 @@ mod tests {
         assert_eq!(messages[0]["content"], json!([{ "type": "text", "text": "q1", "cache_control": { "type": "ephemeral", "ttl": "1h" } }]));
         assert!(!serde_json::to_string(&messages[1]).unwrap().contains("cache_control"));
         assert_eq!(serde_json::to_string(&sent).unwrap().matches("\"cache_control\"").count(), 4);
+    }
+
+    // ------------------------------------------------------- required system line
+
+    const BILLING: &str = "x-anthropic-billing-header: cc_version=2.1.319; cc_entrypoint=cli;";
+
+    fn system_after_prepend(system: Value) -> Value {
+        let body = json!({ "system": system }).as_object().cloned().unwrap();
+        prepend_required_system(&body)["system"].clone()
+    }
+
+    #[test]
+    fn the_line_goes_behind_a_leading_billing_block_and_in_front_otherwise() {
+        let line = json!({ "type": "text", "text": REQUIRED_SYSTEM });
+        let billing = json!({ "type": "text", "text": BILLING });
+        let rules = json!({ "type": "text", "text": "rules" });
+        assert_eq!(system_after_prepend(json!([billing, rules])), json!([billing, line, rules]));
+        assert_eq!(system_after_prepend(json!([rules])), json!([line, rules]));
+        assert_eq!(system_after_prepend(json!("rules")), json!([line, { "type": "text", "text": "rules" }]));
+        assert_eq!(system_after_prepend(Value::Null), json!([line]));
+        // A client line further down is not the opening line the upstream checks for.
+        let late = json!({ "type": "text", "text": REQUIRED_SYSTEM });
+        assert_eq!(system_after_prepend(json!([rules, late])), json!([line, rules, late]));
+        assert_eq!(system_after_prepend(json!([billing, rules, late])), json!([billing, line, rules, late]));
+    }
+
+    #[test]
+    fn the_prefix_matches_both_claude_code_lines() {
+        assert!(CLAUDE_CODE_LINES[..2].iter().all(|line| line.starts_with(CLAUDE_CODE_LINE_PREFIX)));
+    }
+
+    #[test]
+    fn a_system_that_already_has_claude_codes_line_gets_no_second_copy() {
+        let sdk = "You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.";
+        for identity in [REQUIRED_SYSTEM, sdk] {
+            // Claude Code 2.1.319's own shape: billing block first, identity second.
+            let system = json!([
+                { "type": "text", "text": BILLING },
+                { "type": "text", "text": identity, "cache_control": { "type": "ephemeral" } },
+                { "type": "text", "text": "rules" },
+            ]);
+            assert_eq!(system_after_prepend(system.clone()), system, "{identity}");
+            let text = json!(format!("{identity}\n\nrules"));
+            assert_eq!(system_after_prepend(text.clone()), text);
+        }
+    }
+
+    #[tokio::test]
+    async fn with_the_line_switch_on_neither_surface_adds_the_line() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::OK, message_json());
+        transport.respond_json(StatusCode::OK, message_json());
+        let cx = test_state(pool.clone(), transport.clone());
+        let account = account(&pool).await;
+        let extras = CallExtras {
+            edits: crate::providers::types::RequestEdits { strip_claude_code_line: true, ..Default::default() },
+            ..Default::default()
+        };
+
+        let native = json!({ "model": "claude-opus-5", "system": [{ "type": "text", "text": BILLING }], "messages": [] });
+        ClaudeCodeAdapter.messages(&cx, &account, &native, &HeaderMap::new(), &extras).await.unwrap();
+        let req = chat_request(json!([{ "role": "user", "content": "hi" }]), None, None);
+        ClaudeCodeAdapter.chat_completions(&cx, &account, &req, &extras).await.unwrap();
+
+        let sent = transport.requests();
+        assert_eq!(sent[0].json()["system"], json!([{ "type": "text", "text": BILLING }]));
+        assert!(!serde_json::to_string(&sent[1].json()).unwrap().contains(REQUIRED_SYSTEM));
     }
 
     #[tokio::test]

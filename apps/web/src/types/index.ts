@@ -120,6 +120,23 @@ export type AccountsResponse = {
    * server would have answered anyway.
    */
   strategy?: RoutingStrategy
+  /**
+   * The provider's request-edit switches (docs/providers.md § Request edits).
+   * Optional for the same reason as `strategy`: absent reads as off.
+   */
+  strip_fast_mode?: boolean
+  strip_claude_code_line?: boolean
+}
+
+/**
+ * One provider's settings as `PATCH /api/providers/:provider` stores and
+ * returns them (docs/auth.md). `provider` is a builtin id or a custom or CLI
+ * provider's slug; each has its own row.
+ */
+export type ProviderSettings = {
+  strategy: RoutingStrategy
+  strip_fast_mode: boolean
+  strip_claude_code_line: boolean
 }
 
 /** Reset window for a key's spend limit (docs/pricing.md). */
@@ -246,6 +263,9 @@ export type CliProvider = {
   models_updated_at: string | null
   device_id: string | null
   device_name: string | null
+  /** This provider's request-edit switches; absent (old cache entry) reads as off. */
+  strip_fast_mode?: boolean
+  strip_claude_code_line?: boolean
   created_at: string
   updated_at: string
 }
@@ -286,6 +306,9 @@ export type CustomProvider = {
   status: CustomProviderStatus
   /** Display-only position in the user's list. The server returns items pre-sorted by it. */
   sort_order: number
+  /** This endpoint's request-edit switches; absent (old cache entry) reads as off. */
+  strip_fast_mode?: boolean
+  strip_claude_code_line?: boolean
   created_at: string
   updated_at: string
 }

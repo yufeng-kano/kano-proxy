@@ -797,7 +797,7 @@ async function remove() {
           <select
             :id="field.id"
             v-model="strategy"
-            class="select strategy"
+            class="select"
             :aria-describedby="field.describedBy"
             :disabled="saving || deleting"
           >
@@ -1550,45 +1550,19 @@ async function remove() {
   min-width: 0;
 }
 
-/* TextInput's control spec at the small size, so the re-pick select sits level
-   with the ghost buttons sharing its row. */
-.select {
-  max-width: 100%;
-  min-width: 0;
-  height: 28px;
-  padding: 0 var(--space-2);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--text);
-  font-size: var(--text-xs);
-}
-
-/* The re-pick borrows the warn tone from the badge beside it: the row is
-   telling the user something is wrong, and the control is the fix. */
+/* The global select at the small size, so the re-pick select sits level with
+   the ghost buttons sharing its row. It borrows the warn tone from the badge
+   beside it: the row is telling the user something is wrong, and the control
+   is the fix. The strategy select keeps the global full size: it is a form
+   field like the name input above it. */
 .select.repick {
+  width: auto;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 28px 0 var(--space-2);
   border-color: var(--warn-border);
-}
-
-/* In the identity column it is a form field like the name input above it, so
-   it takes TextInput's full-size spec instead of the row-sized one. */
-.select.strategy {
-  width: 100%;
-  height: 34px;
-  padding: 0 var(--space-3);
-  font-size: var(--text-sm);
-}
-
-.select:focus {
-  border-color: var(--ring-border);
-  box-shadow: var(--ring);
-  outline: none;
-}
-
-.select:disabled {
-  background: var(--surface-2);
-  color: var(--muted);
-  cursor: not-allowed;
+  background-position: right 8px center;
+  font-size: var(--text-xs);
 }
 
 .target-warning {
@@ -1671,16 +1645,11 @@ async function remove() {
   }
 }
 
-/* Touch targets: the select matches what a small button gets here, and 16px
+/* Touch targets: the re-pick matches what a small button gets here, and 16px
    type so iOS Safari does not zoom the sheet when it takes focus. */
 @media (pointer: coarse) {
-  .select {
+  .select.repick {
     min-height: 34px;
-    font-size: var(--text-md);
-  }
-
-  .select.strategy {
-    min-height: 40px;
     font-size: var(--text-md);
   }
 }

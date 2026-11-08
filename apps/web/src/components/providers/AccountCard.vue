@@ -335,7 +335,6 @@ watch(
         <template v-if="reorderable">
           <AppButton
             icon-only
-            size="sm"
             variant="ghost"
             :label="t('providers.account.moveUp', { name: displayName })"
             :disabled="busy || !canMoveUp"
@@ -345,7 +344,6 @@ watch(
           </AppButton>
           <AppButton
             icon-only
-            size="sm"
             variant="ghost"
             :label="t('providers.account.moveDown', { name: displayName })"
             :disabled="busy || !canMoveDown"
@@ -357,7 +355,6 @@ watch(
         <AppButton
           v-if="account.status === 'benched' && !share"
           icon-only
-          size="sm"
           variant="ghost"
           :label="t('providers.account.resume', { name: displayName })"
           :disabled="busy"
@@ -368,7 +365,6 @@ watch(
         <AppButton
           v-if="!share"
           icon-only
-          size="sm"
           variant="ghost"
           :label="t('providers.account.rename', { name: displayName })"
           :disabled="busy"
@@ -379,7 +375,6 @@ watch(
         <AppButton
           v-if="!share"
           icon-only
-          size="sm"
           variant="danger"
           :label="t('providers.account.remove', { name: displayName })"
           :disabled="busy"

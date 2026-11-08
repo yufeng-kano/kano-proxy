@@ -64,7 +64,7 @@ defineEmits<{ "update:modelValue": [string]; enter: [] }>()
   padding: 0 var(--space-3);
   height: 34px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-control);
   background: var(--surface);
   color: var(--text);
   font-size: var(--text-sm);

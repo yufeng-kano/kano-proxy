@@ -95,6 +95,7 @@ pub async fn insert_custom_provider(
         .fetch_one(db)
         .await?;
     let sort_order = if count > 0 { max.max((count - 1) as i32) + 1 } else { 0 };
+    let mut tx = db.begin().await?;
     let r = sqlx::query(
         "INSERT INTO custom_providers
          (id, user_id, slug, name, format, base_url, count_tokens_url, models_mode, manual_models_json, sort_order, created_at, updated_at)
@@ -116,11 +117,20 @@ pub async fn insert_custom_provider(
     .bind(sort_order)
     .bind(&ts)
     .bind(MAX_CUSTOM_PROVIDERS_PER_USER)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
     if r.rows_affected() == 0 {
         return Ok(None);
     }
+    // A settings row already under this slug outlived a provider before this one (a write that
+    // raced its delete): a new provider starts with its switches off (docs/database.md
+    // § provider_settings). Same transaction, so no write can land on the new row in between.
+    sqlx::query("DELETE FROM provider_settings WHERE user_id = $1 AND provider = $2")
+        .bind(input.user_id)
+        .bind(input.slug)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
     Ok(Some(CustomProviderRow {
         id,
         user_id: input.user_id.to_string(),
@@ -319,13 +329,24 @@ pub async fn rename_custom_provider_slug(
     Ok(SlugRename::Renamed(SlugRenameOutcome { accounts, group_targets }))
 }
 
+/// Deletes the provider row and its `provider_settings` row in one transaction, so a later
+/// provider under the same slug starts with its request-edit switches off (docs/database.md
+/// § `provider_settings`). The caller removes the account rows.
 pub async fn delete_custom_provider(db: &PgPool, user_id: &str, id: &str) -> Result<bool, sqlx::Error> {
-    let r = sqlx::query("DELETE FROM custom_providers WHERE id = $1 AND user_id = $2")
+    let mut tx = db.begin().await?;
+    let slug: Option<String> = sqlx::query_scalar("DELETE FROM custom_providers WHERE id = $1 AND user_id = $2 RETURNING slug")
         .bind(id)
         .bind(user_id)
-        .execute(db)
+        .fetch_optional(&mut *tx)
         .await?;
-    Ok(r.rows_affected() > 0)
+    let Some(slug) = slug else { return Ok(false) };
+    sqlx::query("DELETE FROM provider_settings WHERE user_id = $1 AND provider = $2")
+        .bind(user_id)
+        .bind(&slug)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -394,9 +415,10 @@ mod tests {
         // The same slug under another user never collides.
         insert_custom_provider(&pool, input(&other.id, "fresh")).await.unwrap().unwrap();
         let account = crate::db::test_support::insert_account(&pool, &user.id, "mine", &Default::default()).await;
-        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "mine", "ordered").await.unwrap();
+        let settings = crate::db::provider_settings::ProviderSettingsUpdate { strategy: Some("ordered"), ..Default::default() };
+        crate::db::provider_settings::update_provider_settings(&pool, &user.id, "mine", settings).await.unwrap();
         // An orphaned settings row under the target slug must not block the rename.
-        crate::db::provider_settings::set_provider_strategy(&pool, &user.id, "fresh", "ordered").await.unwrap();
+        crate::db::provider_settings::update_provider_settings(&pool, &user.id, "fresh", settings).await.unwrap();
         let group = crate::db::model_groups::insert_model_group(&pool, &user.id, "g", "g", Some("ordered")).await.unwrap();
         sqlx::query(
             "INSERT INTO model_group_models (id, user_id, group_id, name, targets_json, created_at, updated_at)
