@@ -59,7 +59,8 @@ import {
 const { t } = useI18n()
 const confirm = useConfirm()
 const { user } = useAuth()
-const { byProvider, setUserId, loadAll, loadProvider, setStrategy, CACHE_TTL_MS } = useAccounts()
+const { byProvider, setUserId, loadAll, loadProvider, setStrategy, setAccountEdits, CACHE_TTL_MS } =
+  useAccounts()
 const customProviders = useCustomProviders()
 const cli = useCli()
 
@@ -399,17 +400,17 @@ async function onStrategyChange(provider: ProviderId, event: Event) {
 }
 
 /**
- * One account's request-edit switch flipped. Same shape as the credits
- * opt-in: the reload reads the stored switches back without forcing a usage
- * probe, a refusal is reported in the page's banner, and the row puts its box
- * back once `busyId` clears.
+ * One account's request-edit switch flipped. The write answers with the
+ * stored pair, which goes straight onto the row and its cache: no reload, so
+ * a failed re-read can never paint the old value over a saved one. A refusal
+ * is reported in the page's banner, and the row puts its box back once
+ * `busyId` clears.
  */
 async function onAccountEdits(provider: ProviderId, id: string, patch: Partial<RequestEdits>) {
   busyId.value = id
   actionError.value = null
   try {
-    await updateAccountEdits(provider, id, patch)
-    await loadProvider(provider, { forceNetwork: true })
+    setAccountEdits(provider, id, await updateAccountEdits(provider, id, patch))
   } catch {
     actionError.value = t("providers.error.settings")
   } finally {

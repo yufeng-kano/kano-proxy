@@ -6,7 +6,7 @@ import {
   readAccountsCache,
   writeAccountsCache,
 } from "@/services/cache"
-import type { AccountsResponse, ProviderId, RoutingStrategy } from "@/types"
+import type { AccountsResponse, ProviderId, RequestEdits, RoutingStrategy } from "@/types"
 
 type ProviderState = {
   data: AccountsResponse | null
@@ -109,6 +109,19 @@ export function useAccounts() {
     writeAccountsCache(userId.value, provider, data)
   }
 
+  /**
+   * Records the switches a write just saved on that one row, the same way:
+   * the write's answer is the stored pair, and nothing else on the row moved.
+   */
+  function setAccountEdits(provider: ProviderId, id: string, edits: RequestEdits) {
+    const data = byProvider[provider].data
+    const row = data?.accounts.find((a) => a.id === id)
+    if (!data || !row) return
+    row.strip_fast_mode = edits.strip_fast_mode
+    row.strip_claude_code_line = edits.strip_claude_code_line
+    writeAccountsCache(userId.value, provider, data)
+  }
+
   function invalidateLocal(provider: ProviderId) {
     byProvider[provider].data = null
     byProvider[provider].fromCache = false
@@ -120,6 +133,7 @@ export function useAccounts() {
     loadProvider,
     loadAll,
     setStrategy,
+    setAccountEdits,
     invalidateLocal,
     CACHE_TTL_MS,
   }
