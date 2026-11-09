@@ -22,8 +22,7 @@ use crate::db::custom_providers::CustomProviderRow;
 use crate::pool::acquire::{acquire, AcquiredAccount};
 use crate::pool::bench::{mark_benched, mark_scope_benched};
 use crate::pool::extension::{settle_lease, AttemptLease, LeaseOutcome, ReserveContext, ReserveOutcome};
-use crate::providers::types::{AdapterError, CallExtras};
-use crate::proxy::request_edits::candidate_edits;
+use crate::providers::types::{AdapterError, CallExtras, RequestEdits};
 use crate::providers::{DynAdapter, ProviderId};
 use crate::routing::candidates::{pool_candidates, PoolTarget};
 use crate::routing::facts::{candidate_facts_list, earliest_unusable_until};
@@ -422,15 +421,6 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
         Plan::Usable { ordered } => ordered,
     };
 
-    // Each candidate's provider switches (docs/providers.md § Request edits), read once for the
-    // whole list. A failed read fails the request the way a failed plan does.
-    let edits = match candidate_edits(cx.pool(), &opts.source.user_id, &ordered).await {
-        Ok(edits) => edits,
-        Err(error) => {
-            tracing::error!(%error, "Failed to read provider request edits");
-            return WalkOutcome::NoAccount;
-        }
-    };
     let base_extras = CallExtras {
         api_key_id: opts.source.api_key_id.clone(),
         first_byte_timeout: Some(first_byte_timeout(cx)),
@@ -449,7 +439,13 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
             ran_out_of_candidates = true;
             break;
         };
-        let extras = CallExtras { edits: edits[idx], ..base_extras.clone() };
+        // The candidate's own account switches (docs/providers.md § Request edits); on a shared
+        // row the account is the owner's, so these are the owner's switches.
+        let edits = RequestEdits {
+            strip_fast_mode: candidate.account.strip_fast_mode,
+            strip_claude_code_line: candidate.account.strip_claude_code_line,
+        };
+        let extras = CallExtras { edits, ..base_extras.clone() };
         idx += 1;
         if !opts.caller.supports(&candidate) {
             continue;

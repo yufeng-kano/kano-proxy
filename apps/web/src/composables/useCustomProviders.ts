@@ -6,7 +6,7 @@ import {
   readCustomProvidersCache,
   writeCustomProvidersCache,
 } from "@/services/cache"
-import type { CustomProvider, ProviderSettings } from "@/types"
+import type { CustomProvider, RequestEdits } from "@/types"
 
 type CustomProvidersState = {
   data: CustomProvider[] | null
@@ -115,15 +115,15 @@ export function useCustomProviders() {
   }
 
   /**
-   * Records the switches a settings write just saved on that endpoint's row,
-   * and re-caches the list: the write's response is the stored truth, and a
+   * Records the switches a write just saved on that endpoint's row, and
+   * re-caches the list: the write's response is the stored truth, and a
    * re-fetch whose failure kept the old cache would paint the switch back.
    */
-  function setSettings(id: string, settings: ProviderSettings) {
+  function setEdits(id: string, edits: RequestEdits) {
     const row = state.data?.find((p) => p.id === id)
     if (!row || !state.data) return
-    row.strip_fast_mode = settings.strip_fast_mode
-    row.strip_claude_code_line = settings.strip_claude_code_line
+    row.strip_fast_mode = edits.strip_fast_mode
+    row.strip_claude_code_line = edits.strip_claude_code_line
     writeCustomProvidersCache(userId.value, state.data)
   }
 
@@ -132,7 +132,7 @@ export function useCustomProviders() {
     setUserId,
     load,
     reorder,
-    setSettings,
+    setEdits,
     invalidateLocal,
     CACHE_TTL_MS,
   }

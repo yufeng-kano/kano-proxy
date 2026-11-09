@@ -82,6 +82,13 @@ export type ProviderAccount = {
    * On a shared row, only where the edition handed its credits.
    */
   on_credits: boolean
+  /**
+   * The account's request-edit switches (docs/providers.md § Request edits).
+   * On a shared row they are the owner's, shown as tags only. Optional: a
+   * cache entry written before the fields existed reads as off.
+   */
+  strip_fast_mode?: boolean
+  strip_claude_code_line?: boolean
 }
 
 /**
@@ -120,21 +127,15 @@ export type AccountsResponse = {
    * server would have answered anyway.
    */
   strategy?: RoutingStrategy
-  /**
-   * The provider's request-edit switches (docs/providers.md § Request edits).
-   * Optional for the same reason as `strategy`: absent reads as off.
-   */
-  strip_fast_mode?: boolean
-  strip_claude_code_line?: boolean
 }
 
 /**
- * One provider's settings as `PATCH /api/providers/:provider` stores and
- * returns them (docs/auth.md). `provider` is a builtin id or a custom or CLI
- * provider's slug; each has its own row.
+ * One account's request-edit switches as
+ * `PATCH /api/providers/:provider/accounts/:id` stores and returns them
+ * (docs/auth.md). Every builtin account, custom endpoint and CLI provider has
+ * its own pair.
  */
-export type ProviderSettings = {
-  strategy: RoutingStrategy
+export type RequestEdits = {
   strip_fast_mode: boolean
   strip_claude_code_line: boolean
 }
@@ -263,7 +264,7 @@ export type CliProvider = {
   models_updated_at: string | null
   device_id: string | null
   device_name: string | null
-  /** This provider's request-edit switches; absent (old cache entry) reads as off. */
+  /** The switches on its account row; absent (old cache entry) reads as off. */
   strip_fast_mode?: boolean
   strip_claude_code_line?: boolean
   created_at: string
@@ -306,7 +307,7 @@ export type CustomProvider = {
   status: CustomProviderStatus
   /** Display-only position in the user's list. The server returns items pre-sorted by it. */
   sort_order: number
-  /** This endpoint's request-edit switches; absent (old cache entry) reads as off. */
+  /** The switches on its account row; absent (old cache entry) reads as off. */
   strip_fast_mode?: boolean
   strip_claude_code_line?: boolean
   created_at: string

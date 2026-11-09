@@ -3,9 +3,9 @@
 //! provider login flows (docs/auth.md § Provider accounts).
 //!
 //! Three things live here and nowhere else: the account list with its computed status dot,
-//! the OAuth login start/complete handlers for the four builtin providers, and the provider
-//! settings write (strategy and request-edit switches). Every upstream call goes through
-//! `cx.transport()`; a decrypted credential never leaves this module.
+//! the OAuth login start/complete handlers for the four builtin providers, and the pool's
+//! routing-strategy write. Every upstream call goes through `cx.transport()`; a decrypted
+//! credential never leaves this module.
 
 use std::collections::HashMap;
 
@@ -29,15 +29,13 @@ use crate::crypto::token_crypto::encrypt_json;
 use crate::db::accounts::{
     account_profile_meta, acquire_usage_lock, get_account, insert_account, is_usage_fresh, iso_from_ms, list_accounts,
     parse_iso_ms, promote_account, read_usage_snapshot, remove_account, replace_account_credential,
-    set_account_priorities, update_account_settings, AccountRow, NewAccount,
+    set_account_priorities, update_account_settings, AccountRow, AccountSettingsUpdate, NewAccount,
 };
 use crate::db::oauth_states::{
     delete_expired_states, delete_state, get_provider_state, insert_provider_state, list_provider_states,
     OAuthLoginStateRow, LOGIN_STATE_TTL_MS,
 };
-use crate::db::cli::get_cli_provider_by_slug;
-use crate::db::custom_providers::get_custom_provider_by_slug;
-use crate::db::provider_settings::{get_provider_settings, update_provider_settings, ProviderSettingsUpdate};
+use crate::db::provider_settings::{get_provider_strategy, set_provider_strategy};
 use crate::ids::{new_id, now_iso};
 use crate::pool::bench::{bench_until_from_row, clear_bench};
 use crate::pool::extension::ListSharedOptions;
@@ -66,7 +64,7 @@ const CODEX_VERIFICATION_URI: &str = "https://auth.openai.com/codex/device";
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/{provider}", patch(patch_settings))
+        .route("/{provider}", patch(set_strategy))
         .route("/{provider}/accounts", get(list_accounts_route))
         .route("/{provider}/accounts/import", post(import_account))
         .route("/{provider}/accounts/order", put(reorder))
@@ -149,6 +147,10 @@ struct AccountView {
     share: Option<crate::pool::ShareInfo>,
     /// The row's own opt-in; always `false` on a shared row (the owner's setting).
     allow_credits: bool,
+    /// The account's request edits (docs/providers.md § Request edits). On a shared row these
+    /// are the owner's, read-only to the viewer, since they are the ones that apply.
+    strip_fast_mode: bool,
+    strip_claude_code_line: bool,
     /// Routable only because of credits: opted in, credits usable, an account-wide window
     /// exhausted (docs/providers.md § Routing module status surfaces).
     on_credits: bool,
@@ -171,6 +173,8 @@ impl AccountView {
             "stale": self.stale,
             "allow_credits": self.allow_credits,
             "on_credits": self.on_credits,
+            "strip_fast_mode": self.strip_fast_mode,
+            "strip_claude_code_line": self.strip_claude_code_line,
         });
         if let Some(share) = &self.share {
             out["share"] = json!({
@@ -358,6 +362,8 @@ async fn list_accounts_route(
             stale: false,
             share: None,
             allow_credits: row.allow_credits,
+            strip_fast_mode: row.strip_fast_mode,
+            strip_claude_code_line: row.strip_claude_code_line,
             on_credits: false,
         };
         account_usage(&state, row, &adapter, force, &mut view).await;
@@ -433,6 +439,8 @@ async fn list_accounts_route(
             stale: false,
             share: Some(shared.share.clone()),
             allow_credits: false,
+            strip_fast_mode: row.strip_fast_mode,
+            strip_claude_code_line: row.strip_claude_code_line,
             on_credits,
         });
         limited_until.push(limited);
@@ -477,94 +485,42 @@ async fn list_accounts_route(
         accounts[i].status = "standby";
     }
 
-    // The pool's routing strategy (docs/providers.md § Routing module) and its request-edit
-    // switches (§ Request edits) — no separate read route; `PATCH /api/providers/:provider` is
-    // the only writer.
-    let Ok(settings) = get_provider_settings(state.pool(), user_id, provider.as_str()).await else {
+    // The pool's routing strategy (docs/providers.md § Routing module) — no separate read
+    // route; `PATCH /api/providers/:provider` is the only writer.
+    let Ok(strategy) = get_provider_strategy(state.pool(), user_id, provider.as_str()).await else {
         return internal_error();
     };
 
     // The list is returned in that same merged order, so the page's list-position assumptions
     // (first row is Primary) match where traffic goes.
     let ordered: Vec<Value> = route_order.iter().map(|&i| accounts[i].to_json()).collect();
-    Json(json!({
-        "available": true,
-        "accounts": ordered,
-        "models": [],
-        "error": null,
-        "strategy": settings.strategy,
-        "strip_fast_mode": settings.strip_fast_mode,
-        "strip_claude_code_line": settings.strip_claude_code_line,
-    }))
-    .into_response()
+    Json(json!({ "available": true, "accounts": ordered, "models": [], "error": null, "strategy": strategy }))
+        .into_response()
 }
 
 // ---------------------------------------------------------------- PATCH /:provider
 
-/// Writes the provider's settings (docs/auth.md § `PATCH /api/providers/:provider`): body
-/// `{strategy?, strip_fast_mode?, strip_claude_code_line?}`. `strategy` takes only `ordered`
-/// (docs/providers.md § Routing module); the switches are booleans (§ Request edits), and
-/// `strip_fast_mode` is refused where the adapter never forwards fast mode. `:provider` is a
-/// builtin id or one of the caller's custom or CLI slugs. Every check runs before the one
-/// upsert, which touches only the fields sent.
-async fn patch_settings(
+/// Sets the pool's routing strategy (docs/providers.md § Routing module): body `{strategy}`,
+/// only `ordered` accepted today. Upserts `provider_settings` — a missing row means `ordered`,
+/// so this is the only writer of that table.
+async fn set_strategy(
     State(state): State<AppState>,
     session: SessionUser,
     Path(provider): Path<String>,
     body: Bytes,
 ) -> Response {
-    let user_id = &session.user.id;
-    let builtin = ProviderId::parse(&provider);
-    if builtin.is_none() {
-        let owned = match get_custom_provider_by_slug(state.pool(), user_id, &provider).await {
-            Err(_) => return internal_error(),
-            Ok(Some(_)) => true,
-            Ok(None) => match get_cli_provider_by_slug(state.pool(), user_id, &provider).await {
-                Err(_) => return internal_error(),
-                Ok(row) => row.is_some(),
-            },
-        };
-        if !owned {
-            return invalid_provider();
-        }
-    }
-    let Some(Value::Object(body)) = parse_body(&body) else {
-        return error(StatusCode::BAD_REQUEST, "invalid body");
+    let Some(provider) = ProviderId::parse(&provider) else { return invalid_provider() };
+    let Some(body) = parse_body(&body) else {
+        return error(StatusCode::BAD_REQUEST, "invalid strategy");
     };
-    let strategy = match body.get("strategy") {
-        None => None,
-        Some(Value::String(s)) if s == DEFAULT_STRATEGY => Some(DEFAULT_STRATEGY),
-        Some(_) => return error(StatusCode::BAD_REQUEST, &format!("strategy must be \"{DEFAULT_STRATEGY}\"")),
-    };
-    let mut switches = [None, None];
-    for (slot, key) in switches.iter_mut().zip(["strip_fast_mode", "strip_claude_code_line"]) {
-        *slot = match body.get(key) {
-            None => None,
-            Some(Value::Bool(b)) => Some(*b),
-            Some(_) => return error(StatusCode::BAD_REQUEST, &format!("invalid {key}")),
-        };
+    let raw = body.get("strategy").and_then(Value::as_str);
+    if raw != Some(DEFAULT_STRATEGY) {
+        return error(StatusCode::BAD_REQUEST, &format!("strategy must be \"{DEFAULT_STRATEGY}\""));
     }
-    let [strip_fast_mode, strip_claude_code_line] = switches;
-    if strategy.is_none() && strip_fast_mode.is_none() && strip_claude_code_line.is_none() {
-        return error(StatusCode::BAD_REQUEST, "nothing to update");
+    if set_provider_strategy(state.pool(), &session.user.id, provider.as_str(), DEFAULT_STRATEGY).await.is_err() {
+        return internal_error();
     }
-    // Both adapters build the upstream body field by field and never carry a fast-mode field,
-    // so the switch would promise something it cannot do.
-    if strip_fast_mode.is_some() && matches!(builtin, Some(ProviderId::Grok | ProviderId::Antigravity)) {
-        return error(StatusCode::BAD_REQUEST, "strip_fast_mode is not supported for this provider");
-    }
-
-    let update = ProviderSettingsUpdate { strategy, strip_fast_mode, strip_claude_code_line };
-    match update_provider_settings(state.pool(), user_id, &provider, update).await {
-        Err(_) => internal_error(),
-        Ok(stored) => Json(json!({
-            "ok": true,
-            "strategy": stored.strategy,
-            "strip_fast_mode": stored.strip_fast_mode,
-            "strip_claude_code_line": stored.strip_claude_code_line,
-        }))
-        .into_response(),
-    }
+    Json(json!({ "ok": true, "strategy": DEFAULT_STRATEGY })).into_response()
 }
 
 // ------------------------------------------------------- PATCH /:provider/accounts/:id
@@ -594,12 +550,16 @@ async fn patch_account(
         }
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid custom_label"),
     };
-    let allow_credits = match body.get("allow_credits") {
-        None => None,
-        Some(Value::Bool(b)) => Some(*b),
-        Some(_) => return error(StatusCode::BAD_REQUEST, "invalid allow_credits"),
-    };
-    if custom_label.is_none() && allow_credits.is_none() {
+    let mut flags = [None, None, None];
+    for (slot, key) in flags.iter_mut().zip(["allow_credits", "strip_fast_mode", "strip_claude_code_line"]) {
+        *slot = match body.get(key) {
+            None => None,
+            Some(Value::Bool(b)) => Some(*b),
+            Some(_) => return error(StatusCode::BAD_REQUEST, &format!("invalid {key}")),
+        };
+    }
+    let [allow_credits, strip_fast_mode, strip_claude_code_line] = flags;
+    if custom_label.is_none() && flags.iter().all(Option::is_none) {
         return error(StatusCode::BAD_REQUEST, "nothing to update");
     }
     // Spillover spends paid credits and needs the adapter's stored `credits` fact, so only an
@@ -609,14 +569,32 @@ async fn patch_account(
     {
         return error(StatusCode::BAD_REQUEST, "allow_credits is not supported for this provider");
     }
+    // Both adapters build the upstream body field by field and never carry a fast-mode field,
+    // so the switch would promise something it cannot do (docs/providers.md § Request edits).
+    if strip_fast_mode.is_some() && matches!(ProviderId::parse(&provider), Some(ProviderId::Grok | ProviderId::Antigravity)) {
+        return error(StatusCode::BAD_REQUEST, "strip_fast_mode is not supported for this provider");
+    }
 
-    let provider_scope = allow_credits.is_some().then_some(provider.as_str());
-    let label = custom_label.as_ref().map(Option::as_deref);
-    match update_account_settings(state.pool(), &session.user.id, &id, provider_scope, label, allow_credits).await {
+    // A flag is checked against the path's provider above, so the row must be that provider's
+    // too. For a custom endpoint or CLI provider the path is its slug, which only its owner's
+    // rows carry.
+    let provider_scope = flags.iter().any(Option::is_some).then_some(provider.as_str());
+    let update = AccountSettingsUpdate {
+        custom_label: custom_label.as_ref().map(Option::as_deref),
+        allow_credits,
+        strip_fast_mode,
+        strip_claude_code_line,
+    };
+    match update_account_settings(state.pool(), &session.user.id, &id, provider_scope, update).await {
         Err(_) => internal_error(),
-        Ok(Some((custom_label, allow_credits))) => {
-            Json(json!({ "ok": true, "custom_label": custom_label, "allow_credits": allow_credits })).into_response()
-        }
+        Ok(Some(stored)) => Json(json!({
+            "ok": true,
+            "custom_label": stored.custom_label,
+            "allow_credits": stored.allow_credits,
+            "strip_fast_mode": stored.strip_fast_mode,
+            "strip_claude_code_line": stored.strip_claude_code_line,
+        }))
+        .into_response(),
         // A row the viewer borrows exists, but changing it is the owner's right.
         Ok(None) => forbidden_or_not_found(&state, &session.user.id, &provider, &id).await,
     }
@@ -1650,7 +1628,7 @@ mod tests {
         )
         .await;
         assert_eq!(patch.status(), StatusCode::OK);
-        assert_eq!(body_json(patch).await, json!({ "ok": true, "custom_label": "Work Claude", "allow_credits": false }));
+        assert_eq!(body_json(patch).await, json!({ "ok": true, "custom_label": "Work Claude", "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
 
         let after = stored_row(&pool, &user.id, "acc_1").await;
         assert_eq!(after.custom_label.as_deref(), Some("Work Claude"));
@@ -1715,7 +1693,7 @@ mod tests {
         );
         let cleared = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": null })))).await;
         assert_eq!(cleared.status(), StatusCode::OK);
-        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false }));
+        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
         let listed = call(&state, request("GET", "/api/providers/claude-code/accounts", Some(&cookie), None)).await;
         let json = body_json(listed).await;
         assert_eq!(json["accounts"][0]["label"], "fallback@example.com");
@@ -1727,7 +1705,7 @@ mod tests {
         );
         let cleared = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": "" })))).await;
         assert_eq!(cleared.status(), StatusCode::OK);
-        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false }));
+        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
         let listed = call(&state, request("GET", "/api/providers/claude-code/accounts?refresh=true", Some(&cookie), None)).await;
         let json = body_json(listed).await;
         assert_eq!(json["accounts"][0]["label"], "fallback@example.com");
@@ -1781,7 +1759,7 @@ mod tests {
 
         let on = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "allow_credits": true })))).await;
         assert_eq!(on.status(), StatusCode::OK);
-        assert_eq!(body_json(on).await, json!({ "ok": true, "custom_label": "Work", "allow_credits": true }));
+        assert_eq!(body_json(on).await, json!({ "ok": true, "custom_label": "Work", "allow_credits": true, "strip_fast_mode": false, "strip_claude_code_line": false }));
         let after = stored_row(&pool, &user.id, "acc_1").await;
         assert!(after.allow_credits);
         assert_eq!(after.custom_label.as_deref(), Some("Work"));
@@ -1789,12 +1767,12 @@ mod tests {
 
         // And the reverse: a rename alone leaves the opt-in as stored.
         let renamed = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": null })))).await;
-        assert_eq!(body_json(renamed).await, json!({ "ok": true, "custom_label": null, "allow_credits": true }));
+        assert_eq!(body_json(renamed).await, json!({ "ok": true, "custom_label": null, "allow_credits": true, "strip_fast_mode": false, "strip_claude_code_line": false }));
         assert!(stored_row(&pool, &user.id, "acc_1").await.allow_credits);
 
         let both =
             call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": "Both", "allow_credits": false })))).await;
-        assert_eq!(body_json(both).await, json!({ "ok": true, "custom_label": "Both", "allow_credits": false }));
+        assert_eq!(body_json(both).await, json!({ "ok": true, "custom_label": "Both", "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
 
         for (body, message) in [
             (json!({}), "nothing to update"),
@@ -2435,10 +2413,7 @@ mod tests {
 
         let ok = call(&state, request("PATCH", "/api/providers/claude-code", Some(&cookie), Some(json!({ "strategy": "ordered" })))).await;
         assert_eq!(ok.status(), StatusCode::OK);
-        assert_eq!(
-            body_json(ok).await,
-            json!({ "ok": true, "strategy": "ordered", "strip_fast_mode": false, "strip_claude_code_line": false })
-        );
+        assert_eq!(body_json(ok).await, json!({ "ok": true, "strategy": "ordered" }));
         let rows: Vec<(String, String, String)> =
             sqlx::query_as("SELECT user_id, provider, strategy FROM provider_settings").fetch_all(&pool).await.unwrap();
         assert_eq!(rows, vec![(user.id.clone(), "claude-code".to_string(), "ordered".to_string())]);
@@ -2459,96 +2434,104 @@ mod tests {
         assert_eq!(count, 1);
     }
 
-    #[tokio::test]
-    async fn the_switches_write_one_field_at_a_time_and_read_back_on_the_accounts_list() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool.clone(), MockTransport::new());
-        let (_, cookie) = signed_in(&state, "user_1@example.com").await;
-        let patch = |provider: &str, body: Value| request("PATCH", &format!("/api/providers/{provider}"), Some(&cookie), Some(body));
+    // ------------------------------------- PATCH /:provider/accounts/:id request edits
 
-        let before = claude_accounts(&state, &cookie, false).await;
-        assert_eq!((before["strip_fast_mode"].clone(), before["strip_claude_code_line"].clone()), (json!(false), json!(false)));
-        let fast = call(&state, patch("claude-code", json!({ "strip_fast_mode": true }))).await;
+    #[tokio::test]
+    async fn each_account_keeps_its_own_switches_and_the_list_reads_them_back() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_1", "claude-code", 2, account_meta("one@example.com")).await;
+        seed_account(&pool, &user.id, "acc_2", "claude-code", 1, account_meta("two@example.com")).await;
+        let patch = |body: Value| request("PATCH", "/api/providers/claude-code/accounts/acc_1", Some(&cookie), Some(body));
+
+        let fast = call(&state, patch(json!({ "strip_fast_mode": true }))).await;
+        assert_eq!(fast.status(), StatusCode::OK);
         assert_eq!(
             body_json(fast).await,
-            json!({ "ok": true, "strategy": "ordered", "strip_fast_mode": true, "strip_claude_code_line": false })
+            json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": true, "strip_claude_code_line": false })
         );
-        let line = call(&state, patch("claude-code", json!({ "strip_claude_code_line": true }))).await;
+        let line = call(&state, patch(json!({ "strip_claude_code_line": true }))).await;
         assert_eq!(body_json(line).await["strip_fast_mode"], true, "a write keeps the switch it was not sent");
-        let after = claude_accounts(&state, &cookie, false).await;
-        assert_eq!((after["strip_fast_mode"].clone(), after["strip_claude_code_line"].clone()), (json!(true), json!(true)));
+        let one = stored_row(&pool, &user.id, "acc_1").await;
+        assert_eq!((one.strip_fast_mode, one.strip_claude_code_line, one.custom_label), (true, true, None));
+        let two = stored_row(&pool, &user.id, "acc_2").await;
+        assert_eq!((two.strip_fast_mode, two.strip_claude_code_line), (false, false), "the other account keeps its own");
+
+        stub_claude_usage(&transport, 2, "upstream@example.com");
+        let json = claude_accounts(&state, &cookie, false).await;
+        let rows: Vec<(String, bool, bool)> = json["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (a["id"].as_str().unwrap().to_string(), a["strip_fast_mode"].as_bool().unwrap(), a["strip_claude_code_line"].as_bool().unwrap())
+            })
+            .collect();
+        assert_eq!(rows, [("acc_1".to_string(), true, true), ("acc_2".to_string(), false, false)]);
+        assert!(json.get("strip_fast_mode").is_none(), "nothing at the pool level any more");
+        let settings: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_settings").fetch_one(&pool).await.unwrap();
+        assert_eq!(settings, 0);
     }
 
     #[tokio::test]
-    async fn the_settings_write_refuses_bad_input_before_writing_anything() {
+    async fn the_switch_write_refuses_bad_input_and_other_providers_rows() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool.clone(), MockTransport::new());
-        let (_, cookie) = signed_in(&state, "user_1@example.com").await;
-        let patch = |provider: &str, body: Value| request("PATCH", &format!("/api/providers/{provider}"), Some(&cookie), Some(body));
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "acc_grok", "grok", 1, account_meta("g@example.com")).await;
+        seed_account(&pool, &user.id, "acc_codex", "codex", 1, account_meta("c@example.com")).await;
+        let patch = |provider: &str, id: &str, body: Value| {
+            request("PATCH", &format!("/api/providers/{provider}/accounts/{id}"), Some(&cookie), Some(body))
+        };
 
-        for (provider, body, message) in [
-            ("claude-code", json!({}), "nothing to update"),
-            ("claude-code", json!("strip_fast_mode"), "invalid body"),
-            ("claude-code", json!({ "strip_fast_mode": "yes" }), "invalid strip_fast_mode"),
-            ("claude-code", json!({ "strategy": "ordered", "strip_claude_code_line": 1 }), "invalid strip_claude_code_line"),
-            ("grok", json!({ "strip_fast_mode": false }), "strip_fast_mode is not supported for this provider"),
-            ("antigravity", json!({ "strip_fast_mode": true, "strip_claude_code_line": true }), "strip_fast_mode is not supported for this provider"),
+        for (provider, id, body, message) in [
+            ("grok", "acc_grok", json!({ "strip_fast_mode": "yes" }), "invalid strip_fast_mode"),
+            ("grok", "acc_grok", json!({ "custom_label": "x", "strip_claude_code_line": 1 }), "invalid strip_claude_code_line"),
+            ("grok", "acc_grok", json!({ "strip_fast_mode": false }), "strip_fast_mode is not supported for this provider"),
+            ("antigravity", "acc_x", json!({ "strip_fast_mode": true, "strip_claude_code_line": true }), "strip_fast_mode is not supported for this provider"),
         ] {
-            let res = call(&state, patch(provider, body)).await;
+            let res = call(&state, patch(provider, id, body)).await;
             assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{provider}");
             assert_eq!(body_json(res).await["error"], message);
         }
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_settings").fetch_one(&pool).await.unwrap();
-        assert_eq!(rows, 0);
+        // A switch is written only on a row of the path's provider: the grok refusal above
+        // cannot be had by naming a provider that allows it.
+        let crossed = call(&state, patch("claude-code", "acc_grok", json!({ "strip_fast_mode": true }))).await;
+        assert_eq!(crossed.status(), StatusCode::NOT_FOUND);
+        let grok = stored_row(&pool, &user.id, "acc_grok").await;
+        assert_eq!((grok.strip_fast_mode, grok.strip_claude_code_line, grok.custom_label), (false, false, None), "a refused body writes nothing");
 
-        let grok = call(&state, patch("grok", json!({ "strip_claude_code_line": true }))).await;
-        assert_eq!(grok.status(), StatusCode::OK, "every provider takes the Claude Code line switch");
+        let line = call(&state, patch("grok", "acc_grok", json!({ "strip_claude_code_line": true }))).await;
+        assert_eq!(line.status(), StatusCode::OK, "every provider takes the Claude Code line switch");
+        let fast = call(&state, patch("codex", "acc_codex", json!({ "strip_fast_mode": true }))).await;
+        assert_eq!(fast.status(), StatusCode::OK);
+        assert!(stored_row(&pool, &user.id, "acc_codex").await.strip_fast_mode);
     }
 
     #[tokio::test]
-    async fn the_settings_write_takes_the_callers_own_custom_and_cli_slugs_only() {
+    async fn the_switch_write_takes_the_callers_own_custom_and_cli_rows_only() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool.clone(), MockTransport::new());
         let (user, cookie) = signed_in(&state, "user_1@example.com").await;
         let (other, _) = signed_in(&state, "user_2@example.com").await;
-        let endpoint = crate::db::custom_providers::NewCustomProvider {
-            user_id: &user.id,
-            slug: "my-endpoint",
-            name: "Mine",
-            format: "anthropic",
-            base_url: "https://example.test",
-            count_tokens_url: None,
-            models_mode: "auto",
-            manual_models_json: None,
-        };
-        crate::db::custom_providers::insert_custom_provider(&pool, endpoint).await.unwrap().unwrap();
-        sqlx::query(
-            "INSERT INTO cli_providers (id, user_id, slug, name, format, created_at, updated_at)
-             VALUES ('cliprov_1', $1, 'box', 'Box', 'openai', 'x', 'x'), ('cliprov_2', $2, 'their-box', 'Theirs', 'openai', 'x', 'x')",
-        )
-        .bind(&user.id)
-        .bind(&other.id)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let patch = |provider: &str| {
-            request("PATCH", &format!("/api/providers/{provider}"), Some(&cookie), Some(json!({ "strip_fast_mode": true })))
+        seed_account(&pool, &user.id, "acc_endpoint", "my-endpoint", 1, json!({})).await;
+        seed_account(&pool, &user.id, "acc_box", "box", 1, json!({})).await;
+        seed_account(&pool, &other.id, "acc_their_box", "their-box", 1, json!({})).await;
+        let patch = |provider: &str, id: &str| {
+            request("PATCH", &format!("/api/providers/{provider}/accounts/{id}"), Some(&cookie), Some(json!({ "strip_fast_mode": true })))
         };
 
-        for slug in ["my-endpoint", "box"] {
-            assert_eq!(call(&state, patch(slug)).await.status(), StatusCode::OK, "{slug}");
+        for (slug, id) in [("my-endpoint", "acc_endpoint"), ("box", "acc_box")] {
+            assert_eq!(call(&state, patch(slug, id)).await.status(), StatusCode::OK, "{slug}");
         }
-        for slug in ["their-box", "nobody"] {
-            let res = call(&state, patch(slug)).await;
-            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{slug}");
-            assert_eq!(body_json(res).await["error"], "invalid provider");
+        for (slug, id) in [("their-box", "acc_their_box"), ("box", "acc_endpoint"), ("nobody", "acc_box")] {
+            assert_eq!(call(&state, patch(slug, id)).await.status(), StatusCode::NOT_FOUND, "{slug}/{id}");
         }
         let stored: Vec<String> =
-            sqlx::query_scalar("SELECT provider FROM provider_settings WHERE strip_fast_mode ORDER BY provider")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(stored, ["box", "my-endpoint"]);
+            sqlx::query_scalar("SELECT id FROM upstream_accounts WHERE strip_fast_mode ORDER BY id").fetch_all(&pool).await.unwrap();
+        assert_eq!(stored, ["acc_box", "acc_endpoint"]);
     }
 
     #[tokio::test]
@@ -2948,6 +2931,8 @@ mod tests {
             edge_strikes: 0,
             edge_strike_at: None,
             allow_credits: false,
+            strip_fast_mode: false,
+            strip_claude_code_line: false,
             created_at: NOW.into(),
             updated_at: NOW.into(),
         }
@@ -3029,6 +3014,7 @@ mod tests {
         let transport = MockTransport::new();
         let mut row = borrowed_row("shared_1", "user_2");
         row.label = Some("owner-seat".into());
+        row.strip_fast_mode = true;
         let ext = Arc::new(FakeExtension {
             shared: vec![SharedAccount { account: row, priority: 3, share: share_info(), usage: None }],
             set_shared_priority_ok: true,
@@ -3051,6 +3037,8 @@ mod tests {
             json["accounts"][0]["share"],
             json!({ "teamId": "team_1", "teamName": "Acme", "ownerLabel": "owner@example.com" })
         );
+        // The owner's switches are the ones that apply to the row, so the borrower sees them.
+        assert_eq!((json["accounts"][0]["strip_fast_mode"].clone(), json["accounts"][0]["strip_claude_code_line"].clone()), (json!(true), json!(false)));
         assert!(!json.to_string().contains("token-shared_1"));
         assert!(transport.requests().is_empty());
     }
@@ -3262,6 +3250,7 @@ mod tests {
 
         for (method, path, body) in [
             ("PATCH", "/api/providers/grok/accounts/shared_1", Some(json!({ "custom_label": "mine" }))),
+            ("PATCH", "/api/providers/grok/accounts/shared_1", Some(json!({ "strip_claude_code_line": true }))),
             ("POST", "/api/providers/grok/accounts/shared_1/unpause", None),
             ("DELETE", "/api/providers/grok/accounts/shared_1", None),
         ] {

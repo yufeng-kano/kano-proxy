@@ -1042,13 +1042,19 @@ mod request_edit_tests {
     const CC_LINE: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
     const BILLING: &str = "x-anthropic-billing-header: cc_version=2.1.319; cc_entrypoint=cli;";
 
+    /// Sets the switches on every one of the user's `provider` accounts.
     async fn switches(f: &Fixture, provider: &str, fast: bool, line: bool) {
-        let update = crate::db::provider_settings::ProviderSettingsUpdate {
-            strip_fast_mode: Some(fast),
-            strip_claude_code_line: Some(line),
-            ..Default::default()
-        };
-        crate::db::provider_settings::update_provider_settings(f.state.pool(), &f.user.id, provider, update).await.unwrap();
+        sqlx::query(
+            "UPDATE upstream_accounts SET strip_fast_mode = $1, strip_claude_code_line = $2
+             WHERE user_id = $3 AND provider = $4",
+        )
+        .bind(fast)
+        .bind(line)
+        .bind(&f.user.id)
+        .bind(provider)
+        .execute(f.state.pool())
+        .await
+        .unwrap();
     }
 
     fn claude_code_body(model: &str) -> serde_json::Value {
@@ -1066,7 +1072,37 @@ mod request_edit_tests {
     }
 
     #[tokio::test]
-    async fn each_candidate_of_a_group_gets_only_its_own_providers_edits() {
+    async fn two_accounts_in_one_pool_apply_only_their_own_switches() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.account("claude-code").await;
+        f.account("claude-code").await;
+        // Only the account the walk tries first, raised to the top of the pool, removes fast mode.
+        sqlx::query(
+            "UPDATE upstream_accounts SET priority = 5, strip_fast_mode = TRUE WHERE id = (
+               SELECT id FROM upstream_accounts WHERE user_id = $1 ORDER BY id LIMIT 1)",
+        )
+        .bind(&f.user.id)
+        .execute(f.state.pool())
+        .await
+        .unwrap();
+        f.mock.respond_json(StatusCode::TOO_MANY_REQUESTS, json!({ "type": "error" }));
+        f.mock.respond_json(StatusCode::OK, anthropic_ok());
+
+        let response = f
+            .router()
+            .oneshot(f.post("/anthropic/v1/messages", claude_code_body("claude-code/claude-opus-5")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = f.mock.requests();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].json().get("speed").is_none(), "the first account removes fast mode");
+        assert_eq!(calls[1].json()["speed"], "fast", "the failover account keeps it");
+    }
+
+    #[tokio::test]
+    async fn each_candidate_of_a_group_gets_only_its_own_accounts_edits() {
         let Some(f) = fixture().await else { return skip_without_db() };
         f.account("claude-code").await;
         f.custom_provider("mygw", "anthropic", "https://upstream.example.com").await;

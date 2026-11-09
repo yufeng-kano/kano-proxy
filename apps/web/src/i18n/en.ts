@@ -272,22 +272,21 @@ export const en = {
   "providers.error.settings": "Couldn't change the setting",
 
   // --- Request edits ------------------------------------------------------
-  // Per-provider switches that change what Kano Proxy forwards upstream
+  // Per-account switches that change what Kano Proxy forwards upstream
   // (docs/providers.md § Request edits). The same two on every surface; the
-  // line under each says what it does to this provider, and the header tags
-  // say which are on while the edit gate is closed.
+  // line under each says what it does to requests sent to that account, and
+  // the row's tags say which are on while the edit gate is closed.
+  "providers.edits.accountTitle": "Request edits for this account",
   "providers.edits.fastMode": "Remove fast mode",
-  "providers.edits.fastModeHint": "Requests go at standard speed. Accounts you share follow this too.",
+  "providers.edits.fastModeHint": "Requests sent to this account go at standard speed.",
   "providers.edits.fastModeHintClaude":
-    "Requests go at standard speed. Claude bills fast mode to usage credits. Accounts you share follow this too.",
+    "Requests sent to this account go at standard speed. Claude bills fast mode to usage credits.",
   "providers.edits.fastModeHintEndpoint": "Requests to this endpoint go at standard speed.",
   "providers.edits.line": "Remove the Claude Code line",
   "providers.edits.lineHintClaude":
-    "Drops Claude Code's identity line, “You are Claude Code, Anthropic's official CLI for Claude.”, from system prompts, and Kano Proxy stops adding it. Claude may refuse or bill requests without it. Shared accounts drop it only when the owner and the borrower both turn this on.",
-  "providers.edits.lineHint":
-    "Drops Claude Code's identity line, “You are Claude Code, Anthropic's official CLI for Claude.”, from system prompts sent to {provider}. Shared accounts drop it only when the owner and the borrower both turn this on.",
-  "providers.edits.lineHintEndpoint":
-    "Drops Claude Code's identity line, “You are Claude Code, Anthropic's official CLI for Claude.”, from system prompts sent to this endpoint.",
+    "Drops Claude Code's identity line from system prompts sent to this account, and Kano Proxy stops adding it. Claude may refuse or bill requests without it.",
+  "providers.edits.lineHint": "Drops Claude Code's identity line from system prompts sent to this account.",
+  "providers.edits.lineHintEndpoint": "Drops Claude Code's identity line from system prompts sent to this endpoint.",
   "providers.edits.fastModeOn": "Fast mode removed",
   "providers.edits.lineOn": "Claude Code line removed",
 

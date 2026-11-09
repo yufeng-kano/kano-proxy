@@ -46,6 +46,10 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         name: "0007_provider_request_edits",
         sql: include_str!("../../migrations/0007_provider_request_edits.sql"),
     },
+    Migration {
+        name: "0008_account_request_edits",
+        sql: include_str!("../../migrations/0008_account_request_edits.sql"),
+    },
 ];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -150,6 +154,7 @@ mod tests {
                 "0005_account_allow_credits",
                 "0006_usage_notice",
                 "0007_provider_request_edits",
+                "0008_account_request_edits",
             ]
         );
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM cli_devices").fetch_all(&pool).await.unwrap();
@@ -198,6 +203,7 @@ mod tests {
                 "0005_account_allow_credits",
                 "0006_usage_notice",
                 "0007_provider_request_edits",
+                "0008_account_request_edits",
             ]
         );
         let old = crate::db::keys::list_keys(&pool, &user.id).await.unwrap();
@@ -238,7 +244,13 @@ mod tests {
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
         assert_eq!(
             applied,
-            ["0004_scoped_bench", "0005_account_allow_credits", "0006_usage_notice", "0007_provider_request_edits"]
+            [
+                "0004_scoped_bench",
+                "0005_account_allow_credits",
+                "0006_usage_notice",
+                "0007_provider_request_edits",
+                "0008_account_request_edits",
+            ]
         );
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert_eq!((row.bench_until.as_deref(), row.bench_reason.as_deref()), (Some("2030-01-01T00:00:00.000Z"), Some("429")));
@@ -274,16 +286,21 @@ mod tests {
         .expect("existing account");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0005_account_allow_credits", "0006_usage_notice", "0007_provider_request_edits"]);
+        assert_eq!(
+            applied,
+            ["0005_account_allow_credits", "0006_usage_notice", "0007_provider_request_edits", "0008_account_request_edits"]
+        );
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert!(!row.allow_credits, "existing accounts never start spending credits");
         assert_eq!((row.custom_label.as_deref(), row.priority), (Some("Mine"), 3));
         assert!(row.account_meta_json.is_some() && row.usage_snapshot_json.is_some() && row.bench_scopes_json.is_some());
 
-        let stored = crate::db::accounts::update_account_settings(&pool, &user.id, "acc_old", Some("codex"), None, Some(true))
+        let opt_in = crate::db::accounts::AccountSettingsUpdate { allow_credits: Some(true), ..Default::default() };
+        let stored = crate::db::accounts::update_account_settings(&pool, &user.id, "acc_old", Some("codex"), opt_in)
             .await
-            .unwrap();
-        assert_eq!(stored, Some((Some("Mine".to_string()), true)));
+            .unwrap()
+            .expect("own row");
+        assert_eq!((stored.custom_label.as_deref(), stored.allow_credits), (Some("Mine"), true));
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
@@ -300,7 +317,7 @@ mod tests {
         let session = crate::db::sessions::insert_session(&pool, &user.id, "2030-01-01T00:00:00.000Z").await.expect("existing session");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0006_usage_notice", "0007_provider_request_edits"]);
+        assert_eq!(applied, ["0006_usage_notice", "0007_provider_request_edits", "0008_account_request_edits"]);
         let row = crate::db::users::find_user_by_id(&pool, &user.id).await.unwrap().expect("the row type reads");
         assert_eq!((row.email.as_str(), row.created_at.as_str()), ("upgrade6@example.com", user.created_at.as_str()));
         assert_eq!((row.notice_version, row.notice_accepted_at), (None, None), "nobody has accepted yet");
@@ -315,9 +332,9 @@ mod tests {
         assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
     }
 
-    /// Upgrading a deployed 0006 schema: an existing settings row keeps its strategy and reads
-    /// with both request-edit switches off, a switch write afterwards leaves the strategy, and
-    /// the user cascade still reaches the row.
+    /// Upgrading a deployed 0006 schema: an existing settings row keeps its strategy and gains
+    /// both request-edit columns off, which 0008 then copies off to the accounts, and the user
+    /// cascade still reaches the row.
     #[tokio::test]
     async fn upgrading_to_0007_keeps_existing_provider_settings_with_both_switches_off() {
         let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..6]).await else { return skip_without_db() };
@@ -332,17 +349,95 @@ mod tests {
         .expect("existing settings");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0007_provider_request_edits"]);
-        for provider in ["codex", "my-endpoint"] {
-            let row = crate::db::provider_settings::get_provider_settings(&pool, &user.id, provider).await.unwrap();
-            assert_eq!(row, crate::db::provider_settings::ProviderSettings::default(), "{provider}");
-        }
-        let fast = crate::db::provider_settings::ProviderSettingsUpdate { strip_fast_mode: Some(true), ..Default::default() };
-        let stored = crate::db::provider_settings::update_provider_settings(&pool, &user.id, "codex", fast).await.unwrap();
-        assert_eq!((stored.strategy.as_str(), stored.strip_fast_mode, stored.strip_claude_code_line), ("ordered", true, false));
+        assert_eq!(applied, ["0007_provider_request_edits", "0008_account_request_edits"]);
+        let rows: Vec<(String, String, bool, bool)> = sqlx::query_as(
+            "SELECT provider, strategy, strip_fast_mode, strip_claude_code_line FROM provider_settings
+             WHERE user_id = $1 ORDER BY provider",
+        )
+        .bind(&user.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            [("codex".into(), "ordered".into(), false, false), ("my-endpoint".into(), "ordered".into(), false, false)]
+        );
+        assert_eq!(crate::db::provider_settings::get_provider_strategy(&pool, &user.id, "codex").await.unwrap(), "ordered");
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_settings").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
+        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+    }
+
+    /// Upgrading a deployed 0007 schema: each user's per-provider switches land on every account
+    /// they own under that provider (builtin and custom alike), nobody else's accounts and no
+    /// other provider's change, an account added afterwards starts off, each account is then
+    /// written on its own, and the user cascade still reaches the rows.
+    #[tokio::test]
+    async fn upgrading_to_0008_copies_each_providers_switches_onto_its_accounts() {
+        let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..7]).await else { return skip_without_db() };
+        let user = insert_user_without_notice(&pool, "upgrade8@example.com").await;
+        let other = insert_user_without_notice(&pool, "upgrade8-other@example.com").await;
+        sqlx::query(
+            "INSERT INTO upstream_accounts (id, user_id, provider, label, custom_label, priority, encrypted_payload,
+                                            allow_credits, created_at, updated_at)
+             VALUES ('acc_cc1', $1, 'claude-code', 'a', 'Work', 2, 'blob', FALSE, 'x', 'x'),
+                    ('acc_cc2', $1, 'claude-code', 'b', NULL, 1, 'blob', FALSE, 'x', 'x'),
+                    ('acc_codex', $1, 'codex', 'c', NULL, 1, 'blob', TRUE, 'x', 'x'),
+                    ('acc_gw', $1, 'my-endpoint', 'gw', NULL, 1, 'blob', FALSE, 'x', 'x'),
+                    ('acc_other', $2, 'claude-code', 'o', NULL, 1, 'blob', FALSE, 'x', 'x')",
+        )
+        .bind(&user.id)
+        .bind(&other.id)
+        .execute(&pool)
+        .await
+        .expect("existing accounts");
+        sqlx::query(
+            "INSERT INTO provider_settings (user_id, provider, strategy, strip_fast_mode, strip_claude_code_line, updated_at)
+             VALUES ($1, 'claude-code', 'ordered', TRUE, FALSE, 'x'),
+                    ($1, 'my-endpoint', 'ordered', FALSE, TRUE, 'x'),
+                    ($1, 'codex', 'ordered', FALSE, FALSE, 'x')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("existing switches");
+
+        let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
+        assert_eq!(applied, ["0008_account_request_edits"]);
+        let switches = |row: &crate::db::AccountRow| (row.id.clone(), row.strip_fast_mode, row.strip_claude_code_line);
+        let mut mine = Vec::new();
+        for provider in ["claude-code", "codex", "my-endpoint"] {
+            mine.extend(crate::db::accounts::list_accounts(&pool, &user.id, provider).await.unwrap());
+        }
+        assert_eq!(
+            mine.iter().map(switches).collect::<Vec<_>>(),
+            [
+                ("acc_cc1".to_string(), true, false),
+                ("acc_cc2".to_string(), true, false),
+                ("acc_codex".to_string(), false, false),
+                ("acc_gw".to_string(), false, true),
+            ]
+        );
+        let cc1 = &mine[0];
+        assert_eq!((cc1.custom_label.as_deref(), cc1.priority, cc1.updated_at.as_str()), (Some("Work"), 2, "x"), "nothing else moves");
+        assert!(mine[2].allow_credits);
+        let theirs = crate::db::accounts::get_account(&pool, &other.id, "acc_other").await.unwrap().expect("the row type reads");
+        assert_eq!(switches(&theirs), ("acc_other".to_string(), false, false), "another user's account keeps its own");
+
+        let added = crate::db::test_support::insert_account(&pool, &user.id, "claude-code", &Default::default()).await;
+        assert!(!added.strip_fast_mode && !added.strip_claude_code_line, "a new account starts off");
+        let line_only = crate::db::accounts::AccountSettingsUpdate {
+            strip_fast_mode: Some(false),
+            strip_claude_code_line: Some(true),
+            ..Default::default()
+        };
+        crate::db::accounts::update_account_settings(&pool, &user.id, "acc_cc2", Some("claude-code"), line_only).await.unwrap();
+        let cc1 = crate::db::accounts::get_account(&pool, &user.id, "acc_cc1").await.unwrap().unwrap();
+        assert_eq!(switches(&cc1), ("acc_cc1".to_string(), true, false), "the other account in the pool keeps its own");
+        sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
+        assert_eq!(left, 1, "only the other user's account is left");
         assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
     }
 }

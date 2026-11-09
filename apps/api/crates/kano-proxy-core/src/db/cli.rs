@@ -365,8 +365,8 @@ pub async fn insert_cli_provider(
         return Ok(None);
     }
     // A settings row already under this slug outlived a provider before this one (a write that
-    // raced its delete): a new provider starts with its switches off (docs/database.md
-    // § provider_settings). Same transaction, so no write can land on the new row in between.
+    // raced its delete): a new provider never inherits it (docs/database.md § provider_settings).
+    // Same transaction, so no write can land on the new row in between.
     sqlx::query("DELETE FROM provider_settings WHERE user_id = $1 AND provider = $2")
         .bind(input.user_id)
         .bind(input.slug)
@@ -401,8 +401,7 @@ pub async fn rename_cli_provider(db: &PgPool, user_id: &str, id: &str, name: &st
 }
 
 /// Deletes the provider row and its `provider_settings` row in one transaction, so a later
-/// provider under the same slug starts with its request-edit switches off (docs/database.md
-/// § `provider_settings`).
+/// provider under the same slug inherits nothing (docs/database.md § `provider_settings`).
 pub async fn delete_cli_provider(db: &PgPool, user_id: &str, id: &str) -> Result<bool, sqlx::Error> {
     let mut tx = db.begin().await?;
     let slug: Option<String> = sqlx::query_scalar("DELETE FROM cli_providers WHERE id = $1 AND user_id = $2 RETURNING slug")

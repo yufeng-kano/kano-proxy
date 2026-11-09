@@ -18,11 +18,9 @@ import RenameAccountDialog from "@/components/RenameAccountDialog.vue"
 import AccountCard from "@/components/providers/AccountCard.vue"
 import CliSection from "@/components/providers/CliSection.vue"
 import CustomProviderCard from "@/components/providers/CustomProviderCard.vue"
-import RequestEditSwitches from "@/components/providers/RequestEditSwitches.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
-import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
 import EmptyState from "@/components/ui/EmptyState.vue"
 import PageHeader from "@/components/ui/PageHeader.vue"
@@ -41,8 +39,9 @@ import {
   removeAccount,
   setAccountAllowCredits,
   unpauseAccount,
+  setProviderStrategy,
   unpauseCustomProvider,
-  updateProviderSettings,
+  updateAccountEdits,
 } from "@/services/api"
 import { invalidateModelCaches } from "@/services/cache"
 import { getProvidersPrefs, setProvidersPrefs } from "@/services/prefs"
@@ -53,14 +52,14 @@ import {
   type CustomProvider,
   type ProviderAccount,
   type ProviderId,
-  type ProviderSettings,
+  type RequestEdits,
   type RoutingStrategy,
 } from "@/types"
 
 const { t } = useI18n()
 const confirm = useConfirm()
 const { user } = useAuth()
-const { byProvider, setUserId, loadAll, loadProvider, setSettings, CACHE_TTL_MS } = useAccounts()
+const { byProvider, setUserId, loadAll, loadProvider, setStrategy, CACHE_TTL_MS } = useAccounts()
 const customProviders = useCustomProviders()
 const cli = useCli()
 
@@ -89,23 +88,6 @@ const STRATEGY_KEY: Record<RoutingStrategy, MessageKey> = {
 
 const STRATEGY_HINT_KEY: Record<RoutingStrategy, MessageKey> = {
   ordered: "strategy.pool.ordered",
-}
-
-/**
- * The line under each pool's "Remove fast mode". A pool without an entry has
- * no such switch: Grok and Antigravity never forward fast mode, and the server
- * refuses the write for them (docs/providers.md § Request edits).
- */
-const FAST_MODE_HINT_KEY: Partial<Record<ProviderId, MessageKey>> = {
-  "claude-code": "providers.edits.fastModeHintClaude",
-  codex: "providers.edits.fastModeHint",
-}
-
-/** Claude Code's line also says the proxy stops adding it there; the others name the pool. */
-function lineHint(provider: ProviderId): string {
-  return provider === "claude-code"
-    ? t("providers.edits.lineHintClaude")
-    : t("providers.edits.lineHint", { provider: t(NAME_KEY[provider]) })
 }
 
 /** The custom-endpoints tab is not a `ProviderId`, so it gets its own id. */
@@ -404,7 +386,7 @@ async function onStrategyChange(provider: ProviderId, event: Event) {
   settingsBusy[provider] = true
   actionError.value = null
   try {
-    setSettings(provider, await updateProviderSettings(provider, { strategy: next }))
+    setStrategy(provider, await setProviderStrategy(provider, next))
     // Same reason as the rollback below: if the stored value is not the one
     // that was sent, the bound value never changed and nothing is patched back.
     el.value = strategyOf(provider)
@@ -417,19 +399,21 @@ async function onStrategyChange(provider: ProviderId, event: Event) {
 }
 
 /**
- * A request-edit switch flipped. Same shape as the strategy write: paint what
- * the server stored, report a refusal in the page's banner, and the switch
- * puts its own box back once `settingsBusy` clears.
+ * One account's request-edit switch flipped. Same shape as the credits
+ * opt-in: the reload reads the stored switches back without forcing a usage
+ * probe, a refusal is reported in the page's banner, and the row puts its box
+ * back once `busyId` clears.
  */
-async function onSettingsChange(provider: ProviderId, patch: Partial<ProviderSettings>) {
-  settingsBusy[provider] = true
+async function onAccountEdits(provider: ProviderId, id: string, patch: Partial<RequestEdits>) {
+  busyId.value = id
   actionError.value = null
   try {
-    setSettings(provider, await updateProviderSettings(provider, patch))
+    await updateAccountEdits(provider, id, patch)
+    await loadProvider(provider, { forceNetwork: true })
   } catch {
     actionError.value = t("providers.error.settings")
   } finally {
-    delete settingsBusy[provider]
+    busyId.value = null
   }
 }
 
@@ -560,12 +544,17 @@ async function onResumeCustom(provider: CustomProvider) {
   }
 }
 
-/** An endpoint's own switches, keyed by its slug like every provider's settings. */
-async function onCustomSettings(provider: CustomProvider, patch: Partial<ProviderSettings>) {
+/**
+ * An endpoint's own switches, on its one account row, written by the account
+ * route under its slug (docs/auth.md). The card offers them only when that
+ * row exists.
+ */
+async function onCustomEdits(provider: CustomProvider, patch: Partial<RequestEdits>) {
+  if (!provider.account_id) return
   customBusyId.value = provider.id
   actionError.value = null
   try {
-    customProviders.setSettings(provider.id, await updateProviderSettings(provider.slug, patch))
+    customProviders.setEdits(provider.id, await updateAccountEdits(provider.slug, provider.account_id, patch))
   } catch {
     actionError.value = t("custom.error.settings")
   } finally {
@@ -649,17 +638,6 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
         :title="t(NAME_KEY[pid])"
         toolbar-wash
       >
-        <!-- A switch that is on says so beside the title, gate open or
-             closed: a setting is never hidden behind the control that
-             changes it (docs/admin-ui.md § Providers page). -->
-        <template #heading>
-          <Badge v-if="byProvider[pid].data?.strip_fast_mode">
-            {{ t("providers.edits.fastModeOn") }}
-          </Badge>
-          <Badge v-if="byProvider[pid].data?.strip_claude_code_line">
-            {{ t("providers.edits.lineOn") }}
-          </Badge>
-        </template>
         <template #actions>
           <!-- Icon-only ghost: this page is read far more often than it is
                added to, so the create affordance sits at icon weight. Hidden
@@ -718,15 +696,6 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
                 {{ t(STRATEGY_HINT_KEY[strategyOf(pid)]) }}
               </span>
             </div>
-            <hr class="settings-rule" />
-            <RequestEditSwitches
-              :strip-fast-mode="!!byProvider[pid].data?.strip_fast_mode"
-              :strip-claude-code-line="!!byProvider[pid].data?.strip_claude_code_line"
-              :fast-mode-hint="FAST_MODE_HINT_KEY[pid] && t(FAST_MODE_HINT_KEY[pid]!)"
-              :line-hint="lineHint(pid)"
-              :busy="settingsBusy[pid]"
-              @change="onSettingsChange(pid, $event)"
-            />
           </div>
         </template>
 
@@ -765,6 +734,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               @remove="onRemove(pid, account.id)"
               @reconnect="reconnecting = { provider: pid, id: account.id, name: $event }"
               @allow-credits="onAllowCredits(pid, account.id, $event)"
+              @edits="onAccountEdits(pid, account.id, $event)"
             />
           </div>
 
@@ -831,7 +801,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               @resume="onResumeCustom(provider)"
               @edit="openEditCustomDialog(provider)"
               @remove="onRemoveCustomProvider(provider)"
-              @settings="onCustomSettings(provider, $event)"
+              @edits="onCustomEdits(provider, $event)"
               @move-up="moveCustomProvider(index, index - 1)"
               @move-down="moveCustomProvider(index, index + 1)"
               @drag-start="onCustomDragStart(provider.id)"
@@ -913,8 +883,8 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
   gap: var(--space-3);
 }
 
-/* The section's settings block: the strategy row, a hairline, then the
-   request-edit switches — one column, so each control sits under the last. */
+/* The section's settings block: the strategy row. A grid, so a future
+   setting sits under it. */
 .settings {
   display: grid;
   gap: var(--space-4);
@@ -944,13 +914,6 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 .setting-hint {
   color: var(--muted);
   font-size: var(--text-sm);
-}
-
-.settings-rule {
-  width: 100%;
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--border);
 }
 
 /* The card body's own padding already spaces the first and last row, so the

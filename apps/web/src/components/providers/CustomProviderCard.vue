@@ -19,7 +19,7 @@ import Banner from "@/components/ui/Banner.vue"
 import StatusDot from "@/components/ui/StatusDot.vue"
 import { useI18n } from "@/i18n"
 import { testCustomProvider } from "@/services/api"
-import type { CustomProvider, CustomProviderTestResult, ProviderSettings } from "@/types"
+import type { CustomProvider, CustomProviderTestResult, RequestEdits } from "@/types"
 
 const props = defineProps<{
   provider: CustomProvider
@@ -41,7 +41,7 @@ const emit = defineEmits<{
   resume: []
   edit: []
   remove: []
-  settings: [patch: Partial<ProviderSettings>]
+  edits: [patch: Partial<RequestEdits>]
   moveUp: []
   moveDown: []
   dragStart: []
@@ -255,15 +255,16 @@ async function runTest() {
     </dl>
 
     <!-- Behind the section's gate, like the row's actions: this endpoint's
-         own pair, the same two a builtin section has. -->
-    <div v-if="editing" class="edits">
+         own pair, the same two a builtin account has, stored on its one
+         account row. Without that row there is nowhere to store them. -->
+    <div v-if="editing && provider.account_id" class="edits">
       <RequestEditSwitches
         :strip-fast-mode="!!provider.strip_fast_mode"
         :strip-claude-code-line="!!provider.strip_claude_code_line"
         :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
         :line-hint="t('providers.edits.lineHintEndpoint')"
         :busy="busy"
-        @change="emit('settings', $event)"
+        @change="emit('edits', $event)"
       />
     </div>
 
