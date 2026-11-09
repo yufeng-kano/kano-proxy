@@ -6,7 +6,7 @@ import {
   readCliCache,
   writeCliCache,
 } from "@/services/cache"
-import type { CliDevice, CliProvider, ProviderSettings } from "@/types"
+import type { CliDevice, CliProvider, RequestEdits } from "@/types"
 
 type CliState = {
   devices: CliDevice[] | null
@@ -72,14 +72,14 @@ export function useCli() {
     }
   }
 
-  /** Same as useCustomProviders' `setSettings`, for one CLI provider's row. */
-  function setSettings(id: string, settings: ProviderSettings) {
+  /** Same as useCustomProviders' `setEdits`, for one CLI provider's row. */
+  function setEdits(id: string, edits: RequestEdits) {
     const row = state.providers?.find((p) => p.id === id)
     if (!row || !state.providers || !state.devices) return
-    row.strip_fast_mode = settings.strip_fast_mode
-    row.strip_claude_code_line = settings.strip_claude_code_line
+    row.strip_fast_mode = edits.strip_fast_mode
+    row.strip_claude_code_line = edits.strip_claude_code_line
     writeCliCache(userId.value, { devices: state.devices, providers: state.providers })
   }
 
-  return { state, setUserId, load, setSettings, CACHE_TTL_MS }
+  return { state, setUserId, load, setEdits, CACHE_TTL_MS }
 }

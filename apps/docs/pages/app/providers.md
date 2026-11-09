@@ -59,28 +59,28 @@ One row per local model server registered from the CLI: its name and prefix, for
 
 Rows show identity and usage only. The one exception is **Sign in again** on your own accounts whose sign-in expired. To change anything else, choose the pencil in a section's header (**Edit Claude Code**, **Edit Custom endpoints**, **Edit CLI providers**, and so on). The pencil appears once the section has at least one row. It reveals the actions on every row of that section. Choose it again, now a check, to close them. The plus button is hidden while edit mode is open.
 
-In edit mode a subscription card shows a settings block between its header and its rows. The block starts with **Strategy**. **Ordered** is the only option: priority order, first usable account. Below **Strategy** are the card's checkboxes, described in [Request edits](#request-edits). Custom endpoints and CLI providers have their own checkboxes too; [Request edits](#request-edits) lists where each one is.
+In edit mode a subscription card shows a settings block between its header and its rows. It holds **Strategy**. **Ordered** is the only option: priority order, first usable account. Each of your own accounts also shows its own checkboxes at the bottom of its row, described in [Request edits](#request-edits). Custom endpoints and CLI providers have their own checkboxes too; [Request edits](#request-edits) lists where each one is.
 
 ### Request edits
 
-Request edits are up to two checkboxes per provider that change what Kano Proxy sends to it. Both are cleared by default. A box is saved as soon as you select or clear it.
+Request edits are up to two checkboxes per account that change what Kano Proxy sends to it. Each account has its own, so two Claude Code accounts can be set differently. Both are cleared by default. A box is saved as soon as you select or clear it.
 
 **Remove fast mode** sends requests at standard speed. Claude bills fast mode to usage credits, even when plan limits are left. Codex fast mode uses up plan limits faster.
 
-**Remove the Claude Code line** removes Claude Code's identity line, `You are Claude Code, Anthropic's official CLI for Claude.`, from system prompts. It also removes the line's two Claude Agent SDK versions: `You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` and `You are a Claude agent, built on Anthropic's Claude Agent SDK.` Claude Code puts this line in every request. When it calls another provider's model through Kano Proxy, the line reaches that provider too, so every provider has this checkbox. On Claude Code accounts, Kano Proxy also stops adding the line itself. Without it, Claude may refuse requests or bill them to usage credits.
+**Remove the Claude Code line** removes Claude Code's identity line, `You are Claude Code, Anthropic's official CLI for Claude.`, from system prompts. It also removes the line's two Claude Agent SDK versions: `You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` and `You are a Claude agent, built on Anthropic's Claude Agent SDK.` Claude Code puts this line in every request. When it calls another provider's model through Kano Proxy, the line reaches that provider too, so every account has this checkbox. On Claude Code accounts, Kano Proxy also stops adding the line itself. Without it, Claude may refuse requests or bill them to usage credits.
 
 Where the boxes are, in edit mode:
 
-- **Claude Code** and **Codex** cards: both boxes, in the settings block under **Strategy**.
-- **Grok** and **Antigravity** cards: **Remove the Claude Code line** only, also under **Strategy**. Kano Proxy never sends fast mode to these providers.
+- **Claude Code** and **Codex** accounts: both boxes, under **Request edits for this account** at the bottom of each of your own rows.
+- **Grok** and **Antigravity** accounts: **Remove the Claude Code line** only, in the same place. Kano Proxy never sends fast mode to these providers.
 - Each custom endpoint: both boxes, on its row under its details.
 - Each CLI provider: both boxes, in its own group under the **CLI providers** table.
 
-A selected box shows a tag: **Fast mode removed** or **Claude Code line removed**. A subscription card shows it beside its title. A custom endpoint shows it beside its status and format, under its name. A CLI provider shows it beside its prefix and format. The tag stays visible with edit mode open or closed.
+A selected box shows a tag: **Fast mode removed** or **Claude Code line removed**. A subscription account shows it on its row, after its status and plan. A custom endpoint shows it beside its status and format, under its name. A CLI provider shows it beside its prefix and format. The tag stays visible with edit mode open or closed.
 
-Each provider applies only its own boxes. A [group](/app/groups) that falls back from one provider to another applies each target's own boxes. With a box selected, a provider may answer differently or refuse the request.
+Each account applies only its own boxes. When a request moves on to the next account in the pool, or a [group](/app/groups) falls back from one provider to another, the next account applies its own boxes. With a box selected, a provider may answer differently or refuse the request.
 
-On a shared account, both the owner's boxes and the boxes of the person it is shared with count. Fast mode is removed when either of them selects **Remove fast mode**. The Claude Code line is removed only when both select **Remove the Claude Code line**. A card shows only its viewer's own boxes and tags, so the owner's choices do not show on the account they shared.
+An account shared with you follows its owner's boxes only. Its row shows the owner's tags but no checkboxes: only the owner can change them, on their own Providers page.
 
 ## Common tasks
 
@@ -122,13 +122,13 @@ Resume is offered only on your own accounts. A paused account shared with you is
 
 ### Remove fast mode or the Claude Code line
 
-For a subscription provider:
+For a subscription account:
 
 1. Choose the pencil in the provider's card.
-2. In the settings block under the card's header, select **Remove fast mode** or **Remove the Claude Code line**. It is saved at once, and the matching tag appears beside the card's title.
+2. At the bottom of the account's row, under **Request edits for this account**, select **Remove fast mode** or **Remove the Claude Code line**. It is saved at once, and the matching tag appears on the row.
 3. Choose the check to close edit mode.
 
-For a custom endpoint, choose the pencil in the **Custom endpoints** card, then select the box on the endpoint's row. For a CLI provider, choose the pencil in the **CLI providers** card, then select the box in that provider's group under the table. Clear a box the same way to undo it.
+Each account is set on its own row, so repeat step 2 for every account you want to change. For a custom endpoint, choose the pencil in the **Custom endpoints** card, then select the box on the endpoint's row. For a CLI provider, choose the pencil in the **CLI providers** card, then select the box in that provider's group under the table. Clear a box the same way to undo it.
 
 ### Let a Codex account use credits after its limits
 

@@ -32,6 +32,10 @@ pub struct AccountRow {
     pub edge_strike_at: Option<String>,
     /// Opt-in to credit spillover (docs/providers.md § Codex "Credit spillover").
     pub allow_credits: bool,
+    /// This account's request edits (docs/providers.md § Request edits). On a shared row these
+    /// are the owner's, the only ones that apply to it.
+    pub strip_fast_mode: bool,
+    pub strip_claude_code_line: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -124,30 +128,50 @@ pub async fn set_account_custom_label(
     Ok(r.rows_affected() > 0)
 }
 
-/// The operator's own settings on one account, written in one statement
-/// (`PATCH /api/providers/:provider/accounts/:id`, docs/auth.md). `None` keeps a column as
-/// stored, so sending one field never rewrites the other; `Some(None)` clears `custom_label`.
-/// `provider`, when given, must match the row. Returns the stored `(custom_label,
-/// allow_credits)`, or `None` when the caller owns no such row.
+/// The columns one `PATCH /api/providers/:provider/accounts/:id` sets (docs/auth.md). `None`
+/// keeps a column as stored, so sending one field never rewrites another; `custom_label:
+/// Some(None)` clears it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AccountSettingsUpdate<'a> {
+    pub custom_label: Option<Option<&'a str>>,
+    pub allow_credits: Option<bool>,
+    pub strip_fast_mode: Option<bool>,
+    pub strip_claude_code_line: Option<bool>,
+}
+
+/// The operator's own settings on one account, as that write stored them.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct AccountSettings {
+    pub custom_label: Option<String>,
+    pub allow_credits: bool,
+    pub strip_fast_mode: bool,
+    pub strip_claude_code_line: bool,
+}
+
+/// Writes `update` in one statement. `provider`, when given, must match the row. `None` when
+/// the caller owns no such row.
 pub async fn update_account_settings(
     db: &PgPool,
     user_id: &str,
     account_id: &str,
     provider: Option<&str>,
-    custom_label: Option<Option<&str>>,
-    allow_credits: Option<bool>,
-) -> Result<Option<(Option<String>, bool)>, sqlx::Error> {
+    update: AccountSettingsUpdate<'_>,
+) -> Result<Option<AccountSettings>, sqlx::Error> {
     sqlx::query_as(
         "UPDATE upstream_accounts
          SET custom_label = CASE WHEN $1 THEN $2 ELSE custom_label END,
              allow_credits = COALESCE($3, allow_credits),
-             updated_at = $4
-         WHERE id = $5 AND user_id = $6 AND ($7::text IS NULL OR provider = $7)
-         RETURNING custom_label, allow_credits",
+             strip_fast_mode = COALESCE($4, strip_fast_mode),
+             strip_claude_code_line = COALESCE($5, strip_claude_code_line),
+             updated_at = $6
+         WHERE id = $7 AND user_id = $8 AND ($9::text IS NULL OR provider = $9)
+         RETURNING custom_label, allow_credits, strip_fast_mode, strip_claude_code_line",
     )
-    .bind(custom_label.is_some())
-    .bind(custom_label.flatten())
-    .bind(allow_credits)
+    .bind(update.custom_label.is_some())
+    .bind(update.custom_label.flatten())
+    .bind(update.allow_credits)
+    .bind(update.strip_fast_mode)
+    .bind(update.strip_claude_code_line)
     .bind(now_iso())
     .bind(account_id)
     .bind(user_id)
@@ -215,6 +239,8 @@ pub async fn insert_account(db: &PgPool, input: NewAccount<'_>) -> Result<Accoun
         edge_strikes: 0,
         edge_strike_at: None,
         allow_credits: false,
+        strip_fast_mode: false,
+        strip_claude_code_line: false,
         created_at: ts.clone(),
         updated_at: ts,
     })
@@ -587,6 +613,7 @@ mod tests {
             usage_fetched_at: None, usage_fetching_at: None, bench_until: None, bench_reason: None,
             bench_scopes_json: None,
             refreshing_at: None, edge_strikes: 0, edge_strike_at: None, allow_credits: false,
+            strip_fast_mode: false, strip_claude_code_line: false,
             created_at: String::new(), updated_at: String::new(),
         };
         let snap = read_usage_snapshot(&row).unwrap();

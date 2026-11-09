@@ -132,14 +132,14 @@ pub enum AudioInput {
 pub struct CallExtras {
     pub api_key_id: Option<String>,
     pub first_byte_timeout: Option<std::time::Duration>,
-    /// This candidate's provider switches. The dispatch caller has already applied them to the
+    /// This candidate's account switches. The dispatch caller has already applied them to the
     /// body; an adapter only reads them where it adds content of its own (claude-code's line).
     pub edits: RequestEdits,
 }
 
-/// One candidate's request-edit switches (docs/providers.md § Request edits), resolved by the
-/// dispatch walk from `provider_settings`. On a shared row both people's switches count: fast
-/// mode comes off when the borrower or the owner asks, the line only when both do.
+/// One candidate's request-edit switches (docs/providers.md § Request edits): the two columns
+/// on its account row. A shared row is the owner's account, so it carries the owner's switches,
+/// the only ones that apply to it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RequestEdits {
     pub strip_fast_mode: bool,

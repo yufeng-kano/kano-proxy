@@ -19,7 +19,6 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 
 use crate::db::accounts::{delete_accounts_for_provider, list_accounts};
-use crate::db::provider_settings::get_provider_settings;
 use crate::db::cli::{
     delete_cli_provider, exposed_cli_models, list_cli_devices, list_cli_providers, parse_cli_models,
     write_cli_provider_models, CliProviderRow,
@@ -86,24 +85,24 @@ pub async fn cli_provider_list_item(
     device_names: &HashMap<String, String>,
 ) -> Result<Value, sqlx::Error> {
     let accounts = list_accounts(state.pool(), &row.user_id, &row.slug).await?;
-    let settings = get_provider_settings(state.pool(), &row.user_id, &row.slug).await?;
+    let account = accounts.first();
     Ok(json!({
         "id": row.id,
         "slug": row.slug,
         "name": row.name,
         "format": row.format,
         "connected": state.tunnels().is_connected(&row.id),
-        "account_id": accounts.first().map(|a| a.id.clone()),
+        "account_id": account.map(|a| a.id.clone()),
         "models": exposed_cli_models(row.models_json.as_deref(), row.model_filter_json.as_deref()),
         "models_reported": parse_cli_models(row.models_json.as_deref()).len(),
         "model_filter": parse_cli_models(row.model_filter_json.as_deref()),
         "models_updated_at": row.models_updated_at,
         "device_id": row.device_id,
         "device_name": row.device_id.as_ref().and_then(|id| device_names.get(id).cloned()),
-        // The provider's request-edit switches (docs/providers.md § Request edits), written
-        // through `PATCH /api/providers/:slug`.
-        "strip_fast_mode": settings.strip_fast_mode,
-        "strip_claude_code_line": settings.strip_claude_code_line,
+        // The request-edit switches on that account row (docs/providers.md § Request edits),
+        // written through `PATCH /api/providers/:slug/accounts/:account_id`.
+        "strip_fast_mode": account.is_some_and(|a| a.strip_fast_mode),
+        "strip_claude_code_line": account.is_some_and(|a| a.strip_claude_code_line),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }))

@@ -13,13 +13,14 @@
  * text label (§ Accessibility floor).
  */
 import { computed, ref, watch } from "vue"
+import RequestEditSwitches from "@/components/providers/RequestEditSwitches.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import StatusDot from "@/components/ui/StatusDot.vue"
 import UsageBar from "@/components/ui/UsageBar.vue"
 import { useI18n } from "@/i18n"
-import type { CodexCredits, ProviderAccount } from "@/types"
+import type { CodexCredits, ProviderAccount, RequestEdits } from "@/types"
 
 const props = defineProps<{
   account: ProviderAccount
@@ -53,6 +54,8 @@ const emit = defineEmits<{
   reconnect: [name: string]
   /** The owner's new choice for routing on credits after the plan's limits. */
   allowCredits: [allow: boolean]
+  /** The owner's change to this account's request-edit switches. */
+  edits: [patch: Partial<RequestEdits>]
 }>()
 
 const { t } = useI18n()
@@ -262,6 +265,23 @@ const showAllowCredits = computed(
 )
 
 /**
+ * This account's request-edit switches (docs/admin-ui.md § Providers page):
+ * the owner's alone, so a shared row gets no block, only the tags. Grok and
+ * Antigravity never forward fast mode, so their rows offer only the line.
+ */
+const showEdits = computed(() => !!props.editing && !share.value)
+
+const fastModeHint = computed(() => {
+  if (props.provider === "claude-code") return t("providers.edits.fastModeHintClaude")
+  if (props.provider === "codex") return t("providers.edits.fastModeHint")
+  return undefined
+})
+
+const lineHint = computed(() =>
+  props.provider === "claude-code" ? t("providers.edits.lineHintClaude") : t("providers.edits.lineHint"),
+)
+
+/**
  * The native checkbox flips itself on click, and Vue patches nothing back
  * when the bound value never changed — so once the write settles, the box is
  * put back to whatever the reloaded row says (a failure reverts it).
@@ -316,6 +336,10 @@ watch(
             {{ t("providers.account.primary") }}
           </Badge>
           <Badge v-if="plan">{{ t("providers.account.plan", { plan }) }}</Badge>
+          <!-- On every row, shared ones included: a borrower cannot change
+               the owner's switches but still sees what they do to requests. -->
+          <Badge v-if="account.strip_fast_mode">{{ t("providers.edits.fastModeOn") }}</Badge>
+          <Badge v-if="account.strip_claude_code_line">{{ t("providers.edits.lineOn") }}</Badge>
           <!-- The one fact on this row the viewer does not own: who lends it. The
                name can be long, so the pill caps its width and keeps the whole
                string in its title rather than clipping mid-word. -->
@@ -422,6 +446,17 @@ watch(
         <span class="check-hint">{{ t("providers.account.allowCreditsHint") }}</span>
       </span>
     </label>
+    <div v-if="showEdits" class="edits">
+      <span class="edits-title">{{ t("providers.edits.accountTitle") }}</span>
+      <RequestEditSwitches
+        :strip-fast-mode="!!account.strip_fast_mode"
+        :strip-claude-code-line="!!account.strip_claude_code_line"
+        :fast-mode-hint="fastModeHint"
+        :line-hint="lineHint"
+        :busy="busy"
+        @change="emit('edits', $event)"
+      />
+    </div>
   </div>
 </template>
 
@@ -581,6 +616,23 @@ watch(
   margin: 0;
   color: var(--faint);
   font-size: var(--text-xs);
+}
+
+/* The row's own settings, set off from its usage by a wash rather than a
+   second card border, so it reads as part of this account. */
+.edits {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.edits-title {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
 }
 
 /* Same checkbox spec as the key dialog's: box, then label over its hint. */
