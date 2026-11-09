@@ -17,7 +17,7 @@ import type {
   ModelGroupModelInput,
   ModelsResponse,
   ProviderId,
-  ProviderSettings,
+  RequestEdits,
   RoutingStrategy,
   SpendLimitInterval,
   UsageDays,
@@ -203,25 +203,19 @@ export async function listAccounts(
 }
 
 /**
- * Writes some of a provider's settings (docs/auth.md): the pool's routing
- * strategy and the request-edit switches. Keys left out keep their stored
- * value. `provider` is a builtin id or a custom or CLI provider's slug.
- * Returns what the server stored, so the caller paints that rather than what
- * it sent.
+ * Sets the pool's routing strategy (docs/auth.md). `ordered` is the only value
+ * the server accepts today; anything else is a 400. Returns the stored value so
+ * the caller paints what was saved rather than what it sent.
  */
-export async function updateProviderSettings(
-  provider: string,
-  patch: Partial<ProviderSettings>,
-): Promise<ProviderSettings> {
-  const data = await request<{ ok: boolean } & ProviderSettings>(
-    `/api/providers/${encodeURIComponent(provider)}`,
-    { method: "PATCH", body: JSON.stringify(patch) },
+export async function setProviderStrategy(
+  provider: ProviderId,
+  strategy: RoutingStrategy,
+): Promise<RoutingStrategy> {
+  const data = await request<{ ok: boolean; strategy: RoutingStrategy }>(
+    `/api/providers/${provider}`,
+    { method: "PATCH", body: JSON.stringify({ strategy }) },
   )
-  return {
-    strategy: data.strategy,
-    strip_fast_mode: data.strip_fast_mode,
-    strip_claude_code_line: data.strip_claude_code_line,
-  }
+  return data.strategy
 }
 
 /**
@@ -274,6 +268,25 @@ export async function setAccountAllowCredits(
     `/api/providers/${provider}/accounts/${encodeURIComponent(id)}`,
     { method: "PATCH", body: JSON.stringify({ allow_credits: allow }) },
   )
+}
+
+/**
+ * Writes some of one account's request-edit switches (docs/auth.md). Same
+ * PATCH as rename; keys left out keep their stored value. `provider` is a
+ * builtin id, or a custom endpoint's or CLI provider's slug with its
+ * `account_id`. Returns what the server stored, so the caller paints that
+ * rather than what it sent.
+ */
+export async function updateAccountEdits(
+  provider: string,
+  id: string,
+  patch: Partial<RequestEdits>,
+): Promise<RequestEdits> {
+  const data = await request<{ ok: boolean } & RequestEdits>(
+    `/api/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(id)}`,
+    { method: "PATCH", body: JSON.stringify(patch) },
+  )
+  return { strip_fast_mode: data.strip_fast_mode, strip_claude_code_line: data.strip_claude_code_line }
 }
 
 export async function removeAccount(

@@ -1,13 +1,10 @@
-//! Per-provider request edits (docs/providers.md § Request edits): "Remove fast mode" and
+//! Per-account request edits (docs/providers.md § Request edits): "Remove fast mode" and
 //! "Remove the Claude Code line", applied by each dispatch caller to the copy of the body one
-//! candidate's call gets. The walk resolves every candidate's switches in one read up front.
+//! candidate's call gets. The walk takes each candidate's switches from its account row.
 
 use serde_json::{Map, Value};
-use sqlx::PgPool;
 
-use crate::db::provider_settings::list_provider_settings;
 use crate::providers::types::{ChatCompletionRequest, RequestEdits};
-use crate::routing::types::RoutingCandidate;
 
 /// Claude Code's identity sentences, as Claude Code 2.1.319 sends them (interactive, the Agent
 /// SDK preset, and the Agent SDK without it).
@@ -19,42 +16,6 @@ pub const CLAUDE_CODE_LINES: [&str; 3] = [
 
 /// The Codex fast-mode tier (codex-rs `Fast => "priority"`); every other tier is left alone.
 const FAST_SERVICE_TIER: &str = "priority";
-
-/// Each candidate's switches, in candidate order: the requester's own row for the candidate's
-/// provider, and on a shared row the owner's too, since both switches touch what the owner pays.
-/// Fast mode comes off when either asks (it only lowers the owner's bill); the line comes off
-/// only when both do (without it the upstream may bill the owner's usage credits). One query
-/// for the whole list.
-pub async fn candidate_edits(
-    db: &PgPool,
-    user_id: &str,
-    candidates: &[RoutingCandidate],
-) -> Result<Vec<RequestEdits>, sqlx::Error> {
-    let mut users = vec![user_id.to_string()];
-    let mut providers: Vec<String> = Vec::new();
-    for candidate in candidates {
-        if !providers.contains(&candidate.provider) {
-            providers.push(candidate.provider.clone());
-        }
-        if candidate.share.is_some() && !users.contains(&candidate.account.user_id) {
-            users.push(candidate.account.user_id.clone());
-        }
-    }
-    let rows = list_provider_settings(db, &users, &providers).await?;
-    let row = |user: &str, provider: &str| rows.iter().find(|r| r.user_id == user && r.provider == provider);
-    Ok(candidates
-        .iter()
-        .map(|candidate| {
-            let own = row(user_id, &candidate.provider);
-            let owner = candidate.share.as_ref().and_then(|_| row(&candidate.account.user_id, &candidate.provider));
-            RequestEdits {
-                strip_fast_mode: own.is_some_and(|r| r.strip_fast_mode) || owner.is_some_and(|r| r.strip_fast_mode),
-                strip_claude_code_line: own.is_some_and(|r| r.strip_claude_code_line)
-                    && (candidate.share.is_none() || owner.is_some_and(|r| r.strip_claude_code_line)),
-            }
-        })
-        .collect())
-}
 
 /// An Anthropic Messages / count_tokens body.
 pub fn edit_anthropic_body(body: &mut Map<String, Value>, edits: RequestEdits) {
@@ -178,10 +139,6 @@ fn strip_text(text: &mut String) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::provider_settings::{update_provider_settings, ProviderSettingsUpdate};
-    use crate::db::test_support::{insert_user, skip_without_db, test_pool};
-    use crate::pool::extension::ShareInfo;
-    use crate::routing::candidates::tests_support::candidate_with;
     use serde_json::json;
 
     const CC: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -317,56 +274,5 @@ mod tests {
             edit_chat_request(&mut req, BOTH);
             assert_eq!(req.raw_body.get("service_tier"), Some(&json!(tier)));
         }
-    }
-
-    #[tokio::test]
-    async fn each_candidate_reads_its_own_provider_and_a_shared_row_adds_the_owners_switches() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let me = insert_user(&pool, "edits-me@example.com").await;
-        let owner = insert_user(&pool, "edits-owner@example.com").await;
-        let set = |fast: bool, line: bool| ProviderSettingsUpdate {
-            strip_fast_mode: Some(fast),
-            strip_claude_code_line: Some(line),
-            ..Default::default()
-        };
-        update_provider_settings(&pool, &me.id, "codex", set(false, true)).await.unwrap();
-        update_provider_settings(&pool, &owner.id, "claude-code", set(true, true)).await.unwrap();
-        // The owner's codex row never applies to my own codex account.
-        update_provider_settings(&pool, &owner.id, "codex", set(true, false)).await.unwrap();
-
-        let mine_codex = {
-            let mut c = candidate_with("acc_1", "codex", 0);
-            c.account.user_id = me.id.clone();
-            c
-        };
-        let mine_claude = {
-            let mut c = candidate_with("acc_2", "claude-code", 0);
-            c.account.user_id = me.id.clone();
-            c
-        };
-        let shared_claude = {
-            let mut c = candidate_with("acc_3", "claude-code", 1);
-            c.account.user_id = owner.id.clone();
-            c.share = Some(ShareInfo { team_id: "t".into(), team_name: "T".into(), owner_label: "O".into() });
-            c
-        };
-        let edits = candidate_edits(&pool, &me.id, &[mine_codex, mine_claude, shared_claude.clone()]).await.unwrap();
-        assert_eq!(
-            edits,
-            [
-                RequestEdits { strip_fast_mode: false, strip_claude_code_line: true },
-                RequestEdits::default(),
-                RequestEdits { strip_fast_mode: true, strip_claude_code_line: false },
-            ]
-        );
-        // The line comes off a lent account only when the borrower and the owner both ask:
-        // without it the upstream may bill the owner's usage credits.
-        update_provider_settings(&pool, &me.id, "claude-code", set(false, true)).await.unwrap();
-        assert_eq!(candidate_edits(&pool, &me.id, std::slice::from_ref(&shared_claude)).await.unwrap(), [BOTH]);
-        update_provider_settings(&pool, &owner.id, "claude-code", set(true, false)).await.unwrap();
-        assert_eq!(
-            candidate_edits(&pool, &me.id, &[shared_claude]).await.unwrap(),
-            [RequestEdits { strip_fast_mode: true, strip_claude_code_line: false }]
-        );
     }
 }

@@ -1,16 +1,16 @@
 <script setup lang="ts">
 /**
- * One provider's request-edit switches (docs/providers.md § Request edits):
+ * One account's request-edit switches (docs/providers.md § Request edits):
  * Remove fast mode and Remove the Claude Code line, each a labelled checkbox
- * with one line saying what it does. The same pair on a builtin section, a
- * custom endpoint and a CLI provider (docs/admin-ui.md § Providers page).
+ * with one line saying what it does. The same pair on a builtin account row,
+ * a custom endpoint and a CLI provider (docs/admin-ui.md § Providers page).
  *
  * Presentational: whoever owns the provider's data writes the change and
  * reloads, and `busy` covers that write.
  */
 import { ref, watch } from "vue"
 import { useI18n } from "@/i18n"
-import type { ProviderSettings } from "@/types"
+import type { RequestEdits } from "@/types"
 
 const props = defineProps<{
   stripFastMode: boolean
@@ -21,7 +21,7 @@ const props = defineProps<{
   busy?: boolean
 }>()
 
-const emit = defineEmits<{ change: [patch: Partial<ProviderSettings>] }>()
+const emit = defineEmits<{ change: [patch: Partial<RequestEdits>] }>()
 
 const { t } = useI18n()
 

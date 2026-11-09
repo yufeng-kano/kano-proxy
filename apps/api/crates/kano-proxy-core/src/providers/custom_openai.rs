@@ -400,6 +400,8 @@ pub(crate) mod test_support {
                 edge_strikes: 0,
                 edge_strike_at: None,
                 allow_credits: false,
+                strip_fast_mode: false,
+                strip_claude_code_line: false,
                 created_at: "2026-01-01T00:00:00.000Z".into(),
                 updated_at: "2026-01-01T00:00:00.000Z".into(),
             },

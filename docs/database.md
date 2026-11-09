@@ -77,13 +77,17 @@ Spend-limit columns are part of the baseline; `device_id` was added in `0003_api
 | bench_reason | TEXT | nullable; content-free cause of the current bench — the upstream status as text (`"429"`, `"524"`, …) or `"refresh_failed"`. Written with `bench_until`, nulled by unpause |
 | bench_scopes_json | TEXT | nullable; benches that cover one **quota scope** of the account instead of all of it (`0004_scoped_bench.sql`, [providers.md](./providers.md) § Routing module "Quota scopes"): `{"<scope>": {"until": "<ISO>", "reason": "429"}}`. Same rules as `bench_until` per entry — monotonic per scope, compared at read, expired entries never deleted (at most one per scope the adapter defines). Nulled by unpause |
 | allow_credits | BOOLEAN | `NOT NULL DEFAULT FALSE`; the owner's opt-in to **credit spillover** (`0005_account_allow_credits.sql`, [providers.md](./providers.md) § Codex "Credit spillover"): when true and the stored `credits` read usable, an exhausted usage window no longer makes the account unusable. Written only by `PATCH /api/providers/:provider/accounts/:id`, and only for a provider whose adapter supports spillover (`codex` today). Reconnect, unpause and the usage refresh leave it alone |
+| strip_fast_mode | BOOLEAN | `NOT NULL DEFAULT FALSE`; **Remove fast mode** for this account (`0008_account_request_edits.sql`, [providers.md](./providers.md) § Request edits). Written only by `PATCH /api/providers/:provider/accounts/:id`, which refuses it for `grok` / `antigravity` (neither forwards a fast-mode field). Reconnect, unpause and the usage refresh leave it alone |
+| strip_claude_code_line | BOOLEAN | `NOT NULL DEFAULT FALSE`; **Remove the Claude Code line** for this account (`0008`). Same writer, accepted for every provider, same rule for reconnect, unpause and the usage refresh |
 | refreshing_at | TEXT | nullable; OAuth refresh single-flight lock, same CAS pattern as `usage_fetching_at` (30s breakable) — see [providers.md](./providers.md) § OAuth refresh single-flight |
 | edge_strikes | INTEGER | `NOT NULL DEFAULT 0`; consecutive upstream edge-timeout (520/522/524) strikes. Incremented atomically on each edge-timeout; the 3rd within 10 minutes benches 30s and resets to 0 ([providers.md](./providers.md) § Penalties). Never written on success |
 | edge_strike_at | TEXT | nullable; time of the last edge-timeout strike. A value older than 10 minutes stales the count — the next increment restarts at 1 |
 | created_at | TEXT | |
 | updated_at | TEXT | |
 
-`allow_credits` is `BOOLEAN` rather than the `INTEGER` 0/1 the baseline's older flags use: it is new, Postgres-only, and reads straight into a Rust `bool`. Its `0005` is the core's own numbering after the baseline, not the pre-baseline `0005_account_custom_label.sql` named in the table above.
+`allow_credits` is `BOOLEAN` rather than the `INTEGER` 0/1 the baseline's older flags use: it is new, Postgres-only, and reads straight into a Rust `bool`. Its `0005` is the core's own numbering after the baseline, not the pre-baseline `0005_account_custom_label.sql` named in the table above. The two switches follow the same rule.
+
+`0008` moved the request-edit switches from the provider to the account: it adds the two columns, then copies each user's `provider_settings` pair for a provider onto every account that user owns under it (builtin, custom or CLI), so an account used by its owner behaves as before. A shared account carries its owner's switches, which are the only ones that apply when it is lent. That part does change at the upgrade: before it, the borrower's Remove fast mode also counted on a lent account, and the line was removed only when owner and borrower both had it on ([providers.md](./providers.md) § Request edits "Shared accounts").
 
 `label` and `custom_label` are two different jobs and must not be merged: `label` is a cache of upstream identity (the accounts read overwrites it whenever the upstream email/display name changes), so a rename written there survives only until the next poll. `custom_label` is user intent — set by `PATCH /api/providers/:provider/accounts/:id`, cleared by sending `null`/`""`, and read first by the display-name resolver.
 
@@ -206,20 +210,19 @@ The callable models of a group, 1–20 per group, each with its own ordered targ
 
 ### `provider_settings`
 
-Per-user, per-provider settings. Two jobs:
+Per-user, per-provider routing **strategy** ([providers.md](./providers.md) § Routing module), the pool-level counterpart of `model_groups.strategy`, governing **direct** `provider/model` calls. Added in `0010_routing_strategy.sql` (pre-baseline; part of `0001_core_baseline.sql` now).
 
-- The pool's routing **strategy** ([providers.md](./providers.md) § Routing module), the pool-level counterpart of `model_groups.strategy`, governing **direct** `provider/model` calls. Added in `0010_routing_strategy.sql` (pre-baseline; part of `0001_core_baseline.sql` now).
-- The two **request-edit switches** ([providers.md](./providers.md) § Request edits), which govern every call a candidate of that provider makes, group endpoints included. Added in `0007_provider_request_edits.sql`.
+`provider` is a builtin id, a custom provider's slug **or** a CLI provider's slug (same convention as `upstream_accounts.provider`); no FK to `custom_providers` / `cli_providers`. Only builtin ids are written today. Deleting a custom endpoint or CLI provider deletes its row in the same transaction (since `0007`), and creating one deletes any row already under its slug in the insert's transaction, so a new provider never inherits an old one's row. **A missing row means `ordered`** — rows are created lazily on first write, never backfilled.
 
-`provider` is a builtin id, a custom provider's slug **or** a CLI provider's slug (same convention as `upstream_accounts.provider`); no FK to `custom_providers` / `cli_providers`. Deleting a custom endpoint or CLI provider deletes its row in the same transaction (since `0007`), and creating one deletes any row already under its slug in the insert's transaction, so a new provider always starts with both switches off, even after a settings write that raced the old provider's delete. A row orphaned before `0007` holds only default values and is inert. **A missing row means `ordered` with both switches off** — rows are created lazily on first write, never backfilled. A write upserts only the columns it was sent, so a strategy write never resets a switch and a switch write never resets the strategy.
+`strip_fast_mode` and `strip_claude_code_line` (`0007_provider_request_edits.sql`) held the request-edit switches per provider until `0008` copied them onto each account (`upstream_accounts` above). Since `0008` nothing reads or writes them. They stay because a core build from before `0008` reads them on every request, so dropping them would break a rollback; a later migration drops them.
 
 | Column | Type | Notes |
 |--------|------|-------|
 | user_id | TEXT | `ON DELETE CASCADE` → `users.id`; PK part |
 | provider | TEXT | builtin id, custom slug or CLI slug; PK part |
 | strategy | TEXT | `NOT NULL DEFAULT 'ordered'`; same value set and forward-compat rule as `model_groups.strategy` |
-| strip_fast_mode | BOOLEAN | `NOT NULL DEFAULT FALSE`; **Remove fast mode**. The write route rejects it for `grok` / `antigravity`, which never forward a fast-mode field |
-| strip_claude_code_line | BOOLEAN | `NOT NULL DEFAULT FALSE`; **Remove the Claude Code line** |
+| strip_fast_mode | BOOLEAN | `NOT NULL DEFAULT FALSE`; unread since `0008` (above) |
+| strip_claude_code_line | BOOLEAN | `NOT NULL DEFAULT FALSE`; unread since `0008` (above) |
 | updated_at | TEXT | ISO |
 
 `PRIMARY KEY (user_id, provider)`.

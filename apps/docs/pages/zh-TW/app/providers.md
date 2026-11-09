@@ -59,28 +59,28 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 
 平常每一列只顯示身分和用量，唯一的例外是你自己的帳號登入失效時出現的 **Sign in again**。要修改其他東西，先按該區標題列的鉛筆（**Edit Claude Code**、**Edit Custom endpoints**、**Edit CLI providers** 等）。該區至少有一列時才會出現鉛筆。按下後，該區每一列的操作按鈕會一起出現。再按一次（這時變成打勾按鈕）就收起來。編輯模式開著時，加號按鈕會隱藏。
 
-在編輯模式下，訂閱帳號的卡片會在標題列和帳號列之間多出一塊設定區。最上面是 **Strategy**，目前只有 **Ordered** 一個選項：依優先順序，用第一個可用的帳號。**Strategy** 下面是這張卡的勾選項，說明見[轉送前的修改](#轉送前的修改)。自訂端點和 CLI 供應商也有自己的勾選項，各自的位置列在[轉送前的修改](#轉送前的修改)。
+在編輯模式下，訂閱帳號的卡片會在標題列和帳號列之間多出一塊設定區，裡面是 **Strategy**。目前只有 **Ordered** 一個選項：依優先順序，用第一個可用的帳號。你自己的每個帳號，該列最下面也會出現它自己的勾選項，說明見[轉送前的修改](#轉送前的修改)。自訂端點和 CLI 供應商也有自己的勾選項，各自的位置列在[轉送前的修改](#轉送前的修改)。
 
 ### 轉送前的修改
 
-這些勾選項會改變 Kano Proxy 轉送給供應商的內容，每個供應商最多兩個，預設都不勾選。勾選或取消勾選都會立刻儲存。
+這些勾選項會改變 Kano Proxy 轉送給帳號的內容，每個帳號最多兩個，預設都不勾選。每個帳號各自設定，所以兩個 Claude Code 帳號可以勾得不一樣。勾選或取消勾選都會立刻儲存。
 
 **Remove fast mode** 讓請求以標準速度送出。Claude 的 fast mode 一律以額外用量點數（usage credits）計費，方案額度還有剩也一樣。Codex 的 fast mode 會更快耗掉方案額度。
 
-**Remove the Claude Code line** 會從 system prompt 拿掉 Claude Code 的身分宣告 `You are Claude Code, Anthropic's official CLI for Claude.`。Claude Agent SDK 用的兩種寫法也會一起拿掉：`You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` 和 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`。Claude Code 每個請求都會帶這一行。它透過 Kano Proxy 呼叫其他供應商的模型時，這一行也會送到那個供應商，所以每個供應商都有這個勾選項。如果是 Claude Code 帳號，Kano Proxy 也不會再自己補上這一行。少了它，Claude 可能拒絕請求，或改用額外用量點數計費。
+**Remove the Claude Code line** 會從 system prompt 拿掉 Claude Code 的身分宣告 `You are Claude Code, Anthropic's official CLI for Claude.`。Claude Agent SDK 用的兩種寫法也會一起拿掉：`You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` 和 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`。Claude Code 每個請求都會帶這一行。它透過 Kano Proxy 呼叫其他供應商的模型時，這一行也會送到那個供應商，所以每個帳號都有這個勾選項。如果是 Claude Code 帳號，Kano Proxy 也不會再自己補上這一行。少了它，Claude 可能拒絕請求，或改用額外用量點數計費。
 
 勾選項在編輯模式下的位置：
 
-- **Claude Code** 和 **Codex** 卡片：兩個都有，在設定區的 **Strategy** 下面。
-- **Grok** 和 **Antigravity** 卡片：只有 **Remove the Claude Code line**，一樣在 **Strategy** 下面。Kano Proxy 本來就不會把 fast mode 送給這兩個供應商。
+- **Claude Code** 和 **Codex** 帳號：兩個都有，在你自己每個帳號那一列最下面的 **Request edits for this account**。
+- **Grok** 和 **Antigravity** 帳號：只有 **Remove the Claude Code line**，位置一樣。Kano Proxy 本來就不會把 fast mode 送給這兩個供應商。
 - 每個自訂端點：兩個都有，在該列的端點資訊下方。
 - 每個 CLI 供應商：兩個都有，在 **CLI providers** 表格下方，每個供應商一組。
 
-勾選後會出現標記：**Fast mode removed** 或 **Claude Code line removed**。訂閱帳號的卡片顯示在標題旁，自訂端點顯示在名稱下方的狀態和格式旁，CLI 供應商顯示在前綴和格式旁。不管編輯模式開著還是關著，標記都會一直顯示。
+勾選後會出現標記：**Fast mode removed** 或 **Claude Code line removed**。訂閱帳號顯示在該列的狀態和方案後面，自訂端點顯示在名稱下方的狀態和格式旁，CLI 供應商顯示在前綴和格式旁。不管編輯模式開著還是關著，標記都會一直顯示。
 
-每個供應商只套用自己的勾選項。[群組](/zh-TW/app/groups)從一個供應商備援到另一個時，每個目標各自套用自己的勾選項。勾選之後，供應商的回應可能不一樣，也可能直接拒絕請求。
+每個帳號只套用自己的勾選項。請求換到帳號池的下一個帳號，或[群組](/zh-TW/app/groups)從一個供應商備援到另一個時，下一個帳號套用它自己的勾選項。勾選之後，供應商的回應可能不一樣，也可能直接拒絕請求。
 
-分享的帳號會同時看擁有者和被分享者的勾選項。只要其中一方勾選 **Remove fast mode**，就會移除 fast mode。Claude Code 那一行則要雙方都勾選 **Remove the Claude Code line** 才會移除。每張卡片只顯示看的人自己的勾選項和標記，擁有者的勾選不會顯示在分享出去的帳號上。
+分享給你的帳號只看擁有者的勾選項。那一列會顯示擁有者的標記，但沒有勾選項：只有擁有者能在自己的 Providers 頁面修改。
 
 ## 常見操作
 
@@ -122,13 +122,13 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 
 ### 移除 fast mode 或 Claude Code 那一行
 
-訂閱供應商：
+訂閱帳號：
 
 1. 在該供應商的卡片上按鉛筆。
-2. 在標題列下方的設定區，勾選 **Remove fast mode** 或 **Remove the Claude Code line**。會立刻儲存，卡片標題旁也會馬上出現對應的標記。
+2. 在該帳號那一列最下面的 **Request edits for this account**，勾選 **Remove fast mode** 或 **Remove the Claude Code line**。會立刻儲存，那一列也會馬上出現對應的標記。
 3. 按打勾按鈕收起編輯模式。
 
-自訂端點：在 **Custom endpoints** 卡片上按鉛筆，再到該端點那一列勾選。CLI 供應商：在 **CLI providers** 卡片上按鉛筆，再到表格下方該供應商那一組勾選。要還原，用同樣的方式取消勾選。
+每個帳號在自己那一列設定，要改幾個帳號，就在每一列各做一次第 2 步。自訂端點：在 **Custom endpoints** 卡片上按鉛筆，再到該端點那一列勾選。CLI 供應商：在 **CLI providers** 卡片上按鉛筆，再到表格下方該供應商那一組勾選。要還原，用同樣的方式取消勾選。
 
 ### 讓 Codex 帳號在額度用完後改用點數
 

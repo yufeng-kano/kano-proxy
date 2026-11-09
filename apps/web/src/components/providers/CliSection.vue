@@ -30,13 +30,13 @@ import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
-import { deleteCliProvider, renameCliProvider, updateProviderSettings } from "@/services/api"
-import type { CliProvider, ProviderSettings } from "@/types"
+import { deleteCliProvider, renameCliProvider, updateAccountEdits } from "@/services/api"
+import type { CliProvider, RequestEdits } from "@/types"
 
 const { t, format } = useI18n()
 const confirm = useConfirm()
 const { user } = useAuth()
-const { state, load, setUserId, setSettings } = useCli()
+const { state, load, setUserId, setEdits } = useCli()
 setUserId(user.value?.id ?? null)
 
 const error = ref<string | null>(null)
@@ -102,12 +102,15 @@ async function onRemove(provider: CliProvider) {
   }
 }
 
-/** A provider's own switches, keyed by its slug like every provider's settings. */
-async function onSettings(provider: CliProvider, patch: Partial<ProviderSettings>) {
+/**
+ * A provider's own switches, on its one internal account row, written by the
+ * account route under its slug (docs/auth.md).
+ */
+async function onEdits(provider: CliProvider, accountId: string, patch: Partial<RequestEdits>) {
   settingsBusyId.value = provider.id
   error.value = null
   try {
-    setSettings(provider.id, await updateProviderSettings(provider.slug, patch))
+    setEdits(provider.id, await updateAccountEdits(provider.slug, accountId, patch))
   } catch {
     error.value = t("cli.error.settings")
   } finally {
@@ -224,27 +227,25 @@ function modelsCell(provider: CliProvider): string {
     <!-- Under the table rather than in it: two switches with a line each do
          not fit a cell. One group per provider, named after it, since every
          group offers the same two switches. -->
-    <div v-if="editing && providers.length" class="edits">
-      <div
-        v-for="row in providers"
-        :key="row.id"
-        class="edit"
-        role="group"
-        :aria-label="row.name"
-      >
-        <span class="edit-name">
-          {{ row.name }}
-          <code class="mono slug">{{ row.slug }}/*</code>
-        </span>
-        <RequestEditSwitches
-          :strip-fast-mode="!!row.strip_fast_mode"
-          :strip-claude-code-line="!!row.strip_claude_code_line"
-          :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
-          :line-hint="t('providers.edits.lineHintEndpoint')"
-          :busy="settingsBusyId === row.id"
-          @change="onSettings(row, $event)"
-        />
-      </div>
+    <div v-if="editing && providers.some((p) => p.account_id)" class="edits">
+      <template v-for="row in providers" :key="row.id">
+        <!-- A provider whose account row is missing has nowhere to store
+             its switches, so it gets no group. -->
+        <div v-if="row.account_id" class="edit" role="group" :aria-label="row.name">
+          <span class="edit-name">
+            {{ row.name }}
+            <code class="mono slug">{{ row.slug }}/*</code>
+          </span>
+          <RequestEditSwitches
+            :strip-fast-mode="!!row.strip_fast_mode"
+            :strip-claude-code-line="!!row.strip_claude_code_line"
+            :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
+            :line-hint="t('providers.edits.lineHintEndpoint')"
+            :busy="settingsBusyId === row.id"
+            @change="onEdits(row, row.account_id, $event)"
+          />
+        </div>
+      </template>
     </div>
   </AppCard>
 

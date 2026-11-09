@@ -401,8 +401,12 @@ mod tests {
         let (_, provider_id) = seed_provider(&state, &user).await;
         let cookie = cookie_for(&state, &user.id).await;
 
-        let fast = crate::db::provider_settings::ProviderSettingsUpdate { strip_fast_mode: Some(true), ..Default::default() };
-        crate::db::provider_settings::update_provider_settings(state.pool(), &user.id, "my-mac", fast).await.unwrap();
+        // The switches live on the provider's one account row, written by the account route
+        // under the provider's slug (docs/auth.md).
+        let account_id = list_accounts(state.pool(), &user.id, "my-mac").await.unwrap()[0].id.clone();
+        let patch = format!("/api/providers/my-mac/accounts/{account_id}");
+        let fast = send(&state, request("PATCH", &patch, &cookie, Some(serde_json::json!({ "strip_fast_mode": true })))).await;
+        assert_eq!(fast.status(), StatusCode::OK);
         let listed = send(&state, request("GET", "/api/cli/providers", &cookie, None)).await;
         let listed: serde_json::Value =
             serde_json::from_slice(&axum::body::to_bytes(listed.into_body(), usize::MAX).await.unwrap()).unwrap();
@@ -412,9 +416,7 @@ mod tests {
         let uri = format!("/api/cli/providers/{provider_id}");
         assert_eq!(send(&state, request("DELETE", &uri, &cookie, None)).await.status(), StatusCode::OK);
         assert!(get_cli_provider_by_id(state.pool(), &user.id, &provider_id).await.unwrap().is_none());
-        assert!(list_accounts(state.pool(), &user.id, "my-mac").await.unwrap().is_empty());
-        let settings = crate::db::provider_settings::get_provider_settings(state.pool(), &user.id, "my-mac").await.unwrap();
-        assert!(!settings.strip_fast_mode, "the switch went with the provider");
+        assert!(list_accounts(state.pool(), &user.id, "my-mac").await.unwrap().is_empty(), "the switch went with its row");
     }
 
     #[tokio::test]

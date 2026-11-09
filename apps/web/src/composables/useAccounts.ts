@@ -6,7 +6,7 @@ import {
   readAccountsCache,
   writeAccountsCache,
 } from "@/services/cache"
-import type { AccountsResponse, ProviderId, ProviderSettings } from "@/types"
+import type { AccountsResponse, ProviderId, RequestEdits, RoutingStrategy } from "@/types"
 
 type ProviderState = {
   data: AccountsResponse | null
@@ -97,15 +97,28 @@ export function useAccounts() {
   }
 
   /**
-   * Records the settings a write just saved. The whole payload is re-cached
-   * with them, so the next cache-first paint shows the new values instead of
-   * the ones the last read happened to carry — a re-fetch would cost an
-   * upstream usage round trip to learn fields the response already told us.
+   * Records the strategy a write just saved. The whole payload is re-cached
+   * with it, so the next cache-first paint shows the new value instead of the
+   * one the last read happened to carry — a re-fetch would cost an upstream
+   * usage round trip to learn one field the response already told us.
    */
-  function setSettings(provider: ProviderId, settings: ProviderSettings) {
+  function setStrategy(provider: ProviderId, strategy: RoutingStrategy) {
     const data = byProvider[provider].data
     if (!data) return
-    Object.assign(data, settings)
+    data.strategy = strategy
+    writeAccountsCache(userId.value, provider, data)
+  }
+
+  /**
+   * Records the switches a write just saved on that one row, the same way:
+   * the write's answer is the stored pair, and nothing else on the row moved.
+   */
+  function setAccountEdits(provider: ProviderId, id: string, edits: RequestEdits) {
+    const data = byProvider[provider].data
+    const row = data?.accounts.find((a) => a.id === id)
+    if (!data || !row) return
+    row.strip_fast_mode = edits.strip_fast_mode
+    row.strip_claude_code_line = edits.strip_claude_code_line
     writeAccountsCache(userId.value, provider, data)
   }
 
@@ -119,7 +132,8 @@ export function useAccounts() {
     setUserId,
     loadProvider,
     loadAll,
-    setSettings,
+    setStrategy,
+    setAccountEdits,
     invalidateLocal,
     CACHE_TTL_MS,
   }
