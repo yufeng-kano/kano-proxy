@@ -102,6 +102,7 @@ Revoking the device from **Access** › **Devices** has the same effect on the s
 | `kano-proxy status` | Sign-in, tunnel and agent state |
 | `kano-proxy update` | Install the newest CLI release |
 | `kano-proxy agent setup\|restore\|list` | Coding agents: [Set up agents](/cli/agents) |
+| `kano-proxy agent launch` | Start a coding agent for one session: [Start an agent for one session](/cli/agents#start-an-agent-for-one-session) |
 | `kano-proxy tunnel add\|attach\|remove\|list\|start` | Local models: [Local models](/cli/local-models) |
 
 `kano-proxy <command> --help` lists every flag. Global flags: `--no-tui` (flags instead of interactive screens) and `--state <path>` (another state file).

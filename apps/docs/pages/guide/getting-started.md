@@ -42,6 +42,8 @@ The quickest way is the `kano-proxy` CLI. It creates a key and writes the tool's
 
 The CLI asks which models answer each of the tool's model slots. [Set up agents](/cli/agents) explains the questions and how to undo the change. For Cursor, Cline, OpenCode, and other tools, follow the tool's own page under **Coding agents**.
 
+To try it for one session without changing the tool's config, run `kano-proxy agent launch claude-code` (or `codex`) instead of steps 3 and 4. The key it creates is revoked when the tool exits. See [Start an agent for one session](/cli/agents#start-an-agent-for-one-session).
+
 ## Or call the API directly
 
 1. Open **Access** and choose **Create key**. Copy the key when it appears. It starts with `sk-kano-proxy-` and is shown only once.

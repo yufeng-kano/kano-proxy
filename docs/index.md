@@ -14,7 +14,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 | [database.md](./database.md) | Schema, secrets handling, migrations |
 | [providers.md](./providers.md) | Per-provider pools, routing module + strategies, failover, usage windows, opt-in Codex credit spillover, per-account request edits (remove fast mode, remove the Claude Code line), manual unpause, adapters, turn-scoped Codex reasoning replay |
 | [pricing.md](./pricing.md) | Estimated per-request cost (LiteLLM + OpenRouter tables), per-key spend limits, `usage.cost` on Chat Completions responses |
-| [cli.md](./cli.md) | The official `kano-proxy` CLI (device login, Rust/ratatui): `tunnel` — the reverse tunnel exposing local LLMs as first-class providers; `agent` — sets up Claude Code / Codex CLI against the proxy through a model group and a device-minted key, and restores them |
+| [cli.md](./cli.md) | The official `kano-proxy` CLI (device login, Rust/ratatui): `tunnel` — the reverse tunnel exposing local LLMs as first-class providers; `agent` — sets up Claude Code / Codex CLI against the proxy through a model group and a device-minted key, and restores them, or launches one against the proxy for a single session with a key that lives as long as the process |
 | [admin-ui.md](./admin-ui.md) | Web UI: design restraint (the house style), shell layout, pages, responsive rules, cache-first UX |
 | [docs-site.md](./docs-site.md) | Public `/docs/` site (VitePress, en + zh-TW): build, same-host serving, origin fill, page layout (one page per app page) and writing rules, SEO and indexing of the whole host |
 | [i18n.md](./i18n.md) | Message catalog, translation runtime, copy voice |

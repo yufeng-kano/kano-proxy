@@ -52,7 +52,7 @@ The site is organised by what the reader is doing, and the sidebar follows the a
 | Get started | `guide/getting-started.md`, `guide/risks.md` | Sign in, connect one provider, set up one agent with the CLI, check the request in Logs; **Risks and terms**: what the usage notice says, at more length, and where each provider's terms are |
 | The app | `app/overview.md`, `app/logs.md`, `app/providers.md`, `app/models.md`, `app/groups.md`, `app/access.md` | One page per page of the app, same names and order as the app's sidebar |
 | Coding agents | `agents/<tool>.md` | One page per coding agent: Claude Code, Codex CLI, Cursor, Cline, OpenCode, Gemini CLI |
-| CLI | `cli/install.md`, `cli/agents.md`, `cli/local-models.md` | Install, sign a device in and update; `agent setup`, `restore`, `list`; exposing a local model server ([cli.md](./cli.md)) |
+| CLI | `cli/install.md`, `cli/agents.md`, `cli/local-models.md` | Install, sign a device in and update; `agent setup`, `restore`, `list` and `launch`; exposing a local model server ([cli.md](./cli.md)) |
 | Reference | `reference/endpoints.md`, `reference/routing.md`, `reference/errors.md` | Base URLs, headers, `provider/model` ids, request parameters; how a request picks a provider and account; error responses and what to do about each |
 
 A concept is explained once, on the page where the reader meets it: model groups on the Groups page, account pools and failover on the Providers page with the full rules in `reference/routing.md`. Other pages link there instead of repeating it.

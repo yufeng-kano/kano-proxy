@@ -195,11 +195,12 @@ pub fn plan_from(base_url: &str, catalog: &[CatalogModel], picks: &Picks) -> Pla
 }
 
 /// `codex debug models --bundled` as JSON, from the `codex` on `PATH`.
-fn bundled_catalog() -> Result<Value> {
-    let output = Command::new("codex")
+pub(super) fn bundled_catalog() -> Result<Value> {
+    let program = super::find_program(AgentKind::Codex.program()).context("no `codex` binary on PATH")?;
+    let output = Command::new(&program)
         .args(["debug", "models", "--bundled"])
         .output()
-        .context("no `codex` binary on PATH")?;
+        .with_context(|| format!("cannot run {}", program.display()))?;
     if !output.status.success() {
         bail!("`codex debug models --bundled` exited with {}", output.status);
     }

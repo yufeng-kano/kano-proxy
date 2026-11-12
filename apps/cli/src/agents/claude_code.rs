@@ -51,7 +51,7 @@ pub fn served_name(catalog: &[CatalogModel], family: &str, targets: &[String]) -
 
 /// What a slot starts as when nothing is in place: the account's Claude model of that family,
 /// `claude-code`'s first; none when no provider serves one (the slot is then left unset).
-fn default_targets(catalog: &[CatalogModel], family: &str) -> Vec<String> {
+pub(super) fn default_targets(catalog: &[CatalogModel], family: &str) -> Vec<String> {
     let fits = |m: &&CatalogModel| {
         let u = m.upstream.to_lowercase();
         u.contains("claude") && u.contains(family)

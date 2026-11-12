@@ -1,7 +1,8 @@
-//! `kano-proxy agent setup|restore|list` (docs/cli.md § Command surface):
-//! point a coding agent on this machine at the proxy — through a model group
-//! that serves the agent's real model ids and an API key this device mints —
-//! and undo it exactly. The agent-specific knowledge (which file, which
+//! `kano-proxy agent setup|restore|list|launch` (docs/cli.md § Command
+//! surface): point a coding agent on this machine at the proxy — through a
+//! model group that serves the agent's real model ids and an API key this
+//! device mints — and undo it exactly; or start one against the proxy for a
+//! single session (`launch`). The agent-specific knowledge (which file, which
 //! fields, how to pick models) lives in `claude_code` and `codex`; this
 //! module owns the flow both share: plan → group → key → config write →
 //! verify → record, and the reverse.
@@ -9,6 +10,7 @@
 pub mod claude_code;
 pub mod codex;
 mod doc;
+pub mod launch;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -119,6 +121,44 @@ pub fn home_dir() -> PathBuf {
     #[cfg(not(windows))]
     let var = "HOME";
     std::env::var_os(var).map(PathBuf::from).filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// An agent's executable on `PATH`. On Windows through `PATHEXT`, so an npm `.cmd` shim
+/// resolves — and only through it: npm also drops an extensionless shell script of the
+/// same name, which Windows cannot run.
+pub fn find_program(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    #[cfg(windows)]
+    let extensions: Vec<String> = std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into())
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .map(str::to_string)
+        .collect();
+    #[cfg(not(windows))]
+    let extensions = [String::new()];
+    for dir in std::env::split_paths(&path).filter(|d| !d.as_os_str().is_empty()) {
+        for extension in &extensions {
+            let candidate = dir.join(format!("{name}{extension}"));
+            if is_executable(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else { return false };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -852,17 +892,36 @@ mod tests {
 
     /// A one-thread HTTP/1.1 responder: records every request (method, path, body) and
     /// answers by path, which is all `agent setup` / `restore` need from the server.
-    struct MockServer {
-        base: String,
-        requests: StdArc<Mutex<Vec<(String, String, String)>>>,
+    pub(crate) struct MockServer {
+        pub(crate) base: String,
+        pub(crate) requests: StdArc<Mutex<Vec<(String, String, String)>>>,
+        /// While set, `DELETE /cli/v1/keys/…` answers this status instead of revoking.
+        pub(crate) revoke_status: StdArc<Mutex<Option<u16>>>,
+        /// While set, `POST /cli/v1/keys` answers 500.
+        pub(crate) refuse_mint: StdArc<Mutex<bool>>,
+        /// While set, creating a group answers 400 — and the group exists from then on, as
+        /// when another client created it a moment earlier.
+        pub(crate) lose_group_race: StdArc<Mutex<bool>>,
+        /// A signal this process sends itself while a key is being minted — Ctrl-C at the
+        /// worst moment.
+        pub(crate) signal_on_mint: StdArc<Mutex<Option<i32>>>,
     }
 
-    fn mock_server(groups_initially_present: bool) -> MockServer {
+    pub(crate) fn mock_server(groups_initially_present: bool) -> MockServer {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let requests = StdArc::new(Mutex::new(Vec::new()));
         let log = requests.clone();
         let group_exists = StdArc::new(Mutex::new(groups_initially_present));
+        let revoke_status: StdArc<Mutex<Option<u16>>> = StdArc::new(Mutex::new(None));
+        let revoking = revoke_status.clone();
+        let refuse_mint = StdArc::new(Mutex::new(false));
+        let refusing_mint = refuse_mint.clone();
+        let lose_group_race = StdArc::new(Mutex::new(false));
+        let losing = lose_group_race.clone();
+        let signal_on_mint: StdArc<Mutex<Option<i32>>> = StdArc::new(Mutex::new(None));
+        #[cfg_attr(not(unix), allow(unused_variables))]
+        let signalling = signal_on_mint.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -912,6 +971,10 @@ mod tests {
                         };
                         (200, json!({ "groups": groups }).to_string())
                     }
+                    ("POST", "/cli/v1/model-groups") if *losing.lock().unwrap() => {
+                        *group_exists.lock().unwrap() = true;
+                        (400, json!({ "error": "a model group with this slug already exists" }).to_string())
+                    }
                     ("POST", "/cli/v1/model-groups") => {
                         let sent: Value = serde_json::from_str(&body).unwrap();
                         if sent["slug"] == "claude-code" {
@@ -923,9 +986,23 @@ mod tests {
                         let sent: Value = serde_json::from_str(&body).unwrap();
                         (200, json!({ "id": "mgrp_1", "name": "Claude Code", "slug": "claude-code", "models": sent["models"] }).to_string())
                     }
+                    ("POST", "/cli/v1/keys") if *refusing_mint.lock().unwrap() => (500, json!({ "error": "internal_error" }).to_string()),
                     ("POST", "/cli/v1/keys") => {
+                        #[cfg(unix)]
+                        if let Some(signal) = signalling.lock().unwrap().take() {
+                            // SAFETY: raising a signal on this process, which handles it.
+                            unsafe {
+                                libc::raise(signal);
+                            }
+                            // The handler only wakes the launch: give it a moment to hear.
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
                         let sent: Value = serde_json::from_str(&body).unwrap();
                         (201, json!({ "id": format!("key_{}", log.lock().unwrap().len()), "name": sent["name"], "key": "sk-kano-proxy-e2e-secret", "device_id": "clidev_1" }).to_string())
+                    }
+                    ("DELETE", p) if p.starts_with("/cli/v1/keys/") && revoking.lock().unwrap().is_some() => {
+                        let status = revoking.lock().unwrap().unwrap_or(503);
+                        (status, json!({ "error": if status == 401 { "unauthorized" } else { "unavailable" } }).to_string())
                     }
                     ("DELETE", p) if p.starts_with("/cli/v1/keys/key_") => (200, json!({ "ok": true }).to_string()),
                     ("DELETE", "/cli/v1/keys/key_gone") => (404, json!({ "error": "not found" }).to_string()),
@@ -936,21 +1013,29 @@ mod tests {
                     ("DELETE", "/cli/v1/device") => (200, json!({ "ok": true }).to_string()),
                     _ => (404, json!({ "error": format!("unscripted {method} {path}") }).to_string()),
                 };
-                let reason = match status { 200 => "OK", 201 => "Created", _ => "Not Found" };
+                let reason = match status {
+                    200 => "OK",
+                    201 => "Created",
+                    400 => "Bad Request",
+                    401 => "Unauthorized",
+                    500 => "Internal Server Error",
+                    503 => "Service Unavailable",
+                    _ => "Not Found",
+                };
                 let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}", json.len());
                 let _ = stream.flush();
             }
         });
-        MockServer { base, requests }
+        MockServer { base, requests, revoke_status, refuse_mint, lose_group_race, signal_on_mint }
     }
 
-    struct Sandbox {
-        dir: PathBuf,
-        file: StateFile,
+    pub(crate) struct Sandbox {
+        pub(crate) dir: PathBuf,
+        pub(crate) file: StateFile,
     }
 
     impl Sandbox {
-        fn new(base: &str) -> Self {
+        pub(crate) fn new(base: &str) -> Self {
             static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let dir = std::env::temp_dir().join(format!("kano-proxy-agent-e2e-{}-{}-{n}", std::process::id(), now_stamp()));
@@ -1174,12 +1259,21 @@ mod tests {
     }
 
     /// `PATH` emptied so no `codex` binary is found, whatever the machine has.
-    struct PathGuard(Option<std::ffi::OsString>);
+    pub(crate) struct PathGuard(Option<std::ffi::OsString>);
 
     impl PathGuard {
         fn empty() -> Self {
             let previous = std::env::var_os("PATH");
             std::env::set_var("PATH", "");
+            Self(previous)
+        }
+
+        /// `dir` ahead of everything else, so a stand-in `claude` / `codex` there is the one found.
+        pub(crate) fn prepend(dir: &Path) -> Self {
+            let previous = std::env::var_os("PATH");
+            let mut dirs = vec![dir.to_path_buf()];
+            dirs.extend(previous.as_ref().map(|p| std::env::split_paths(p).collect::<Vec<_>>()).unwrap_or_default());
+            std::env::set_var("PATH", std::env::join_paths(dirs).unwrap());
             Self(previous)
         }
     }
@@ -1193,16 +1287,18 @@ mod tests {
         }
     }
 
-    /// `HOME` is process-global: tests that need it run one at a time.
-    struct HomeGuard {
+    /// `HOME` (and `PATH`) are process-global: tests that change them run one at a time.
+    pub(crate) struct HomeGuard {
         previous: Option<std::ffi::OsString>,
+        /// The agents' own directory overrides: a test must not read the developer's.
+        overrides: Vec<(&'static str, Option<std::ffi::OsString>)>,
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     static HOME_LOCK: Mutex<()> = Mutex::new(());
 
     impl HomeGuard {
-        fn set(dir: &Path) -> Self {
+        pub(crate) fn set(dir: &Path) -> Self {
             let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
             #[cfg(windows)]
             let var = "USERPROFILE";
@@ -1210,7 +1306,11 @@ mod tests {
             let var = "HOME";
             let previous = std::env::var_os(var);
             std::env::set_var(var, dir);
-            Self { previous, _lock: lock }
+            let overrides: Vec<_> = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
+            for (name, _) in &overrides {
+                std::env::remove_var(name);
+            }
+            Self { previous, overrides, _lock: lock }
         }
     }
 
@@ -1223,6 +1323,12 @@ mod tests {
             match &self.previous {
                 Some(v) => std::env::set_var(var, v),
                 None => std::env::remove_var(var),
+            }
+            for (name, value) in &self.overrides {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
             }
         }
     }

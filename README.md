@@ -155,7 +155,7 @@ kano-proxy tunnel add    # slug, openai|anthropic, http://localhost:11434/v1
 kano-proxy tunnel start  # one outbound WebSocket per registered provider
 ```
 
-The local models now answer as `<slug>/<model>` on every base URL above and can be targets in a model group. The same CLI points Claude Code or the Codex CLI at your proxy — `kano-proxy agent setup claude-code` / `codex` — and undoes it with `agent restore`. Details in [docs/cli.md](./docs/cli.md).
+The local models now answer as `<slug>/<model>` on every base URL above and can be targets in a model group. The same CLI points Claude Code or the Codex CLI at your proxy — `kano-proxy agent setup claude-code` / `codex` — and undoes it with `agent restore`, or starts one for a single session with `kano-proxy agent launch <agent>`, writing nothing to the agent's config. Details in [docs/cli.md](./docs/cli.md).
 
 ---
 

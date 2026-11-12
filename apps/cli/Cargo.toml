@@ -1,8 +1,8 @@
-# kano-proxy CLI (docs/cli.md § CLI). Version is released in lockstep with the
-# product SemVer (root package.json / the vX.Y.Z tag) — bump together.
+# kano-proxy CLI (docs/cli.md § CLI). Versioned on its own line: the tag
+# `cli-vX.Y.Z` must match `version` here (docs/deployment.md).
 [package]
 name = "kano-proxy"
-version = "2.5.2"
+version = "2.6.0"
 edition = "2021"
 license = "MIT"
 description = "Official kano-proxy CLI: tunnel local LLM servers in as providers, and point Claude Code or the Codex CLI at the proxy"
@@ -24,6 +24,11 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "tim
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 toml_edit = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# `agent launch` only: pass a stop signal on to the agent, leave a signal that was
+# already ignored (nohup) ignored, and die by the signal that ended the agent.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 strip = true

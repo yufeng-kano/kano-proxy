@@ -1,11 +1,11 @@
 ---
 title: 設定 agent
-description: 用 kano-proxy agent setup 一步把 Claude Code 或 Codex CLI 接到 Kano Proxy，用 agent list 查看寫了什麼，用 agent restore 還原。
+description: 用 kano-proxy agent setup 一步把 Claude Code 或 Codex CLI 接到 Kano Proxy，用 agent launch 單次啟動，用 agent list 查看 setup 寫了什麼，用 agent restore 還原。
 ---
 
 # 設定 agent
 
-`kano-proxy agent setup` 一個指令就能把這台機器上的 coding agent 接到你的 proxy，`kano-proxy agent restore` 則能原樣還原。目前支援 **Claude Code**（`claude-code`）和 **Codex CLI**（`codex`）。Cursor、Cline 和 OpenCode 請照 Coding agent 設定底下各自頁面的手動步驟。
+`kano-proxy agent setup` 一個指令就能把這台機器上的 coding agent 接到你的 proxy，`kano-proxy agent restore` 則能原樣還原。只想用一次的話，`kano-proxy agent launch` 會讓 agent 這次啟動時走 proxy，不改它的設定。目前支援 **Claude Code**（`claude-code`）和 **Codex CLI**（`codex`）。Cursor、Cline 和 OpenCode 請照 Coding agent 設定底下各自頁面的手動步驟。
 
 機器要先登入（[安裝與登入](/zh-TW/cli/install)）。
 
@@ -62,6 +62,67 @@ kano-proxy agent setup codex --no-tui --model gpt-5.6-sol --effort high
 
 兩個指令都可以加 `--dry-run`：印出所有會寫入的欄位，以及會建立或修改的 group，但不寫檔、不建立 key、不改 group。key 會顯示成 `<new key>`。
 
+## 單次啟動 agent
+
+```bash
+kano-proxy agent launch claude-code
+kano-proxy agent launch codex
+```
+
+`kano-proxy agent launch` 只在這一次啟動 agent 時讓它走你的 proxy，不會動它的設定檔。`agent setup` 是長期的做法：它會修改 agent 的設定，之後每次啟動都會走 proxy。`agent launch` 不會在 agent 的設定裡寫入任何東西，下次你直接啟動 agent 時，一切跟原本一樣。它會依序：
+
+1. 直接使用 agent 的 model group（`claude-code` 或 `codex-cli`），不做任何修改。如果你的帳號還沒有這個 group，會用 setup 一開始的預設值建立一個，並告訴你。Claude Code 需要你的帳號有 Claude 模型，Codex CLI 需要已連接的 Codex（ChatGPT）帳號，才能建立。條件不符時，指令會說明缺少什麼並停止。
+2. 建立一把只給這次使用的 API key，名稱是 `<agent>-launch@<裝置名稱>`，例如 `claude-code-launch@my-mac`。
+3. 在目前的終端機和目錄啟動 agent。
+4. agent 結束後撤銷這把 key，刪除這次產生的檔案，並以 agent 的結束代碼結束。
+
+agent 在這次使用中自己存下的設定會保留，跟平常一樣，例如用 `/model` 選的預設模型。
+
+launch 建立的 key 沒有花費上限。你在 [Access](/zh-TW/app/access) 頁替 setup 的 key 設定的上限，不適用於 launch。
+
+`--` 之後的所有參數都會原封不動交給 agent：
+
+```bash
+kano-proxy agent launch claude-code -- -p "explain this repo"
+kano-proxy agent launch codex -- exec "run the tests"
+```
+
+::: details 這次啟動怎麼連到 proxy
+Claude Code 會透過 `--settings` 拿到 launch 自己的設定檔，優先順序高於你的使用者、專案和本機設定檔。Codex CLI 會在指令列拿到 `-c` 覆寫值，優先順序高於 `config.toml`；key 則放在它的環境變數裡，不會出現在指令列。所以就算你的設定已經指向別的 gateway 或供應商，也不會互相干擾。受管理的（企業）設定優先順序更高，launch 無法覆寫。
+
+如果你的 Claude Code 設定存了一個 group 無法提供的預設模型，這次會改從 Opus 位置開始，launch 會告訴你。如果 Codex 的 `config.toml` 設了 proxy 不接受的 effort（`minimal` 或 `ultra`），launch 會改用 `high`，並告訴你。
+:::
+
+### 選項
+
+這些選項要放在 `--` 之前：
+
+- `--dry-run`：印出會使用或建立的 group、key 名稱和指令列，然後結束，不建立 group 或 key，也不啟動任何東西。key 會顯示成 `<new key>`。
+- `--model <名稱>`，僅限 Codex：Codex 啟動時用的模型，必須是 group 提供的名稱。
+- `--effort <low|medium|high|xhigh>`，僅限 Codex：這次使用的 reasoning effort。沒有指定時，沿用 Codex 自己的設定。
+
+Claude Code 的模型請直接交給 Claude Code：`kano-proxy agent launch claude-code -- --model <名稱>`。Codex 的話，你在 `--` 之後傳的 `-c` 或 `-m`，會蓋過 launch 對同一個設定給的值。
+
+### launch 不接受的參數
+
+- Claude Code 的 `--settings`：launch 會傳入自己的設定檔，兩個會互相衝突。
+- Claude Code 的 `--bg` 和 `--background`：背景 session 會比 launch 活得久，key 撤銷後它仍然需要這把 key。同樣的原因，用 launch 啟動的 Claude Code 不能轉到背景執行。
+- Codex 的 `--oss`、`--local-provider` 和 `--remote`：它們會讓 Codex 不再走 proxy。
+
+### 接續 Codex 的 session
+
+Codex 會依供應商列出過去的 session，而 launch 用的是它自己的供應商。要接續用 launch 啟動的 session，請同樣透過 launch，不要直接用 `codex resume`：
+
+```bash
+kano-proxy agent launch codex -- resume
+```
+
+### launch 被強制結束時
+
+如果 agent 還沒結束，launch 就被強制結束，例如被 `kill -9` 或機器斷電，它就沒辦法撤銷 key。這把 key 會一直有效，直到下一次執行 `kano-proxy agent launch`，由它撤銷 key 並刪除留下的檔案。`kano-proxy status` 會顯示有幾個 launch 正在執行，以及幾個沒有正常結束。`kano-proxy logout` 也會撤銷這把 key，連同這台裝置建立的其他 key。
+
+如果 agent 結束時連不到伺服器，launch 會告訴你，下一次 launch 會撤銷這把 key。
+
 ## 查看設定狀態
 
 ```bash
@@ -74,7 +135,7 @@ kano-proxy agent list
 - `drifted`：你或 agent 改過 CLI 寫入的欄位。
 - `missing`：設定檔不見了。
 
-這個指令不連伺服器。`kano-proxy status` 會連同登入狀態一起顯示這些資訊。
+這個指令不連伺服器。launch 不算 setup，不會出現在清單裡。`kano-proxy status` 會連同登入狀態一起顯示這些資訊。
 
 ## 還原
 
@@ -103,11 +164,12 @@ kano-proxy agent restore claude-code
 | Claude Code 設定 | `~/.claude/settings.json` | `%USERPROFILE%\.claude\settings.json` |
 | Codex CLI 設定 | `~/.codex/config.toml` 與 `~/.codex/kano-models.json` | `%USERPROFILE%\.codex\` |
 | 備份 | `~/.config/kano-proxy/backups/<agent>/` | `%APPDATA%\kano-proxy\backups\` |
+| 執行中 launch 的檔案 | `~/.config/kano-proxy/launch/` | `%APPDATA%\kano-proxy\launch\` |
 
-CLI 只會寫入 Claude Code 的使用者設定檔，不會碰專案裡的 `.claude/settings.json`，因為那個檔案可能會被 commit。備份檔只有你自己能讀，CLI 也不會刪除它們。
+CLI 只會寫入 Claude Code 的使用者設定檔，不會碰專案裡的 `.claude/settings.json`，因為那個檔案可能會被 commit。備份檔只有你自己能讀，CLI 也不會刪除它們。launch 的檔案同樣只有你自己能讀，這次使用結束時就會刪除。
 
 ## 相關頁面
 
 - [Claude Code](/zh-TW/agents/claude-code)、[Codex CLI](/zh-TW/agents/codex-cli)：同樣的設定如何手動完成，以及各工具的限制。
 - [Groups](/zh-TW/app/groups)：`claude-code` 和 `codex-cli` 這兩個 group。
-- [Access](/zh-TW/app/access)：setup 建立的 key，顯示在對應的裝置下。
+- [Access](/zh-TW/app/access)：setup 和 launch 建立的 key，顯示在對應的裝置下。
