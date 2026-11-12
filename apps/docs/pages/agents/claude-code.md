@@ -30,6 +30,15 @@ The CLI also turns on gateway model discovery, so every name in the group shows 
 
 To undo it, or to see what the CLI manages, see [Set up agents](/cli/agents). The group stays on the **Groups** page, where you can reorder or add fallback targets at any time.
 
+To use the proxy for one session only, start Claude Code through the CLI instead:
+
+```console
+$ kano-proxy agent launch claude-code
+$ kano-proxy agent launch claude-code -- --model <name>    # everything after -- goes to claude
+```
+
+It does not write `settings.json`. It uses the `claude-code` group as it is, mints a key for this session alone, and revokes the key when Claude Code exits. Its settings take precedence over your own `settings.json`, so it works even when that file points at another gateway. See [Set up agents](/cli/agents#start-an-agent-for-one-session).
+
 ## Set it up by hand
 
 1. Create a key on the **Access** page.
@@ -64,7 +73,7 @@ Do not put the key in a project's committed `.claude/settings.json`.
 - Leave `ANTHROPIC_MODEL` unset unless you want to pin the start model. It overrides whatever you save with `/model`, every launch.
 :::
 
-For a one-off session, export the same variables in your shell instead:
+For a one-off session, use `kano-proxy agent launch claude-code` from [the CLI section](#set-it-up-with-the-cli). Without the CLI, export the same variables in your shell. They take effect only when `settings.json` does not set the same ones, because the `env` block takes precedence over the shell:
 
 ::: code-group
 
@@ -101,7 +110,8 @@ Gateway model discovery keeps only ids containing `claude` or `anthropic`. Claud
 - The WebFetch tool's domain safety check calls `api.anthropic.com` directly. If your network blocks that host, set `skipWebFetchPreflight: true` in your settings.
 - The Claude desktop app ignores these variables. It has its own third-party inference form, where the same base URL and key go.
 - The VS Code extension reads them from the `claudeCode.environmentVariables` setting instead of the shell.
+- A session started with `kano-proxy agent launch` cannot be moved to the background (`/bg`, `--bg`), because its key is revoked when the command returns.
 
 ## Checked against
 
-Claude Code documentation, 2026-09-04: [Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect), [Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol), [Model configuration](https://code.claude.com/docs/en/model-config). 2026-11-08, for fast mode and the WebFetch check: [Fast mode](https://code.claude.com/docs/en/fast-mode), [Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect).
+Claude Code documentation, 2026-09-04: [Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect), [Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol), [Model configuration](https://code.claude.com/docs/en/model-config). 2026-11-08, for fast mode and the WebFetch check: [Fast mode](https://code.claude.com/docs/en/fast-mode), [Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect). Claude Code 2.1.322, 2026-11-13, for `kano-proxy agent launch` and for the `env` block taking precedence over the shell: with a `settings.json` that named another gateway, the launch's endpoint, key and model were the ones sent.

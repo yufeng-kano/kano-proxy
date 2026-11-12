@@ -57,6 +57,8 @@ Access 頁放的是你的憑證：工具送出請求時帶的 API key、用 `kan
 | **Created** | 登入的時間。畫面較窄時會隱藏。 |
 | **Keys** | 這台裝置建立的 API key 數量，例如 `kano-proxy agent setup` 建立的 key。 |
 
+`kano-proxy agent launch` 會建立一把名為 `<agent>-launch@<裝置名稱>` 的 key，例如 `claude-code-launch@my-mac`。它只在 agent 執行期間出現在 **Keys** 分頁，agent 結束時就會撤銷。詳見[單次啟動 agent](/zh-TW/cli/agents#單次啟動-agent)。
+
 還沒有任何裝置時，卡片會顯示安裝指令、這個站台專用的 `kano-proxy login` 指令，以及 GitHub Releases 的連結，那裡有各平台的版本。詳見 [安裝與登入](/zh-TW/cli/install)。
 
 ### 重新命名或撤銷裝置

@@ -57,6 +57,8 @@ The **CLI devices** card lists every machine that ran `kano-proxy login` with yo
 | **Created** | When it was signed in. Hidden on narrow screens. |
 | **Keys** | How many API keys this device created, for example with `kano-proxy agent setup`. |
 
+`kano-proxy agent launch` creates a key named `<agent>-launch@<device name>`, for example `claude-code-launch@my-mac`. It appears on the **Keys** tab while the session runs and is revoked when the session ends. See [Start an agent for one session](/cli/agents#start-an-agent-for-one-session).
+
 With no devices yet, the card shows the install commands and the exact `kano-proxy login` command for this instance, plus a link to all platforms on GitHub Releases. See [Install and sign in](/cli/install).
 
 ### Rename or revoke a device

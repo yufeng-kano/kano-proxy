@@ -71,7 +71,7 @@ enum Command {
     /// Expose local LLM servers as providers over the CLI tunnel
     #[command(subcommand)]
     Tunnel(TunnelCommand),
-    /// Point a coding agent on this machine at the proxy, or undo it
+    /// Point a coding agent on this machine at the proxy, undo it, or start one for a single session
     #[command(subcommand)]
     Agent(AgentCommand),
 }
@@ -179,6 +179,23 @@ enum AgentCommand {
     },
     /// Which agents this device set up, and whether their config still holds what was written
     List,
+    /// Start the agent against the proxy for this one session: nothing is written to its config, the key is revoked when it exits
+    Launch {
+        /// claude-code | codex
+        agent: AgentKind,
+        /// Print the group, the key name and the command line; create, mint and start nothing
+        #[arg(long)]
+        dry_run: bool,
+        /// codex: the model it starts with, a name the group serves (default: the one setup wrote here, else your first codex model)
+        #[arg(long)]
+        model: Option<String>,
+        /// codex: low | medium | high | xhigh (default: Codex's own setting)
+        #[arg(long)]
+        effort: Option<String>,
+        /// Arguments for the agent itself, after `--`
+        #[arg(last = true, value_name = "AGENT ARGS")]
+        args: Vec<std::ffi::OsString>,
+    },
 }
 
 #[tokio::main]
@@ -220,6 +237,9 @@ async fn main() {
                 .await
             }
             AgentCommand::List => agents::cmd_list(&file),
+            AgentCommand::Launch { agent, dry_run, model, effort, args } => {
+                agents::launch::cmd_launch(&file, agent, agents::launch::LaunchArgs { dry_run, model, effort, args }).await
+            }
         },
     };
 

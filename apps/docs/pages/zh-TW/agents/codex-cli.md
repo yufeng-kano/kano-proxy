@@ -28,6 +28,16 @@ $ kano-proxy agent setup codex
 
 要還原設定，或查看 CLI 管理了哪些項目，見[設定 agent](/zh-TW/cli/agents)。
 
+只想在這一次 session 使用 proxy 的話，改用 CLI 啟動 Codex：
+
+```console
+$ kano-proxy agent launch codex
+$ kano-proxy agent launch codex --model <name> --effort high
+$ kano-proxy agent launch codex -- exec "run the tests"    # -- 後面的參數都交給 codex
+```
+
+它不會寫入 `config.toml`。它直接沿用現有的 `codex-cli` 群組，建立一把只給這次 session 用的 key，Codex 結束時就撤銷這把 key。key 透過 Codex 的環境變數傳入，不會出現在命令列上。`--model` 要填群組裡的名稱，例如 `gpt-5.6-sol`（只是範例），`--effort` 可以是 `low`、`medium`、`high` 或 `xhigh`。Codex 會依 provider 列出 session，所以用 launch 開的 session 要用 `kano-proxy agent launch codex -- resume` 接續，不是 `codex resume`。見[設定 agent](/zh-TW/cli/agents#單次啟動-agent)。
+
 ## 手動設定
 
 三步：寫設定、產生模型目錄、啟動 `codex`。
@@ -141,4 +151,4 @@ Codex 模型最高到 `xhigh`：送 `max` 時，proxy 會先降成 `xhigh` 再�
 
 ## 查證來源
 
-Codex CLI 0.150.1，2026-09-04 對本機端點錄下的請求。目錄腳本和 `codex debug models` 以 Codex CLI 0.154.0 於 2026-09-13 在 macOS 驗證；PowerShell 版依同樣邏輯寫成，未在 Windows 上執行過。設定文件：[learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference)。
+Codex CLI 0.150.1，2026-09-04 對本機端點錄下的請求。目錄腳本和 `codex debug models` 以 Codex CLI 0.154.0 於 2026-09-13 在 macOS 驗證；PowerShell 版依同樣邏輯寫成，未在 Windows 上執行過。`kano-proxy agent launch codex` 以 Codex CLI 0.154.0 於 2026-11-13 驗證：`config.toml` 指向別的 provider 時，launch 的設定仍然優先，放在子指令前也一樣，而且 `config.toml` 沒有被寫入。設定文件：[learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference)。

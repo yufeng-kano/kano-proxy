@@ -128,6 +128,9 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
                     "· the server no longer accepts this device (\"{}\" was revoked or signed out there) — signing in again",
                     state.device_name.as_deref().unwrap_or("?")
                 );
+                // The device is gone on the server, and every key it minted with it: the
+                // records of its dead launches have nothing left to revoke.
+                agents::launch::forget_dead(&file.path, &state.base_url, state.device_id.as_deref().unwrap_or_default());
                 mutate_state(file, |s| {
                     s.device_id = None;
                     s.device_name = None;
@@ -612,6 +615,13 @@ pub async fn cmd_status(file: &StateFile) -> Result<()> {
     }
     println!();
     agents::print_rows(&state);
+    match agents::launch::counts(&file.path) {
+        (0, 0) => {}
+        (running, dead) => {
+            println!();
+            println!("launches: {running} running, {dead} that did not exit cleanly (the next `kano-proxy agent launch` cleans up after them)");
+        }
+    }
     Ok(())
 }
 
@@ -652,12 +662,34 @@ pub async fn cmd_logout(file: &StateFile, no_tui: bool, force: bool, remove_grou
     }
     if state.signed_in() {
         let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-        match tokens.get(false).await {
-            Ok(access) => match api::delete_device(&state.base_url, &access).await? {
-                true => eprintln!("✓ device \"{}\" revoked", state.device_name.as_deref().unwrap_or("?")),
-                false => eprintln!("· the server had already revoked this device"),
-            },
-            Err(_) => eprintln!("· the server no longer accepts this device — it was revoked already"),
+        // Whether the server confirmed the device gone — and with it every key it minted.
+        let gone = match tokens.get(false).await {
+            Ok(access) => {
+                match api::delete_device(&state.base_url, &access).await? {
+                    true => eprintln!("✓ device \"{}\" revoked", state.device_name.as_deref().unwrap_or("?")),
+                    false => eprintln!("· the server had already revoked this device"),
+                }
+                true
+            }
+            Err(e) if api::is_auth_rejection(&e) => {
+                eprintln!("· the server no longer accepts this device — it was revoked already");
+                true
+            }
+            Err(e) => {
+                eprintln!("· the server could not be reached ({e:#}) — this device is only forgotten here; revoke it on the Access page");
+                false
+            }
+        };
+        // Launches (docs/cli.md § `agent launch`): their keys went with the device, so the
+        // records of dead ones only need deleting, and ones still running just lost theirs.
+        let (running, dead) = agents::launch::counts(&file.path);
+        if gone {
+            agents::launch::forget_dead(&file.path, &state.base_url, state.device_id.as_deref().unwrap_or_default());
+            if running > 0 {
+                eprintln!("· {running} launched agent session{} still running lost {} key", if running == 1 { "" } else { "s" }, if running == 1 { "its" } else { "their" });
+            }
+        } else if running + dead > 0 {
+            eprintln!("· {} launch key{} still alive on the server with the device", running + dead, if running + dead == 1 { " is" } else { "s are" });
         }
     }
     mutate_state(file, |s| {

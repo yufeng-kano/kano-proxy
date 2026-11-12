@@ -429,6 +429,16 @@ pub fn is_auth_rejection(e: &anyhow::Error) -> bool {
     e.chain().any(|c| c.to_string().contains("(401 Unauthorized)"))
 }
 
+/// Whether an error from this module is the server's own answer (any status), as opposed
+/// to a request whose fate is unknown — a `POST` that failed this way may still have
+/// taken effect.
+pub fn is_server_answer(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        let text = c.to_string();
+        text.starts_with("server said (") || text.starts_with("server answered ")
+    })
+}
+
 /// Load state and require a signed-in device, with a uniform message.
 pub fn require_signed_in(state: &State) -> Result<()> {
     if !state.signed_in() {

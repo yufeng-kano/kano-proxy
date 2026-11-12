@@ -102,6 +102,7 @@ agent 設定檔的備份會留在磁碟上。加上 `--remove-group` 會連 agen
 | `kano-proxy status` | 登入、tunnel 和 agent 的狀態 |
 | `kano-proxy update` | 安裝最新的 CLI 版本 |
 | `kano-proxy agent setup\|restore\|list` | coding agent：[設定 agent](/zh-TW/cli/agents) |
+| `kano-proxy agent launch` | 單次啟動 coding agent：[單次啟動 agent](/zh-TW/cli/agents#單次啟動-agent) |
 | `kano-proxy tunnel add\|attach\|remove\|list\|start` | 本機模型：[本機模型](/zh-TW/cli/local-models) |
 
 `kano-proxy <指令> --help` 會列出所有參數。全域參數有 `--no-tui`（用參數取代互動畫面）和 `--state <路徑>`（使用另一個 state 檔）。

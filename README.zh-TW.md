@@ -155,7 +155,7 @@ kano-proxy tunnel add    # slug、openai|anthropic、http://localhost:11434/v1
 kano-proxy tunnel start  # 每個已註冊的供應商一條對外 WebSocket
 ```
 
-本地模型隨即以 `<slug>/<model>` 出現在上述所有端點，也能當作模型群組的目標。同一支 CLI 也能把 Claude Code 或 Codex CLI 接到你的 proxy（`kano-proxy agent setup claude-code` / `codex`），並用 `agent restore` 還原。細節見 [docs/cli.md](./docs/cli.md)。
+本地模型隨即以 `<slug>/<model>` 出現在上述所有端點，也能當作模型群組的目標。同一支 CLI 也能把 Claude Code 或 Codex CLI 接到你的 proxy（`kano-proxy agent setup claude-code` / `codex`），並用 `agent restore` 還原；也能用 `kano-proxy agent launch <agent>` 只在單次 session 啟動，不寫入 agent 的設定檔。細節見 [docs/cli.md](./docs/cli.md)。
 
 ---
 

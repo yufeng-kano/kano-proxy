@@ -203,7 +203,7 @@ The API key is **never** echoed back on any of these routes — `GET`/`POST`/`PU
 
 The CLI-provider subsystem ([cli.md](./cli.md)) has two auth surfaces:
 
-- **`/cli/v1/*`** — the CLI's own namespace: token-authenticated (device access tokens minted from rotating refresh tokens, HMAC-signed with `CLI_TOKEN_SECRET`), never session-authenticated. Besides login, tunnel providers and the WebSocket connect it carries the key and model-group routes `kano-proxy agent setup` uses — the session handlers behind a device authenticator, same validation and caps. Route table and token semantics: [cli.md](./cli.md) § Server routes / § Device auth. The pre-2.0 `/agent/v1/*` namespace answers `410 Gone` with an upgrade message until the next major release.
+- **`/cli/v1/*`** — the CLI's own namespace: token-authenticated (device access tokens minted from rotating refresh tokens, HMAC-signed with `CLI_TOKEN_SECRET`), never session-authenticated. Besides login, tunnel providers and the WebSocket connect it carries the key and model-group routes `kano-proxy agent setup` and `agent launch` use — the session handlers behind a device authenticator, same validation and caps. Route table and token semantics: [cli.md](./cli.md) § Server routes / § Device auth. The pre-2.0 `/agent/v1/*` namespace answers `410 Gone` with an upgrade message until the next major release.
 - **`/api/cli/*`** — session-authenticated management for the web UI: devices on the Access page, providers on the Providers page, and the authorize view. Same origin-locked CORS as every `/api/*` route.
 
 ### Management routes (session required)

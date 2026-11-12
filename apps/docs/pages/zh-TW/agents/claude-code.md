@@ -30,6 +30,15 @@ CLI 也會開啟 gateway model discovery，群組裡每個名稱都會出現在 
 
 要還原設定，或查看 CLI 管理了哪些項目，見[設定 agent](/zh-TW/cli/agents)。群組會留在 **Groups** 頁面，隨時可以調整順序或加入備援目標。
 
+只想在這一次 session 使用 proxy 的話，改用 CLI 啟動 Claude Code：
+
+```console
+$ kano-proxy agent launch claude-code
+$ kano-proxy agent launch claude-code -- --model <name>    # -- 後面的參數都交給 claude
+```
+
+它不會寫入 `settings.json`。它直接沿用現有的 `claude-code` 群組，建立一把只給這次 session 用的 key，Claude Code 結束時就撤銷這把 key。它的設定優先於你自己的 `settings.json`，所以就算那個檔案指向別的 gateway 也能用。見[設定 agent](/zh-TW/cli/agents#單次啟動-agent)。
+
 ## 手動設定
 
 1. 在 **Access** 頁面建立一把 key。
@@ -64,7 +73,7 @@ CLI 也會開啟 gateway model discovery，群組裡每個名稱都會出現在 
 - 除非要固定啟動時的模型，否則不要設 `ANTHROPIC_MODEL`。它每次啟動都會蓋掉你用 `/model` 存的預設。
 :::
 
-只想試一次的話，也可以在 shell 匯出同一組變數：
+只想試一次的話，用[上面 CLI 一節](#用-cli-設定)的 `kano-proxy agent launch claude-code`。不用 CLI 的話，也可以在 shell 匯出同一組變數。因為 `env` 區塊優先於 shell，只有 `settings.json` 沒設同樣的變數時，匯出的值才會生效：
 
 ::: code-group
 
@@ -101,7 +110,8 @@ Gateway model discovery 只保留含 `claude` 或 `anthropic` 的 id。Claude �
 - WebFetch 工具的網域安全檢查會直接連 `api.anthropic.com`。如果你的網路擋了這個網域，在設定裡加上 `skipWebFetchPreflight: true`。
 - Claude 桌面版 app 不讀這些變數。它有自己的第三方推論設定表單，把同一組 base URL 和 key 填進去即可。
 - VS Code 擴充套件從 `claudeCode.environmentVariables` 設定讀取這些變數，不讀 shell。
+- 用 `kano-proxy agent launch` 啟動的 session 不能移到背景（`/bg`、`--bg`），因為指令結束時它的 key 就被撤銷了。
 
 ## 查證來源
 
-Claude Code 文件，2026-09-04：[Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)、[Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)、[Model configuration](https://code.claude.com/docs/en/model-config)。2026-11-08，fast mode 與 WebFetch 檢查：[Fast mode](https://code.claude.com/docs/en/fast-mode)、[Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)。
+Claude Code 文件，2026-09-04：[Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)、[Gateway protocol](https://code.claude.com/docs/en/llm-gateway-protocol)、[Model configuration](https://code.claude.com/docs/en/model-config)。2026-11-08，fast mode 與 WebFetch 檢查：[Fast mode](https://code.claude.com/docs/en/fast-mode)、[Connect to an LLM gateway](https://code.claude.com/docs/en/llm-gateway-connect)。2026-11-13 以 Claude Code 2.1.322 驗證 `kano-proxy agent launch`，以及 `env` 區塊優先於 shell：在 `settings.json` 指向別的 gateway 的情況下，實際送出的是 launch 的端點、key 和模型。

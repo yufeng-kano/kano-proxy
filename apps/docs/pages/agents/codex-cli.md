@@ -28,6 +28,16 @@ The group's model names are the plain ids (`gpt-5.6-sol`, not `codex/gpt-5.6-sol
 
 To undo it, or to see what the CLI manages, see [Set up agents](/cli/agents).
 
+To use the proxy for one session only, start Codex through the CLI instead:
+
+```console
+$ kano-proxy agent launch codex
+$ kano-proxy agent launch codex --model <name> --effort high
+$ kano-proxy agent launch codex -- exec "run the tests"    # everything after -- goes to codex
+```
+
+It does not write `config.toml`. It uses the `codex-cli` group as it is, mints a key for this session alone, and revokes the key when Codex exits. The key travels in Codex's environment, not on the command line. `--model` takes a name the group serves, such as `gpt-5.6-sol` (an example), and `--effort` takes `low`, `medium`, `high` or `xhigh`. Codex lists sessions by provider, so resume a launched session with `kano-proxy agent launch codex -- resume`, not `codex resume`. See [Set up agents](/cli/agents#start-an-agent-for-one-session).
+
 ## Set it up by hand
 
 Three steps: write the config, generate the model catalog, start `codex`.
@@ -141,4 +151,4 @@ What changes on a non-Codex model:
 
 ## Checked against
 
-Codex CLI 0.150.1, request captured against a local endpoint, 2026-09-04. Catalog script and `codex debug models` checked with Codex CLI 0.154.0 on macOS, 2026-09-13; the PowerShell version is written to the same logic but was not run on Windows. Config reference: [learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference).
+Codex CLI 0.150.1, request captured against a local endpoint, 2026-09-04. Catalog script and `codex debug models` checked with Codex CLI 0.154.0 on macOS, 2026-09-13; the PowerShell version is written to the same logic but was not run on Windows. `kano-proxy agent launch codex` checked against Codex CLI 0.154.0, 2026-11-13, with a `config.toml` that named another provider: the launch's settings won, also before a subcommand, and `config.toml` was not written. Config reference: [learn.chatgpt.com](https://learn.chatgpt.com/docs/config-file/config-reference).

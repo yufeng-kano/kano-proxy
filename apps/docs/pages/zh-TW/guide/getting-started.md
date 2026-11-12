@@ -42,6 +42,8 @@ description: 登入、連接供應商、用 kano-proxy CLI 設定 coding agent �
 
 CLI 會問你工具的每個模型欄位要由哪些模型回應。這些問題的意思和還原方法見[設定 agent](/zh-TW/cli/agents)。Cursor、Cline、OpenCode 等其他工具，請照 **Coding agent 設定**底下各自的頁面手動設定。
 
+只想用一次、不改工具的設定檔的話，可以跳過第 3、4 步，改執行 `kano-proxy agent launch claude-code`（或 `codex`）。它建立的金鑰會在工具結束時撤銷。詳見[單次啟動 agent](/zh-TW/cli/agents#單次啟動-agent)。
+
 ## 或直接呼叫 API
 
 1. 打開 **Access**，按 **Create key**。金鑰出現時就複製下來。它以 `sk-kano-proxy-` 開頭，只會顯示這一次。
