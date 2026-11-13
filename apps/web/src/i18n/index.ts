@@ -236,6 +236,23 @@ function makeFormatters() {
         timeStyle: "short",
       }).format(d)
     },
+    /** Time of day to the second, 24-hour: "22:31:52" — the Logs rows, under their day's heading. */
+    clock(value: string | Date | null | undefined): string {
+      const d = toDate(value)
+      if (!d) return EM_DASH
+      return new Intl.DateTimeFormat(tag(), {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      }).format(d)
+    },
+    /** A day heading past yesterday: "Wed, Nov 11". */
+    weekdayDate(value: string | Date | null | undefined): string {
+      const d = toDate(value)
+      if (!d) return EM_DASH
+      return new Intl.DateTimeFormat(tag(), { weekday: "short", month: "short", day: "numeric" }).format(d)
+    },
     /**
      * Log-line timestamp: "Mar 4, 15:04:05". Compact enough for a column, and
      * to the second — two requests a moment apart are told apart by the

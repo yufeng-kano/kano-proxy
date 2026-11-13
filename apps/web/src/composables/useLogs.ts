@@ -1,13 +1,14 @@
 import { computed, reactive, ref } from "vue"
-import { listLogs } from "@/services/api"
+import { getLogFacets, listLogs } from "@/services/api"
 import {
   CACHE_TTL_MS,
   isLogsCacheFresh,
   readLogsCache,
   writeLogsCache,
 } from "@/services/cache"
+import { todayRange } from "@/services/logsView"
 import { getLogsPrefs, setLogsPrefs } from "@/services/prefs"
-import type { RequestLogRow } from "@/types"
+import type { LogFacets, LogModelFilter, RequestLogRow } from "@/types"
 
 type LogsState = {
   rows: RequestLogRow[]
@@ -40,7 +41,14 @@ const state = reactive<LogsState>(emptyState())
 
 /** Filters, kept beside the rows they produced so a reload never mixes two views. */
 const provider = ref<string | null>(getLogsPrefs().provider)
+const modelFilter = ref<LogModelFilter>(null)
 const errorsOnly = ref(false)
+
+/**
+ * Today's counts for the pickers. A side dish like the provider list: the rows
+ * never wait on it, and a failure leaves the pickers working without counts.
+ */
+const facets = reactive<{ data: LogFacets | null; error: boolean }>({ data: null, error: false })
 
 /** Server default; stated here because the cached page has to match the fetched one. */
 const PAGE_SIZE = 50
@@ -53,7 +61,18 @@ export function useLogs() {
   }
 
   /** Only the unfiltered view is cached — a filtered one is one of arbitrarily many. */
-  const isUnfiltered = computed(() => provider.value === null && !errorsOnly.value)
+  const isUnfiltered = computed(
+    () => provider.value === null && modelFilter.value === null && !errorsOnly.value,
+  )
+
+  async function loadFacets() {
+    try {
+      facets.data = await getLogFacets(todayRange(new Date()))
+      facets.error = false
+    } catch {
+      facets.error = true
+    }
+  }
 
   /**
    * Loads the first page.
@@ -87,6 +106,7 @@ export function useLogs() {
       const page = await listLogs({
         limit: PAGE_SIZE,
         provider: provider.value ?? undefined,
+        modelFilter: modelFilter.value,
         errorsOnly: errorsOnly.value,
       })
       applyPage(page.rows, page.next_cursor)
@@ -115,6 +135,7 @@ export function useLogs() {
         limit: PAGE_SIZE,
         cursor,
         provider: provider.value ?? undefined,
+        modelFilter: modelFilter.value,
         errorsOnly: errorsOnly.value,
       })
       state.rows = [...state.rows, ...page.rows]
@@ -126,11 +147,23 @@ export function useLogs() {
     }
   }
 
-  /** Server-side filter, so a change reloads from the first page. */
-  async function setProvider(next: string | null) {
+  /**
+   * Server-side filter, so a change reloads from the first page. A model or
+   * alias choice that belongs to another provider goes with it — the two
+   * together would only ever match nothing.
+   */
+  async function setProvider(next: string | null, keepModelFilter: boolean) {
     if (provider.value === next) return
     provider.value = next
+    if (!keepModelFilter) modelFilter.value = null
     setLogsPrefs({ provider: next })
+    resetRows()
+    await load()
+  }
+
+  async function setModelFilter(next: LogModelFilter) {
+    if (JSON.stringify(modelFilter.value) === JSON.stringify(next)) return
+    modelFilter.value = next
     resetRows()
     await load()
   }
@@ -162,7 +195,11 @@ export function useLogs() {
   return {
     state,
     provider: computed(() => provider.value),
+    modelFilter: computed(() => modelFilter.value),
     errorsOnly: computed(() => errorsOnly.value),
+    facets,
+    loadFacets,
+    setModelFilter,
     setUserId,
     load,
     loadMore,
