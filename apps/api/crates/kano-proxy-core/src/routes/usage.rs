@@ -18,7 +18,7 @@ use crate::auth::session::SessionUser;
 use crate::db::accounts::{iso_from_ms, parse_iso_ms};
 use crate::db::cli::list_cli_providers;
 use crate::db::custom_providers::list_custom_providers;
-use crate::db::request_logs::{usage_rows_in_range, RequestLogPageRow, UsageLogRow};
+use crate::db::request_logs::{usage_rows_in_range, FacetLogRow, RequestLogPageRow, UsageLogRow};
 use crate::pricing::litellm::{
     estimate_cost, get_price_table, has_source_tagged_price_tables, refresh_price_table, CostUsage, PriceTable,
 };
@@ -32,7 +32,7 @@ pub fn routes() -> Router<AppState> {
 const ALLOWED_DAYS: [i64; 3] = [1, 7, 30];
 const DAY_MS: i64 = 86_400_000;
 /// A range wider than a year is refused rather than scanned.
-const MAX_SPAN_MS: i64 = 366 * DAY_MS;
+pub(crate) const MAX_SPAN_MS: i64 = 366 * DAY_MS;
 
 fn error(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({ "error": code }))).into_response()
@@ -302,6 +302,26 @@ impl CostRow for UsageLogRow {
     }
 }
 
+impl CostRow for FacetLogRow {
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn usage(&self) -> CostUsage {
+        CostUsage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            cache_read_input_tokens: self.cache_read_input_tokens,
+            cache_creation_input_tokens: self.cache_creation_input_tokens,
+        }
+    }
+    fn cost(&self) -> Option<f64> {
+        self.cost
+    }
+    fn set_cost(&mut self, cost: f64) {
+        self.cost = Some(cost);
+    }
+}
+
 impl CostRow for RequestLogPageRow {
     fn model(&self) -> &str {
         &self.model
@@ -374,7 +394,7 @@ pub fn summarize_usage_rows(
 
 /// `Number(value)` on a query parameter: JavaScript's numeric coercion, where an empty or
 /// blank string is 0 and anything non-numeric is NaN (`None` here).
-fn js_number(value: &str) -> Option<f64> {
+pub(crate) fn js_number(value: &str) -> Option<f64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Some(0.0);
