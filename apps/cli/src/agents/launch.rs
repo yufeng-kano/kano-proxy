@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use super::doc::Doc;
-use super::{claude_code, codex, group_models, now_stamp, provider_ids, AgentKind, EFFORTS, KEY_PLACEHOLDER};
-use crate::api::{self, CatalogModel, Group, GroupModel};
+use super::{claude_code, codex, group_models, now_stamp, provider_ids, AgentKind, EFFORTS, KEY_PLACEHOLDER, MAX_GROUP_MODELS};
+use crate::api::{self, CatalogModel, Group, GroupModel, GroupTarget};
 use crate::state::StateFile;
 use crate::tunnel::TokenCache;
 
@@ -146,11 +146,32 @@ pub async fn run(file: &StateFile, kind: AgentKind, args: LaunchArgs) -> Result<
         if !args.dry_run {
             sweep(&dir, &base_url, &device_id, &access).await;
         }
-        // The group, as it is — created with setup's defaults only when the account has none.
+        // The group: what it already holds stays exactly as it is. Models the account
+        // gained since — which no name in the group serves yet — are added, each answering
+        // as itself; a group the account does not have is created with setup's defaults.
         let catalog = api::list_models(&base_url, &access).await?;
         let groups = api::list_groups(&base_url, &access).await?;
-        let (group, created) = match groups.into_iter().find(|g| g.slug == kind.group_slug()) {
-            Some(g) => (g, false),
+        let (group, change) = match groups.into_iter().find(|g| g.slug == kind.group_slug()) {
+            Some(g) => {
+                let (new, left_out) = new_models(kind, &g, &catalog);
+                let names: Vec<String> = new.iter().map(|m| m.name.clone()).collect();
+                let mut models = g.models.clone();
+                models.extend(new);
+                if names.is_empty() {
+                    (g, GroupChange::None { left_out })
+                } else if args.dry_run {
+                    (Group { models, ..g }, GroupChange::Added { names, left_out })
+                } else {
+                    match api::update_group_models(&base_url, &access, &g.id, &models).await {
+                        Ok(updated) => (updated, GroupChange::Added { names, left_out }),
+                        // Not worth failing a launch over: the group as it is still works.
+                        Err(e) => {
+                            say(format_args!("· could not add {} to the group \"{}\" ({e:#}) — launching with the group as it is", names.join(", "), g.slug));
+                            (g, GroupChange::None { left_out: Vec::new() })
+                        }
+                    }
+                }
+            }
             None => {
                 let models = default_group_models(kind, &base_url, &catalog)?;
                 let group = if args.dry_run {
@@ -158,7 +179,7 @@ pub async fn run(file: &StateFile, kind: AgentKind, args: LaunchArgs) -> Result<
                 } else {
                     create_group(kind, &base_url, &access, &models).await?
                 };
-                (group, true)
+                (group, GroupChange::Created)
             }
         };
         if group.models.is_empty() {
@@ -169,9 +190,9 @@ pub async fn run(file: &StateFile, kind: AgentKind, args: LaunchArgs) -> Result<
             );
         }
         let plan = Plan::new(kind, &base_url, &group, &catalog, &args)?;
-        Ok((group, created, plan))
+        Ok((group, change, plan))
     };
-    let (group, created, plan) = tokio::select! {
+    let (group, change, plan) = tokio::select! {
         prepared = prepare => prepared?,
         // Nothing is minted yet: there is nothing to undo.
         got = signals.next() => return Ok(got.cancelled()),
@@ -179,10 +200,21 @@ pub async fn run(file: &StateFile, kind: AgentKind, args: LaunchArgs) -> Result<
 
     if args.dry_run {
         println!("dry run — nothing is created, minted, revoked or started\n");
-        println!("Group \"{}\" — {}", group.slug, if created { "would be created with these models:" } else { "used as it is:" });
+        println!(
+            "Group \"{}\" — {}",
+            group.slug,
+            match &change {
+                GroupChange::Created => "would be created with these models:".to_string(),
+                GroupChange::Added { names, .. } => format!("what it holds is kept, and {} would be added (new on your account):", names.join(", ")),
+                GroupChange::None { .. } => "used as it is:".to_string(),
+            }
+        );
         for model in &group.models {
             let targets: Vec<&str> = model.targets.iter().map(|t| t.model.as_str()).collect();
             println!("  {:<32} → {}", model.name, targets.join(", "));
+        }
+        if let Some(note) = change.left_out_note(&group) {
+            println!("{note}");
         }
         for note in &plan.notes {
             println!("{note}");
@@ -207,8 +239,15 @@ pub async fn run(file: &StateFile, kind: AgentKind, args: LaunchArgs) -> Result<
         "✓ group \"{}\" — {} models{}",
         group.slug,
         group.models.len(),
-        if created { " (created with the defaults; `kano-proxy agent setup` or the Groups page changes them)" } else { "" }
+        match &change {
+            GroupChange::Created => " (created with the defaults; `kano-proxy agent setup` or the Groups page changes them)".to_string(),
+            GroupChange::Added { names, .. } => format!(" (added {}, new on your account)", names.join(", ")),
+            GroupChange::None { .. } => String::new(),
+        }
     ));
+    if let Some(note) = change.left_out_note(&group) {
+        say(note);
+    }
     for note in &plan.notes {
         say(note);
     }
@@ -352,6 +391,52 @@ fn default_group_models(kind: AgentKind, base_url: &str, catalog: &[CatalogModel
         });
     }
     Ok(models)
+}
+
+/// What a launch did to the agent's group.
+enum GroupChange {
+    Created,
+    /// Models new on the account were added; nothing the group held was touched.
+    Added { names: Vec<String>, left_out: Vec<String> },
+    None { left_out: Vec<String> },
+}
+
+impl GroupChange {
+    /// Models the account has that the group has no room for.
+    fn left_out_note(&self, group: &Group) -> Option<String> {
+        let left_out = match self {
+            GroupChange::Added { left_out, .. } | GroupChange::None { left_out } => left_out,
+            GroupChange::Created => return None,
+        };
+        (!left_out.is_empty()).then(|| {
+            format!(
+                "· the group \"{}\" is full ({MAX_GROUP_MODELS} models): {} on your account {} not in it — make room on the Groups page",
+                group.slug,
+                left_out.join(", "),
+                if left_out.len() == 1 { "is" } else { "are" }
+            )
+        })
+    }
+}
+
+/// The agent's own provider's models that no name in the group serves — in practice what
+/// the account gained since the group was written, and also a mirror the user deleted —
+/// each answering as itself, in catalog order, as far as the group's cap allows; and the
+/// ids there was no room for.
+fn new_models(kind: AgentKind, group: &Group, catalog: &[CatalogModel]) -> (Vec<GroupModel>, Vec<String>) {
+    let room = MAX_GROUP_MODELS.saturating_sub(group.models.len());
+    let mut missing: Vec<String> = Vec::new();
+    for id in provider_ids(catalog, kind.provider()) {
+        if !group.models.iter().any(|m| m.name == id) && !missing.contains(&id) {
+            missing.push(id);
+        }
+    }
+    let left_out = missing.split_off(room.min(missing.len()));
+    let new = missing
+        .into_iter()
+        .map(|id| GroupModel { targets: vec![GroupTarget { model: format!("{}/{id}", kind.provider()), account_id: None }], name: id })
+        .collect();
+    (new, left_out)
 }
 
 /// Create the agent's group. Another launch may have created it a moment ago: then that
@@ -1133,6 +1218,29 @@ mod tests {
     }
 
     #[test]
+    fn models_new_on_the_account_are_added_and_nothing_the_group_holds_is_touched() {
+        // Newest first, as the catalog lists them; the group was written before 5-2 existed.
+        let cat = catalog(&["claude-code/claude-fable-5-2", "claude-code/claude-fable-5-1", "claude-code/claude-opus-5", "codex/gpt-5.6-sol", "claude-code/claude-fable-5-2"]);
+        let g = group(&["my-alias", "claude-fable-5-1"]);
+        let (new, left_out) = new_models(AgentKind::ClaudeCode, &g, &cat);
+        let names: Vec<&str> = new.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["claude-fable-5-2", "claude-opus-5"], "only the agent's own provider, only what no name serves yet, each once");
+        assert_eq!(new[0].targets, [GroupTarget { model: "claude-code/claude-fable-5-2".into(), account_id: None }], "answering as itself");
+        assert!(left_out.is_empty());
+        // The Fable slot then follows the account's newest model of the family.
+        let all = Group { models: g.models.iter().cloned().chain(new).collect(), ..g };
+        assert_eq!(slot_names(&all, &cat, &[None, None, None, None]).0[0], "claude-fable-5-2");
+
+        // A full group gains nothing, and says what it has no room for.
+        let full = group(&(0..MAX_GROUP_MODELS).map(|i| format!("m{i}")).collect::<Vec<_>>().iter().map(String::as_str).collect::<Vec<_>>());
+        let (new, left_out) = new_models(AgentKind::ClaudeCode, &full, &cat);
+        assert!(new.is_empty());
+        assert_eq!(left_out, ["claude-fable-5-2", "claude-fable-5-1", "claude-opus-5"]);
+        // Nothing new: nothing to add.
+        assert!(new_models(AgentKind::ClaudeCode, &group(&["claude-fable-5-2", "claude-fable-5-1", "claude-opus-5"]), &cat).0.is_empty());
+    }
+
+    #[test]
     fn the_settings_file_holds_setups_keys_and_clears_what_would_leak_in() {
         let slots = strings(&["claude-fable-5-1", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]);
         let settings = claude_settings("https://p.example", &slots, None, "sk-kano-proxy-abc");
@@ -1358,7 +1466,7 @@ exit @CODE@
             assert_eq!(seen["env"]["ANTHROPIC_BASE_URL"], format!("{}/g/claude-code/anthropic", server.base));
             assert_eq!(seen["env"]["ANTHROPIC_AUTH_TOKEN"], SECRET);
             assert_eq!(seen["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-5", "the group's name for the slot, not another gateway's");
-            assert_eq!(seen["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-opus-5", "a slot the group cannot name still resolves");
+            assert_eq!(seen["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5", "a model the account gained since the group was written is served too");
             assert_eq!(seen["env"]["ANTHROPIC_MODEL"], "", "the user's pin cannot reach a launched session");
             assert_eq!(seen["model"], "claude-opus-5", "nor a saved model this group does not serve");
 
@@ -1374,7 +1482,22 @@ exit @CODE@
             assert_eq!(serde_json::from_str::<Value>(&minted.2).unwrap()["name"], "claude-code-launch@my-mac");
             assert_eq!(count(&seen, "DELETE", "/cli/v1/keys/key_"), 1, "revoked when the agent exited: {seen:?}");
             assert_eq!(count(&seen, "POST", "/cli/v1/token"), 2, "a token for the start and a fresh one for the revoke — a session can outlive the first");
-            assert!(!seen.iter().any(|(m, p, _)| m != "GET" && p.starts_with("/cli/v1/model-groups")), "an existing group is never modified");
+            // The group: what it held is sent back exactly as it was, with the models the
+            // account gained since appended — never created anew, never rewritten.
+            assert_eq!(count(&seen, "POST", "/cli/v1/model-groups"), 0);
+            let updated = seen.iter().find(|(m, p, _)| m == "PUT" && p == "/cli/v1/model-groups/mgrp_1").expect("new models are added");
+            let models = serde_json::from_str::<Value>(&updated.2).unwrap()["models"].clone();
+            assert_eq!(
+                models.as_array().unwrap()[..2],
+                [
+                    json!({ "name": "claude-opus-5", "targets": [{ "model": "grok/grok-4.5" }] }),
+                    json!({ "name": "my-alias", "targets": [{ "model": "codex/gpt-5.6-sol" }] })
+                ],
+                "the user's own names and targets are untouched"
+            );
+            let added: Vec<&str> = models.as_array().unwrap()[2..].iter().map(|m| m["name"].as_str().unwrap()).collect();
+            assert_eq!(added, ["claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5-1"], "each answering as itself, in catalog order");
+            assert_eq!(models[2]["targets"], json!([{ "model": "claude-code/claude-sonnet-5" }]));
         }
 
         /// A machine `agent setup` already wrote: the names setup gave the slots are the
@@ -1404,7 +1527,7 @@ exit @CODE@
             let seen: Value = serde_json::from_str(&fs::read_to_string(out.join("settings.json")).unwrap()).unwrap();
             assert_eq!(seen["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "my-alias", "the name setup wrote for the slot");
             assert_eq!(seen["env"]["ANTHROPIC_DEFAULT_OPUS_MODEL"], "claude-opus-5");
-            assert_eq!(seen["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "my-alias", "a name the group no longer serves is not used: the slot borrows the next");
+            assert_eq!(seen["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "claude-haiku-4-5", "a name the group no longer serves is not used: the account's own model of the family is");
             assert!(seen.get("model").is_none(), "a saved model the group serves is the user's choice");
             assert_eq!(fs::read_to_string(config.join("settings.json")).unwrap(), own);
         }
@@ -1657,20 +1780,23 @@ while [ $i -lt 300 ]; do sleep 0.1; i=$((i + 1)); done
         /// `--dry-run` reads and prints; it creates, mints, revokes and starts nothing.
         #[tokio::test(flavor = "multi_thread")]
         async fn a_dry_run_creates_mints_revokes_and_starts_nothing() {
-            let server = mock_server(false);
-            let sandbox = Sandbox::new(&server.base);
-            let _home = HomeGuard::set(&sandbox.dir);
-            let (bin, out) = stand_in(&sandbox, "claude", 0);
-            let _path = PathGuard::prepend(&bin);
-            let dir = launch_dir(&sandbox.file.path);
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("dead.lock"), record(&server.base, "clidev_1", Some("key_orphan"))).unwrap();
-            let args = LaunchArgs { dry_run: true, ..launch_args(&[]) };
-            assert_eq!(run(&sandbox.file, AgentKind::ClaudeCode, args).await.unwrap(), Exit::Code(0));
-            let seen = server.requests.lock().unwrap();
-            assert!(seen.iter().all(|(m, p, _)| m == "GET" || p == "/cli/v1/token"), "{seen:?}");
-            assert!(!out.join("argv").exists(), "the agent was not started");
-            assert_eq!(left_in(&dir), ["dead.lock"], "not even the sweep");
+            // With no group (one would be created) and with one that would gain models.
+            for group_exists in [false, true] {
+                let server = mock_server(group_exists);
+                let sandbox = Sandbox::new(&server.base);
+                let _home = HomeGuard::set(&sandbox.dir);
+                let (bin, out) = stand_in(&sandbox, "claude", 0);
+                let _path = PathGuard::prepend(&bin);
+                let dir = launch_dir(&sandbox.file.path);
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join("dead.lock"), record(&server.base, "clidev_1", Some("key_orphan"))).unwrap();
+                let args = LaunchArgs { dry_run: true, ..launch_args(&[]) };
+                assert_eq!(run(&sandbox.file, AgentKind::ClaudeCode, args).await.unwrap(), Exit::Code(0));
+                let seen = server.requests.lock().unwrap();
+                assert!(seen.iter().all(|(m, p, _)| m == "GET" || p == "/cli/v1/token"), "{seen:?}");
+                assert!(!out.join("argv").exists(), "the agent was not started");
+                assert_eq!(left_in(&dir), ["dead.lock"], "not even the sweep");
+            }
         }
     }
 }

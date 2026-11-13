@@ -71,7 +71,7 @@ kano-proxy agent launch codex
 
 `kano-proxy agent launch` starts the agent against your proxy for this one session and leaves its config files alone. `agent setup` is the permanent way: it changes the agent's config, so every later start goes through the proxy. `agent launch` writes nothing to the agent's config, and the next time you start the agent on its own it works as before. In order, it:
 
-1. Uses the agent's model group (`claude-code` or `codex-cli`) as it is, and never changes it. If your account has no such group yet, it creates one with the defaults setup starts from and says so. Creating one needs a Claude model on your account for Claude Code, or a connected Codex (ChatGPT) account for the Codex CLI. Without one the command says which is missing and stops.
+1. Uses the agent's model group (`claude-code` or `codex-cli`) and changes nothing it already holds. Models of the agent's own provider that the group has no name for, such as ones your account gained since the group was written, are added under their own names, and the launch says which. If your account has no such group yet, it creates one with the defaults setup starts from and says so. Creating one needs a Claude model on your account for Claude Code, or a connected Codex (ChatGPT) account for the Codex CLI. Without one the command says which is missing and stops.
 2. Creates an API key for this session only, named `<agent>-launch@<device name>`, for example `claude-code-launch@my-mac`.
 3. Starts the agent in the current terminal and directory.
 4. When the agent exits, revokes the key and deletes the files it made for the session. It exits with the agent's exit code.

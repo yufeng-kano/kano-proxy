@@ -71,7 +71,7 @@ kano-proxy agent launch codex
 
 `kano-proxy agent launch` 只在這一次啟動 agent 時讓它走你的 proxy，不會動它的設定檔。`agent setup` 是長期的做法：它會修改 agent 的設定，之後每次啟動都會走 proxy。`agent launch` 不會在 agent 的設定裡寫入任何東西，下次你直接啟動 agent 時，一切跟原本一樣。它會依序：
 
-1. 直接使用 agent 的 model group（`claude-code` 或 `codex-cli`），不做任何修改。如果你的帳號還沒有這個 group，會用 setup 一開始的預設值建立一個，並告訴你。Claude Code 需要你的帳號有 Claude 模型，Codex CLI 需要已連接的 Codex（ChatGPT）帳號，才能建立。條件不符時，指令會說明缺少什麼並停止。
+1. 使用 agent 的 model group（`claude-code` 或 `codex-cli`），group 裡原有的內容完全不動。agent 自己的供應商裡、group 還沒有名稱對應的模型（例如 group 寫好之後你的帳號才有的新模型），會以它自己的名稱加進去，並告訴你加了哪些。如果你的帳號還沒有這個 group，會用 setup 一開始的預設值建立一個，並告訴你。Claude Code 需要你的帳號有 Claude 模型，Codex CLI 需要已連接的 Codex（ChatGPT）帳號，才能建立。條件不符時，指令會說明缺少什麼並停止。
 2. 建立一把只給這次使用的 API key，名稱是 `<agent>-launch@<裝置名稱>`，例如 `claude-code-launch@my-mac`。
 3. 在目前的終端機和目錄啟動 agent。
 4. agent 結束後撤銷這把 key，刪除這次產生的檔案，並以 agent 的結束代碼結束。
