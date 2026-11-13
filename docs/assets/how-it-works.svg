@@ -1,152 +1,149 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 470" width="100%" height="100%" role="img" aria-label="How Kano Proxy works">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1152 600" width="1152" height="600" role="img" aria-label="How Kano Proxy works">
   <defs>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
       <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0F172A" flood-opacity="0.08" />
     </filter>
-    <marker id="arrowIn" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arrowIn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 1 L 10 5 L 0 9 z" fill="#4F46E5" />
     </marker>
-    <marker id="arrowOut" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arrowOut" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 1 L 10 5 L 0 9 z" fill="#059669" />
     </marker>
-    <marker id="arrowTunnel" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <marker id="arrowTunnel" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M 0 1 L 10 5 L 0 9 z" fill="#0891B2" />
     </marker>
   </defs>
 
   <style>
-    .h { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; font-size: 14px; font-weight: 700; fill: #0F172A; }
-    .t { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; font-size: 12px; font-weight: 600; fill: #1E293B; }
-    .s { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; font-size: 11px; fill: #64748B; }
-    .c { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; fill: #334155; }
-    .l { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; font-size: 10px; font-weight: 600; letter-spacing: 0.04em; }
+    .h { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; font-size: 21px; font-weight: 700; fill: #0F172A; }
+    .t { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; font-size: 17px; font-weight: 600; fill: #1E293B; }
+    .r { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; font-size: 16px; font-weight: 500; fill: #1E293B; }
+    .s { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; font-size: 16px; fill: #64748B; }
+    .c { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 15px; fill: #334155; }
+    .l { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", "PingFang TC", "Microsoft JhengHei", "Noto Sans TC", sans-serif; font-size: 14px; font-weight: 700; }
   </style>
 
   <!-- Canvas -->
-  <rect width="960" height="470" rx="16" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5" />
+  <rect x="0.75" y="0.75" width="1150.5" height="598.5" rx="18" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5" />
 
-  <!-- ==================== LEFT: CLIENTS ==================== -->
-  <g transform="translate(36, 40)" filter="url(#shadow)">
-    <rect width="220" height="300" rx="12" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" />
-    <text x="110" y="30" text-anchor="middle" class="h">Clients &amp; coding agents</text>
+  <!-- ==================== LEFT: HOW YOU USE IT ==================== -->
+  <g transform="translate(28, 36)" filter="url(#shadow)">
+    <rect width="290" height="490" rx="14" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" />
 
-    <g transform="translate(16, 48)">
-      <rect width="188" height="36" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <circle cx="18" cy="18" r="5" fill="#0EA5E9" />
-      <text x="32" y="22" class="t">Claude Code · Codex CLI</text>
-
-      <rect y="44" width="188" height="36" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <circle cx="18" cy="62" r="5" fill="#8B5CF6" />
-      <text x="32" y="66" class="t">Cursor · Cline · Roo · Aider</text>
-
-      <rect y="88" width="188" height="36" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <circle cx="18" cy="106" r="5" fill="#10B981" />
-      <text x="32" y="110" class="t">OpenAI / Anthropic SDKs</text>
-
-      <!-- Bases -->
-      <g transform="translate(0, 140)">
-        <rect width="188" height="96" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-        <text x="12" y="20" class="l" fill="#94A3B8">BASE URLS</text>
-        <text x="12" y="40" class="c" fill="#4F46E5">/openai/v1</text>
-        <text x="12" y="56" class="c" fill="#4F46E5">/anthropic</text>
-        <text x="12" y="72" class="c" fill="#4F46E5">/g/&lt;group&gt;/…</text>
-        <text x="12" y="88" class="s">Authorization: Bearer sk-kano-proxy-…</text>
-      </g>
+    <text x="145" y="36" text-anchor="middle" class="h">How you use it</text>
+    <g transform="translate(16, 56)">
+      <rect width="258" height="112" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <circle cx="22" cy="26" r="6" fill="#0EA5E9" />
+      <text x="38" y="32" class="t">From the CLI</text>
+      <text x="18" y="64" class="c">kano-proxy agent launch</text>
+      <text x="18" y="92" class="s">Claude Code · Codex CLI</text>
+    </g>
+    <g transform="translate(16, 180)">
+      <rect width="258" height="112" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <circle cx="22" cy="26" r="6" fill="#8B5CF6" />
+      <text x="38" y="32" class="t">Through the API</text>
+      <text x="18" y="64" class="s">Cursor · Cline · OpenCode</text>
+      <text x="18" y="92" class="s">OpenAI / Anthropic SDKs</text>
+    </g>
+    <g transform="translate(16, 304)">
+      <rect width="258" height="166" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <text x="18" y="30" class="l" fill="#64748B">BASE URLS</text>
+      <text x="18" y="58" class="c">/openai/v1</text>
+      <text x="18" y="82" class="c">/anthropic</text>
+      <text x="18" y="106" class="c">/g/&lt;group&gt;/…</text>
+      <line x1="18" y1="122" x2="240" y2="122" stroke="#E2E8F0" />
+      <text x="18" y="148" class="c">sk-kano-proxy-…</text>
+      <text x="242" y="148" text-anchor="end" class="l" fill="#64748B">KEY</text>
     </g>
   </g>
 
-  <!-- ==================== CENTER: KANO PROXY ==================== -->
-  <g transform="translate(330, 24)" filter="url(#shadow)">
-    <rect width="300" height="380" rx="14" fill="#FFFFFF" stroke="#4F46E5" stroke-width="2" />
-
-    <!-- Header -->
-    <rect x="18" y="16" width="264" height="34" rx="8" fill="#EEF2FF" />
-    <text x="150" y="38" text-anchor="middle" class="h" fill="#3730A3">Kano Proxy</text>
-    <text x="150" y="68" text-anchor="middle" class="s">Rust server · PostgreSQL · docker compose</text>
-
-    <!-- Stages -->
-    <g transform="translate(18, 82)">
-      <rect width="264" height="46" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
-      <text x="14" y="20" class="t">1 · Tenant auth</text>
-      <text x="14" y="36" class="s">Google sign-in · API keys · per-user pools</text>
-
-      <rect y="54" width="264" height="46" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
-      <text x="14" y="74" class="t">2 · Protocol adapter</text>
-      <text x="14" y="90" class="s">OpenAI and Anthropic wire, both directions</text>
-
-      <rect y="108" width="264" height="46" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
-      <text x="14" y="128" class="t" fill="#B45309">3 · Routing &amp; failover</text>
-      <text x="14" y="144" class="s">Account pools · model groups · 429 bench</text>
-
-      <rect y="162" width="264" height="46" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
-      <text x="14" y="182" class="t" fill="#047857">4 · Streaming relay</text>
-      <text x="14" y="198" class="s">SSE passthrough, no buffering · cancellation</text>
-
-      <!-- Footer -->
-      <rect y="220" width="264" height="52" rx="8" fill="#FFFFFF" stroke="#E2E8F0" stroke-dasharray="3 3" />
-      <text x="132" y="240" text-anchor="middle" class="s" fill="#475569">Web UI: usage windows · keys · groups · logs</text>
-      <text x="132" y="258" text-anchor="middle" class="s" fill="#475569">Prompts and completions are never stored</text>
+  <!-- ==================== CENTRE: KANO PROXY ==================== -->
+  <g transform="translate(422, 20)" filter="url(#shadow)">
+    <rect width="308" height="506" rx="18" fill="#FFFFFF" stroke="#4F46E5" stroke-width="2.5" />
+    <rect x="16" y="16" width="276" height="46" rx="10" fill="#EEF2FF" />
+    <text x="154" y="46" text-anchor="middle" class="h">Kano Proxy</text>
+    <text x="154" y="86" text-anchor="middle" class="s">Rust server · PostgreSQL</text>
+    <g transform="translate(16, 102)">
+      <rect width="276" height="70" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
+      <text x="16" y="31" class="t">1 · Sign-in and keys</text>
+      <text x="16" y="55" class="s">Google sign-in · API keys</text>
+    </g>
+    <g transform="translate(16, 182)">
+      <rect width="276" height="70" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
+      <text x="16" y="31" class="t">2 · Two-way translation</text>
+      <text x="16" y="55" class="s">OpenAI and Anthropic APIs</text>
+    </g>
+    <g transform="translate(16, 262)">
+      <rect width="276" height="70" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
+      <text x="16" y="31" class="t">3 · Routing and failover</text>
+      <text x="16" y="55" class="s">accounts · model groups</text>
+    </g>
+    <g transform="translate(16, 342)">
+      <rect width="276" height="70" rx="8" fill="#F8FAFC" stroke="#E2E8F0" />
+      <text x="16" y="31" class="t">4 · Streaming</text>
+      <text x="16" y="55" class="s">no buffering · cancellation</text>
+    </g>
+    <g transform="translate(16, 422)">
+      <rect width="276" height="68" rx="8" fill="#FFFFFF" stroke="#CBD5E1" stroke-dasharray="4 4" />
+      <text x="138" y="28" text-anchor="middle" class="s">Web UI: usage, keys, logs</text>
+      <text x="138" y="52" text-anchor="middle" class="s">No prompt or reply is logged</text>
     </g>
   </g>
 
-  <!-- ==================== RIGHT: UPSTREAMS ==================== -->
-  <g transform="translate(704, 40)" filter="url(#shadow)">
-    <rect width="220" height="222" rx="12" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" />
-    <text x="110" y="30" text-anchor="middle" class="h">Your subscriptions</text>
-
-    <g transform="translate(16, 46)">
-      <rect width="188" height="30" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <rect x="8" y="8" width="14" height="14" rx="4" fill="#D97706" />
-      <text x="30" y="20" class="c">Claude Code (Pro / Team)</text>
-
-      <rect y="36" width="188" height="30" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <rect x="8" y="44" width="14" height="14" rx="4" fill="#00A67E" />
-      <text x="30" y="56" class="c">ChatGPT Codex</text>
-
-      <rect y="72" width="188" height="30" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <rect x="8" y="80" width="14" height="14" rx="4" fill="#0F172A" />
-      <text x="30" y="92" class="c">xAI SuperGrok</text>
-
-      <rect y="108" width="188" height="30" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <rect x="8" y="116" width="14" height="14" rx="4" fill="#3B82F6" />
-      <text x="30" y="128" class="c">Google Antigravity</text>
-
-      <rect y="144" width="188" height="30" rx="6" fill="#FFFFFF" stroke="#E2E8F0" />
-      <rect x="8" y="152" width="14" height="14" rx="4" fill="#6366F1" />
-      <text x="30" y="164" class="c">Custom endpoint (BYO API)</text>
+  <!-- ==================== RIGHT: YOUR ACCOUNTS ==================== -->
+  <g transform="translate(834, 36)" filter="url(#shadow)">
+    <rect width="290" height="306" rx="14" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5" />
+    <text x="145" y="36" text-anchor="middle" class="h">Your accounts</text>
+    <g transform="translate(16, 56)">
+      <rect width="258" height="42" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <rect x="14" y="13" width="16" height="16" rx="4" fill="#D97706" />
+      <text x="42" y="27" class="r">Claude subscription</text>
+    </g>
+    <g transform="translate(16, 104)">
+      <rect width="258" height="42" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <rect x="14" y="13" width="16" height="16" rx="4" fill="#10A37F" />
+      <text x="42" y="27" class="r">ChatGPT Codex</text>
+    </g>
+    <g transform="translate(16, 152)">
+      <rect width="258" height="42" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <rect x="14" y="13" width="16" height="16" rx="4" fill="#0F172A" />
+      <text x="42" y="27" class="r">xAI SuperGrok</text>
+    </g>
+    <g transform="translate(16, 200)">
+      <rect width="258" height="42" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <rect x="14" y="13" width="16" height="16" rx="4" fill="#4285F4" />
+      <text x="42" y="27" class="r">Google AI Pro / Ultra</text>
+    </g>
+    <g transform="translate(16, 248)">
+      <rect width="258" height="42" rx="8" fill="#FFFFFF" stroke="#E2E8F0" />
+      <rect x="14" y="13" width="16" height="16" rx="4" fill="#6366F1" />
+      <text x="42" y="27" class="r">Custom endpoints</text>
     </g>
   </g>
 
-  <!-- ==================== RIGHT BOTTOM: LOCAL LLMs ==================== -->
-  <g transform="translate(704, 284)" filter="url(#shadow)">
-    <rect width="220" height="120" rx="12" fill="#ECFEFF" stroke="#A5F3FC" stroke-width="1.5" />
-    <text x="110" y="28" text-anchor="middle" class="h" fill="#155E75">Your machine</text>
-    <g transform="translate(16, 42)">
-      <rect width="188" height="30" rx="6" fill="#FFFFFF" stroke="#A5F3FC" />
-      <text x="94" y="20" text-anchor="middle" class="c" fill="#0E7490">kano-proxy CLI</text>
-      <text x="94" y="52" text-anchor="middle" class="s" fill="#155E75">Ollama · LM Studio · vLLM · llama.cpp</text>
-      <text x="94" y="68" text-anchor="middle" class="s" fill="#155E75">no public URL, no port forwarding</text>
-    </g>
+  <!-- ==================== RIGHT: YOUR MACHINE ==================== -->
+  <g transform="translate(834, 358)" filter="url(#shadow)">
+    <rect width="290" height="168" rx="14" fill="#ECFEFF" stroke="#A5F3FC" stroke-width="1.5" />
+    <text x="145" y="32" text-anchor="middle" class="h">Your machine</text>
+    <rect x="16" y="46" width="258" height="38" rx="8" fill="#FFFFFF" stroke="#A5F3FC" />
+    <text x="145" y="71" text-anchor="middle" class="c">kano-proxy tunnel</text>
+    <text x="145" y="106" text-anchor="middle" class="s">Ollama · LM Studio</text>
+    <text x="145" y="128" text-anchor="middle" class="s">vLLM · llama.cpp</text>
+    <text x="145" y="150" text-anchor="middle" class="s">No public URL needed</text>
   </g>
 
   <!-- ==================== ARROWS ==================== -->
-  <!-- Client -> Proxy -->
-  <path d="M 256 140 L 322 140" fill="none" stroke="#4F46E5" stroke-width="2" marker-end="url(#arrowIn)" />
-  <text x="289" y="130" text-anchor="middle" class="l" fill="#4F46E5">API key</text>
-
-  <!-- Proxy -> Upstreams -->
-  <path d="M 630 140 L 696 140" fill="none" stroke="#4F46E5" stroke-width="2" marker-end="url(#arrowIn)" />
-  <text x="663" y="130" text-anchor="middle" class="l" fill="#4F46E5">OAuth</text>
-
-  <!-- Upstreams -> Proxy -> Client (stream) -->
-  <path d="M 696 220 L 630 220" fill="none" stroke="#059669" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrowOut)" />
-  <path d="M 322 220 L 256 220" fill="none" stroke="#059669" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arrowOut)" />
-  <text x="289" y="238" text-anchor="middle" class="l" fill="#059669">SSE stream</text>
-
-  <!-- CLI tunnel: outbound dial from the machine to the proxy -->
-  <path d="M 704 344 L 630 344" fill="none" stroke="#0891B2" stroke-width="2" marker-end="url(#arrowTunnel)" marker-start="url(#arrowTunnel)" />
-  <text x="667" y="334" text-anchor="middle" class="l" fill="#0891B2">WebSocket</text>
+  <path d="M 324 160 L 414 160" stroke="#4F46E5" stroke-width="2" marker-end="url(#arrowIn)" />
+  <text x="370" y="148" text-anchor="middle" class="l" fill="#4F46E5">API key</text>
+  <path d="M 416 262 L 326 262" stroke="#059669" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrowOut)" />
+  <text x="370" y="284" text-anchor="middle" class="l" fill="#059669">stream</text>
+  <path d="M 736 160 L 826 160" stroke="#4F46E5" stroke-width="2" marker-end="url(#arrowIn)" />
+  <text x="782" y="148" text-anchor="middle" class="l" fill="#4F46E5">request</text>
+  <path d="M 828 262 L 738 262" stroke="#059669" stroke-width="2" stroke-dasharray="6 4" marker-end="url(#arrowOut)" />
+  <text x="782" y="284" text-anchor="middle" class="l" fill="#059669">stream</text>
+  <path d="M 738 423 L 826 423" stroke="#0891B2" stroke-width="2" marker-start="url(#arrowTunnel)" marker-end="url(#arrowTunnel)" />
+  <text x="782" y="411" text-anchor="middle" class="l" fill="#0891B2">WebSocket</text>
 
   <!-- Caption -->
-  <text x="480" y="446" text-anchor="middle" class="s">Credentials stay on the server. Clients only ever hold a Kano API key; every bound provider answers on both API formats.</text>
+  <text x="576" y="570" text-anchor="middle" class="s">Credentials stay on the server. Your tools only hold a Kano API key.</text>
 </svg>
