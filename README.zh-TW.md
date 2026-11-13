@@ -9,12 +9,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust-server-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" />
-  <img src="https://img.shields.io/badge/PostgreSQL-storage-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL" />
   <img src="https://img.shields.io/badge/Docker_Compose-self--hosted-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose" />
   <img src="https://img.shields.io/badge/OpenAI-Chat_Completions_%26_Responses-00A67E?style=flat-square" alt="OpenAI API" />
   <img src="https://img.shields.io/badge/Anthropic-Messages_API-D97706?style=flat-square" alt="Anthropic API" />
-  <img src="https://img.shields.io/badge/隱私-零對話日誌-059669?style=flat-square" alt="隱私" />
   <img src="https://img.shields.io/badge/授權-MIT-blue?style=flat-square" alt="授權" />
 </p>
 
@@ -28,188 +25,172 @@
 
 ---
 
-**Kano Proxy** 是一套自架、多租戶的代理系統，專為開發者與編程代理（Coding Agents）打造。連接你自己的 AI 帳號（Claude Code、ChatGPT Codex、SuperGrok、Google AI Pro/Ultra）、串接任何相容 OpenAI 或 Anthropic 的端點，或把自己電腦上跑的本地 LLM 接進來，再透過標準的 OpenAI 與 Anthropic API 呼叫。
+**Kano Proxy** 把你已經有的 AI 帳號集中到一個端點後面。連接你的訂閱（Claude、ChatGPT Codex、SuperGrok、Google AI Pro/Ultra）、你自己的 OpenAI 或 Anthropic 相容端點，或是你電腦上跑的模型，之後就能透過標準的 OpenAI 與 Anthropic API，在 coding agent 或自己的程式裡使用其中任何一個。
 
-一支 Rust 伺服器加一個 PostgreSQL，用 docker compose 跑在自己掌控的機器上。上游 OAuth 憑證僅保留在伺服器端，客戶端只需使用系統核發的專屬 API Key。
+它是一個 Rust 伺服器加一個 PostgreSQL 資料庫，用 docker compose 跑在你自己掌控的機器上。供應商的憑證只留在伺服器上，你的工具手上只有一把 Kano API key。
 
-> **想直接使用？**
-> 線上託管版本已上線：[kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com)。登入時會請你同意同一份說明。
+## 開始使用
 
----
+1. 用 Google 登入託管版 [kano-proxy.yuufeng.com](https://kano-proxy.yuufeng.com)，或你自架的伺服器（見[自架](#自架)）。第一次登入會請你同意上面的使用說明。
+2. 打開 **Providers**，至少連接一個帳號。
 
-## 核心特色
+接著選一種用法：
 
-- **在任意 Coding Agent 自由混用模型** — 直接在 **Claude Code 裡跑 GPT 與 Gemini**，或在 **Cursor、Cline、Codex CLI 裡跑 Claude 與 Grok**。Chat Completions、Responses API 與 Anthropic Messages 三種協議雙向即時轉譯，工具不再被單一供應商綁死。
-- **容錯移轉** — 每個供應商可排列多個帳號或端點。某一個出錯或無法使用時，系統暫時停用它，把請求移到下一個。
-- **模型群組即虛擬端點** — 每個群組有自己的 Base URL（`/g/<slug>/openai/v1`、`/g/<slug>/anthropic`），群組內的模型名稱展開成有序的 `provider/model` 目標清單：客戶端模型對應與跨供應商容錯，一個機制搞定。
-- **自帶端點** — 註冊任何相容 OpenAI / Anthropic 的 API（Base URL + Key），它就和內建供應商一樣可在兩種協議上使用。
-- **本地 LLM 不需公開網址** — `kano-proxy` CLI 主動對外建立 WebSocket 連線，把你電腦上的 Ollama、LM Studio、vLLM 或 llama.cpp 變成正式的供應商。不需 cloudflared、ngrok 或開通連接埠。
-- **用量儀表板與花費上限** — 即時掌握各帳號 5 小時與每週額度，檢視每次請求的估算費用，並可替每把 API Key 設定每日 / 每週 / 每月的美元上限。
-- **隱私至上設計** — 預設絕不記錄、儲存任何提示詞（Prompts）或生成內容。
-- **專為 Coding Agent 最佳化** — 零緩衝 SSE 即時串流並支援中途取消、Tool Calling、Vision 圖片輸入、音訊輸入與語音轉文字、思考推理深度（Reasoning Effort）對應及 Anthropic 提示詞快取（Prompt Caching）透傳。
+- **[用 CLI 使用](#用-cli-使用)**：一個指令就讓 Claude Code 或 Codex CLI 走你的 proxy。
+- **[呼叫 API](#呼叫-api)**：任何 OpenAI 或 Anthropic 的客戶端、SDK，或 `curl`。
 
----
+## 用 CLI 使用
 
-## 運作架構
+安裝 `kano-proxy` CLI：
+
+```bash
+brew install yufeng-kano/tap/kano-proxy
+# 或
+curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
+```
+
+Windows：先 `scoop bucket add kano https://github.com/yufeng-kano/scoop-bucket`，再 `scoop install kano-proxy`。
+
+讓這台機器登入，只要做一次：
+
+```bash
+kano-proxy login                                    # 託管版
+kano-proxy login --base-url https://<your-domain>   # 你自己的伺服器
+```
+
+啟動 coding agent，讓它走你的 proxy。agent 本身要先裝好；`claude-code` 需要連接 Claude 帳號，`codex` 需要連接 ChatGPT 帳號：
+
+```bash
+kano-proxy agent launch claude-code
+kano-proxy agent launch codex
+```
+
+agent 這一次會走你的 proxy，它自己的設定檔完全不動，CLI 替它建立的 key 在 agent 結束時就撤銷。`--` 之後的參數會原樣交給 agent：
+
+```bash
+kano-proxy agent launch codex -- exec "run the tests"
+```
+
+想要長期使用，就改讓 CLI 幫你設定 agent。之後照平常的方式啟動 agent，就會走 proxy：
+
+```bash
+kano-proxy agent setup claude-code     # 問你要用哪些模型，再寫入 agent 的設定
+kano-proxy agent restore claude-code   # 原樣還原
+```
+
+### 使用自己電腦上的模型
+
+你電腦上的 Ollama、LM Studio、vLLM 或 llama.cpp 也能當成供應商。CLI 會主動連到 proxy，所以不需要公開網址，也不用開連接埠：
+
+```bash
+kano-proxy tunnel add      # 會問名稱（slug）、格式和本機網址，例如 http://localhost:11434/v1
+kano-proxy tunnel start    # 使用期間保持執行
+```
+
+之後它的模型會以 `<slug>/<model>` 出現（slug 是你取的名稱），用法和其他供應商一樣。
+
+延伸閱讀：[安裝與登入](./apps/docs/pages/zh-TW/cli/install.md) · [設定與啟動 agent](./apps/docs/pages/zh-TW/cli/agents.md) · [本機模型](./apps/docs/pages/zh-TW/cli/local-models.md)
+
+## 呼叫 API
+
+1. 打開 **Access** 建立一把 key。它以 `sk-kano-proxy-` 開頭，只會顯示一次。
+2. 在 **Models** 挑一個模型 id，格式是 `provider/model`。
+3. 把請求送到下面任一個 base URL。
+
+| API | Base URL |
+|---|---|
+| OpenAI 相容（Chat Completions、Responses） | `https://<your-domain>/openai/v1` |
+| Anthropic Messages（客戶端會自己加上 `/v1/messages`） | `https://<your-domain>/anthropic` |
+
+```bash
+curl https://<your-domain>/openai/v1/chat/completions \
+  -H "Authorization: Bearer <your-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-code/claude-opus-5",
+    "messages": [{"role": "user", "content": "Say hello in five words."}],
+    "max_tokens": 32
+  }'
+```
+
+同一把 key、同一個模型 id 也能用在 Anthropic 的 base，不論模型來自哪個供應商，proxy 都會轉換請求與回應：
+
+```bash
+curl https://<your-domain>/anthropic/v1/messages \
+  -H "x-api-key: <your-api-key>" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-code/claude-opus-5",
+    "max_tokens": 32,
+    "messages": [{"role": "user", "content": "Say hello in five words."}]
+  }'
+```
+
+id 範例（你實際能用的清單在 **Models**）：
+
+| 供應商 | id 範例 |
+|---|---|
+| Claude Code | `claude-code/claude-opus-5` |
+| ChatGPT Codex | `codex/gpt-5.6-sol` |
+| xAI Grok | `grok/grok-4.5` |
+| Google Antigravity | `antigravity/gemini-3-flash` |
+| 自訂端點或本機模型 | `<slug>/<model>`，slug 是你取的名稱 |
+
+只要工具或 SDK 能填 base URL 和 API key，用法都一樣，包括 Aider 以及 OpenAI 與 Anthropic 的 SDK。設定頁：[Cursor](./apps/docs/pages/zh-TW/agents/cursor.md) · [Cline](./apps/docs/pages/zh-TW/agents/cline.md) · [OpenCode](./apps/docs/pages/zh-TW/agents/opencode.md)
+
+延伸閱讀：[端點與模型 id](./apps/docs/pages/zh-TW/reference/endpoints.md) · [路由與容錯移轉](./apps/docs/pages/zh-TW/reference/routing.md) · [錯誤訊息](./apps/docs/pages/zh-TW/reference/errors.md)
+
+## 功能
+
+- **任何工具用任何模型。** 在 Claude Code 裡用 GPT 與 Gemini，在 Cursor 或 Codex CLI 裡用 Claude 與 Grok。Chat Completions、Responses API 與 Anthropic Messages 雙向轉換。
+- **容錯移轉。** 訂閱型供應商可以放多個帳號，模型群組可以放多個供應商與端點。其中一個被限流、額度用完、登入失效或沒有回應時，請求會移到下一個。
+- **模型群組。** 讓工具看到它認得的模型名稱（例如 `claude-opus-5`），再決定每個名稱依序由哪些供應商回答。每個群組有自己的 base URL：`/g/<slug>/openai/v1` 與 `/g/<slug>/anthropic`。
+- **用量與花費上限。** 查看每個帳號的 5 小時與每週額度，以及每次請求的估算費用。每把 API key 都能設定每日、每週或每月的美元上限。
+- **預設保護隱私。** 提示詞與生成內容從不寫入日誌或資料庫。
+- **為 coding agent 打造。** 不緩衝的串流、中途取消、工具呼叫、圖片輸入、音訊輸入、reasoning effort，以及 Anthropic prompt caching。
 
 <p align="center">
   <img src="./docs/assets/how-it-works.zh-TW.svg" alt="Kano Proxy 運作架構" width="100%" />
 </p>
 
-1. **登入**：透過 Google 帳號登入 Web 管理介面。
-2. **綁定**：授權綁定訂閱帳號（Claude Code、Codex、Grok、Antigravity）、新增自訂端點，或用 CLI 接上本地 LLM。
-3. **建立金鑰**：產生專屬的 Kano API Key（`sk-kano-proxy-...`）。
-4. **設定工具**：將 Claude Code、Codex CLI、Cursor、Cline、Aider 或任何 SDK 指向 Kano Proxy 即可開始使用。
+## 可以連接什麼
 
----
+| 供應商 | 使用的來源 |
+|---|---|
+| Claude Code | Claude Pro、Max、Ultra 或 Team 訂閱 |
+| ChatGPT Codex | ChatGPT Plus、Team 或 Pro 訂閱 |
+| xAI Grok | SuperGrok 訂閱 |
+| Google Antigravity | Google AI Pro 或 Ultra |
+| 自訂端點 | 任何相容 OpenAI 或 Anthropic 的 API：一個 base URL 加一把 key |
+| 本機模型 | 透過 CLI 接上你電腦上的 Ollama、LM Studio、vLLM 或 llama.cpp |
 
-## 快速上手
+每個訂閱型供應商都能放多個帳號，依你設定的順序嘗試。要在不同供應商、自訂端點或本機模型之間備援，請用模型群組。
 
-### 1. 介面端點（Base URL）
+## 自架
 
-| 協議格式 | 端點 URL | 適用客戶端工具 |
-|---|---|---|
-| **OpenAI 相容** | `https://<your-domain>/openai/v1` | Codex CLI, Cursor, Cline, Roo Code, Aider, CC Switch, OpenAI SDK |
-| **Anthropic Messages** | `https://<your-domain>/anthropic` | Claude Code CLI, Anthropic SDK, Claude 格式工具 |
-| **模型群組** | `https://<your-domain>/g/<slug>/openai/v1` · `/g/<slug>/anthropic` | 同上，改用群組內定義的模型名稱 |
-
-OpenAI 相容端點同時提供 **Chat Completions**（`/chat/completions`）、**Responses API**（`/responses`，Codex CLI 使用的協議）、`/models` 與 `/audio/transcriptions`。Codex 模型在此原生透傳到你的 ChatGPT 訂閱，其他供應商由 proxy 即時轉換。
-
-### 2. 身份驗證
-
-```http
-Authorization: Bearer sk-kano-proxy-...
-```
-*(Anthropic 格式客戶端亦支援 `x-api-key: sk-kano-proxy-...`)*
-
-### 3. 模型名稱格式
-
-在兩種協議端點上，皆使用統一的 `provider/model` 命名格式：
-
-- `claude-code/claude-opus-5` / `claude-code/claude-sonnet-5`
-- `codex/gpt-5.6-sol`
-- `grok/grok-4.5`
-- `antigravity/gemini-3-flash`
-- `<custom-slug>/<model-name>`：自訂端點
-- `<cli-slug>/<local-model>`：透過 CLI 接入的本地 LLM
-
----
-
-## 實用混用範例
-
-### 在 Claude Code 裡直接執行 GPT 與 Gemini
-
-將 Claude Code CLI 指向 Kano Proxy 的 `/anthropic` 端點，即可使用 GPT 或 Gemini 模型，且原生支援工具呼叫：
-
-```bash
-export ANTHROPIC_BASE_URL="https://<your-domain>/anthropic"
-export ANTHROPIC_API_KEY="sk-kano-proxy-..."
-
-# 在 Claude Code 內使用 GPT 或 Gemini
-claude --model codex/gpt-5.6-sol
-# 或
-claude --model antigravity/gemini-3-flash
-```
-
-### 讓 Codex CLI 走 proxy
-
-在 `~/.codex/config.toml` 把 Kano Proxy 加成 model provider。Codex 模型在 CLI 原生的 Responses 協議上直接透傳；Models 頁面上的其他模型 id（`claude-code/...`、`antigravity/...`）也能填在同一個位置：
-
-```toml
-model = "codex/gpt-5.6-sol"
-model_provider = "kano"
-model_catalog_json = "kano-models.json"  # 讓 /model 列出 codex/... 的 id，產生方式見文件
-
-[model_providers.kano]
-name = "Kano Proxy"
-base_url = "https://<your-domain>/openai/v1"
-experimental_bearer_token = "<your-api-key>"
-wire_api = "responses"
-```
-
-### 在 Cursor / OpenAI SDK 使用 Claude
-
-將任何支援 OpenAI 格式的工具指向 `/openai/v1`：
-
-```bash
-curl https://<your-domain>/openai/v1/chat/completions \
-  -H "Authorization: Bearer sk-kano-proxy-..." \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "claude-code/claude-sonnet-5",
-    "messages": [{"role": "user", "content": "請用 Rust 寫一個快速排序演算法。"}],
-    "stream": true
-  }'
-```
-
-### 把本地 Ollama 接進 proxy
-
-安裝 CLI（Homebrew、Scoop 或安裝腳本），讓這台機器登入一次，註冊本地端點，然後讓通道持續運行：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/yufeng-kano/kano-proxy/main/scripts/install-cli.sh | sh
-# 或：brew install yufeng-kano/tap/kano-proxy
-
-kano-proxy login          # 開啟瀏覽器授權此裝置，貼回一次性代碼
-kano-proxy tunnel add    # slug、openai|anthropic、http://localhost:11434/v1
-kano-proxy tunnel start  # 每個已註冊的供應商一條對外 WebSocket
-```
-
-本地模型隨即以 `<slug>/<model>` 出現在上述所有端點，也能當作模型群組的目標。同一支 CLI 也能把 Claude Code 或 Codex CLI 接到你的 proxy（`kano-proxy agent setup claude-code` / `codex`），並用 `agent restore` 還原；也能用 `kano-proxy agent launch <agent>` 只在單次 session 啟動，不寫入 agent 的設定檔。細節見 [docs/cli.md](./docs/cli.md)。
-
----
-
-## 支援的供應商
-
-| 供應商 | 上游來源 | 多帳號池支援 |
-|---|---|:---:|
-| <img src="https://img.shields.io/badge/Claude_Code-D97706?style=flat-square" alt="Claude Code" height="20" /> | Anthropic Claude Pro / Team OAuth | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-| <img src="https://img.shields.io/badge/ChatGPT_Codex-00A67E?style=flat-square" alt="Codex" height="20" /> | ChatGPT Plus / Team / Pro (Codex Backend) | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-| <img src="https://img.shields.io/badge/xAI_Grok-000000?style=flat-square" alt="Grok" height="20" /> | xAI SuperGrok OAuth | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-| <img src="https://img.shields.io/badge/Google_Antigravity-4285F4?style=flat-square" alt="Antigravity" height="20" /> | Google AI Pro / Ultra (CloudCode API) | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-| <img src="https://img.shields.io/badge/Custom_Endpoints-6366F1?style=flat-square&logo=fastapi&logoColor=white" alt="Custom Endpoints" height="20" /> | 任何相容 OpenAI / Anthropic 的 API | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-| <img src="https://img.shields.io/badge/Local_LLMs_(CLI)-0891B2?style=flat-square&logo=ollama&logoColor=white" alt="Local LLMs" height="20" /> | 你電腦上的 Ollama、LM Studio、vLLM、llama.cpp，透過 `kano-proxy` CLI 通道 | <img src="https://img.shields.io/badge/支援-10B981?style=flat-square" alt="支援" height="18" /> |
-
----
-
-## 本地開發與部署
-
-四個容器各司其職：PostgreSQL、API 伺服器、Web 靜態站（管理介面加公開的 `/docs/` 文件站）、負責 TLS 與路由的 Caddy。
+四個容器各司其職：PostgreSQL、API 伺服器、Web（管理介面加公開的 `/docs/` 文件站），以及負責 TLS 與路由的 Caddy。
 
 ```bash
 git clone https://github.com/yufeng-kano/kano-proxy.git
 cd kano-proxy
-cp .env.example .env     # 填好網域、Google OAuth client 與密鑰
+cp .env.example .env     # 填好網域、ACME email、Google OAuth client 與密鑰
 docker compose up -d --build
 ```
 
-把網域 DNS 指到這台機器並開放 80、443 連接埠。Caddy 會在第一次請求時取得憑證，伺服器啟動時自動套用資料庫遷移。若已有自己的反向代理，拿掉 `caddy` 服務、依部署文件自行把 API 路徑轉到伺服器即可。
+把網域的 DNS 指到這台機器，並開放 80 與 443 連接埠。Caddy 會在第一次請求時取得憑證，伺服器啟動時會套用資料庫遷移。如果你已經有自己的反向代理，拿掉 `caddy` 服務，依[部署文件](./docs/deployment.md)自行把 API 路徑轉到伺服器。
 
-每個 app 各自安裝、各自建置，專案根目錄沒有共用的套件設定檔。
+要改程式的話，請看 [Testing](./docs/testing.md)。`apps/` 下的每個 app 各自建置與測試。
 
-```bash
-cd apps/api  && cargo test --workspace
-cd apps/cli  && cargo test
-cd apps/web  && pnpm install && pnpm typecheck && pnpm build
-cd apps/docs && pnpm install && pnpm build
-```
+## 文件
 
-設定、憑證、資料庫遷移與發版流程請參閱 [docs/deployment.md](./docs/deployment.md)，架構說明在 [docs/rust-server.md](./docs/rust-server.md)。
-
----
-
-## 完整文件
-
+- [開始使用](./apps/docs/pages/zh-TW/guide/getting-started.md)
 - [風險與條款](./apps/docs/pages/zh-TW/guide/risks.md)
-- [產品目標與模型命名](./docs/product.md)
-- [API 參考與協議映射](./docs/api.md)
-- [身份認證與帳號池機制](./docs/auth.md)
-- [供應商、路由與容錯策略](./docs/providers.md)
-- [CLI 與本地 LLM 通道](./docs/cli.md)
+- [CLI](./docs/cli.md)
+- [API 與協定對應](./docs/api.md)
+- [供應商、路由與容錯移轉](./docs/providers.md)
 - [部署](./docs/deployment.md)
-- [文件總覽導覽](./docs/index.md)
-
----
+- [其他文件](./docs/index.md)
 
 ## 授權
 
