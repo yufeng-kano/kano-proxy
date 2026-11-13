@@ -36,7 +36,7 @@ $ kano-proxy agent launch codex --model <name> --effort high
 $ kano-proxy agent launch codex -- exec "run the tests"    # everything after -- goes to codex
 ```
 
-It does not write `config.toml`. It uses the `codex-cli` group as it is, mints a key for this session alone, and revokes the key when Codex exits. The key travels in Codex's environment, not on the command line. `--model` takes a name the group serves, such as `gpt-5.6-sol` (an example), and `--effort` takes `low`, `medium`, `high` or `xhigh`. Codex lists sessions by provider, so resume a launched session with `kano-proxy agent launch codex -- resume`, not `codex resume`. See [Set up agents](/cli/agents#start-an-agent-for-one-session).
+It does not write `config.toml`. It uses the `codex-cli` group, adding only models new on your account, mints a key for this session alone, and revokes the key when Codex exits. The key travels in Codex's environment, not on the command line. `--model` takes a name the group serves, such as `gpt-5.6-sol` (an example), and `--effort` takes `low`, `medium`, `high` or `xhigh`. Codex lists sessions by provider, so resume a launched session with `kano-proxy agent launch codex -- resume`, not `codex resume`. See [Set up agents](/cli/agents#start-an-agent-for-one-session).
 
 ## Set it up by hand
 

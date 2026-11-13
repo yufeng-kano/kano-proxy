@@ -37,7 +37,7 @@ $ kano-proxy agent launch claude-code
 $ kano-proxy agent launch claude-code -- --model <name>    # everything after -- goes to claude
 ```
 
-It does not write `settings.json`. It uses the `claude-code` group as it is, mints a key for this session alone, and revokes the key when Claude Code exits. Its settings take precedence over your own `settings.json`, so it works even when that file points at another gateway. See [Set up agents](/cli/agents#start-an-agent-for-one-session).
+It does not write `settings.json`. It uses the `claude-code` group, adding only models new on your account, mints a key for this session alone, and revokes the key when Claude Code exits. Its settings take precedence over your own `settings.json`, so it works even when that file points at another gateway. See [Set up agents](/cli/agents#start-an-agent-for-one-session).
 
 ## Set it up by hand
 

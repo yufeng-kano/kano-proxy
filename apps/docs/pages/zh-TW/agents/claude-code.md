@@ -37,7 +37,7 @@ $ kano-proxy agent launch claude-code
 $ kano-proxy agent launch claude-code -- --model <name>    # -- 後面的參數都交給 claude
 ```
 
-它不會寫入 `settings.json`。它直接沿用現有的 `claude-code` 群組，建立一把只給這次 session 用的 key，Claude Code 結束時就撤銷這把 key。它的設定優先於你自己的 `settings.json`，所以就算那個檔案指向別的 gateway 也能用。見[設定 agent](/zh-TW/cli/agents#單次啟動-agent)。
+它不會寫入 `settings.json`。它沿用現有的 `claude-code` 群組，只會把帳號上新出現的模型加進去，並建立一把只給這次 session 用的 key，Claude Code 結束時就撤銷這把 key。它的設定優先於你自己的 `settings.json`，所以就算那個檔案指向別的 gateway 也能用。見[設定 agent](/zh-TW/cli/agents#單次啟動-agent)。
 
 ## 手動設定
 

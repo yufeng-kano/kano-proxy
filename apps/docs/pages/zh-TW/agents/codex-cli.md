@@ -36,7 +36,7 @@ $ kano-proxy agent launch codex --model <name> --effort high
 $ kano-proxy agent launch codex -- exec "run the tests"    # -- 後面的參數都交給 codex
 ```
 
-它不會寫入 `config.toml`。它直接沿用現有的 `codex-cli` 群組，建立一把只給這次 session 用的 key，Codex 結束時就撤銷這把 key。key 透過 Codex 的環境變數傳入，不會出現在命令列上。`--model` 要填群組裡的名稱，例如 `gpt-5.6-sol`（只是範例），`--effort` 可以是 `low`、`medium`、`high` 或 `xhigh`。Codex 會依 provider 列出 session，所以用 launch 開的 session 要用 `kano-proxy agent launch codex -- resume` 接續，不是 `codex resume`。見[設定 agent](/zh-TW/cli/agents#單次啟動-agent)。
+它不會寫入 `config.toml`。它沿用現有的 `codex-cli` 群組，只會把帳號上新出現的模型加進去，並建立一把只給這次 session 用的 key，Codex 結束時就撤銷這把 key。key 透過 Codex 的環境變數傳入，不會出現在命令列上。`--model` 要填群組裡的名稱，例如 `gpt-5.6-sol`（只是範例），`--effort` 可以是 `low`、`medium`、`high` 或 `xhigh`。Codex 會依 provider 列出 session，所以用 launch 開的 session 要用 `kano-proxy agent launch codex -- resume` 接續，不是 `codex resume`。見[設定 agent](/zh-TW/cli/agents#單次啟動-agent)。
 
 ## 手動設定
 
