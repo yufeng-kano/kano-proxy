@@ -12,6 +12,8 @@ import type {
   CustomProviderModelsMode,
   CustomProviderTestResult,
   LoginStart,
+  LogFacets,
+  LogModelFilter,
   LogsResponse,
   ModelGroup,
   ModelGroupModelInput,
@@ -100,25 +102,28 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
 
-  if (!res.ok) {
-    const msg =
-      typeof data === "object" &&
-      data !== null &&
-      "error" in data &&
-      typeof (data as { error: unknown }).error === "string"
-        ? (data as { error: string }).error
-        : `Request failed (${res.status})`
-    // The usage notice changed while the app was open: everything waits until the new
-    // text is accepted (docs/admin-ui.md § Usage notice page). The notice page itself
-    // only calls ungated routes, so it never lands here.
-    if (res.status === 403 && msg === "notice_required" && window.location.pathname !== "/notice") {
-      const here = window.location.pathname + window.location.search
-      window.location.assign(`/notice?redirect=${encodeURIComponent(here)}`)
-    }
-    throw new ApiError(res.status, msg, data)
-  }
+  if (!res.ok) throw failure(res.status, data)
 
   return data as T
+}
+
+/** The error a refused call throws, from its status and parsed body. */
+function failure(status: number, data: unknown): ApiError {
+  const msg =
+    typeof data === "object" &&
+    data !== null &&
+    "error" in data &&
+    typeof (data as { error: unknown }).error === "string"
+      ? (data as { error: string }).error
+      : `Request failed (${status})`
+  // The usage notice changed while the app was open: everything waits until the new
+  // text is accepted (docs/admin-ui.md § Usage notice page). The notice page itself
+  // only calls ungated routes, so it never lands here.
+  if (status === 403 && msg === "notice_required" && window.location.pathname !== "/notice") {
+    const here = window.location.pathname + window.location.search
+    window.location.assign(`/notice?redirect=${encodeURIComponent(here)}`)
+  }
+  return new ApiError(status, msg, data)
 }
 
 export type Me = { user: User; notice: UsageNotice }
@@ -585,21 +590,91 @@ export async function getUsageSummary(
  * the previous page's `next_cursor` and is passed straight back — it is opaque
  * by contract, so nothing here reads inside it.
  */
-export async function listLogs(params?: {
-  limit?: number
-  cursor?: string
+export type LogsFilterParams = {
   /** Exact provider slug; omitted = every provider, including deleted ones. */
   provider?: string
+  /** Exact model, exact alias, or no alias. */
+  modelFilter?: LogModelFilter
   /** Only rows that failed (`error_code` set or `status_code >= 400`). */
   errorsOnly?: boolean
-}): Promise<LogsResponse> {
+}
+
+function setLogsFilters(q: URLSearchParams, params: LogsFilterParams | undefined) {
+  if (params?.provider) q.set("provider", params.provider)
+  const filter = params?.modelFilter
+  if (filter?.kind === "model") q.set("model", filter.value)
+  if (filter?.kind === "group") q.set("group", filter.value)
+  if (filter?.kind === "direct") q.set("direct", "1")
+  if (params?.errorsOnly) q.set("errors", "1")
+}
+
+export async function listLogs(
+  params?: LogsFilterParams & { limit?: number; cursor?: string },
+): Promise<LogsResponse> {
   const q = new URLSearchParams()
   if (params?.limit !== undefined) q.set("limit", String(params.limit))
   if (params?.cursor) q.set("cursor", params.cursor)
-  if (params?.provider) q.set("provider", params.provider)
-  if (params?.errorsOnly) q.set("errors", "1")
+  setLogsFilters(q, params)
   const query = q.toString()
   return request<LogsResponse>(`/api/logs${query ? `?${query}` : ""}`)
+}
+
+/** Requests and cost per provider, model and alias inside `[from, to]` — the pickers' counts. */
+export async function getLogFacets(range: { from: string; to: string }): Promise<LogFacets> {
+  const q = new URLSearchParams(range)
+  return request<LogFacets>(`/api/logs/facets?${q.toString()}`)
+}
+
+/**
+ * Downloads every row matching the range and filters as a file. Fetched rather
+ * than navigated to, so the session cookie goes with it the same way it does
+ * for every other call, and a refusal surfaces as an error instead of a page
+ * of JSON in a new tab.
+ */
+export async function downloadLogsExport(
+  params: LogsFilterParams & {
+    from: string
+    to: string
+    format: "csv" | "json"
+    /** Field keys in output order; omitted = every field. */
+    columns?: string[]
+    /** Minutes east of UTC, for the CSV's local times. */
+    offsetMinutes: number
+  },
+): Promise<void> {
+  const q = new URLSearchParams({
+    from: params.from,
+    to: params.to,
+    format: params.format,
+    offset: String(params.offsetMinutes),
+  })
+  if (params.columns) q.set("columns", params.columns.join(","))
+  setLogsFilters(q, params)
+  const res = await fetch(apiUrl(`/api/logs/export?${q.toString()}`), { credentials: "include" })
+  if (!res.ok) {
+    let data: unknown = null
+    try {
+      data = await res.json()
+    } catch {
+      /* a non-JSON refusal keeps the status line */
+    }
+    throw failure(res.status, data)
+  }
+  // Held whole before saving: a page cannot hand a stream to the downloads
+  // folder without the File System Access API, which Safari and Firefox lack.
+  const blob = await res.blob()
+  const filename =
+    /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ??
+    `kano-proxy-logs.${params.format}`
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement("a")
+  link.href = url
+  link.download = filename
+  document.body.append(link)
+  link.click()
+  link.remove()
+  // Revoked later: some browsers start reading the URL only after click() returns.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 // Changelog — session auth. See docs/changelog.md.

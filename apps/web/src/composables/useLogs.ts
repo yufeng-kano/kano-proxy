@@ -1,13 +1,14 @@
 import { computed, reactive, ref } from "vue"
-import { listLogs } from "@/services/api"
+import { getLogFacets, listLogs } from "@/services/api"
 import {
   CACHE_TTL_MS,
   isLogsCacheFresh,
   readLogsCache,
   writeLogsCache,
 } from "@/services/cache"
+import { todayRange } from "@/services/logsView"
 import { getLogsPrefs, setLogsPrefs } from "@/services/prefs"
-import type { RequestLogRow } from "@/types"
+import type { LogFacets, LogModelFilter, RequestLogRow } from "@/types"
 
 type LogsState = {
   rows: RequestLogRow[]
@@ -40,20 +41,62 @@ const state = reactive<LogsState>(emptyState())
 
 /** Filters, kept beside the rows they produced so a reload never mixes two views. */
 const provider = ref<string | null>(getLogsPrefs().provider)
+const modelFilter = ref<LogModelFilter>(null)
 const errorsOnly = ref(false)
+
+/**
+ * Today's counts for the pickers. A side dish like the provider list: the rows
+ * never wait on it, and a failure leaves the pickers working without counts.
+ */
+const facets = reactive<{ data: LogFacets | null; error: boolean }>({ data: null, error: false })
 
 /** Server default; stated here because the cached page has to match the fetched one. */
 const PAGE_SIZE = 50
+
+/** Whose rows and filters the singletons above hold, so another account starts clean. */
+let owner: string | null = null
+
+/**
+ * Bumped whenever the rows are thrown away (filter or account change). A
+ * request started under an older generation answers a question nobody is
+ * asking any more, so its result is dropped instead of painted.
+ */
+let generation = 0
 
 export function useLogs() {
   const userId = ref<string | null>(null)
 
   function setUserId(id: string | null) {
     userId.value = id
+    if (id === owner) return
+    // Another account on the same tab: the alias it chose and today's
+    // tallies are the previous user's, not this one's.
+    if (owner !== null) {
+      modelFilter.value = null
+      errorsOnly.value = false
+      facets.data = null
+      facets.error = false
+      resetRows()
+    }
+    owner = id
   }
 
   /** Only the unfiltered view is cached — a filtered one is one of arbitrarily many. */
-  const isUnfiltered = computed(() => provider.value === null && !errorsOnly.value)
+  const isUnfiltered = computed(
+    () => provider.value === null && modelFilter.value === null && !errorsOnly.value,
+  )
+
+  async function loadFacets() {
+    const forOwner = owner
+    try {
+      const data = await getLogFacets(todayRange(new Date()))
+      if (forOwner !== owner) return
+      facets.data = data
+      facets.error = false
+    } catch {
+      if (forOwner === owner) facets.error = true
+    }
+  }
 
   /**
    * Loads the first page.
@@ -83,20 +126,26 @@ export function useLogs() {
     state.refreshing = true
     state.error = null
     state.moreError = null
+    const started = generation
     try {
       const page = await listLogs({
         limit: PAGE_SIZE,
         provider: provider.value ?? undefined,
+        modelFilter: modelFilter.value,
         errorsOnly: errorsOnly.value,
       })
+      if (started !== generation) return
       applyPage(page.rows, page.next_cursor)
       if (cacheable) writeLogsCache(userId.value, page)
     } catch (e) {
+      if (started !== generation) return
       state.error = e instanceof Error ? e.message : "Failed to load logs"
       // Keep whatever is painted; the page surfaces a non-blocking banner.
     } finally {
-      state.loading = false
-      state.refreshing = false
+      if (started === generation) {
+        state.loading = false
+        state.refreshing = false
+      }
     }
   }
 
@@ -110,27 +159,43 @@ export function useLogs() {
     if (!cursor || state.loadingMore) return
     state.loadingMore = true
     state.moreError = null
+    const started = generation
     try {
       const page = await listLogs({
         limit: PAGE_SIZE,
         cursor,
         provider: provider.value ?? undefined,
+        modelFilter: modelFilter.value,
         errorsOnly: errorsOnly.value,
       })
+      if (started !== generation) return
       state.rows = [...state.rows, ...page.rows]
       state.nextCursor = page.next_cursor
     } catch (e) {
+      if (started !== generation) return
       state.moreError = e instanceof Error ? e.message : "Failed to load more logs"
     } finally {
-      state.loadingMore = false
+      if (started === generation) state.loadingMore = false
     }
   }
 
-  /** Server-side filter, so a change reloads from the first page. */
-  async function setProvider(next: string | null) {
+  /**
+   * Server-side filter, so a change reloads from the first page. A model or
+   * alias choice that belongs to another provider goes with it — the two
+   * together would only ever match nothing.
+   */
+  async function setProvider(next: string | null, keepModelFilter: boolean) {
     if (provider.value === next) return
     provider.value = next
+    if (!keepModelFilter) modelFilter.value = null
     setLogsPrefs({ provider: next })
+    resetRows()
+    await load()
+  }
+
+  async function setModelFilter(next: LogModelFilter) {
+    if (JSON.stringify(modelFilter.value) === JSON.stringify(next)) return
+    modelFilter.value = next
     resetRows()
     await load()
   }
@@ -148,7 +213,9 @@ export function useLogs() {
    * row — including the Load-more pages, which belong to the old filter.
    */
   function resetRows() {
+    generation += 1
     state.rows = []
+    state.loadingMore = false
     state.nextCursor = null
     state.error = null
     state.moreError = null
@@ -162,7 +229,11 @@ export function useLogs() {
   return {
     state,
     provider: computed(() => provider.value),
+    modelFilter: computed(() => modelFilter.value),
     errorsOnly: computed(() => errorsOnly.value),
+    facets,
+    loadFacets,
+    setModelFilter,
     setUserId,
     load,
     loadMore,

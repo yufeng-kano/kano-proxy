@@ -96,7 +96,7 @@ Rules:
 - `count_tokens` requests log a row like any other request but never carry token fields (their response is an estimate, not consumption).
 - OpenAI-shaped `usage.completion_tokens` is already the total completion count inclusive of reasoning tokens (with `completion_tokens_details.reasoning_tokens` reported as a detail breakdown). It is stored directly as `request_logs.completion_tokens` and mapped to Anthropic `output_tokens` on conversion paths without adding `reasoning_tokens` a second time.
 
-The Overview page aggregates these rows via `GET /api/usage/summary`, and the Logs page lists them per request via `GET /api/logs` (see [auth.md](./auth.md), [admin-ui.md](./admin-ui.md)).
+The Overview page aggregates these rows via `GET /api/usage/summary`, and the Logs page lists them per request via `GET /api/logs`, counts today's models and aliases via `GET /api/logs/facets`, and downloads them via `GET /api/logs/export` — the same columns, so an export carries no content either (see [auth.md](./auth.md), [admin-ui.md](./admin-ui.md)).
 
 ## Request start timestamps
 

@@ -582,6 +582,29 @@ export type RequestLogRow = {
   cost: number | null
 }
 
+/** Requests and read-time cost for one picker option; `cost` null = nothing in it priced. */
+export type LogFacetTally = { requests: number; cost: number | null }
+
+/** `GET /api/logs/facets` — what the Logs pickers count, each list most-used first. */
+export type LogFacets = {
+  providers: (LogFacetTally & { provider: string })[]
+  models: (LogFacetTally & { provider: string; model: string })[]
+  /** `models`: the alias's distinct targets in the range, most-used first. */
+  groups: (LogFacetTally & { group_name: string; models: string[] })[]
+  /** Rows that came through no alias. */
+  direct: LogFacetTally
+}
+
+/**
+ * What the model picker filters by: one canonical `provider/model`, one alias,
+ * or no alias at all. `null` = every row.
+ */
+export type LogModelFilter =
+  | { kind: "model"; value: string }
+  | { kind: "group"; value: string }
+  | { kind: "direct" }
+  | null
+
 export type LogsResponse = {
   /** Newest first. */
   rows: RequestLogRow[]

@@ -15,8 +15,9 @@
   Cells render through a per-column slot named `cell-<key>`, falling back to
   the column's `value()`.
 
-  `fixed` (below) adds a fourth, opt-in: a table whose columns are shares of the
-  card rather than of their own content.
+  `fixed` (below) adds a fourth, opt-in: a table whose columns are pixel tracks
+  rather than sized by their content, with one-line cells, optional resize
+  handles and optional group separator rows.
 -->
 
 <!-- A plain block, not a second `<script setup>`: only one setup block is
@@ -43,11 +44,13 @@ export type Column<Row> = {
    * table's leftover width and its header ends up at the far edge of a 400px
    * cell from the control it labels.
    *
-   * Under `fixed` this is not a hint but the track itself, so there give every
-   * column a percentage and make them sum to 100 — a column left without one
-   * splits whatever the others did not claim.
+   * Under `fixed` this is not a hint but the track itself, in px. At most one
+   * column leaves it unset and gives `minWidth` instead: that one takes the
+   * card's width beyond the others.
    */
   width?: string
+  /** Under `fixed`, the floor (px) of the one column without a `width`. */
+  minWidth?: number
   /**
    * Accessible name for a column whose `header` is intentionally blank — an
    * action column, where a visible word would label a control that already
@@ -60,7 +63,9 @@ export type Column<Row> = {
 </script>
 
 <script setup lang="ts" generic="Row">
-defineProps<{
+import { computed } from "vue"
+
+const props = defineProps<{
   columns: Column<Row>[]
   rows: Row[]
   rowKey: (row: Row) => string
@@ -73,28 +78,39 @@ defineProps<{
    */
   rowClickable?: boolean
   /**
-   * Fixed tracks and two-line cells, for a table with more columns than the
-   * card has width (Logs, twelve of them).
+   * Pixel tracks and one-line cells, for a table with more columns than the
+   * card has width (Logs, eleven of them).
    *
    * Auto layout sizes a column by its longest cell, so one long model id widens
-   * the table past its card and the card grows a horizontal scrollbar that
-   * parks the last columns out of sight. `table-layout: fixed` makes each
-   * `width` a share of the card that no content can argue with; every cell is
-   * then clamped to the row's two lines and cut, never wrapped into a taller
-   * row (docs/admin-ui.md § Logs page).
+   * the table and every other column moves with it. `table-layout: fixed`
+   * makes each `width` the track itself; a cell that does not fit is cut with
+   * an ellipsis, never wrapped into a taller row (docs/admin-ui.md § Logs page).
+   * The table is never narrower than its tracks, so a user who widens them
+   * past the card scrolls the card sideways.
    *
-   * It lives here rather than in the page's scoped styles because the clamp
+   * It lives here rather than in the page's scoped styles because the cut
    * needs a wrapper element inside each `<td>` — markup only this component
    * emits — and because the mobile card fallback has to opt back out of it in
-   * the same place it is defined. It stays opt-in because it is a real
-   * constraint on the content: the four- and five-column tables size themselves
-   * fine, and clamping their cells would cut text that fits today.
+   * the same place it is defined. Opt-in: the four- and five-column tables
+   * size themselves fine, and cutting their cells would hide text that fits.
    *
-   * A page that turns it on owns the tooltips: a clamped cell should carry its
-   * full text as a native `title`, since what the clamp cut is otherwise only
-   * in the row detail.
+   * A page that turns it on owns the tooltips: a cut cell should carry its
+   * full text as a native `title`.
    */
   fixed?: boolean
+  /**
+   * Under `fixed`, each header's right edge becomes a resize handle — a pointer
+   * drag, or ←/→ on the focused handle — that emits `resize(key, px)`. The
+   * page owns the widths and keeps them.
+   */
+  resizable?: boolean
+  /** The handle's accessible name for a column, e.g. "Resize Account". */
+  resizeLabel?: (header: string) => string
+  /**
+   * Under `fixed`, a label per row: a full-width separator row goes in
+   * wherever it changes (Logs' day headings).
+   */
+  groupBy?: (row: Row) => string
   /**
    * Drops the visible column-header row, for a table whose columns are
    * self-evident *and* whose card head already names the collection (Models'
@@ -115,14 +131,78 @@ defineProps<{
   hideHeader?: boolean
 }>()
 
-defineEmits<{ rowClick: [Row] }>()
+const emit = defineEmits<{ rowClick: [Row]; resize: [key: string, width: number] }>()
 
 defineSlots<Record<string, (props: { row: Row }) => unknown>>()
+
+const MIN_WIDTH = 48
+const MAX_WIDTH = 800
+const KEY_STEP = 16
+
+/** Each row with the group heading that goes above it, if any. */
+const entries = computed(() => {
+  let previous: string | null = null
+  return props.rows.map((row) => {
+    const label = props.groupBy?.(row) ?? null
+    const group = label !== null && label !== previous ? label : null
+    previous = label
+    return { row, group }
+  })
+})
+
+/**
+ * The narrowest the fixed table may get: every pixel track plus the flexible
+ * column's floor. With no flexible column the table is exactly its tracks.
+ */
+const fixedStyle = computed(() => {
+  if (!props.fixed) return undefined
+  let total = 0
+  let flexible = false
+  for (const column of props.columns) {
+    if (column.width) total += Number.parseFloat(column.width)
+    else {
+      flexible = true
+      total += column.minWidth ?? 0
+    }
+  }
+  return flexible ? { minWidth: `${total}px` } : { width: `${total}px` }
+})
+
+let drag: { key: string; x: number; width: number } | null = null
+
+function headerWidth(event: Event): number {
+  return (event.currentTarget as HTMLElement).closest("th")?.getBoundingClientRect().width ?? MIN_WIDTH
+}
+
+function clampWidth(width: number): number {
+  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(width)))
+}
+
+function onResizeStart(event: PointerEvent, key: string) {
+  event.preventDefault()
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  drag = { key, x: event.clientX, width: headerWidth(event) }
+}
+
+function onResizeMove(event: PointerEvent) {
+  if (!drag) return
+  emit("resize", drag.key, clampWidth(drag.width + event.clientX - drag.x))
+}
+
+function onResizeEnd() {
+  drag = null
+}
+
+function onResizeKey(event: KeyboardEvent, key: string) {
+  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
+  event.preventDefault()
+  emit("resize", key, clampWidth(headerWidth(event) + (event.key === "ArrowRight" ? KEY_STEP : -KEY_STEP)))
+}
 </script>
 
 <template>
   <div class="table-wrap">
-    <table class="table" :class="{ fixed, headerless: hideHeader }">
+    <table class="table" :class="{ fixed, headerless: hideHeader }" :style="fixedStyle">
       <caption class="sr-only">{{ caption }}</caption>
       <thead>
         <tr>
@@ -138,41 +218,57 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
               class="sr-only"
             >{{ column.header || column.srHeader }}</span>
             <template v-else>{{ column.header }}</template>
+            <span
+              v-if="fixed && resizable"
+              class="resize"
+              role="separator"
+              aria-orientation="vertical"
+              tabindex="0"
+              :aria-label="resizeLabel?.(column.header) ?? column.header"
+              @pointerdown="onResizeStart($event, column.key)"
+              @pointermove="onResizeMove"
+              @pointerup="onResizeEnd"
+              @pointercancel="onResizeEnd"
+              @keydown="onResizeKey($event, column.key)"
+            />
           </th>
         </tr>
       </thead>
       <tbody>
-        <tr
-          v-for="row in rows"
-          :key="rowKey(row)"
-          :class="{ clickable: rowClickable }"
-          @click="rowClickable && $emit('rowClick', row)"
-        >
-          <td
-            v-for="column in columns"
-            :key="column.key"
-            :class="{
-              numeric: column.numeric,
-              end: column.align === 'end',
-              'hide-mobile': column.hideOnMobile,
-            }"
-            :data-label="column.header || column.srHeader"
+        <template v-for="{ row, group } in entries" :key="rowKey(row)">
+          <tr v-if="group !== null" class="group-row">
+            <th scope="colgroup" :colspan="columns.length">{{ group }}</th>
+          </tr>
+          <tr
+            :class="{ clickable: rowClickable }"
+            @click="rowClickable && $emit('rowClick', row)"
           >
-            <!-- The line clamp needs a `display: -webkit-box` box, and a `<td>`
-                 that is not `display: table-cell` stops being a column — so the
-                 clamp goes on a wrapper inside the cell. Only under `fixed`:
-                 wrapping every table's cells in a block would re-flow the
-                 inline content of four other pages to buy them nothing. -->
-            <div v-if="fixed" class="cell">
-              <slot :name="`cell-${column.key}`" :row="row">
+            <td
+              v-for="column in columns"
+              :key="column.key"
+              :class="{
+                numeric: column.numeric,
+                end: column.align === 'end',
+                'hide-mobile': column.hideOnMobile,
+              }"
+              :data-label="column.header || column.srHeader"
+            >
+              <!-- The ellipsis needs a block box with `overflow: hidden`, and a
+                   `<td>` that is not `display: table-cell` stops being a column —
+                   so the cut goes on a wrapper inside the cell. Only under
+                   `fixed`: wrapping every table's cells in a block would re-flow
+                   the inline content of four other pages to buy them nothing. -->
+              <div v-if="fixed" class="cell">
+                <slot :name="`cell-${column.key}`" :row="row">
+                  {{ column.value?.(row) ?? "" }}
+                </slot>
+              </div>
+              <slot v-else :name="`cell-${column.key}`" :row="row">
                 {{ column.value?.(row) ?? "" }}
               </slot>
-            </div>
-            <slot v-else :name="`cell-${column.key}`" :row="row">
-              {{ column.value?.(row) ?? "" }}
-            </slot>
-          </td>
-        </tr>
+            </td>
+          </tr>
+        </template>
       </tbody>
     </table>
   </div>
@@ -279,49 +375,95 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 /*
  * --- Fixed tracks (the `fixed` prop) --------------------------------------
  *
- * The table is exactly as wide as the card and the columns divide that width
- * between them, so no cell can push the card into scrolling sideways.
+ * Every column is its own pixel track; the one without a width takes the rest
+ * of the card. Widths include the padding, so a dragged edge lands where the
+ * pointer is.
  */
 .table.fixed {
   table-layout: fixed;
 }
 
+.table.fixed th,
+.table.fixed td {
+  box-sizing: border-box;
+}
+
 /* Eleven tracks: the default `--space-4` gutter would spend a third of the
-   table's width on padding, and every column would pay for it in text. */
+   table's width on padding, and every column would pay for it in text. A
+   two-word figure header ("Cache write") may take two lines of the 36px row
+   rather than force its column wider than the figures under it. */
 .table.fixed th {
   padding: 0 var(--space-2);
-  /* A fixed track is regularly narrower than a two-word header ("Cache read"),
-     and `nowrap` in a fixed layout runs the label into its neighbour instead of
-     shrinking the column. Two lines of 11px still clear the 36px header. */
   white-space: normal;
-  overflow: hidden;
+  line-height: 1.2;
 }
 
 .table.fixed td {
   padding: var(--space-2);
 }
 
-/*
- * Every cell is exactly two lines tall, so rows are a uniform height and the
- * first line of each column starts on the same baseline.
- *
- * The line box is a length rather than a ratio because the cells are not all
- * text: a badge is ~22px tall (11px type plus its padding and border), and a
- * cell pairing a badge with a line of text has to come out the same height as
- * one holding two lines of text or the rows ripple down the table.
- */
+/* Figures line up on their last digit in a narrow track, header included. */
+.table.fixed th.numeric,
+.table.fixed td.numeric {
+  text-align: right;
+}
+
+/* One line, cut with an ellipsis; the page puts the full text on a `title`. */
 .table.fixed .cell {
-  --cell-line: 22px;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
   overflow: hidden;
-  height: calc(2 * var(--cell-line));
-  line-height: var(--cell-line);
-  /* A model id or an account slug has no spaces to wrap at, so without this it
-     would overrun its one line rather than fill both of them. */
-  overflow-wrap: anywhere;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 22px;
+}
+
+/* The resize handle: an 8px strip inside the header's right edge (inside, so
+   the next sticky header cannot paint over it), a rule only while pointed at
+   or focused, so the header row reads as plain labels. */
+.resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 2;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resize::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  right: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.resize:hover::after,
+.resize:focus-visible::after {
+  background: var(--ring-border);
+}
+
+.resize:focus-visible {
+  outline: none;
+}
+
+/* A day heading between rows: part of the table, so it scrolls with the rows
+   it names, set like a section label rather than a column header. */
+.table .group-row th {
+  position: static;
+  height: auto;
+  padding: var(--space-4) var(--space-2) var(--space-1);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text-secondary);
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 
 /* Mobile: one card per row, each cell labelled by its column header. */
@@ -411,15 +553,27 @@ defineSlots<Record<string, (props: { row: Row }) => unknown>>()
   }
 
   .table.fixed .cell {
-    display: block;
     min-width: 0;
-    height: auto;
     line-height: inherit;
     overflow: visible;
-    /* Both spellings: the `-webkit-` one needs the `-webkit-box` display we
-       just dropped, but the standard property clamps a plain block too. */
-    -webkit-line-clamp: none;
-    line-clamp: none;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* Tracks belong to the desktop table; a card is as wide as the screen. */
+  .table.fixed {
+    width: auto !important;
+    min-width: 0 !important;
+  }
+
+  .table .group-row {
+    padding: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .table .group-row th {
+    display: block;
+    padding: var(--space-4) var(--space-4) var(--space-2);
   }
 }
 </style>

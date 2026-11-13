@@ -154,7 +154,16 @@ pub struct RequestLogPageRow {
 pub struct LogPageQuery<'a> {
     pub user_id: &'a str,
     pub provider: Option<&'a str>,
+    /// Exact canonical `provider/model`.
+    pub model: Option<&'a str>,
+    /// Exact `group_name`.
+    pub group: Option<&'a str>,
+    /// Only rows that came through no group (`group_name IS NULL`).
+    pub direct: bool,
     pub errors_only: bool,
+    /// Inclusive `created_at` bounds, normalized ISO strings (the export's range).
+    pub from: Option<&'a str>,
+    pub to: Option<&'a str>,
     pub cursor: Option<(&'a str, &'a str)>,
     pub limit: i64,
 }
@@ -173,9 +182,22 @@ pub async fn list_request_log_page(
          WHERE user_id = $1",
     );
     let mut n = 1;
-    if query.provider.is_some() {
-        n += 1;
-        sql.push_str(&format!(" AND provider = ${n}"));
+    let mut text_binds: Vec<&str> = Vec::new();
+    for (column, value) in [
+        ("provider = ", query.provider),
+        ("model = ", query.model),
+        ("group_name = ", query.group),
+        ("created_at >= ", query.from),
+        ("created_at <= ", query.to),
+    ] {
+        if let Some(value) = value {
+            n += 1;
+            sql.push_str(&format!(" AND {column}${n}"));
+            text_binds.push(value);
+        }
+    }
+    if query.direct {
+        sql.push_str(" AND group_name IS NULL");
     }
     if query.errors_only {
         n += 1;
@@ -193,8 +215,8 @@ pub async fn list_request_log_page(
     sql.push_str(&format!(" ORDER BY created_at DESC, id DESC LIMIT ${}", n + 1));
 
     let mut q = sqlx::query_as::<_, RequestLogPageRow>(&sql).bind(query.user_id);
-    if let Some(provider) = query.provider {
-        q = q.bind(provider);
+    for value in text_binds {
+        q = q.bind(value);
     }
     if query.errors_only {
         q = q.bind(400_i32);
@@ -203,6 +225,35 @@ pub async fn list_request_log_page(
         q = q.bind(created_at).bind(created_at).bind(id);
     }
     q.bind(query.limit).fetch_all(db).await
+}
+
+/// The columns the Logs pickers count (`/api/logs/facets`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+pub struct FacetLogRow {
+    pub provider: String,
+    pub model: String,
+    pub group_name: Option<String>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub cache_read_input_tokens: Option<i64>,
+    pub cache_creation_input_tokens: Option<i64>,
+    pub cost: Option<f64>,
+}
+
+/// One user's rows with `created_at` inside `[from, to]`; counted in the route, like the usage
+/// summary, so the math is testable without a database.
+pub async fn facet_rows_in_range(db: &PgPool, user_id: &str, from: &str, to: &str) -> Result<Vec<FacetLogRow>, sqlx::Error> {
+    sqlx::query_as::<_, FacetLogRow>(
+        "SELECT provider, model, group_name, prompt_tokens, completion_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens, cost
+         FROM request_logs
+         WHERE user_id = $1 AND created_at >= $2 AND created_at <= $3",
+    )
+    .bind(user_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(db)
+    .await
 }
 
 /// The columns `/api/usage/summary` aggregates over.

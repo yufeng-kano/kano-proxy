@@ -19,6 +19,14 @@
  * degrades to "first visit" instead of crashing a page.
  */
 
+import {
+  LOCKED_COLUMNS,
+  LOG_COLUMN_KEYS,
+  MAX_COLUMN_WIDTH,
+  MIN_COLUMN_WIDTH,
+  type LogColumnKey,
+  type PickerView,
+} from "@/services/logsView"
 import type { UsageDays, UsageRangeKind } from "@/types"
 
 const PREFS_KEY = "kano-proxy:prefs"
@@ -58,6 +66,12 @@ export type Prefs = {
   logs: {
     /** Provider the Logs page is filtered to; null = all. Free-form like models.provider. */
     provider: string | null
+    /** Which list the model picker shows. */
+    view: PickerView
+    /** Columns the user unticked. Never Time or Model. */
+    hidden: LogColumnKey[]
+    /** Widths the user dragged, in px; a column absent here uses its default. */
+    widths: Partial<Record<LogColumnKey, number>>
   }
 }
 
@@ -69,7 +83,7 @@ function defaults(): Prefs {
     overview: { days: 7, rangeKind: "week", anchor: null, chartView: "tokens" },
     models: { provider: null },
     providers: { tab: null },
-    logs: { provider: null },
+    logs: { provider: null, view: "model", hidden: [], widths: {} },
   }
 }
 
@@ -142,11 +156,25 @@ function parse(raw: string): Prefs {
   }
 
   if (isRecord(parsed.logs)) {
-    const { provider } = parsed.logs
+    const { provider, view, hidden, widths } = parsed.logs
     // Same shape-and-length check as models.provider: a slug is user-defined,
     // and one deleted since this was written resolves to "all" at the page.
     if (typeof provider === "string" && provider.length > 0 && provider.length <= 64) {
       base.logs.provider = provider
+    }
+    if (view === "model" || view === "alias") base.logs.view = view
+    if (Array.isArray(hidden)) {
+      base.logs.hidden = LOG_COLUMN_KEYS.filter(
+        (key) => hidden.includes(key) && !LOCKED_COLUMNS.includes(key),
+      )
+    }
+    if (isRecord(widths)) {
+      for (const key of LOG_COLUMN_KEYS) {
+        const width = widths[key]
+        if (typeof width === "number" && width >= MIN_COLUMN_WIDTH && width <= MAX_COLUMN_WIDTH) {
+          base.logs.widths[key] = Math.round(width)
+        }
+      }
     }
   }
   return base

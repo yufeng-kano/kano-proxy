@@ -5,25 +5,23 @@
  *
  * The per-request companion to Overview's aggregates — the account and alias
  * the By-model table folds away live here, as does the error evidence
- * (`error_code`, `upstream_status`) that otherwise needs a D1 query. Nothing
- * is scoped to live providers: a row from a since-deleted endpoint is still
- * what happened, and hiding it would hurt the diagnosis this page exists for.
+ * (`error_code`, `upstream_status`) that otherwise needs a database query.
+ * Nothing is scoped to live providers: a row from a since-deleted endpoint is
+ * still what happened, and hiding it would hurt the diagnosis this page exists
+ * for.
  *
  * One bounded card filling the content region, rows scrolling inside it with a
- * sticky header — the Keys/Models shape. The next page loads on approach, with
- * the Load more control at the end kept as the keyboard, no-observer, and
- * after-a-failure path to the same request. Both filters are applied
- * server-side, so changing either reloads from the first page rather than
- * narrowing what is already painted.
- *
- * The card scrolls vertically only. Twelve columns do not fit a laptop's width
- * by their content, so the table is fixed-layout: each column is a share of the
- * card and each cell is clamped to the row's two lines, with the full text on a
- * `title` for the pointer and the row detail for everything else.
+ * sticky header and grouped under their local day. Every row is one line: the
+ * columns are pixel tracks the user can hide and drag, and a cell that does
+ * not fit is cut with its full text on a `title`. The pickers count today's
+ * use from `/api/logs/facets`; every filter is applied server-side, so a
+ * change reloads from the first page rather than narrowing what is painted.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import LogDetailModal from "@/components/LogDetailModal.vue"
+import LogExportDialog from "@/components/LogExportDialog.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
+import ActionMenu from "@/components/ui/ActionMenu.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Badge from "@/components/ui/Badge.vue"
@@ -31,6 +29,7 @@ import Banner from "@/components/ui/Banner.vue"
 import DataTable from "@/components/ui/DataTable.vue"
 import type { Column } from "@/components/ui/DataTable.vue"
 import EmptyState from "@/components/ui/EmptyState.vue"
+import ListPicker, { type ListPickerOption } from "@/components/ui/ListPicker.vue"
 import PageHeader from "@/components/ui/PageHeader.vue"
 import Segmented from "@/components/ui/Segmented.vue"
 import { useAuth } from "@/composables/useAuth"
@@ -39,26 +38,46 @@ import { useCustomProviders } from "@/composables/useCustomProviders"
 import { useLogs } from "@/composables/useLogs"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
-import { PROVIDERS, type ProviderId, type RequestLogRow } from "@/types"
+import {
+  DEFAULT_WIDTHS,
+  LOCKED_COLUMNS,
+  LOG_COLUMN_KEYS,
+  MODEL_MIN_WIDTH,
+  daysAgo,
+  filterKey,
+  isFailure,
+  modelName,
+  optionColors,
+  pickerOptions,
+  rowOptionKey,
+  type LogColumnKey,
+  type PickerView,
+} from "@/services/logsView"
+import { getLogsPrefs, setLogsPrefs } from "@/services/prefs"
+import { PROVIDERS, type LogFacetTally, type ProviderId, type RequestLogRow } from "@/types"
 
 const { t, format } = useI18n()
 const { user } = useAuth()
 const {
   state: logs,
   provider: providerFilter,
+  modelFilter,
   errorsOnly,
+  facets,
+  loadFacets,
   setUserId: setLogsUserId,
   load: loadLogs,
   loadMore,
   setProvider,
+  setModelFilter,
   setErrorsOnly,
 } = useLogs()
 const customProviders = useCustomProviders()
 const cli = useCli()
 
 /**
- * The "no provider filter" option value. Underscored so it can never collide
- * with a custom endpoint's slug, which is lowercase letters, digits, hyphens.
+ * The "no filter" option key. Underscored so it can never collide with a
+ * custom endpoint's slug, which is lowercase letters, digits, hyphens.
  */
 const ALL = "__all__"
 
@@ -74,130 +93,280 @@ const NAME_KEY: Record<ProviderId, MessageKey> = {
   antigravity: "provider.antigravity.name",
 }
 
+const COLUMN_KEY: Record<LogColumnKey, MessageKey> = {
+  time: "logs.column.time",
+  model: "logs.column.model",
+  account: "logs.column.account",
+  apiKey: "logs.column.apiKey",
+  status: "logs.column.status",
+  input: "logs.column.input",
+  cacheRead: "logs.column.cacheRead",
+  cacheWrite: "logs.column.cacheWrite",
+  output: "logs.column.output",
+  cost: "logs.column.cost",
+  latency: "logs.column.latency",
+}
+
 /** Which row's detail dialog is open. */
 const detail = ref<RequestLogRow | null>(null)
+const exporting = ref(false)
 /** Only the user's own Refresh — a background refresh shows nothing. */
 const manualRefreshing = ref(false)
+/** What "today" and "yesterday" are measured from; moved on every load. */
+const now = ref(new Date())
+
+const prefs = getLogsPrefs()
+const view = ref<PickerView>(prefs.view)
+const hidden = ref<LogColumnKey[]>(prefs.hidden)
+const widths = ref<Partial<Record<LogColumnKey, number>>>(prefs.widths)
 
 const rows = computed(() => logs.rows)
 const showSkeleton = computed(() => logs.loading && rows.value.length === 0)
-const isFiltered = computed(() => providerFilter.value !== null || errorsOnly.value)
+const isFiltered = computed(
+  () => providerFilter.value !== null || modelFilter.value !== null || errorsOnly.value,
+)
+
+/* --- Providers ---------------------------------------------------------- */
+
+const builtinIds = new Set<string>(PROVIDERS.map((p) => p.id))
+
+function providerName(slug: string): string {
+  if (builtinIds.has(slug)) return t(NAME_KEY[slug as ProviderId])
+  return (
+    customProviders.state.data?.find((cp) => cp.slug === slug)?.name ??
+    cli.state.providers?.find((cp) => cp.slug === slug)?.name ??
+    slug
+  )
+}
+
+function tallyText(tally: LogFacetTally | null | undefined): string | null {
+  if (!tally) return null
+  return t("logs.picker.meta", { requests: format.integer(tally.requests), cost: format.currency(tally.cost) })
+}
 
 /**
- * All + the builtins + the user's live custom slugs — the same sources the
- * Models and Providers pages filter by. A slug the user filtered to and has
- * since deleted stays in the list as its own bare option: its rows are still in
- * the log, so a select that silently dropped it would show a filter the page
- * cannot name.
+ * All + the builtins + the user's live custom and CLI slugs — the same sources
+ * the Models and Providers pages filter by — each with its kind and today's
+ * count. A slug the user filtered to and has since deleted stays as its own
+ * bare option: its rows are still in the log.
  */
-const providerOptions = computed(() => {
-  const options = [
-    { value: ALL, label: t("logs.filter.allProviders") },
-    ...PROVIDERS.map((p) => ({ value: p.id as string, label: t(NAME_KEY[p.id]) })),
-    ...(customProviders.state.data ?? []).map((cp) => ({ value: cp.slug, label: cp.name })),
-    ...(cli.state.providers ?? []).map((cp) => ({ value: cp.slug, label: cp.name })),
+/** Today across every provider; null until the facets land. */
+const totalTally = computed<LogFacetTally | null>(() => {
+  if (!facets.data) return null
+  let requests = 0
+  let cost: number | null = null
+  for (const p of facets.data.providers) {
+    requests += p.requests
+    if (p.cost !== null) cost = (cost ?? 0) + p.cost
+  }
+  return { requests, cost }
+})
+
+const providerOptions = computed<ListPickerOption[]>(() => {
+  const today = new Map((facets.data?.providers ?? []).map((p) => [p.provider, p]))
+  const option = (slug: string, label: string, kind: MessageKey) => ({
+    key: slug,
+    label,
+    sub: t(kind),
+    meta: tallyText(today.get(slug)),
+  })
+  const options: ListPickerOption[] = [
+    { key: ALL, label: t("logs.filter.allProviders"), meta: tallyText(totalTally.value) },
+    ...PROVIDERS.map((p) => option(p.id, t(NAME_KEY[p.id]), "logs.picker.kind.subscription")),
+    ...(customProviders.state.data ?? []).map((cp) => option(cp.slug, cp.name, "logs.picker.kind.endpoint")),
+    ...(cli.state.providers ?? []).map((cp) => option(cp.slug, cp.name, "logs.picker.kind.cli")),
   ]
   const selected = providerFilter.value
-  if (selected && !options.some((o) => o.value === selected)) {
-    options.push({ value: selected, label: selected })
+  if (selected && !options.some((o) => o.key === selected)) {
+    options.push({ key: selected, label: selected, meta: tallyText(today.get(selected)) })
   }
   return options
 })
+
+function onProviderPick(key: string) {
+  const next = key === ALL ? null : key
+  const current = modelFilter.value
+  // Drop a model or alias choice only when it surely has no rows under the new
+  // provider. An alias today's tallies don't know (unused today, or no
+  // tallies at all) is kept: the empty state says more than a silent reset.
+  const group = current?.kind === "group" ? facets.data?.groups.find((g) => g.group_name === current.value) : undefined
+  const keep =
+    next === null ||
+    current === null ||
+    current.kind === "direct" ||
+    (current.kind === "model" && current.value.startsWith(`${next}/`)) ||
+    (current.kind === "group" && (!group || group.models.some((m) => m.startsWith(`${next}/`))))
+  void setProvider(next, keep)
+}
+
+/* --- Models and aliases ------------------------------------------------- */
+
+const modelPickerOptions = computed(() =>
+  pickerOptions(facets.data, view.value, providerFilter.value, modelFilter.value, providerName, t("logs.picker.noAlias")),
+)
+/** The same mapping colors the picker's dots and the rows' dots, so a color names one thing. */
+const colors = computed(() => optionColors(modelPickerOptions.value))
+
+const modelOptions = computed<ListPickerOption[]>(() => {
+  // "All" under a provider filter is that provider's day, otherwise everyone's.
+  const allTally = providerFilter.value
+    ? facets.data?.providers.find((p) => p.provider === providerFilter.value)
+    : totalTally.value
+  return [
+    {
+      key: "all",
+      label: view.value === "model" ? t("logs.picker.allModels") : t("logs.picker.allAliases"),
+      meta: tallyText(allTally),
+    },
+    ...modelPickerOptions.value.map((o) => ({
+      key: o.key,
+      label: o.label,
+      sub: o.sub,
+      meta: tallyText(o.tally),
+      color: colors.value.get(o.key),
+    })),
+  ]
+})
+
+const viewOptions = computed(() => [
+  { value: "model", label: t("logs.picker.byModel") },
+  { value: "alias", label: t("logs.picker.byAlias") },
+])
+
+function onViewChange(value: string | number) {
+  view.value = value === "alias" ? "alias" : "model"
+  setLogsPrefs({ view: view.value })
+}
+
+function onModelPick(key: string) {
+  const option = modelPickerOptions.value.find((o) => o.key === key)
+  void setModelFilter(option ? option.filter : null)
+}
+
+/* --- Columns ------------------------------------------------------------ */
+
+const visibleKeys = computed(() => LOG_COLUMN_KEYS.filter((key) => !hidden.value.includes(key)))
+
+function width(key: LogColumnKey): string | undefined {
+  const dragged = widths.value[key]
+  if (dragged) return `${dragged}px`
+  return key === "model" ? undefined : `${DEFAULT_WIDTHS[key]}px`
+}
+
+const numericValue: Partial<Record<LogColumnKey, (row: RequestLogRow) => string>> = {
+  input: (row) => format.compact(row.prompt_tokens),
+  cacheRead: (row) => format.compact(row.cache_read_input_tokens),
+  cacheWrite: (row) => format.compact(row.cache_creation_input_tokens),
+  output: (row) => format.compact(row.completion_tokens),
+  cost: (row) => format.currency(row.cost),
+  latency: (row) => format.duration(row.latency_ms),
+}
+
+const columns = computed<Column<RequestLogRow>[]>(() =>
+  visibleKeys.value.map((key) => ({
+    key,
+    header: t(COLUMN_KEY[key]),
+    width: width(key),
+    minWidth: key === "model" ? MODEL_MIN_WIDTH : undefined,
+    numeric: key in numericValue,
+    value: numericValue[key],
+    hideOnMobile: key === "cacheRead" || key === "cacheWrite",
+  })),
+)
+
+/* A drag emits on every pointer move; the table follows each one, the stored
+   prefs only the width it settles on. */
+let saveWidths: ReturnType<typeof setTimeout> | undefined
+function onResize(key: string, px: number) {
+  widths.value = { ...widths.value, [key]: px }
+  clearTimeout(saveWidths)
+  saveWidths = setTimeout(() => setLogsPrefs({ widths: widths.value }), 250)
+}
+
+function toggleColumn(key: LogColumnKey) {
+  hidden.value = hidden.value.includes(key) ? hidden.value.filter((k) => k !== key) : [...hidden.value, key]
+  setLogsPrefs({ hidden: hidden.value })
+}
+
+function resetColumns() {
+  clearTimeout(saveWidths)
+  hidden.value = []
+  widths.value = {}
+  setLogsPrefs({ hidden: [], widths: {} })
+}
+
+/** The Columns checklist: a small popover of its own, closed by Escape or a press outside. */
+const columnsOpen = ref(false)
+const columnsWrap = ref<HTMLElement | null>(null)
+
+function onColumnsPointerDown(event: PointerEvent) {
+  if (!columnsWrap.value?.contains(event.target as Node)) columnsOpen.value = false
+}
+
+watch(columnsOpen, (open) => {
+  if (open) document.addEventListener("pointerdown", onColumnsPointerDown)
+  else document.removeEventListener("pointerdown", onColumnsPointerDown)
+})
+
+onBeforeUnmount(() => document.removeEventListener("pointerdown", onColumnsPointerDown))
+
+/* --- Rows --------------------------------------------------------------- */
+
+function dayLabel(row: RequestLogRow): string {
+  const ago = daysAgo(row.created_at, now.value)
+  if (ago === 0) return t("logs.day.today", { date: format.date(row.created_at) })
+  if (ago === 1) return t("logs.day.yesterday", { date: format.date(row.created_at) })
+  return format.weekdayDate(row.created_at)
+}
+
+function rowColor(row: RequestLogRow): string {
+  return colors.value.get(rowOptionKey(row, view.value)) ?? "var(--series-other)"
+}
+
+/** The cell's first, strong part: the model (By model) or the alias (By alias). */
+function rowPrimary(row: RequestLogRow): string {
+  if (view.value === "alias" && row.group_name) return row.group_name
+  return modelName(row.model, row.provider)
+}
+
+function rowSecondary(row: RequestLogRow): string {
+  if (view.value === "alias") {
+    return row.group_name ? `→ ${modelName(row.model, row.provider)}` : `${t("logs.noAliasRow")} · ${providerName(row.provider)}`
+  }
+  const provider = providerName(row.provider)
+  return row.group_name ? `${provider} · ${t("logs.via", { group: row.group_name })}` : provider
+}
+
+function rowModelTitle(row: RequestLogRow): string {
+  return row.group_name ? `${row.model} (${t("logs.via", { group: row.group_name })})` : row.model
+}
+
+/** The row's visible time — also its tooltip and part of its button's name. */
+function timeLabel(row: RequestLogRow): string {
+  return format.timestamp(row.created_at)
+}
+
+/* --- Header ------------------------------------------------------------- */
 
 const showOptions = computed(() => [
   { value: "all", label: t("logs.filter.showAll") },
   { value: "errors", label: t("logs.filter.showErrors") },
 ])
 
-/*
- * Every track is a percentage and the twelve of them sum to 100: under
- * `DataTable`'s fixed layout a width is the column, not a suggestion, and a
- * pixel width would stop being a share of the card the moment the sidebar
- * collapses or the window changes.
- *
- * 8 Time + 8 Model + 9 Account + 9 API key + 7 Type + 13 Status + 7 Input +
- * 7 Cache read + 7 Cache write + 7 Output + 9 Cost + 9 Latency = 100.
- *
- * The shares are sized to their *headers* first — an uppercase 11px LATENCY
- * needs more room than the "1.2 s" under it, and a header that does not fit is
- * a column nobody can name — then to the values that cannot be shortened
- * ("$0.0042" is four significant digits by design, docs/pricing.md). Time,
- * Model, Account and API key get the remainder because they are the only
- * columns whose text is open-ended, and they are the ones the two-line clamp
- * is for. Account and API key hold the 9% their headers need — ACCOUNT the
- * same seven letters LATENCY already holds at 9%, API KEY six letters plus a
- * space — and Time and Model take the rest at 8% each, where their shorter
- * headers (four and five letters, the class TYPE and INPUT already hold at
- * 7%) still fit on one line.
- *
- * **Status is sized to the longest error code**, because that cell is the one
- * value on the row that has to be read in full to be worth anything — a code
- * cut down to `upstream_unavailabl` names nothing. The full set is in
- * docs/logging.md; the longest are `upstream_unavailable` and
- * `spend_limit_exceeded` at 20 characters. The narrowest the desktop table ever
- * gets is a ~770px viewport (below 768px it is cards instead), which leaves the
- * card body ~752px: 13% of that is ~98px, ~82px inside the cell's padding, or 11
- * characters a line of `.mono` at 0.6em advance — 22 across the row's two lines,
- * against the 20 it has to hold. The three percent that bought it came from
- * Time, Model and Account, whose text was already being clamped at every width.
- *
- * Which is also why only their cells carry a `title`: a figure column is sized
- * to its own widest value, so nothing there is ever cut, and a tooltip
- * repeating the "12.3K" already on screen would fire under the pointer on
- * every row of the table for no reading the row does not already give.
- */
-const columns = computed<Column<RequestLogRow>[]>(() => [
-  { key: "time", header: t("logs.column.time"), width: "8%" },
-  { key: "model", header: t("logs.column.model"), width: "8%" },
-  { key: "account", header: t("logs.column.account"), width: "9%" },
-  { key: "apiKey", header: t("logs.column.apiKey"), width: "9%" },
-  { key: "type", header: t("logs.column.type"), width: "7%", hideOnMobile: true },
-  { key: "status", header: t("logs.column.status"), width: "13%" },
-  {
-    key: "input",
-    header: t("logs.column.input"),
-    numeric: true,
-    width: "7%",
-    value: (row) => format.compact(row.prompt_tokens),
-  },
-  {
-    key: "cacheRead",
-    header: t("logs.column.cacheRead"),
-    numeric: true,
-    width: "7%",
-    hideOnMobile: true,
-    value: (row) => format.compact(row.cache_read_input_tokens),
-  },
-  {
-    key: "cacheWrite",
-    header: t("logs.column.cacheWrite"),
-    numeric: true,
-    width: "7%",
-    hideOnMobile: true,
-    value: (row) => format.compact(row.cache_creation_input_tokens),
-  },
-  {
-    key: "output",
-    header: t("logs.column.output"),
-    numeric: true,
-    width: "7%",
-    value: (row) => format.compact(row.completion_tokens),
-  },
-  {
-    key: "cost",
-    header: t("logs.column.cost"),
-    numeric: true,
-    width: "9%",
-    value: (row) => format.currency(row.cost),
-  },
-  {
-    key: "latency",
-    header: t("logs.column.latency"),
-    numeric: true,
-    width: "9%",
-    value: (row) => format.duration(row.latency_ms),
-  },
-])
+const titleMenu = computed(() => [{ key: "export", label: t("logs.export.open") }])
+
+function onShowChange(value: string | number) {
+  void setErrorsOnly(value === "errors")
+}
+
+const exportSummary = computed(() =>
+  [
+    providerOptions.value.find((o) => o.key === (providerFilter.value ?? ALL))?.label,
+    modelOptions.value.find((o) => o.key === filterKey(modelFilter.value))?.label ??
+      (view.value === "model" ? t("logs.picker.allModels") : t("logs.picker.allAliases")),
+    errorsOnly.value ? t("logs.export.errorsOnly") : t("logs.export.allStatuses"),
+  ].join(" · "),
+)
 
 /* --- Auto load more ------------------------------------------------------ */
 
@@ -270,69 +439,64 @@ async function load() {
   setLogsUserId(uid)
   customProviders.setUserId(uid)
   cli.setUserId(uid)
-  // The filter list is a side dish: the rows must not wait on it, and a
-  // failure there leaves the page working with the builtins alone.
+  now.value = new Date()
+  // The pickers' sources are side dishes: the rows must not wait on them, and
+  // a failure there leaves the pickers working without names or counts.
   void customProviders.load()
   void cli.load()
+  void loadFacets()
   await loadLogs()
 }
 
 async function onRefresh() {
   manualRefreshing.value = true
+  now.value = new Date()
   try {
-    await loadLogs({ refresh: true })
+    await Promise.all([loadLogs({ refresh: true }), loadFacets()])
   } finally {
     manualRefreshing.value = false
   }
-}
-
-function onProviderChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  void setProvider(value === ALL ? null : value)
-}
-
-function onShowChange(value: string | number) {
-  void setErrorsOnly(value === "errors")
-}
-
-/**
- * A row failed if the proxy answered 4xx/5xx **or** it carries an error code —
- * an eager stream logs `status_code: 200` with the failure only in the code
- * (docs/logging.md), so neither test alone finds every failure.
- */
-function isFailure(row: RequestLogRow): boolean {
-  return row.error_code !== null || row.status_code >= 400
-}
-
-/** The badge's text on a failed row: the code when there is one, else the status it answered with. */
-function failureLabel(row: RequestLogRow): string {
-  return row.error_code ?? String(row.status_code)
-}
-
-/** The row's visible timestamp — also its tooltip and part of its button's name. */
-function timeLabel(row: RequestLogRow): string {
-  return format.timestamp(row.created_at)
-}
-
-function typeLabel(row: RequestLogRow): string {
-  return row.usage_type === "oauth" ? t("logs.type.oauth") : t("logs.type.api")
 }
 </script>
 
 <template>
   <div class="page">
     <PageHeader :title="t('logs.title')">
+      <template #title>
+        <ActionMenu :items="titleMenu" class="title-menu" :aria-label="t('logs.menu')" @select="exporting = true">
+          {{ t("logs.title") }}
+          <svg class="title-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+        </ActionMenu>
+      </template>
       <template #actions>
-        <!-- The wrapping label is the select's accessible name; the "All
-             providers" option carries the same words visually. -->
-        <label class="filter">
-          <span class="sr-only">{{ t("logs.filter.provider") }}</span>
-          <select class="select" :value="providerFilter ?? ALL" @change="onProviderChange">
-            <option v-for="option in providerOptions" :key="option.value" :value="option.value">
-              {{ option.label }}
-            </option>
-          </select>
-        </label>
+        <ListPicker
+          :options="modelOptions"
+          :model-value="filterKey(modelFilter)"
+          :label="t('logs.picker.model')"
+          @update:model-value="onModelPick"
+        >
+          <template #header>
+            <div class="picker-head">
+              <span class="picker-title">{{ t("logs.picker.usedToday") }}</span>
+              <Segmented
+                size="sm"
+                :model-value="view"
+                :options="viewOptions"
+                :label="t('logs.picker.view')"
+                @update:model-value="onViewChange"
+              />
+            </div>
+          </template>
+          <template #empty>{{ t("logs.picker.empty") }}</template>
+        </ListPicker>
+
+        <ListPicker
+          :options="providerOptions"
+          :model-value="providerFilter ?? ALL"
+          :label="t('logs.filter.provider')"
+          align="end"
+          @update:model-value="onProviderPick"
+        />
 
         <Segmented
           :model-value="errorsOnly ? 'errors' : 'all'"
@@ -340,6 +504,31 @@ function typeLabel(row: RequestLogRow): string {
           :label="t('logs.filter.show')"
           @update:model-value="onShowChange"
         />
+
+        <div ref="columnsWrap" class="columns" @keydown.escape="columnsOpen = false">
+          <AppButton
+            variant="secondary"
+            :aria-expanded="columnsOpen ? 'true' : 'false'"
+            @click="columnsOpen = !columnsOpen"
+          >
+            {{ t("logs.columns.button") }}
+          </AppButton>
+          <div v-if="columnsOpen" class="columns-panel">
+            <label v-for="key in LOG_COLUMN_KEYS" :key="key" class="columns-item">
+              <input
+                type="checkbox"
+                :checked="!hidden.includes(key)"
+                :disabled="LOCKED_COLUMNS.includes(key)"
+                @change="toggleColumn(key)"
+              />
+              <span>{{ t(COLUMN_KEY[key]) }}</span>
+            </label>
+            <div class="columns-foot">
+              <span>{{ t("logs.columns.note") }}</span>
+              <button type="button" class="columns-reset" @click="resetColumns">{{ t("logs.columns.reset") }}</button>
+            </div>
+          </div>
+        </div>
 
         <!-- Icon-only: the label is a tooltip and the accessible name. -->
         <AppButton
@@ -394,11 +583,15 @@ function typeLabel(row: RequestLogRow): string {
         <DataTable
           row-clickable
           fixed
+          resizable
+          :resize-label="(header) => t('logs.columns.resize', { column: header })"
+          :group-by="dayLabel"
           :columns="columns"
           :rows="rows"
           :row-key="(row) => row.id"
           :caption="t('logs.title')"
           @row-click="detail = $event"
+          @resize="onResize"
         >
           <template #cell-time="{ row }">
             <AppButton
@@ -408,19 +601,18 @@ function typeLabel(row: RequestLogRow): string {
               :label="t('logs.openDetail', { time: timeLabel(row) })"
               @click.stop="detail = row"
             >
-              <span class="tabular" :title="timeLabel(row)">{{ timeLabel(row) }}</span>
+              <span class="mono" :title="timeLabel(row)">{{ format.clock(row.created_at) }}</span>
             </AppButton>
           </template>
 
-          <!-- The alias travels with the model id: it is what the client
-               actually sent, and the id is what ran. Both are plain inline
-               content so they flow through the cell's two lines together —
-               a flex box between them would be one unclampable item. -->
+          <!-- Inline content, not a flex box: the ellipsis cuts the line as a
+               whole, so the provider and alias go first when it runs out. -->
           <template #cell-model="{ row }">
-            <code class="mono model-id" :title="row.model">{{ row.model }}</code>
-            <Badge v-if="row.group_name" tone="neutral" class="alias">
-              {{ t("logs.via", { group: row.group_name }) }}
-            </Badge>
+            <span :title="rowModelTitle(row)">
+              <span class="dot" :style="{ background: rowColor(row) }" aria-hidden="true" />
+              <code class="mono model-id">{{ rowPrimary(row) }}</code>
+              <span class="model-sub">{{ rowSecondary(row) }}</span>
+            </span>
           </template>
 
           <!-- A removed record keeps its last name and gains the tag; a row
@@ -434,10 +626,10 @@ function typeLabel(row: RequestLogRow): string {
             >
               {{ row.account_label }}
             </span>
-            <Badge v-if="row.account_removed" tone="warn">
+            <Badge v-if="row.account_removed" tone="warn" class="tag">
               {{ row.account_label ? t("logs.removed") : t("logs.accountRemoved") }}
             </Badge>
-            <Badge v-else-if="row.account_shared_by" tone="neutral" :title="t('logs.sharedBy', { owner: row.account_shared_by })">
+            <Badge v-else-if="row.account_shared_by" tone="neutral" class="tag" :title="t('logs.sharedBy', { owner: row.account_shared_by })">
               {{ t("logs.shared") }}
             </Badge>
             <span v-else-if="!row.account_label" class="none">—</span>
@@ -447,23 +639,20 @@ function typeLabel(row: RequestLogRow): string {
             <span v-if="row.api_key_name" class="api-key" :title="row.api_key_name">
               {{ row.api_key_name }}
             </span>
-            <Badge v-if="row.api_key_removed" tone="warn">
+            <Badge v-if="row.api_key_removed" tone="warn" class="tag">
               {{ row.api_key_name ? t("logs.removed") : t("logs.keyRemoved") }}
             </Badge>
             <span v-else-if="!row.api_key_name" class="none">—</span>
           </template>
 
-          <template #cell-type="{ row }">
-            <Badge tone="neutral">{{ typeLabel(row) }}</Badge>
-          </template>
-
-          <!-- Never color-only: a failure is named by its code, a success is
-               its status number and nothing louder. -->
+          <!-- The number and nothing else; a failure is the same number in
+               the danger tone, named in full on the title and in the detail. -->
           <template #cell-status="{ row }">
-            <span v-if="isFailure(row)" class="error-code mono" :title="failureLabel(row)">
-              {{ failureLabel(row) }}
-            </span>
-            <span v-else class="status tabular">{{ row.status_code }}</span>
+            <span
+              class="mono"
+              :class="isFailure(row) ? 'status-failed' : 'status'"
+              :title="row.error_code ?? undefined"
+            >{{ row.status_code }}</span>
           </template>
         </DataTable>
 
@@ -490,6 +679,15 @@ function typeLabel(row: RequestLogRow): string {
     </AppCard>
 
     <LogDetailModal v-if="detail" :row="detail" @close="detail = null" />
+    <LogExportDialog
+      v-if="exporting"
+      :provider="providerFilter"
+      :model-filter="modelFilter"
+      :errors-only="errorsOnly"
+      :filter-summary="exportSummary"
+      :columns="visibleKeys"
+      @close="exporting = false"
+    />
   </div>
 </template>
 
@@ -522,14 +720,107 @@ function typeLabel(row: RequestLogRow): string {
   min-height: 0;
 }
 
-/* A real width, sized to the longest provider name, and shrinkable — a fixed
-   width alone contributes its full size to the flex line and pushes Refresh
-   onto a row of its own (docs/admin-ui.md § Layout). */
-.filter {
-  display: block;
-  width: 160px;
-  max-width: 100%;
-  min-width: 0;
+/* The title reads as the title, with a chevron saying it opens something. */
+.title-menu {
+  margin-left: calc(var(--space-2) * -1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-control);
+  transition: background var(--duration-fast) var(--ease);
+}
+
+.title-menu:hover,
+.title-menu[aria-expanded="true"] {
+  background: var(--hover);
+}
+
+.title-chevron {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.picker-title {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  color: var(--text-secondary);
+}
+
+/* --- Columns checklist --------------------------------------------------- */
+
+.columns {
+  position: relative;
+}
+
+.columns-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  width: 220px;
+  padding: var(--space-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.columns-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: 32px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.columns-item:hover {
+  background: var(--hover);
+}
+
+.columns-item input {
+  accent-color: var(--accent);
+}
+
+.columns-item:has(input:disabled) {
+  color: var(--muted);
+  cursor: default;
+}
+
+.columns-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-2xs);
+  color: var(--muted);
+}
+
+.columns-reset {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-xs);
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 /* --- Rows --------------------------------------------------------------- */
@@ -537,64 +828,56 @@ function typeLabel(row: RequestLogRow): string {
 /*
  * The timestamp is the row's control, so it reads as the row's first field
  * rather than as a button parked in the column: no padding of its own, and the
- * full text strength the rest of the row's identity has.
- *
- * It also has to behave like text inside the clamped cell. A button is 28px
- * tall and `nowrap` by default, which in a fixed track means one line sitting
- * 6px off every other column's first line, with the tail of the timestamp cut
- * flat at the track's edge. Here it inherits the cell's line box instead and
- * wraps into the second line the row already has.
+ * line box of the cell around it.
  */
 .list :deep(.time) {
   height: auto;
   padding: 0;
   justify-content: flex-start;
-  color: var(--text);
+  color: var(--text-secondary);
   font-size: var(--text-sm);
   line-height: inherit;
-  text-align: left;
-  white-space: normal;
-  /* Its top edge, not its baseline, is what should line up with the cell's
-     first line — a two-line timestamp aligned on the baseline of its *first*
-     line hangs the second one below the cell and loses it to the clip. */
   vertical-align: top;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--space-2);
+  border-radius: var(--radius-full);
+  vertical-align: 1px;
 }
 
 .model-id {
   color: var(--text);
+  font-weight: var(--weight-medium);
 }
 
-/* Inline spacing, not a flex gap: the tag flows with the id through the cell's
-   two lines rather than being an item beside it. */
-.alias {
+.model-sub {
   margin-left: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
 }
 
-.account {
-  color: var(--text-secondary);
-}
-
+.account,
 .api-key {
   color: var(--text-secondary);
 }
 
-/*
- * A failure names itself, as text rather than in a pill. The code word *is* the
- * identification, so the pill added a rounded border and its side padding to a
- * track sized for the code — and being one nowrap item, it could not use the
- * row's second line either, so every failing row read `upstream_unav…` with the
- * border sliced through it. Set as text it breaks inside the token instead
- * (`overflow-wrap: anywhere`, inherited from DataTable's clamped cell) and uses
- * both lines. The colour stays decoration: the word carries the meaning.
- */
-.error-code {
-  color: var(--danger);
+.tag {
+  margin-left: var(--space-1);
 }
 
 /* A successful status is context, not a finding — the failures beside it are
    what the eye should catch. */
 .status {
   color: var(--faint);
+}
+
+.status-failed {
+  color: var(--danger);
+  font-weight: var(--weight-medium);
 }
 
 .none {
