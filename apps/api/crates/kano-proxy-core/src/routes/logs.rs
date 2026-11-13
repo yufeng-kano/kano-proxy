@@ -286,11 +286,18 @@ fn row_json(row: &RequestLogPageRow, names: &Resolved) -> Value {
 
 /* --- Facets ---------------------------------------------------------------- */
 
+/// The pickers count one local day (25h across a DST change); rows are tallied
+/// in memory, so a longer span is refused rather than read.
+const FACETS_MAX_SPAN_MS: i64 = 48 * 60 * 60 * 1000;
+
 async fn facets(State(state): State<AppState>, session: SessionUser, Query(params): Query<HashMap<String, String>>) -> Response {
     let (from, to) = match parse_range(&params) {
         Ok(range) => range,
         Err(code) => return error(StatusCode::BAD_REQUEST, code),
     };
+    if to - from > FACETS_MAX_SPAN_MS {
+        return error(StatusCode::BAD_REQUEST, "range_too_large");
+    }
     let Ok(mut rows) = facet_rows_in_range(state.pool(), &session.user.id, &iso_from_ms(from), &iso_from_ms(to)).await else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     };
@@ -1096,6 +1103,10 @@ mod tests {
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
             assert_eq!(body_json(response).await, json!({ "error": "invalid_range" }));
         }
+        let week = "/api/logs/facets?from=2026-08-07T00:00:00Z&to=2026-08-14T00:00:00Z";
+        let response = get(router(state.clone()), &cookie, week).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(response).await, json!({ "error": "range_too_large" }));
     }
 
     #[test]

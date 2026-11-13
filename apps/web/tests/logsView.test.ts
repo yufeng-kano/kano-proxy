@@ -81,14 +81,19 @@ describe("pickerOptions", () => {
     expect(codex.map((o) => [o.key, o.tally])).toEqual([["direct", null]])
   })
 
-  it("keeps an active choice that has no option today as a bare one, in its own view only", () => {
+  it("keeps an active choice that has no option as a bare one, in either view", () => {
     const stale = { kind: "model", value: "grok/old" } as const
-    expect(pickerOptions(facets, "model", null, stale, name, "No alias").at(-1)).toMatchObject({
-      key: "model:grok/old",
-      label: "grok/old",
-      tally: null,
+    for (const view of ["model", "alias"] as const) {
+      expect(pickerOptions(facets, view, null, stale, name, "No alias").at(-1)).toMatchObject({
+        key: "model:grok/old",
+        label: "grok/old",
+        tally: null,
+      })
+    }
+    expect(pickerOptions(facets, "model", null, { kind: "direct" }, name, "No alias").at(-1)).toMatchObject({
+      key: "direct",
+      label: "No alias",
     })
-    expect(pickerOptions(facets, "alias", null, stale, name, "No alias").some((o) => o.key === "model:grok/old")).toBe(false)
   })
 
   it("works before the facets land", () => {

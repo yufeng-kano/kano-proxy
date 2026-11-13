@@ -186,14 +186,16 @@ const providerOptions = computed<ListPickerOption[]>(() => {
 function onProviderPick(key: string) {
   const next = key === ALL ? null : key
   const current = modelFilter.value
-  // Keep a model or alias choice only where it still has rows under the new provider.
+  // Drop a model or alias choice only when it surely has no rows under the new
+  // provider. An alias today's tallies don't know (unused today, or no
+  // tallies at all) is kept: the empty state says more than a silent reset.
+  const group = current?.kind === "group" ? facets.data?.groups.find((g) => g.group_name === current.value) : undefined
   const keep =
     next === null ||
     current === null ||
     current.kind === "direct" ||
     (current.kind === "model" && current.value.startsWith(`${next}/`)) ||
-    (current.kind === "group" &&
-      !!facets.data?.groups.find((g) => g.group_name === current.value)?.models.some((m) => m.startsWith(`${next}/`)))
+    (current.kind === "group" && (!group || group.models.some((m) => m.startsWith(`${next}/`))))
   void setProvider(next, keep)
 }
 
@@ -272,9 +274,13 @@ const columns = computed<Column<RequestLogRow>[]>(() =>
   })),
 )
 
+/* A drag emits on every pointer move; the table follows each one, the stored
+   prefs only the width it settles on. */
+let saveWidths: ReturnType<typeof setTimeout> | undefined
 function onResize(key: string, px: number) {
   widths.value = { ...widths.value, [key]: px }
-  setLogsPrefs({ widths: widths.value })
+  clearTimeout(saveWidths)
+  saveWidths = setTimeout(() => setLogsPrefs({ widths: widths.value }), 250)
 }
 
 function toggleColumn(key: LogColumnKey) {
@@ -283,6 +289,7 @@ function toggleColumn(key: LogColumnKey) {
 }
 
 function resetColumns() {
+  clearTimeout(saveWidths)
   hidden.value = []
   widths.value = {}
   setLogsPrefs({ hidden: [], widths: {} })

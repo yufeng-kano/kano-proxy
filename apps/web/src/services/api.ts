@@ -102,25 +102,28 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
   }
 
-  if (!res.ok) {
-    const msg =
-      typeof data === "object" &&
-      data !== null &&
-      "error" in data &&
-      typeof (data as { error: unknown }).error === "string"
-        ? (data as { error: string }).error
-        : `Request failed (${res.status})`
-    // The usage notice changed while the app was open: everything waits until the new
-    // text is accepted (docs/admin-ui.md § Usage notice page). The notice page itself
-    // only calls ungated routes, so it never lands here.
-    if (res.status === 403 && msg === "notice_required" && window.location.pathname !== "/notice") {
-      const here = window.location.pathname + window.location.search
-      window.location.assign(`/notice?redirect=${encodeURIComponent(here)}`)
-    }
-    throw new ApiError(res.status, msg, data)
-  }
+  if (!res.ok) throw failure(res.status, data)
 
   return data as T
+}
+
+/** The error a refused call throws, from its status and parsed body. */
+function failure(status: number, data: unknown): ApiError {
+  const msg =
+    typeof data === "object" &&
+    data !== null &&
+    "error" in data &&
+    typeof (data as { error: unknown }).error === "string"
+      ? (data as { error: string }).error
+      : `Request failed (${status})`
+  // The usage notice changed while the app was open: everything waits until the new
+  // text is accepted (docs/admin-ui.md § Usage notice page). The notice page itself
+  // only calls ungated routes, so it never lands here.
+  if (status === 403 && msg === "notice_required" && window.location.pathname !== "/notice") {
+    const here = window.location.pathname + window.location.search
+    window.location.assign(`/notice?redirect=${encodeURIComponent(here)}`)
+  }
+  return new ApiError(status, msg, data)
 }
 
 export type Me = { user: User; notice: UsageNotice }
@@ -649,15 +652,16 @@ export async function downloadLogsExport(
   setLogsFilters(q, params)
   const res = await fetch(apiUrl(`/api/logs/export?${q.toString()}`), { credentials: "include" })
   if (!res.ok) {
-    let code = `Request failed (${res.status})`
+    let data: unknown = null
     try {
-      const data = (await res.json()) as { error?: unknown }
-      if (typeof data.error === "string") code = data.error
+      data = await res.json()
     } catch {
       /* a non-JSON refusal keeps the status line */
     }
-    throw new ApiError(res.status, code, null)
+    throw failure(res.status, data)
   }
+  // Held whole before saving: a page cannot hand a stream to the downloads
+  // folder without the File System Access API, which Safari and Firefox lack.
   const blob = await res.blob()
   const filename =
     /filename="([^"]+)"/.exec(res.headers.get("content-disposition") ?? "")?.[1] ??
@@ -669,7 +673,8 @@ export async function downloadLogsExport(
   document.body.append(link)
   link.click()
   link.remove()
-  URL.revokeObjectURL(url)
+  // Revoked later: some browsers start reading the URL only after click() returns.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 // Changelog — session auth. See docs/changelog.md.

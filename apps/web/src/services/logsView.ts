@@ -99,8 +99,8 @@ export function rowOptionKey(row: RequestLogRow, view: PickerView): string {
 /**
  * The picker's options for one view, most-used first, narrowed to `provider`
  * when one is set. A filter that is still active but has no option (nothing
- * today, or another provider) is kept as a bare option, so the button can
- * always name what the table is filtered to.
+ * today, another provider, or the other view) is kept as a bare option, so
+ * the button can always name what the table is filtered to.
  */
 export function pickerOptions(
   facets: LogFacets | null,
@@ -142,12 +142,12 @@ export function pickerOptions(
       tally: provider || !facets ? null : facets.direct,
     })
   }
+  // Also across views: a model choice seen By alias (or the reverse) still
+  // filters the table, and the button has to say so.
   const activeKey = filterKey(active)
-  if (active && active.kind !== "direct" && !options.some((o) => o.key === activeKey)) {
-    const belongs = (view === "model") === (active.kind === "model")
-    if (belongs) {
-      options.push({ key: activeKey, filter: active, label: active.value, sub: null, tally: null })
-    }
+  if (active && !options.some((o) => o.key === activeKey)) {
+    const label = active.kind === "direct" ? noAliasLabel : active.value
+    options.push({ key: activeKey, filter: active, label, sub: null, tally: null })
   }
   return options
 }
