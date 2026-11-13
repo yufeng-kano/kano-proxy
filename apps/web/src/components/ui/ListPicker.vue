@@ -49,7 +49,10 @@ defineSlots<{
 const open = ref(false)
 const trigger = ref<HTMLButtonElement | null>(null)
 const panel = ref<HTMLElement | null>(null)
-const position = ref<{ top: number; left?: number; right?: number }>({ top: 0 })
+const position = ref<{ top: number; left: number }>({ top: 0, left: 0 })
+
+/** Space kept between the panel and the window's edges. */
+const GUTTER = 16
 
 const OPTION = 'button[role="option"]'
 
@@ -57,13 +60,18 @@ function current(): ListPickerOption | undefined {
   return props.options.find((o) => o.key === props.modelValue)
 }
 
+/**
+ * Hangs the panel from the button's edge, then pulls it back inside the
+ * window: on a narrow screen the header wraps, and a button far from the
+ * edge would otherwise push a wide panel off-screen.
+ */
 function place() {
   const rect = trigger.value?.getBoundingClientRect()
-  if (!rect) return
-  position.value =
-    props.align === "end"
-      ? { top: rect.bottom + 6, right: window.innerWidth - rect.right }
-      : { top: rect.bottom + 6, left: rect.left }
+  const width = panel.value?.offsetWidth
+  if (!rect || width === undefined) return
+  const wanted = props.align === "end" ? rect.right - width : rect.left
+  const left = Math.max(GUTTER, Math.min(wanted, window.innerWidth - GUTTER - width))
+  position.value = { top: rect.bottom + 6, left }
 }
 
 function close(refocus: boolean) {
@@ -124,8 +132,8 @@ function listen(on: boolean) {
 watch(open, async (isOpen) => {
   listen(isOpen)
   if (!isOpen) return
-  place()
   await nextTick()
+  place()
   const items = [...(panel.value?.querySelectorAll<HTMLElement>(OPTION) ?? [])]
   ;(items.find((el) => el.getAttribute("aria-selected") === "true") ?? items[0])?.focus()
 })
@@ -157,11 +165,7 @@ onBeforeUnmount(() => listen(false))
       v-if="open"
       ref="panel"
       class="panel"
-      :style="{
-        top: `${position.top}px`,
-        left: position.left !== undefined ? `${position.left}px` : undefined,
-        right: position.right !== undefined ? `${position.right}px` : undefined,
-      }"
+      :style="{ top: `${position.top}px`, left: `${position.left}px` }"
       @keydown="onKeydown"
     >
       <div v-if="$slots.header" class="panel-head">
