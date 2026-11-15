@@ -76,8 +76,7 @@ function onRefresh() {
 
 <template>
   <div>
-    <PageHeader :title="t('changelog.title')" :refreshing="refreshing" @refresh="onRefresh">
-    </PageHeader>
+    <PageHeader :title="t('changelog.title')" :refreshing="refreshing" @refresh="onRefresh" />
 
     <!-- Capped list, not full width: this is long-form reading, and a
          release note running the width of a 1440px display is unreadable. -->

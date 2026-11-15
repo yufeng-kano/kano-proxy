@@ -33,7 +33,10 @@ const props = defineProps<{
    * emit so the header can tell a page that reloads from one that does not.
    */
   onRefresh?: () => unknown
-  /** The refresh the user chose is in flight: spinner in the chevron's place. */
+  /**
+   * Something the user chose from this menu is in flight, Refresh above all:
+   * spinner in the chevron's place, trigger disabled.
+   */
   refreshing?: boolean
   /** What this page alone does from its title, after Refresh; chosen keys arrive as `select`. */
   menu?: MenuItem[]
@@ -70,9 +73,10 @@ function onSelect(key: string) {
           class="title-menu"
           :items="items"
           :loading="refreshing"
-          :aria-label="t('pageHeader.menu', { title })"
           @select="onSelect"
         >
+          <!-- No aria-label: the button's name stays the title, so the page's
+               one h1 is still announced by its name. -->
           {{ title }}
           <svg v-if="!refreshing" class="title-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
         </ActionMenu>

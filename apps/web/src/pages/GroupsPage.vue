@@ -230,7 +230,9 @@ async function loadCatalog(opts?: { refresh?: boolean }) {
   if (cached && !opts?.refresh && isModelsCacheFresh(uid, CACHE_TTL_MS)) return
 
   try {
-    const res = await listModels({ refresh: !!opts?.refresh })
+    // Past the local cache only: the picker needs ids, not a fresh upstream
+    // catalog, so the server's own catalog cache is left alone.
+    const res = await listModels()
     catalog.value = res.data
     writeModelsCache(uid, res)
   } catch {

@@ -41,8 +41,6 @@ export const en = {
 
   // --- Shared actions -----------------------------------------------------
   "action.refresh": "Refresh",
-  // The page title is a menu (PageHeader); this names it for assistive tech.
-  "pageHeader.menu": "{title} actions",
   "action.retry": "Try again",
   "action.cancel": "Cancel",
   "action.close": "Close",
