@@ -36,6 +36,11 @@ use crate::AppState;
 
 pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The beta whose presence marks a request as Claude Code to Anthropic's usage accounting
+/// (docs/providers.md § Request edits). Dropped from a forwarded client list with the
+/// identity switch on; kept on the claude-code adapter, whose OAuth upstream requires it.
+pub const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
+
 pub struct CustomAnthropicAdapter {
     id: String,
     base: String,
@@ -78,12 +83,23 @@ impl CustomAnthropicAdapter {
         extras: &CallExtras,
     ) -> Result<Response, AdapterError> {
         let raw = object_or_empty(body);
+        // With "Hide Claude Code identity" on, the `claude-code-20250219` entry is dropped from
+        // the forwarded `anthropic-beta` (docs/providers.md § Request edits): it is one of the two
+        // markers Anthropic reads to bill Claude Code usage. Other client betas stay verbatim.
+        let beta = if extras.edits.strip_claude_code_line {
+            non_empty_header(headers, "anthropic-beta").and_then(|beta| {
+                let kept: Vec<&str> = beta.split(',').map(str::trim).filter(|b| !b.is_empty() && *b != CLAUDE_CODE_BETA).collect();
+                (!kept.is_empty()).then(|| kept.join(","))
+            })
+        } else {
+            non_empty_header(headers, "anthropic-beta").map(str::to_string)
+        };
         let native_post = |body: &Map<String, Value>| {
             let mut request = UpstreamRequest::post(url.as_str())
                 .header("x-api-key", &account.credential.access_token)
                 .json(&Value::Object(body.clone()))
                 .header("anthropic-version", header_or(headers, "anthropic-version", DEFAULT_ANTHROPIC_VERSION));
-            if let Some(beta) = non_empty_header(headers, "anthropic-beta") {
+            if let Some(beta) = &beta {
                 request = request.header("anthropic-beta", beta);
             }
             if let Some(timeout) = extras.first_byte_timeout {
@@ -404,6 +420,45 @@ mod tests {
         let rendered = format!("{:?}", sent.headers);
         assert!(!rendered.contains("oauth-"));
         assert!(!rendered.contains("claude-code-"));
+    }
+
+    #[tokio::test]
+    async fn the_identity_switch_drops_only_the_claude_code_beta_from_the_forwarded_list() {
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::OK, json!({}));
+        let state = adapter_state(transport.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "anthropic-beta",
+            http::HeaderValue::from_static("claude-code-20250219,some-client-beta-2026"),
+        );
+        adapter()
+            .messages(
+                &state,
+                &account(KEY),
+                &json!({ "model": "claude-3", "messages": [] }),
+                &headers,
+                &CallExtras { edits: crate::providers::types::RequestEdits { strip_claude_code_line: true, ..Default::default() }, ..Default::default() },
+            )
+            .await
+            .expect("messages");
+        assert_eq!(transport.requests()[0].header("anthropic-beta"), Some("some-client-beta-2026"));
+
+        // The only entry: the header goes entirely, not as an empty string.
+        transport.respond_json(StatusCode::OK, json!({}));
+        let mut headers = HeaderMap::new();
+        headers.insert("anthropic-beta", http::HeaderValue::from_static("claude-code-20250219"));
+        adapter()
+            .messages(
+                &state,
+                &account(KEY),
+                &json!({ "model": "claude-3", "messages": [] }),
+                &headers,
+                &CallExtras { edits: crate::providers::types::RequestEdits { strip_claude_code_line: true, ..Default::default() }, ..Default::default() },
+            )
+            .await
+            .expect("messages");
+        assert_eq!(transport.requests()[1].header("anthropic-beta"), None);
     }
 
     #[tokio::test]

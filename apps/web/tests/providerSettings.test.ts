@@ -67,7 +67,7 @@ it("offers fast mode only where the provider has a line for it", async () => {
     lineHint: "Drops the line.",
   })
   expect(both).toContain("Remove fast mode")
-  expect(both).toContain("Remove the Claude Code line")
+  expect(both).toContain("Hide Claude Code identity")
   // Each box paints the stored value, not a default.
   expect(both).toMatch(/<input[^>]*type="checkbox"[^>]*checked[^>]*>[\s\S]*Remove fast mode/)
   expect(both.match(/checked/g)).toHaveLength(1)
@@ -79,7 +79,7 @@ it("offers fast mode only where the provider has a line for it", async () => {
     lineHint: "Drops the line.",
   })
   expect(lineOnly).not.toContain("Remove fast mode")
-  expect(lineOnly).toContain("Remove the Claude Code line")
+  expect(lineOnly).toContain("Hide Claude Code identity")
 })
 
 it("tags an endpoint whose switch is on while the gate is closed, and keeps the switches behind it", async () => {
@@ -87,14 +87,14 @@ it("tags an endpoint whose switch is on while the gate is closed, and keeps the 
     provider: endpoint({ strip_fast_mode: true }),
   })
   expect(closed).toContain("Fast mode removed")
-  expect(closed).not.toContain("Claude Code line removed")
+  expect(closed).not.toContain("Claude Code identity hidden")
   expect(closed).not.toContain("Remove fast mode")
 
   const open = await render(CustomProviderCard, {
     provider: endpoint({ strip_claude_code_line: true }),
     editing: true,
   })
-  expect(open).toContain("Claude Code line removed")
+  expect(open).toContain("Claude Code identity hidden")
   expect(open).toContain("Requests to this endpoint go at standard speed.")
   expect(open).toContain("sent to this endpoint.")
 })
@@ -130,7 +130,7 @@ it("gives each own account its own block, behind the gate, with that account's v
 it("offers only the line on grok and antigravity rows", async () => {
   for (const provider of ["grok", "antigravity"]) {
     const html = await render(AccountCard, { account: account(), provider, editing: true })
-    expect(html).toContain("Remove the Claude Code line")
+    expect(html).toContain("Hide Claude Code identity")
     expect(html).not.toContain("Remove fast mode")
   }
 })
@@ -141,7 +141,7 @@ it("shows a shared row the owner's switches as tags and gives it no block", asyn
     provider: "claude-code",
     editing: true,
   })
-  expect(html).toContain("Claude Code line removed")
+  expect(html).toContain("Claude Code identity hidden")
   expect(html).not.toContain("Request edits for this account")
 })
 

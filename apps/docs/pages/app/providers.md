@@ -1,6 +1,6 @@
 ---
 title: Providers
-description: What the Providers page in Kano Proxy does, connecting subscription accounts, custom endpoints and local models, reading account status and usage windows, ordering the account pool, and removing fast mode or the Claude Code line from requests.
+description: What the Providers page in Kano Proxy does, connecting subscription accounts, custom endpoints and local models, reading account status and usage windows, ordering the account pool, and removing fast mode or hiding Claude Code identity from requests.
 ---
 
 # Providers
@@ -67,16 +67,16 @@ Request edits are up to two checkboxes per account that change what Kano Proxy s
 
 **Remove fast mode** sends requests at standard speed. Claude bills fast mode to usage credits, even when plan limits are left. Codex fast mode uses up plan limits faster.
 
-**Remove the Claude Code line** removes Claude Code's identity line, `You are Claude Code, Anthropic's official CLI for Claude.`, from system prompts. It also removes the line's two Claude Agent SDK versions: `You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` and `You are a Claude agent, built on Anthropic's Claude Agent SDK.` Claude Code puts this line in every request. When it calls another provider's model through Kano Proxy, the line reaches that provider too, so every account has this checkbox. On Claude Code accounts, Kano Proxy also stops adding the line itself. Without it, Claude may refuse requests or bill them to usage credits.
+**Hide Claude Code identity** removes Claude Code's identity line, `You are Claude Code, Anthropic's official CLI for Claude.`, from system prompts. It also removes the line's two Claude Agent SDK versions: `You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` and `You are a Claude agent, built on Anthropic's Claude Agent SDK.` Claude Code puts this line in every request. When it calls another provider's model through Kano Proxy, the line reaches that provider too, so every account has this checkbox. On Claude Code accounts, Kano Proxy also stops adding the line itself. Without it, Claude may refuse requests or bill them to usage credits. The checkbox also removes the two markers that tell the upstream a request comes from Claude Code: the `x-anthropic-billing-header` block Claude Code 2.1.319 puts first in the system prompt, and the `claude-code-20250219` beta on a custom Anthropic endpoint. Anthropic bills usage by those markers: on a custom Anthropic endpoint that only has free Console credits, this checkbox is what lets Claude Code spend them.
 
 Where the boxes are, in edit mode:
 
 - **Claude Code** and **Codex** accounts: both boxes, under **Request edits for this account** at the bottom of each of your own rows.
-- **Grok** and **Antigravity** accounts: **Remove the Claude Code line** only, in the same place. Kano Proxy never sends fast mode to these providers.
+- **Grok** and **Antigravity** accounts: **Hide Claude Code identity** only, in the same place. Kano Proxy never sends fast mode to these providers.
 - Each custom endpoint: both boxes, on its row under its details.
 - Each CLI provider: both boxes, in its own group under the **CLI providers** table.
 
-A selected box shows a tag: **Fast mode removed** or **Claude Code line removed**. A subscription account shows it on its row, after its status and plan. A custom endpoint shows it beside its status and format, under its name. A CLI provider shows it beside its prefix and format. The tag stays visible with edit mode open or closed.
+A selected box shows a tag: **Fast mode removed** or **Claude Code identity hidden**. A subscription account shows it on its row, after its status and plan. A custom endpoint shows it beside its status and format, under its name. A CLI provider shows it beside its prefix and format. The tag stays visible with edit mode open or closed.
 
 Each account applies only its own boxes. When a request moves on to the next account in the pool, or a [group](/app/groups) falls back from one provider to another, the next account applies its own boxes. With a box selected, a provider may answer differently or refuse the request.
 
@@ -120,12 +120,12 @@ The account takes requests again right away. If the provider rejects it again, i
 
 Resume is offered only on your own accounts. A paused account shared with you is resumed, or signed in again, by its owner.
 
-### Remove fast mode or the Claude Code line
+### Remove fast mode or hide Claude Code identity
 
 For a subscription account:
 
 1. Choose the pencil in the provider's card.
-2. At the bottom of the account's row, under **Request edits for this account**, select **Remove fast mode** or **Remove the Claude Code line**. It is saved at once, and the matching tag appears on the row.
+2. At the bottom of the account's row, under **Request edits for this account**, select **Remove fast mode** or **Hide Claude Code identity**. It is saved at once, and the matching tag appears on the row.
 3. Choose the check to close edit mode.
 
 Each account is set on its own row, so repeat step 2 for every account you want to change. For a custom endpoint, choose the pencil in the **Custom endpoints** card, then select the box on the endpoint's row. For a CLI provider, choose the pencil in the **CLI providers** card, then select the box in that provider's group under the table. Clear a box the same way to undo it.
@@ -175,7 +175,7 @@ In edit mode each custom row has:
 - The pencil (**Edit**), which opens the same form. Leave **API key** blank to keep the stored key.
 - The trash button (**Remove**), which deletes the endpoint and its key after you confirm. Requests to `<prefix>/…` stop resolving.
 - **Move up** and **Move down**, which change only the display order on this page. They do not affect routing.
-- **Remove fast mode** and **Remove the Claude Code line**, described in [Request edits](#request-edits).
+- **Remove fast mode** and **Hide Claude Code identity**, described in [Request edits](#request-edits).
 
 Changing the **Model prefix** of an existing endpoint opens a confirmation first. It lists the group targets that will be rewritten to the new prefix. Clients that still call the old prefix fail with an invalid model error until you update them.
 

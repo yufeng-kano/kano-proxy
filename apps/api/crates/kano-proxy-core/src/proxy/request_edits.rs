@@ -17,6 +17,11 @@ pub const CLAUDE_CODE_LINES: [&str; 3] = [
 /// The Codex fast-mode tier (codex-rs `Fast => "priority"`); every other tier is left alone.
 const FAST_SERVICE_TIER: &str = "priority";
 
+/// Claude Code's attribution header, the text block Claude Code 2.1.319 puts first in `system`
+/// and Anthropic reads to bill Claude Code usage. Only a leading block is one; a copy further
+/// down is ordinary text.
+pub const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
+
 /// An Anthropic Messages / count_tokens body.
 pub fn edit_anthropic_body(body: &mut Map<String, Value>, edits: RequestEdits) {
     if edits.strip_fast_mode {
@@ -26,14 +31,31 @@ pub fn edit_anthropic_body(body: &mut Map<String, Value>, edits: RequestEdits) {
     if !edits.strip_claude_code_line {
         return;
     }
-    let emptied = match body.get_mut("system") {
-        Some(Value::String(text)) => strip_text(text),
-        Some(Value::Array(blocks)) => strip_parts(blocks),
-        _ => false,
-    };
+    let emptied = drop_leading_billing_header(body)
+        || match body.get_mut("system") {
+            Some(Value::String(text)) => strip_text(text),
+            Some(Value::Array(blocks)) => strip_parts(blocks),
+            _ => false,
+        };
     if emptied {
         body.remove("system");
     }
+}
+
+/// Removes the leading `x-anthropic-billing-header:` text block from `system` (docs/providers.md
+/// § Request edits). A string `system` never carries one. Only the first text block counts.
+/// `true` when it removed one and left no blocks behind, so the caller drops `system` entirely.
+fn drop_leading_billing_header(body: &mut Map<String, Value>) -> bool {
+    let Some(Value::Array(blocks)) = body.get_mut("system") else { return false };
+    let leading = blocks.first().is_some_and(|block| {
+        block.get("type").and_then(Value::as_str) == Some("text")
+            && block.get("text").and_then(Value::as_str).is_some_and(|t| t.starts_with(BILLING_HEADER_PREFIX))
+    });
+    if !leading {
+        return false;
+    }
+    blocks.remove(0);
+    blocks.is_empty()
 }
 
 /// A Chat Completions request, with the native Responses body it may carry for codex.
@@ -164,10 +186,53 @@ mod tests {
         assert_eq!(
             Value::Object(body),
             json!({
-                "system": [{ "type": "text", "text": BILLING }, { "type": "text", "text": "Project rules." }],
+                "system": [{ "type": "text", "text": "Project rules." }],
                 "messages": [{ "role": "user", "content": CC }],
             }),
-            "speed and the identity block go; the billing block and user content stay byte for byte"
+            "speed, the billing block and the identity block go; user content stays byte for byte"
+        );
+    }
+
+    #[test]
+    fn a_leading_billing_header_block_is_dropped() {
+        // Claude Code 2.1.319's shape: billing block first, identity second. Both go.
+        let mut body = object(json!({
+            "system": [
+                { "type": "text", "text": BILLING },
+                { "type": "text", "text": CC },
+                { "type": "text", "text": "Project rules." },
+            ],
+        }));
+        edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: true, ..Default::default() });
+        assert_eq!(body["system"], json!([{ "type": "text", "text": "Project rules." }]));
+
+        // Only the leading block is an attribution header; one further down is just text.
+        let mut body = object(json!({
+            "system": [
+                { "type": "text", "text": "Project rules." },
+                { "type": "text", "text": BILLING },
+            ],
+        }));
+        edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: true, ..Default::default() });
+        assert_eq!(body["system"], json!([{ "type": "text", "text": "Project rules." }, { "type": "text", "text": BILLING }]));
+
+        // Only the identity blocks gone leaves the billing block in place for the non-leading case,
+        // and a system left with nothing is removed entirely.
+        let mut body = object(json!({ "system": [{ "type": "text", "text": BILLING }] }));
+        edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: true, ..Default::default() });
+        assert!(body.get("system").is_none(), "the billing block alone leaves no system");
+    }
+
+    #[test]
+    fn a_billing_header_block_is_left_alone_without_the_switch() {
+        let mut body = object(json!({
+            "system": [{ "type": "text", "text": BILLING }, { "type": "text", "text": CC }],
+        }));
+        edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: false, ..Default::default() });
+        assert_eq!(
+            body["system"],
+            json!([{ "type": "text", "text": BILLING }, { "type": "text", "text": CC }]),
+            "nothing is edited without the switch"
         );
     }
 

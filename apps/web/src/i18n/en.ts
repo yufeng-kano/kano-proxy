@@ -333,13 +333,13 @@ export const en = {
   "providers.edits.fastModeHintClaude":
     "Requests sent to this account go at standard speed. Claude bills fast mode to usage credits.",
   "providers.edits.fastModeHintEndpoint": "Requests to this endpoint go at standard speed.",
-  "providers.edits.line": "Remove the Claude Code line",
+  "providers.edits.line": "Hide Claude Code identity",
   "providers.edits.lineHintClaude":
     "Drops Claude Code's identity line from system prompts sent to this account, and Kano Proxy stops adding it. Claude may refuse or bill requests without it.",
-  "providers.edits.lineHint": "Drops Claude Code's identity line from system prompts sent to this account.",
-  "providers.edits.lineHintEndpoint": "Drops Claude Code's identity line from system prompts sent to this endpoint.",
+  "providers.edits.lineHint": "Drops Claude Code's identity line and billing marker from requests sent to this account.",
+  "providers.edits.lineHintEndpoint": "Drops Claude Code's identity line and billing marker from requests sent to this endpoint.",
   "providers.edits.fastModeOn": "Fast mode removed",
-  "providers.edits.lineOn": "Claude Code line removed",
+  "providers.edits.lineOn": "Claude Code identity hidden",
 
   // --- Routing strategy ---------------------------------------------------
   // How a pool or a group decides what a request runs on. One option ships
