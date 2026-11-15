@@ -28,6 +28,10 @@ pub struct AccountRow {
     /// Per-quota-scope benches, `{"<scope>": {"until", "reason"}}` (`pool::bench`).
     pub bench_scopes_json: Option<String>,
     pub refreshing_at: Option<String>,
+    /// The last failed OAuth refresh, `{at, status, refused, expires_at}` (`pool::sign_in`).
+    pub refresh_failure_json: Option<String>,
+    /// When upstream last answered `401` for the stored credential (`pool::sign_in`).
+    pub sign_in_rejected_at: Option<String>,
     pub edge_strikes: i32,
     pub edge_strike_at: Option<String>,
     /// Opt-in to credit spillover (docs/providers.md § Codex "Credit spillover").
@@ -235,7 +239,7 @@ pub async fn insert_account(db: &PgPool, input: NewAccount<'_>) -> Result<Accoun
         bench_until: None,
         bench_reason: None,
         bench_scopes_json: None,
-        refreshing_at: None,
+        refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None,
         edge_strikes: 0,
         edge_strike_at: None,
         allow_credits: false,
@@ -420,7 +424,11 @@ pub async fn acquire_refresh_lock(db: &PgPool, account_id: &str) -> Result<Optio
     Ok((r.rows_affected() > 0).then_some(token))
 }
 
-/// Persists a refreshed credential and releases only the lock this caller owns.
+/// Persists a refreshed credential and releases only the lock this caller owns. A credential
+/// that just refreshed has nothing recorded against its sign-in (`pool::sign_in`), and a bench
+/// an upstream `401` earned its predecessor ends with it: that `401` was about a token which no
+/// longer exists, and leaving the bench would keep a now-working account out for the rest of
+/// its 300s. Benches for any other reason are the account's, not the token's, and stay.
 pub async fn write_refreshed_credential(
     db: &PgPool,
     account_id: &str,
@@ -429,7 +437,10 @@ pub async fn write_refreshed_credential(
 ) -> Result<bool, sqlx::Error> {
     let r = sqlx::query(
         "UPDATE upstream_accounts
-         SET encrypted_payload = $1, refreshing_at = NULL, updated_at = $2
+         SET encrypted_payload = $1, refreshing_at = NULL, updated_at = $2,
+             refresh_failure_json = NULL, sign_in_rejected_at = NULL,
+             bench_until = CASE WHEN bench_reason = '401' THEN NULL ELSE bench_until END,
+             bench_reason = CASE WHEN bench_reason = '401' THEN NULL ELSE bench_reason END
          WHERE id = $3 AND refreshing_at = $4",
     )
     .bind(encrypted_payload)
@@ -453,7 +464,8 @@ pub async fn release_refresh_lock(db: &PgPool, account_id: &str, token: &str) ->
 
 /// Reconnect: replaces an existing row's credential in place (docs/auth.md § Management
 /// routes). Keeps `id`, `priority`, `custom_label` and `created_at`, so group pins survive;
-/// clears the bench and the usage cache so the next read recomputes the status, and the
+/// clears the bench, the usage cache and the recorded sign-in failures so the next read
+/// recomputes the status, and the
 /// refresh lock so a late refresh winner fails its compare-and-release instead of overwriting
 /// this credential. `external_account_id` follows the COALESCE convention. Returns whether the
 /// row still existed.
@@ -472,7 +484,7 @@ pub async fn replace_account_credential(
              account_meta_json = $4,
              bench_until = NULL, bench_reason = NULL, bench_scopes_json = NULL,
              usage_snapshot_json = NULL, usage_fetched_at = NULL, usage_fetching_at = NULL,
-             refreshing_at = NULL, updated_at = $5
+             refreshing_at = NULL, refresh_failure_json = NULL, sign_in_rejected_at = NULL, updated_at = $5
          WHERE id = $6 AND user_id = $7",
     )
     .bind(encrypted_payload)
@@ -612,7 +624,7 @@ mod tests {
             usage_snapshot_json: Some(r#"{"windows":[{"w":1}],"account":{"plan":"max"},"stale":true}"#.into()),
             usage_fetched_at: None, usage_fetching_at: None, bench_until: None, bench_reason: None,
             bench_scopes_json: None,
-            refreshing_at: None, edge_strikes: 0, edge_strike_at: None, allow_credits: false,
+            refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None, edge_strikes: 0, edge_strike_at: None, allow_credits: false,
             strip_fast_mode: false, strip_claude_code_line: false,
             created_at: String::new(), updated_at: String::new(),
         };

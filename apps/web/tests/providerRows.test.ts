@@ -71,6 +71,76 @@ it("leaves Sign in again to the owner on a borrowed row", async () => {
   expect(html).not.toContain("Sign in again")
 })
 
+it("warns on a row whose sign-in is about to stop working, and offers the fix beside it", async () => {
+  const soon = new Date(Date.now() + 20 * 60_000).toISOString()
+  const expiring = account({ status: "active", sign_in_expires_at: soon })
+  const html = await render(AccountCard, { account: expiring, provider: "claude-code" })
+  // Still serving, so the dot is not the one that says it.
+  expect(html).toContain("Active")
+  expect(html).not.toContain("Sign-in expired")
+  expect(html).toContain("Sign-in ends in 20 minutes")
+  // A stated end days out reads in days, in the same badge.
+  const days = new Date(Date.now() + 3 * 86_400_000).toISOString()
+  const dated = await render(AccountCard, {
+    account: account({ status: "active", sign_in_expires_at: days }),
+    provider: "claude-code",
+  })
+  expect(dated).toContain("Sign-in ends in 3 days")
+  expect(html).toContain('aria-label="Sign in again as owner@example.com"')
+
+  // Once it has expired the status says so, and the notice would only repeat it.
+  const gone = await render(AccountCard, {
+    account: { ...expiring, status: "reauth" },
+    provider: "claude-code",
+  })
+  expect(gone).toContain("Sign-in expired")
+  expect(gone).not.toContain("Sign-in ends")
+
+  // A borrower is never told about the owner's sign-in.
+  const borrowed = await render(AccountCard, {
+    account: { ...expiring, share: { teamId: "t", teamName: "Team", ownerLabel: "Owner" } },
+    provider: "claude-code",
+  })
+  expect(borrowed).not.toContain("Sign-in ends")
+  expect(borrowed).not.toContain("Sign in again")
+})
+
+it("offers Sign in again on every row of the viewer's own while the section is being edited", async () => {
+  const again = 'aria-label="Sign in again as owner@example.com"'
+  const working = account({ status: "active" })
+  // A working row at rest is identity and usage only.
+  expect(await render(AccountCard, { account: working, provider: "claude-code" })).not.toContain(again)
+  expect(await render(AccountCard, { account: working, provider: "claude-code", editing: true })).toContain(again)
+  // Once, even where the row already offered it at rest.
+  const expiredOpen = await render(AccountCard, { account: expired, provider: "claude-code", editing: true })
+  expect(expiredOpen.split(again).length - 1).toBe(1)
+  // Signing in is the owner's alone, gate or no gate.
+  const borrowed = await render(AccountCard, {
+    account: { ...working, share: { teamId: "t", teamName: "Team", ownerLabel: "Owner" } },
+    provider: "claude-code",
+    editing: true,
+  })
+  expect(borrowed).not.toContain("Sign in again")
+})
+
+it("offers Resume wherever a bench is running, an expired sign-in included", async () => {
+  const resume = 'aria-label="Resume owner@example.com"'
+  const row = (overrides: Partial<ProviderAccount>, editing = true) =>
+    render(AccountCard, { account: account(overrides), provider: "claude-code", editing })
+
+  expect(await row({ status: "benched", benched: true })).toContain(resume)
+  // The 401 bench is how the proxy paces its retries; clearing it retries now.
+  expect(await row({ status: "reauth", benched: true })).toContain(resume)
+  // Nothing to clear once the bench has run out, though the sign-in is still expired.
+  expect(await row({ status: "reauth", benched: false })).not.toContain(resume)
+  expect(await row({ status: "limited" })).not.toContain(resume)
+  // Behind the section's gate, like the row's other actions.
+  expect(await row({ status: "reauth", benched: true }, false)).not.toContain(resume)
+  expect(
+    await row({ status: "benched", benched: true, share: { teamId: "t", teamName: "Team", ownerLabel: "Owner" } }),
+  ).not.toContain(resume)
+})
+
 it("states another probe failure inline, keeping the upstream text for hover and screen readers", async () => {
   const html = await render(AccountCard, {
     account: account({ error: "usage 500 internal" }),

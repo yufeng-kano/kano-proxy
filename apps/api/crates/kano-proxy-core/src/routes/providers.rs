@@ -39,6 +39,7 @@ use crate::db::provider_settings::{get_provider_strategy, set_provider_strategy}
 use crate::ids::{new_id, now_iso};
 use crate::pool::bench::{bench_until_from_row, clear_bench};
 use crate::pool::extension::ListSharedOptions;
+use crate::pool::sign_in::{sign_in_end_notice, sign_in_state, SignIn};
 use crate::pool::{SharedAccount, StoredCredential};
 use crate::providers::antigravity::bootstrap_antigravity_project;
 use crate::providers::claude_code::FABLE_MODEL_PREFIX;
@@ -154,6 +155,13 @@ struct AccountView {
     /// Routable only because of credits: opted in, credits usable, an account-wide window
     /// exhausted (docs/providers.md § Routing module status surfaces).
     on_credits: bool,
+    /// A bench is running on the row right now, whatever `status` says: an expired sign-in
+    /// reads `reauth` with or without one, and Resume needs to know which.
+    benched: bool,
+    /// Set while the refresh token has been refused but the access token still works
+    /// (docs/providers.md § Sign-in state): when requests through this account stop. Own rows
+    /// only.
+    sign_in_expires_at: Option<String>,
 }
 
 impl AccountView {
@@ -175,6 +183,8 @@ impl AccountView {
             "on_credits": self.on_credits,
             "strip_fast_mode": self.strip_fast_mode,
             "strip_claude_code_line": self.strip_claude_code_line,
+            "benched": self.benched,
+            "sign_in_expires_at": self.sign_in_expires_at,
         });
         if let Some(share) = &self.share {
             out["share"] = json!({
@@ -185,6 +195,19 @@ impl AccountView {
         }
         out
     }
+}
+
+/// The end the provider stated for this row's sign-in, once it is close enough to be worth a
+/// notice (docs/providers.md § Sign-in state "Stated end"). It lives inside the encrypted
+/// credential, so the payload is decrypted here, and only for Claude Code, the one provider
+/// that states one; an unreadable payload simply has none.
+fn stated_sign_in_end(state: &AppState, provider: ProviderId, row: &AccountRow, now_ms: i64) -> Option<i64> {
+    if provider != ProviderId::ClaudeCode {
+        return None;
+    }
+    let key = state.config().token_encryption_key.as_deref();
+    let credential: StoredCredential = crate::crypto::token_crypto::decrypt_json(key, &row.encrypted_payload).ok()?;
+    sign_in_end_notice(&credential, now_ms)
 }
 
 /// `401|invalid token|unauthorized` in the stored error text, the signal the TypeScript's
@@ -335,12 +358,15 @@ async fn list_accounts_route(
 
     for row in &rows {
         let benched = bench_until_from_row(row, now).is_some();
-        // Dispatch writes the upstream status as the bench reason: a 401 bench is a dead
-        // sign-in, not a pause the operator can resume.
-        let provisional = match (benched, row.bench_reason.as_deref()) {
-            (true, Some("401")) => "reauth",
-            (true, _) => "benched",
-            (false, _) => "standby",
+        // An expired sign-in is read off the row's recorded sign-in failures, which outlive the
+        // bench: the row keeps reading `reauth` after its 401 bench runs out, until a request
+        // or a refresh succeeds or the operator signs in again. The bench reason still counts
+        // for a row benched by a build that did not record them.
+        let sign_in = sign_in_state(row, now);
+        let provisional = match (sign_in, benched, row.bench_reason.as_deref()) {
+            (SignIn::Expired, _, _) | (_, true, Some("401")) => "reauth",
+            (_, true, _) => "benched",
+            (_, false, _) => "standby",
         };
         let meta = row
             .account_meta_json
@@ -365,6 +391,13 @@ async fn list_accounts_route(
             strip_fast_mode: row.strip_fast_mode,
             strip_claude_code_line: row.strip_claude_code_line,
             on_credits: false,
+            benched,
+            sign_in_expires_at: match sign_in {
+                SignIn::Expiring { until_ms } => Some(iso_from_ms(until_ms)),
+                // Nothing has failed yet: the only deadline is the one the provider stated.
+                SignIn::Ok => stated_sign_in_end(&state, provider, row, now).map(iso_from_ms),
+                SignIn::Expired => None,
+            },
         };
         account_usage(&state, row, &adapter, force, &mut view).await;
         view.label = display_label(row, view.account.as_ref());
@@ -442,6 +475,8 @@ async fn list_accounts_route(
             strip_fast_mode: row.strip_fast_mode,
             strip_claude_code_line: row.strip_claude_code_line,
             on_credits,
+            benched: bench_until_from_row(row, now).is_some(),
+            sign_in_expires_at: None,
         });
         limited_until.push(limited);
         created_at.push(row.created_at.clone());
@@ -768,6 +803,8 @@ async fn import_account(
         client_id: text("client_id"),
         token_endpoint: text("token_endpoint"),
         extra: None,
+        issued_at: None,
+        refresh_expires_at: None,
     };
     let Ok(encrypted) = encrypt_json(state.config().token_encryption_key.as_deref(), &credential) else {
         return internal_error();
@@ -1237,6 +1274,8 @@ async fn claude_complete(state: &AppState, session: &SessionUser, login_id: &str
         access_token: tokens.access_token.clone(),
         refresh_token: tokens.refresh_token.clone(),
         expires_at: expiry_from_tokens(&tokens, state.now_ms()),
+        issued_at: Some(iso_from_ms(state.now_ms())),
+        refresh_expires_at: tokens.refresh_token_expires_in.map(|secs| iso_from_ms(state.now_ms() + secs * 1000)),
         client_id: Some(pending.client_id.clone()),
         email: identity.email.clone(),
         ..Default::default()
@@ -1463,7 +1502,7 @@ async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) 
 mod tests {
     use super::*;
     use crate::auth::session::create_session;
-    use crate::db::accounts::{acquire_refresh_lock, iso_from_ms, set_account_custom_label};
+    use crate::db::accounts::{acquire_refresh_lock, iso_from_ms, parse_iso_ms, set_account_custom_label};
     use crate::db::test_support::{
         insert_user, skip_without_db, test_config, test_pool, test_router, test_state, TEST_TOKEN_KEY,
     };
@@ -2927,7 +2966,7 @@ mod tests {
             bench_until: None,
             bench_reason: None,
             bench_scopes_json: None,
-            refreshing_at: None,
+            refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None,
             edge_strikes: 0,
             edge_strike_at: None,
             allow_credits: false,
@@ -3454,6 +3493,93 @@ mod tests {
         );
     }
 
+    /// What `sign_in_state` reads, written the way the refresh single-flight writes it.
+    async fn seed_refresh_failure(pool: &PgPool, id: &str, status: Option<u16>, refused: bool, expires_in_ms: i64, now: i64) {
+        let failure = crate::pool::sign_in::RefreshFailure {
+            at: iso_from_ms(now),
+            status,
+            refused,
+            expires_at: Some(iso_from_ms(now + expires_in_ms)),
+        };
+        sqlx::query("UPDATE upstream_accounts SET refresh_failure_json = $1 WHERE id = $2")
+            .bind(serde_json::to_string(&failure).unwrap())
+            .bind(id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// The report behind the sign-in columns: a 401 bench ran out and the row read active again
+    /// with the sign-in still dead. The status follows the recorded refusal, not the bench, and
+    /// Resume clears the bench without pretending the sign-in is back.
+    #[tokio::test]
+    async fn an_expired_sign_in_reads_reauth_with_or_without_a_running_bench() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let now = state.now_ms();
+        for (id, priority) in [("acc_dead", 9), ("acc_ok", 1)] {
+            seed_account(&pool, &user.id, id, "claude-code", priority, account_meta("seat@example.com")).await;
+            seed_snapshot(&pool, id, json!([]), None, false).await;
+        }
+        crate::pool::sign_in::mark_sign_in_rejected(&pool, &user.id, "claude-code", "acc_dead", now).await.unwrap();
+        // The bench that came with the 401 is already over.
+        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_dead", Some(300_000), Some("401"), now - 400_000)
+            .await
+            .unwrap();
+
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(statuses(&json), pairs(&[("acc_dead", "reauth"), ("acc_ok", "active")]));
+        assert_eq!(json["accounts"][0]["benched"], false);
+        assert_eq!(json["accounts"][0]["sign_in_expires_at"], Value::Null);
+
+        // Upstream refuses it again: still reauth, and now there is a bench to resume.
+        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_dead", Some(300_000), Some("401"), now)
+            .await
+            .unwrap();
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!((&json["accounts"][0]["status"], &json["accounts"][0]["benched"]), (&json!("reauth"), &json!(true)));
+
+        let uri = "/api/providers/claude-code/accounts/acc_dead/unpause";
+        assert_eq!(call(&state, request("POST", uri, Some(&cookie), None)).await.status(), StatusCode::OK);
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!((&json["accounts"][0]["status"], &json["accounts"][0]["benched"]), (&json!("reauth"), &json!(false)));
+        assert!(stored_row(&pool, &user.id, "acc_dead").await.sign_in_rejected_at.is_some(), "unpause is not a sign-in");
+
+        // A request went through: the sign-in is back, and the row is the pool's first choice again.
+        crate::pool::sign_in::clear_sign_in_failure(&pool, &user.id, "acc_dead", false).await.unwrap();
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(statuses(&json), pairs(&[("acc_dead", "active"), ("acc_ok", "standby")]));
+    }
+
+    /// A refused refresh while the old access token still works: the row keeps routing and says
+    /// when it stops. A refresh that merely failed says nothing, and once the token has run out
+    /// either one is an expired sign-in.
+    #[tokio::test]
+    async fn a_refused_refresh_reports_when_the_sign_in_stops_working() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        let now = state.now_ms();
+        for (id, priority) in [("acc_refused", 9), ("acc_flaky", 5), ("acc_lapsed", 1)] {
+            seed_account(&pool, &user.id, id, "claude-code", priority, account_meta("seat@example.com")).await;
+            seed_snapshot(&pool, id, json!([]), None, false).await;
+        }
+        seed_refresh_failure(&pool, "acc_refused", Some(400), true, 1_200_000, now).await;
+        // A 403 that does not name the grant is an edge or a client problem, not the sign-in.
+        seed_refresh_failure(&pool, "acc_flaky", Some(403), false, 1_200_000, now).await;
+        seed_refresh_failure(&pool, "acc_lapsed", Some(503), false, -1_000, now).await;
+
+        let json = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(
+            statuses(&json),
+            pairs(&[("acc_refused", "active"), ("acc_flaky", "standby"), ("acc_lapsed", "reauth")])
+        );
+        assert_eq!(json["accounts"][0]["sign_in_expires_at"], iso_from_ms(now + 1_200_000).as_str());
+        assert_eq!(json["accounts"][1]["sign_in_expires_at"], Value::Null);
+        assert_eq!(json["accounts"][2]["sign_in_expires_at"], Value::Null);
+    }
+
     #[tokio::test]
     async fn a_usage_429_or_an_edge_blocked_error_never_reads_reauth() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -3491,7 +3617,13 @@ mod tests {
                 if req.url == crate::auth::provider_oauth::ClaudeOAuth::TOKEN_URL {
                     Ok(UpstreamResponse::json(
                         StatusCode::OK,
-                        &json!({ "access_token": "at-new", "refresh_token": "rt-new", "expires_in": 3600 }),
+                        // The sign-in itself ends in three days, as the provider states it.
+                        &json!({
+                            "access_token": "at-new",
+                            "refresh_token": "rt-new",
+                            "expires_in": 3600,
+                            "refresh_token_expires_in": 259_200
+                        }),
                     ))
                 } else if req.url.contains("/api/oauth/profile") {
                     Ok(UpstreamResponse::json(StatusCode::OK, &json!({ "account": account })))
@@ -3532,6 +3664,8 @@ mod tests {
             .await
             .unwrap();
         seed_snapshot(&pool, "acc_1", json!([{ "label": "5h", "utilization": 10 }]), Some("usage 401"), false).await;
+        crate::pool::sign_in::mark_sign_in_rejected(&pool, &user.id, "claude-code", "acc_1", now).await.unwrap();
+        seed_refresh_failure(&pool, "acc_1", Some(400), true, -1_000, now).await;
         acquire_refresh_lock(&pool, "acc_1").await.unwrap().unwrap();
         let before = stored_row(&pool, &user.id, "acc_1").await;
 
@@ -3564,10 +3698,14 @@ mod tests {
         assert!(after.bench_until.is_none() && after.bench_reason.is_none() && after.bench_scopes_json.is_none());
         assert!(after.usage_snapshot_json.is_none() && after.usage_fetched_at.is_none() && after.usage_fetching_at.is_none());
         assert!(after.refreshing_at.is_none());
+        assert!(after.refresh_failure_json.is_none() && after.sign_in_rejected_at.is_none(), "a new sign-in starts clean");
         let credential: StoredCredential =
             crate::crypto::token_crypto::decrypt_json(Some(TEST_TOKEN_KEY), &after.encrypted_payload).unwrap();
         assert_eq!(credential.access_token, "at-new");
         assert_eq!(credential.refresh_token.as_deref(), Some("rt-new"));
+        let ends = credential.refresh_expires_at.clone().expect("the sign-in's stated end is kept");
+        let ends_in = parse_iso_ms(&ends).unwrap() - state.now_ms();
+        assert!((259_000_000..=259_200_000).contains(&ends_in), "three days from the sign-in: {ends_in}");
         // The login's keys win; the plan facts it does not return (and its null display_name)
         // leave the stored ones alone.
         let meta: Value = serde_json::from_str(after.account_meta_json.as_deref().unwrap()).unwrap();
@@ -3581,6 +3719,14 @@ mod tests {
         let listed = claude_accounts(&state, &cookie, false).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(listed["accounts"][0]["status"], "active");
+        // Three days is inside the week of notice, so the working row already says when it ends.
+        assert_eq!(listed["accounts"][0]["sign_in_expires_at"], ends.as_str());
+
+        // A month out it says nothing yet.
+        let later = StoredCredential { refresh_expires_at: Some(iso_from_ms(state.now_ms() + 30 * 86_400_000)), ..credential };
+        crate::pool::acquire::save_credential(&state, "acc_1", &later, None).await.unwrap();
+        let listed = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(listed["accounts"][0]["sign_in_expires_at"], Value::Null);
     }
 
     #[tokio::test]

@@ -74,6 +74,10 @@ pub struct OAuthTokens {
     pub refresh_token: Option<String>,
     #[serde(default)]
     pub expires_in: Option<i64>,
+    /// Seconds until the refresh token itself stops working, where the provider states it
+    /// (Claude Code does). That is the day the sign-in ends: docs/providers.md § Sign-in state.
+    #[serde(default)]
+    pub refresh_token_expires_in: Option<i64>,
 }
 
 fn query(pairs: &[(&str, &str)]) -> String {
@@ -332,7 +336,7 @@ mod tests {
         assert!(transport.requests().is_empty());
 
         let tokens = exchange_claude_code(&state, "code", &begun.pending.oauth_state, &begun.pending).await.unwrap();
-        assert_eq!(tokens, OAuthTokens { access_token: "at".into(), refresh_token: Some("rt".into()), expires_in: Some(3600) });
+        assert_eq!(tokens, OAuthTokens { access_token: "at".into(), refresh_token: Some("rt".into()), expires_in: Some(3600), refresh_token_expires_in: None });
         let body = transport.requests()[0].json();
         assert_eq!(body["code_verifier"], begun.pending.code_verifier);
         assert_eq!(body["grant_type"], "authorization_code");

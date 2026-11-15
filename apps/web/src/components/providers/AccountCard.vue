@@ -58,7 +58,7 @@ const emit = defineEmits<{
   edits: [patch: Partial<RequestEdits>]
 }>()
 
-const { t } = useI18n()
+const { t, format } = useI18n()
 
 /**
  * Server data, not copy: an email or upstream username identifies the account
@@ -190,6 +190,39 @@ const windows = computed(() => props.account.usage?.windows ?? [])
 const reauth = computed(() => props.account.status === "reauth" && !share.value)
 
 /**
+ * The refresh token was refused while the access token still works
+ * (docs/admin-ui.md § Providers page): the row is still serving, and this is
+ * when it stops unless the operator signs in again. The server sends the time
+ * only in that state, and never on a shared row.
+ */
+const signInEnds = computed(() =>
+  !share.value && !reauth.value ? (props.account.sign_in_expires_at ?? null) : null,
+)
+
+/**
+ * Sign in again is offered on the viewer's own row whenever it is the fix for
+ * what the row reports, and on every own row while the section is being
+ * edited: a working account is signed in again to move it to another login of
+ * the same account, or to pick up the end date a sign-in made by an earlier
+ * version never stored (docs/admin-ui.md § Providers page).
+ */
+const canReconnect = computed(
+  () => !share.value && (reauth.value || !!signInEnds.value || !!props.editing),
+)
+
+/**
+ * A bench is running on the viewer's own row. Read off `benched` rather than
+ * the status alone: an expired sign-in reads `reauth` with or without one, and
+ * clearing its bench is how the operator makes the proxy try it again now.
+ */
+const paused = computed(
+  () =>
+    !share.value &&
+    (props.account.status === "benched" ||
+      (props.account.status === "reauth" && props.account.benched === true)),
+)
+
+/**
  * Any other probe failure worth seeing: a short note on the tags line, not a
  * banner. The last good windows stay on the bars; the upstream text is data,
  * so it rides in the tooltip and the accessible name rather than as copy.
@@ -310,10 +343,15 @@ watch(
           <Badge v-if="account.on_credits" tone="warn">
             {{ t("providers.account.onCredits") }}
           </Badge>
-          <!-- Outside the section's gate on purpose: it is the fix for the
-               state the dot beside it reports, and it destroys nothing. -->
+          <!-- Still serving, so the dot stays as it is; this is the notice. -->
+          <Badge v-if="signInEnds" tone="warn" :title="format.dateTime(signInEnds)">
+            {{ t("providers.account.signInEnds", { when: format.relative(signInEnds) }) }}
+          </Badge>
+          <!-- Outside the section's gate when it is the fix for the state the
+               dot or the notice beside it reports; it destroys nothing. With
+               the gate open, every row of the viewer's own offers it. -->
           <AppButton
-            v-if="reauth"
+            v-if="canReconnect"
             class="reconnect"
             size="sm"
             variant="ghost"
@@ -377,7 +415,7 @@ watch(
           </AppButton>
         </template>
         <AppButton
-          v-if="account.status === 'benched' && !share"
+          v-if="paused"
           icon-only
           variant="ghost"
           :label="t('providers.account.resume', { name: displayName })"

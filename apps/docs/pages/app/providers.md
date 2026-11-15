@@ -37,12 +37,13 @@ A row shows:
 | **Standby** | Usable. It takes requests when the accounts above it cannot. |
 | **Limit reached** | A usage window is at 100%. It is skipped until that window resets. |
 | **Paused** | The provider rejected a recent request, for example with a rate limit. It is skipped until the pause ends. |
-| **Sign-in expired** | The stored sign-in no longer works. On your own account the row shows **Sign in again** beside the status. An account shared with you never shows this status, even when its sign-in expired: only its owner sees it and can sign in again. |
+| **Sign-in expired** | The stored sign-in no longer works. The row keeps this status until a request through the account succeeds again or you sign in again, including between the retries Kano Proxy makes every five minutes. On your own account the row shows **Sign in again** beside the status. An account shared with you never shows this status, even when its sign-in expired: only its owner sees it and can sign in again. |
 | **Active · no Fable** | Claude Code only. The next request goes here, but this seat cannot serve Fable models. |
 | **Active · Fable** | Claude Code only. Fable requests go here, because the account above it cannot serve them. |
 | **Needs attention** | The server sent a status this version of the page does not know. |
 
 - **On credits**, a badge beside the status. A Codex account shows it while it takes requests only because it spends paid credits.
+- **Sign-in ends in …**, a badge beside the status on your own account, with **Sign in again** next to it. The account still works until the time shown; hover the badge for the exact time. Sign in again before then and nothing is interrupted. On Claude Code the badge appears seven days before the sign-in ends, because Claude states that date when you sign in. On every provider it also appears when the provider refuses to renew a sign-in that still works for now: at most four hours ahead on Claude Code, an hour on Grok, and five minutes or less on the others. An account connected before this version shows the seven-day notice only after you sign in to it again.
 - **Couldn't read usage**, a short note beside the status when the last usage check failed. Hover it to see the provider's error. The bars keep the last values that were read. The note is not shown on accounts shared with you, on **Sign-in expired** rows, or for check errors that leave requests working, such as a rate limit on the usage check itself.
 - **Usage bars**, one per usage window the provider reports, such as **5h** and **Week**, each with the percentage used and when it resets. A verified Claude Ultra account has no 5-hour limit, so it shows only its weekly bars. Antigravity shows **Gemini 5h** and **Gemini Week**, then **Argon Week** on Google AI Pro, where Gemini 4 Argon has its own weekly quota, then **Other 5h** and **Other Week**. Each of these bars covers one group of models. A full one blocks only the models in its group, so the account's status does not change. A bar without a group name, such as **Week**, covers every model: a full one turns the row **Limit reached**. A new account shows **Usage will appear once this account is used**. On a **Sign-in expired** account the bars are dimmed: they show the last usage that was read.
 - **Credits**, a row under the bars when Codex or Antigravity reports a credit balance, such as `1,500 left` or `Unlimited`. A Codex account that has credits without a balance shows `Available`. A balance has no total, so it has no bar.
@@ -57,7 +58,7 @@ One row per local model server registered from the CLI: its name and prefix, for
 
 ### Edit mode
 
-Rows show identity and usage only. The one exception is **Sign in again** on your own accounts whose sign-in expired. To change anything else, choose the pencil in a section's header (**Edit Claude Code**, **Edit Custom endpoints**, **Edit CLI providers**, and so on). The pencil appears once the section has at least one row. It reveals the actions on every row of that section. Choose it again, now a check, to close them. The plus button is hidden while edit mode is open.
+Rows show identity and usage only. The one exception is **Sign in again** on your own accounts whose sign-in expired or is about to. In edit mode every one of your own accounts shows it. To change anything else, choose the pencil in a section's header (**Edit Claude Code**, **Edit Custom endpoints**, **Edit CLI providers**, and so on). The pencil appears once the section has at least one row. It reveals the actions on every row of that section. Choose it again, now a check, to close them. The plus button is hidden while edit mode is open.
 
 In edit mode a subscription card shows a settings block between its header and its rows. It holds **Strategy**. **Ordered** is the only option: priority order, first usable account. Each of your own accounts also shows its own checkboxes at the bottom of its row, described in [Request edits](#request-edits). Custom endpoints and CLI providers have their own checkboxes too; [Request edits](#request-edits) lists where each one is.
 
@@ -99,10 +100,12 @@ If you already hold tokens for an account, **Enter tokens manually** takes an ac
 
 ### Fix an expired sign-in
 
-1. On the row that reads **Sign-in expired**, choose **Sign in again**. You do not need edit mode.
+1. On the row that reads **Sign-in expired**, or that shows **Sign-in ends in …**, choose **Sign in again**. You do not need edit mode.
 2. Sign in with the same account, as in [Connect a subscription account](#connect-a-subscription-account). **Enter tokens manually** is not offered here.
 
 The account keeps its place in the order, its name and its group settings. Kano Proxy compares the two when both carry an email or an account id. A different account then fails, and the dialog names both accounts. When they cannot be compared, the new sign-in replaces the old one, so make sure it is the same account.
+
+You can also sign in again to an account that still works: open edit mode with the pencil in the provider's card, and **Sign in again** appears on each of your own accounts. Do this to renew a sign-in before it ends, or to make an account connected before this version show when its sign-in ends.
 
 ### Change the order of a pool
 
@@ -116,7 +119,9 @@ The top row is **Primary** and is tried first. Order matters only between usable
 1. Choose the pencil in the provider's card.
 2. Choose the play button (**Resume**) on the paused row.
 
-The account takes requests again right away. If the provider rejects it again, it is paused again. Resume does not appear for **Limit reached**: a full usage window is a limit set by the provider, and only its reset clears it. It does not appear for **Sign-in expired** either: that needs **Sign in again**.
+The account takes requests again right away. If the provider rejects it again, it is paused again. Resume does not appear for **Limit reached**: a full usage window is a limit set by the provider, and only its reset clears it.
+
+A **Sign-in expired** row is paused for five minutes each time the provider rejects it, and shows **Resume** while that pause runs. Resuming does not bring the sign-in back. It makes Kano Proxy try the account on the next request instead of waiting out the pause, which is worth doing when you think the failure was temporary. The row keeps reading **Sign-in expired** until a request succeeds; if none does, use **Sign in again**.
 
 Resume is offered only on your own accounts. A paused account shared with you is resumed, or signed in again, by its owner.
 

@@ -72,10 +72,13 @@ export const CACHE_TTL_MS = 120_000
  * its credits switch off until the TTL expired. v16: a shared Codex row may
  * carry `usage.credits` and `on_credits` — a v15 entry has neither, so a
  * member's row would miss its balance and On credits until the TTL expired.
- * v17: the custom-providers entry became `{providers, shared}` to carry the
- * endpoints other users share — a v16 entry is a bare array of own rows.
+ * v17: accounts grew `benched` and `sign_in_expires_at` — a v16 entry has
+ * neither, so an expired sign-in with a running bench would hide Resume and
+ * an expiring one its notice until the TTL expired.
+ * v18: the custom-providers entry became `{providers, shared}` to carry the
+ * endpoints other users share — a v17 entry is a bare array of own rows.
  */
-const CACHE_SCHEMA_VERSION = 17
+const CACHE_SCHEMA_VERSION = 18
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000

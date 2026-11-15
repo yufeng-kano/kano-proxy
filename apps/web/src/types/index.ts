@@ -7,9 +7,10 @@ export type ProviderId = "claude-code" | "codex" | "grok" | "antigravity"
  * `active_no_fable` / `active_fable` exist only on Claude Code pools: the
  * first usable account when its seat cannot serve Fable, and the first
  * usable Fable-eligible account below it — where Fable traffic goes.
- * `reauth` is an expired sign-in (usage probe 401, or paused by an upstream
- * 401): only signing in again fixes it, and any windows it still carries are
- * the last known values.
+ * `reauth` is an expired sign-in (usage probe 401, an upstream 401, or an
+ * access token that ran out and could not be refreshed): it stays until a
+ * request or a refresh succeeds or the operator signs in again, and any
+ * windows it still carries are the last known values.
  */
 export type AccountStatus =
   | "active"
@@ -89,6 +90,19 @@ export type ProviderAccount = {
    */
   strip_fast_mode?: boolean
   strip_claude_code_line?: boolean
+  /**
+   * A bench is running on the row right now, whatever `status` says: an expired
+   * sign-in reads `reauth` with or without one, and Resume is offered only while
+   * there is a bench to clear.
+   */
+  benched?: boolean
+  /**
+   * When requests through an own row stop unless the operator signs in again
+   * (docs/providers.md § Sign-in state): the end the provider stated for the
+   * sign-in, once it is a week or less away, or the access token's expiry while
+   * the refresh token has been refused. Null otherwise.
+   */
+  sign_in_expires_at?: string | null
 }
 
 /**
