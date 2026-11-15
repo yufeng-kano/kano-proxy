@@ -283,6 +283,10 @@ export const en = {
   // glyph names it — and the accessible name carries the account.
   "providers.account.reconnect": "Sign in again",
   "providers.account.reconnectLabel": "Sign in again as {name}",
+  // The account still works, but its sign-in is about to end: on its stated
+  // date, or because it could not be renewed. `when` is relative ("in 3
+  // days", "in 20 minutes"); the exact time rides in the tooltip.
+  "providers.account.signInEnds": "Sign-in ends {when}",
   // A usage read that failed for a reason other than sign-in. The visible note
   // is short; the upstream text rides in its tooltip and accessible name.
   "providers.account.usageStale": "Couldn't read usage",
@@ -373,7 +377,7 @@ export const en = {
   "addAccount.manual": "Enter tokens manually",
   "addAccount.reconnect.title": "Sign in again as {name}",
   "addAccount.reconnect.intro":
-    "The sign-in for {name} has expired. Sign in with the same {provider} account; its place in the order, name and group settings stay as they are.",
+    "Sign in to {name} with the same {provider} account. Its place in the order, name and group settings stay as they are.",
   "addAccount.openAuth": "Open sign-in page",
   "addAccount.claude.step1": "Approve access on the page that opened.",
   "addAccount.claude.step2": "Copy the code you're given and paste it below.",

@@ -39,7 +39,7 @@ use super::codex_reasoning_cache::{
 };
 use super::codex_replay_history::{codex_input_hashes, codex_replay_turn, replay_codex_history};
 use super::codex_usage::{credits_meta, fetch_codex_usage_json, windows_from_codex_payload};
-use super::refresh::refresh_oauth_credential;
+use super::refresh::{refresh_oauth_credential, RefreshError};
 use super::types::{
     AdapterError, AffinityIds, CallExtras, ChatCompletionRequest, DynAdapter, FetchedUsage, ListedModels,
     ProviderAdapter,
@@ -86,8 +86,8 @@ async fn refresh_codex_credential(
     cx: &AppState,
     credential: StoredCredential,
     fallback_client_id: String,
-) -> Option<StoredCredential> {
-    let refresh_token = credential.refresh_token.clone()?;
+) -> Result<StoredCredential, RefreshError> {
+    let refresh_token = credential.refresh_token.clone().ok_or(RefreshError::NotAttempted)?;
     let client_id =
         credential.client_id.clone().filter(|s| !s.is_empty()).unwrap_or(fallback_client_id);
     let form = url::form_urlencoded::Serializer::new(String::new())
@@ -98,14 +98,14 @@ async fn refresh_codex_credential(
     let request = UpstreamRequest::post(TOKEN_URL)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Bytes::from(form));
-    let response = cx.transport().send(request).await.ok()?;
+    let response = cx.transport().send(request).await.map_err(|_| RefreshError::Unusable)?;
     if !response.status.is_success() {
-        return None;
+        return Err(RefreshError::from_response(response).await);
     }
-    let json = response.json_value().await.ok()?;
+    let json = response.json_value().await.map_err(|_| RefreshError::Unusable)?;
     // An answer without an access token is not a refresh; keep the stored credential rather
     // than persisting a blank one.
-    let access_token = json.get("access_token")?.as_str()?.to_string();
+    let access_token = json.get("access_token").and_then(Value::as_str).ok_or(RefreshError::Unusable)?.to_string();
     let mut next = credential;
     next.access_token = access_token;
     if let Some(token) = json.get("refresh_token").and_then(Value::as_str) {
@@ -114,7 +114,7 @@ async fn refresh_codex_credential(
     if let Some(expires_in) = json.get("expires_in").and_then(Value::as_i64).filter(|v| *v != 0) {
         next.expires_at = Some(iso_from_ms(crate::app::now_ms() + expires_in * 1000));
     }
-    Some(next)
+    Ok(next)
 }
 
 async fn refresh_codex(cx: &AppState, account: AcquiredAccount) -> AcquiredAccount {

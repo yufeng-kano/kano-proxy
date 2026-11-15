@@ -1583,6 +1583,204 @@ pub(crate) mod tests {
         assert_eq!(rows[0].status_code, 200);
     }
 
+    /// docs/providers.md § Sign-in state: an upstream 401 on a builtin account is remembered
+    /// past its bench, and the next 2xx through that account forgets it. A custom endpoint has
+    /// a key, not a sign-in, so its 401 is a bench and nothing more.
+    #[tokio::test]
+    async fn a_401_marks_the_sign_in_rejected_until_a_request_gets_through() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "signin@example.com").await;
+        seed_accounts(state.pool(), &user.id, "claude-code", &["acc_1", "acc_2"]).await;
+        let ok = || json!({ "choices": [{ "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" }] });
+        let unauthorized = || Reply::Json(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" }));
+        let rejected_at = |id: &'static str| {
+            let state = state.clone();
+            let user_id = user.id.clone();
+            async move { get_account(state.pool(), &user_id, id).await.unwrap().unwrap().sign_in_rejected_at }
+        };
+
+        let adapter = ScriptedAdapter::new("claude-code", vec![unauthorized(), Reply::Json(StatusCode::OK, ok())]);
+        let opts = || ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "claude-code", false) };
+        assert_eq!(dispatch_chat_completions(&state, opts()).await.status(), StatusCode::OK);
+        assert_eq!(adapter.calls(), ["acc_1", "acc_2"]);
+        assert!(rejected_at("acc_1").await.is_some());
+        assert!(rejected_at("acc_2").await.is_none());
+
+        // The bench runs out (here: is cleared) and the account answers again. A refresh refused
+        // in the meantime, with the old token still good for ten minutes, is not disproved by
+        // that token working: the record stays, and with it the notice and the retry pacing.
+        crate::pool::bench::clear_bench(state.pool(), &user.id, "claude-code", "acc_1").await.unwrap();
+        assert!(rejected_at("acc_1").await.is_some(), "the bench ending is not the sign-in coming back");
+        let set_failure = |expires_in_ms: i64| {
+            let failure = crate::pool::sign_in::RefreshFailure {
+                at: crate::db::accounts::iso_from_ms(now_ms()),
+                status: Some(400),
+                refused: true,
+                expires_at: Some(crate::db::accounts::iso_from_ms(now_ms() + expires_in_ms)),
+            };
+            sqlx::query("UPDATE upstream_accounts SET refresh_failure_json = $1 WHERE id = 'acc_1'")
+                .bind(serde_json::to_string(&failure).unwrap())
+                .execute(state.pool())
+        };
+        set_failure(600_000).await.unwrap();
+        assert_eq!(dispatch_chat_completions(&state, opts()).await.status(), StatusCode::OK);
+        assert_eq!(adapter.calls(), ["acc_1", "acc_2", "acc_1"]);
+        assert!(rejected_at("acc_1").await.is_none());
+        let row = get_account(state.pool(), &user.id, "acc_1").await.unwrap().unwrap();
+        assert!(row.refresh_failure_json.is_some(), "the refusal is still on record");
+
+        // A record that says the token had already run out is disproved by a request getting through.
+        set_failure(-1_000).await.unwrap();
+        assert_eq!(dispatch_chat_completions(&state, opts()).await.status(), StatusCode::OK);
+        let row = get_account(state.pool(), &user.id, "acc_1").await.unwrap().unwrap();
+        assert!(row.refresh_failure_json.is_none());
+
+        seed_accounts(state.pool(), &user.id, "my-endpoint", &["acc_key"]).await;
+        let custom = ScriptedAdapter::new("my-endpoint", vec![unauthorized()]);
+        let res = dispatch_chat_completions(
+            &state,
+            ChatDispatchOptions {
+                user_id: user.id.clone(),
+                is_builtin: Some(false),
+                ..chat_opts(custom.clone(), "my-endpoint", false)
+            },
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(is_benched(state.pool(), &user.id, "acc_key", now_ms()).await.unwrap());
+        assert!(rejected_at("acc_key").await.is_none());
+    }
+
+    /// docs/providers.md § Routing module "Penalties": an OAuth refresh can revoke the token it
+    /// replaces, so the request that lost the refresh race is refused although the sign-in is
+    /// fine. It waits for the winner to store the new credential, is sent once more with it, and
+    /// the account is neither benched nor marked. (2026-11-07: three such 401s cost a one-account
+    /// pool five minutes.)
+    #[tokio::test]
+    async fn a_401_for_a_token_replaced_mid_request_is_retried_on_the_new_one_without_benching() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "rotated@example.com").await;
+        seed_accounts(state.pool(), &user.id, "claude-code", &["acc_1", "acc_2"]).await;
+        // A sign-in, not a key: only a credential with a refresh token can have been replaced.
+        let signed_in = StoredCredential { access_token: "tok-acc_1".into(), refresh_token: Some("rt".into()), ..Default::default() };
+        crate::pool::acquire::save_credential(&state, "acc_1", &signed_in, None).await.unwrap();
+
+        struct Rotating {
+            sent: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait]
+        impl ProviderAdapter for Rotating {
+            fn id(&self) -> &str {
+                "claude-code"
+            }
+            async fn chat_completions(
+                &self,
+                cx: &AppState,
+                account: &crate::pool::AcquiredAccount,
+                _: &ChatCompletionRequest,
+                _: &CallExtras,
+            ) -> Result<Response, AdapterError> {
+                let first = {
+                    let mut sent = self.sent.lock().unwrap();
+                    sent.push(format!("{}:{}", account.row.id, account.credential.access_token));
+                    sent.len() == 1
+                };
+                if !first {
+                    return Ok(json_response(StatusCode::OK, &json!({ "choices": [{ "message": { "content": "hi" } }] })));
+                }
+                // The refresh this request lost: its winner still holds the lock, and stores the
+                // new token a moment after upstream has refused the old one.
+                let lock = crate::db::accounts::acquire_refresh_lock(cx.pool(), &account.row.id).await.unwrap().unwrap();
+                let renewed = StoredCredential { access_token: "tok-new".into(), ..account.credential.clone() };
+                let blob = crate::crypto::token_crypto::encrypt_json(cx.config().token_encryption_key.as_deref(), &renewed).unwrap();
+                let (pool, id) = (cx.pool().clone(), account.row.id.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    crate::db::accounts::write_refreshed_credential(&pool, &id, &lock, &blob).await.unwrap();
+                });
+                Ok(json_response(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthorized" })))
+            }
+        }
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let adapter: Arc<dyn ProviderAdapter> = Arc::new(Rotating { sent: sent.clone() });
+
+        let res = dispatch_chat_completions(
+            &state,
+            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "claude-code", false) },
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(*sent.lock().unwrap(), ["acc_1:tok-acc_1", "acc_1:tok-new"], "the same account, on its new token");
+        assert!(!is_benched(state.pool(), &user.id, "acc_1", now_ms()).await.unwrap());
+        let row = get_account(state.pool(), &user.id, "acc_1").await.unwrap().unwrap();
+        assert!(row.sign_in_rejected_at.is_none());
+        let rows = logs(&state).await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].account_id.as_deref(), rows[0].status_code), (Some("acc_1"), 200));
+    }
+
+    /// The sign-in facts are the owner's, like the bench beside them: a borrower's 401 on a lent
+    /// account is recorded on the owner's row, where the owner's Providers page reads it, and a
+    /// borrower's 2xx clears it there. Scoped to the requester instead, both writes would match
+    /// no row at all.
+    #[tokio::test]
+    async fn a_lent_accounts_401_is_recorded_on_its_owners_row_and_a_borrowers_2xx_clears_it() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let owner = insert_user(state.pool(), "lender@example.com").await;
+        let member = insert_user(state.pool(), "borrower@example.com").await;
+        seed_accounts(state.pool(), &owner.id, "claude-code", &["acc_lent"]).await;
+        let adapter = ScriptedAdapter::new(
+            "claude-code",
+            vec![
+                Reply::Json(StatusCode::UNAUTHORIZED, json!({ "error": "unauthorized" })),
+                Reply::Json(StatusCode::OK, json!({ "choices": [{ "message": { "content": "hi" } }] })),
+            ],
+        );
+        let lent_row = || {
+            let state = state.clone();
+            let owner_id = owner.id.clone();
+            async move { get_account(state.pool(), &owner_id, "acc_lent").await.unwrap().unwrap() }
+        };
+        let as_member = |account: AccountRow| ChatDispatchOptions {
+            user_id: member.id.clone(),
+            provider: "claude-code".into(),
+            candidates: Some(vec![RoutingCandidate {
+                target_index: 0,
+                pinned: false,
+                provider: "claude-code".into(),
+                upstream_model: "claude-opus-5".into(),
+                is_builtin: true,
+                custom_provider: None,
+                adapter: adapter.clone(),
+                account,
+                share: Some(crate::pool::ShareInfo {
+                    team_id: "t1".into(),
+                    team_name: "Team".into(),
+                    owner_label: "lender".into(),
+                }),
+            }]),
+            group_name: Some("opus".into()),
+            req: chat_req("opus", "claude-opus-5", false),
+            ..Default::default()
+        };
+
+        let res = dispatch_chat_completions(&state, as_member(lent_row().await)).await;
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let refused = lent_row().await;
+        assert!(refused.sign_in_rejected_at.is_some(), "on the owner's row");
+        assert!(is_benched(state.pool(), &owner.id, "acc_lent", now_ms()).await.unwrap());
+
+        // The bench is over; the plan hands the walk the row as it now stands.
+        crate::pool::bench::clear_bench(state.pool(), &owner.id, "claude-code", "acc_lent").await.unwrap();
+        let res = dispatch_chat_completions(&state, as_member(lent_row().await)).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(adapter.calls(), ["acc_lent", "acc_lent"]);
+        assert!(lent_row().await.sign_in_rejected_at.is_none());
+    }
+
     #[tokio::test]
     async fn the_first_two_edge_timeouts_fail_over_without_benching_and_the_third_benches_thirty_seconds() {
         let Some(pool) = test_pool().await else { return skip_without_db() };

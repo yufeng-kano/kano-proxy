@@ -149,7 +149,7 @@ mod tests {
             bench_until: None,
             bench_reason: None,
             bench_scopes_json: None,
-            refreshing_at: None,
+            refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None,
             edge_strikes: 0,
             edge_strike_at: None,
             allow_credits: false,

@@ -22,6 +22,7 @@ use crate::db::custom_providers::CustomProviderRow;
 use crate::pool::acquire::{acquire, AcquiredAccount};
 use crate::pool::bench::{mark_benched, mark_scope_benched};
 use crate::pool::extension::{settle_lease, AttemptLease, LeaseOutcome, ReserveContext, ReserveOutcome};
+use crate::pool::sign_in::{clear_sign_in_failure, mark_sign_in_rejected, read_refresh_failure};
 use crate::providers::types::{AdapterError, CallExtras, RequestEdits};
 use crate::providers::{DynAdapter, ProviderId};
 use crate::routing::candidates::{pool_candidates, PoolTarget};
@@ -215,6 +216,80 @@ async fn retry_529_once(
     fetch_upstream_response(cx, caller, candidate, acquired, extras).await
 }
 
+/// How long a `401` waits for a refresh that is in flight on the account before it is taken at
+/// face value. The refresh was already under way when upstream refused the old token, so what
+/// is left is the winner storing its answer: one second covers it, and bounds what a lock left
+/// behind by a killed process can cost a `401` that was real.
+const SUPERSEDED_POLL_ATTEMPTS: u32 = 10;
+const SUPERSEDED_POLL_DELAY: Duration = Duration::from_millis(100);
+
+/// The credential now stored for `acquired`'s account, when it is no longer the one this attempt
+/// sent. Waits out a refresh in flight first: the request that loses the refresh race is sent
+/// with the old token and is refused before the winner has stored the new one. A credential
+/// with no refresh token is a key: nothing replaces it, so its `401` costs no lookup. Gives up
+/// as soon as the client has gone away.
+async fn superseding_credential(
+    cx: &AppState,
+    acquired: &AcquiredAccount,
+    cancelled: Option<&CancelSignal>,
+) -> Option<AcquiredAccount> {
+    acquired.credential.refresh_token.as_ref()?;
+    for attempt in 0..=SUPERSEDED_POLL_ATTEMPTS {
+        if cancelled.is_some_and(|gone| gone()) {
+            return None;
+        }
+        let row = crate::db::accounts::get_account(cx.pool(), &acquired.row.user_id, &acquired.row.id).await.ok()??;
+        if row.encrypted_payload != acquired.row.encrypted_payload {
+            return acquire(cx, row).ok();
+        }
+        // No refresh in flight, and the stored credential is the one that was refused.
+        row.refreshing_at.as_ref()?;
+        if attempt < SUPERSEDED_POLL_ATTEMPTS {
+            tokio::time::sleep(SUPERSEDED_POLL_DELAY).await;
+        }
+    }
+    None
+}
+
+/// One candidate's call, with a `401` for a superseded credential retried on the stored one
+/// (docs/providers.md § Routing module "Penalties"). An OAuth refresh can revoke the access
+/// token it replaces, so a request already holding the old one is refused although the sign-in
+/// is fine; benching for that turned every refresh under load into a five-minute outage (observed
+/// 2026-11-07). The retry happens once, before any bytes were piped, and its answer is judged
+/// like any other. Callers that merely lost the refresh race now wait for the winner inside the
+/// refresh itself (`providers::refresh`); this is for a request that was already on the wire.
+async fn fetch_with_stored_credential(
+    cx: &AppState,
+    caller: &dyn CandidateCaller,
+    candidate: &RoutingCandidate,
+    acquired: AcquiredAccount,
+    extras: &CallExtras,
+    cancelled: Option<&CancelSignal>,
+) -> (AcquiredAccount, Fetched) {
+    let fetched = retry_529_once(cx, caller, candidate, &acquired, extras).await;
+    let unauthorized = matches!(&fetched, Fetched::Response(res) if res.status().as_u16() == 401);
+    if !unauthorized {
+        return (acquired, fetched);
+    }
+    // The refused response is kept, owned, across the lookup: when nothing replaced the
+    // credential it is the answer the walk judges.
+    let Some(current) = superseding_credential(cx, &acquired, cancelled).await else {
+        return (acquired, fetched);
+    };
+    if cancelled.is_some_and(|gone| gone()) {
+        // Nobody is left to answer: the walk's own check drops this response, unsent again.
+        return (acquired, fetched);
+    }
+    drop(fetched);
+    let fetched = match retry_529_once(cx, caller, candidate, &current, extras).await {
+        // The refused answer would have moved the walk on to the next candidate. A retry that
+        // got no answer must not end the request in its place: skip this candidate, unbenched.
+        Fetched::Failed => Fetched::TimedOut,
+        answered => answered,
+    };
+    (current, fetched)
+}
+
 /// Bench persistence is feedback, never a reason to abort an in-flight failover walk. Bench
 /// writes are scoped to the row's **owner** (`account.user_id`), which is the caller for every
 /// own row and the sharer for a borrowed one — a shared account that just failed must really
@@ -262,6 +337,42 @@ async fn persist_scope_bench(cx: &AppState, candidate: &RoutingCandidate, scope:
             %error,
             "Failed to persist scoped bench"
         );
+    }
+}
+
+/// An upstream `401` on a builtin account is the stored sign-in being refused, which outlives
+/// the bench written beside it (docs/providers.md § Sign-in state). Non-fatal like the bench, and
+/// scoped to the row's owner the same way.
+async fn persist_sign_in_rejected(cx: &AppState, candidate: &RoutingCandidate) {
+    if ProviderId::parse(&candidate.provider).is_none() {
+        return;
+    }
+    if let Err(error) = mark_sign_in_rejected(
+        cx.pool(),
+        &candidate.account.user_id,
+        &candidate.provider,
+        &candidate.account.id,
+        now_ms(),
+    )
+    .await
+    {
+        tracing::error!(account_id = %candidate.account.id, provider = %candidate.provider, %error, "Failed to persist sign-in rejection");
+    }
+}
+
+/// A `2xx` proves upstream accepts the credential, so a recorded refusal is forgotten, and with
+/// it a failed refresh whose record says the token had run out. Read off the row this attempt
+/// actually used: a refresh that just succeeded already cleared both. A refresh refused while
+/// the old token still works is left alone: the old token working does not disprove it, and its
+/// record is what paces the retry and carries the notice.
+async fn forget_expired_sign_in(cx: &AppState, acquired: &AcquiredAccount) {
+    let row = &acquired.row;
+    let ran_out = read_refresh_failure(row).is_some_and(|failure| failure.token_ran_out(now_ms()));
+    if row.sign_in_rejected_at.is_none() && !ran_out {
+        return;
+    }
+    if let Err(error) = clear_sign_in_failure(cx.pool(), &row.user_id, &row.id, ran_out).await {
+        tracing::error!(account_id = %acquired.row.id, %error, "Failed to clear sign-in failure");
     }
 }
 
@@ -322,6 +433,9 @@ async fn should_fail_over_for_response(
     match penalty.scope {
         Some(scope) => persist_scope_bench(cx, candidate, scope, penalty.cooldown_ms, &status.to_string()).await,
         None => persist_bench(cx, candidate, penalty.cooldown_ms, &status.to_string()).await,
+    }
+    if status == 401 {
+        persist_sign_in_rejected(cx, candidate).await;
     }
     true
 }
@@ -491,7 +605,7 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
         attempts += 1;
         opts.progress.lock().unwrap_or_else(|e| e.into_inner()).candidate = Some(candidate.clone());
 
-        let fetched = retry_529_once(cx, opts.caller, &candidate, &acquired, &extras).await;
+        let (acquired, fetched) = fetch_with_stored_credential(cx, opts.caller, &candidate, acquired, &extras, opts.cancelled.as_ref()).await;
         let response = match fetched {
             Fetched::Failed => {
                 // Terminal for this request and logged as `upstream_error` with no output, so
@@ -537,6 +651,9 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
             continue;
         }
 
+        if (200..300).contains(&status) {
+            forget_expired_sign_in(cx, &acquired).await;
+        }
         return WalkOutcome::Response { candidate, response, lease };
     }
 

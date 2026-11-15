@@ -13,7 +13,7 @@ use http::{header, HeaderMap, StatusCode};
 use serde_json::{json, Map, Value};
 
 use crate::pool::{AcquiredAccount, StoredCredential};
-use crate::providers::refresh::refresh_oauth_credential;
+use crate::providers::refresh::{refresh_oauth_credential, RefreshError};
 use crate::providers::types::{
     AdapterError, CallExtras, ChatCompletionRequest, DynAdapter, FetchedUsage, ListedModels, ProviderAdapter, UpstreamModel,
     UsageWindow,
@@ -75,8 +75,31 @@ fn client_id(cx: &AppState) -> String {
     cx.config().claude_code_oauth_client_id.clone().unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string())
 }
 
-/// `refreshOAuthCredential` with the Claude expiry rule: refresh within 60s of expiry, or when
-/// the stored expiry is missing/unparseable, and only when there is a refresh token at all.
+/// How long before the access token runs out the refresh is first tried. It is the notice the
+/// operator gets for a sign-in that ends unannounced: a refresh refused now leaves the old token
+/// working until its expiry, and the Providers page says so (docs/providers.md § Sign-in state).
+/// The token lives eight hours, so four hours of notice means refreshing every four hours
+/// instead of every eight. A sign-in ending on its stated date is announced days ahead instead
+/// (`refresh_expires_at`).
+const REFRESH_LEAD_MS: i64 = 4 * 60 * 60 * 1000;
+
+/// The lead for one credential: [`REFRESH_LEAD_MS`], but never more than half the token's own
+/// life. A lead as long as the life would make every freshly granted token due at once, and
+/// every request would refresh. The life is only known for a token this build was granted
+/// (`issued_at`); one from before it gets the plain lead, and its replacement carries the stamp.
+fn refresh_lead_ms(credential: &StoredCredential, expires_ms: i64) -> i64 {
+    let life = credential
+        .issued_at
+        .as_deref()
+        .and_then(crate::db::accounts::parse_iso_ms)
+        .map(|issued| expires_ms - issued)
+        .filter(|life| *life > 0);
+    life.map_or(REFRESH_LEAD_MS, |life| REFRESH_LEAD_MS.min(life / 2))
+}
+
+/// `refreshOAuthCredential` with the Claude expiry rule: refresh within [`REFRESH_LEAD_MS`] of
+/// expiry, or when the stored expiry is missing/unparseable, and only when there is a refresh
+/// token at all.
 async fn refresh_claude(cx: &AppState, account: AcquiredAccount) -> AcquiredAccount {
     let now = crate::app::now_ms();
     let fallback_client_id = client_id(cx);
@@ -92,7 +115,7 @@ async fn refresh_claude(cx: &AppState, account: AcquiredAccount) -> AcquiredAcco
                 .as_deref()
                 .and_then(crate::db::accounts::parse_iso_ms)
                 .unwrap_or(0);
-            exp == 0 || exp - 60_000 <= now
+            exp == 0 || exp - refresh_lead_ms(credential, exp) <= now
         },
         move |credential: &StoredCredential| {
             let credential = credential.clone();
@@ -103,22 +126,39 @@ async fn refresh_claude(cx: &AppState, account: AcquiredAccount) -> AcquiredAcco
                     "refresh_token": credential.refresh_token,
                     "client_id": client_id,
                 });
-                let res = cx.transport().send(UpstreamRequest::post(OAUTH_TOKEN).json(&body)).await.ok()?;
+                let res = cx
+                    .transport()
+                    .send(UpstreamRequest::post(OAUTH_TOKEN).json(&body))
+                    .await
+                    .map_err(|_| RefreshError::Unusable)?;
                 if !res.status.is_success() {
-                    return None;
+                    return Err(RefreshError::from_response(res).await);
                 }
-                let json = res.json_value().await.ok()?;
-                let access_token = json.get("access_token")?.as_str()?.to_string();
+                let json = res.json_value().await.map_err(|_| RefreshError::Unusable)?;
+                let access_token =
+                    json.get("access_token").and_then(Value::as_str).ok_or(RefreshError::Unusable)?.to_string();
                 let refresh_token = json
                     .get("refresh_token")
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .or_else(|| credential.refresh_token.clone());
-                let expires_at = match json.get("expires_in").and_then(Value::as_f64) {
-                    Some(seconds) => Some(crate::db::accounts::iso_from_ms(crate::app::now_ms() + (seconds * 1000.0) as i64)),
-                    None => credential.expires_at.clone(),
+                let granted = crate::app::now_ms();
+                // The grant is stamped only with a fresh expiry: against a kept one it would
+                // misstate the life.
+                let (expires_at, issued_at) = match json.get("expires_in").and_then(Value::as_f64) {
+                    Some(seconds) => (
+                        Some(crate::db::accounts::iso_from_ms(granted + (seconds * 1000.0) as i64)),
+                        Some(crate::db::accounts::iso_from_ms(granted)),
+                    ),
+                    None => (credential.expires_at.clone(), None),
                 };
-                Some(StoredCredential { access_token, refresh_token, expires_at, ..credential })
+                // The sign-in's own end. A refresh that does not restate it leaves the stored one,
+                // as Claude Code's client does.
+                let refresh_expires_at = match json.get("refresh_token_expires_in").and_then(Value::as_f64) {
+                    Some(seconds) => Some(crate::db::accounts::iso_from_ms(granted + (seconds * 1000.0) as i64)),
+                    None => credential.refresh_expires_at.clone(),
+                };
+                Ok(StoredCredential { access_token, refresh_token, expires_at, issued_at, refresh_expires_at, ..credential })
             }
         },
     )
@@ -1285,6 +1325,140 @@ mod tests {
         assert_eq!(sent["grant_type"], json!("refresh_token"));
         assert_eq!(sent["refresh_token"], json!("rt"));
         assert_eq!(sent["client_id"], json!(DEFAULT_CLIENT_ID));
+    }
+
+    /// The refresh is first tried four hours before the access token runs out. When the token
+    /// endpoint refuses, the old token is still served and the row says until when
+    /// (docs/providers.md § Sign-in state); outside the lead nothing is sent at all.
+    #[tokio::test]
+    async fn the_refresh_starts_four_hours_early_and_a_refusal_leaves_the_old_token_in_use() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::BAD_REQUEST, json!({ "error": "invalid_grant" }));
+        let cx = test_state(pool.clone(), transport.clone());
+        let user = insert_user(&pool, "cc-early@example.com").await;
+        let expiring_in = |ms: i64| StoredCredential {
+            access_token: "old".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: Some(crate::db::accounts::iso_from_ms(crate::app::now_ms() + ms)),
+            ..Default::default()
+        };
+
+        let far = expiring_in(REFRESH_LEAD_MS + 60_000);
+        let row = insert_account(&pool, &user.id, "claude-code", &far).await;
+        ClaudeCodeAdapter.refresh_if_needed(&cx, AcquiredAccount { row, credential: far }).await.unwrap();
+        assert!(transport.requests().is_empty(), "not due yet");
+
+        let near = expiring_in(REFRESH_LEAD_MS - 60_000);
+        let row = insert_account(&pool, &user.id, "claude-code", &near).await;
+        let out = ClaudeCodeAdapter
+            .refresh_if_needed(&cx, AcquiredAccount { row: row.clone(), credential: near.clone() })
+            .await
+            .unwrap();
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(out.credential.access_token, "old");
+        let until_ms = crate::db::accounts::parse_iso_ms(near.expires_at.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            crate::pool::sign_in::sign_in_state(&out.row, crate::app::now_ms()),
+            crate::pool::sign_in::SignIn::Expiring { until_ms }
+        );
+
+        // An answer that does not name the grant (an edge's 403, say) is recorded and paced, but
+        // it is not a reason to tell the operator to sign in again.
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::FORBIDDEN, json!({ "error": { "type": "forbidden" } }));
+        let cx = test_state(pool.clone(), transport.clone());
+        let blocked = expiring_in(REFRESH_LEAD_MS - 60_000);
+        let row = insert_account(&pool, &user.id, "claude-code", &blocked).await;
+        let out = ClaudeCodeAdapter.refresh_if_needed(&cx, AcquiredAccount { row, credential: blocked }).await.unwrap();
+        let failure = crate::pool::sign_in::read_refresh_failure(&out.row).expect("recorded");
+        assert_eq!((failure.status, failure.refused), (Some(403), false));
+        assert_eq!(crate::pool::sign_in::sign_in_state(&out.row, crate::app::now_ms()), crate::pool::sign_in::SignIn::Ok);
+    }
+
+    /// The lead is capped at half the token's life. A token granted for one hour is not due the
+    /// moment it arrives just because an hour is less than the four-hour lead: without the cap
+    /// every request would refresh it again.
+    #[tokio::test]
+    async fn a_token_shorter_lived_than_the_lead_is_not_refreshed_on_every_request() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::OK, json!({ "access_token": "hour-token", "expires_in": 3600 }));
+        let cx = test_state(pool.clone(), transport.clone());
+        let user = insert_user(&pool, "cc-short@example.com").await;
+        let expired = StoredCredential {
+            access_token: "old".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: Some("2020-01-01T00:00:00.000Z".into()),
+            ..Default::default()
+        };
+        let row = insert_account(&pool, &user.id, "claude-code", &expired).await;
+
+        let granted = ClaudeCodeAdapter.refresh_if_needed(&cx, AcquiredAccount { row, credential: expired }).await.unwrap();
+        assert_eq!(granted.credential.access_token, "hour-token");
+        assert!(granted.credential.issued_at.is_some(), "the grant is stamped");
+        // The very next request, and one twenty minutes in: the token has more than half its hour left.
+        let again = ClaudeCodeAdapter.refresh_if_needed(&cx, granted.clone()).await.unwrap();
+        assert_eq!(again.credential.access_token, "hour-token");
+        assert_eq!(transport.requests().len(), 1, "one refresh, not one per request");
+
+        let now = crate::app::now_ms();
+        let iso = crate::db::accounts::iso_from_ms;
+        let aged = |issued_ago_ms: i64| StoredCredential {
+            issued_at: Some(iso(now - issued_ago_ms)),
+            expires_at: Some(iso(now - issued_ago_ms + 3_600_000)),
+            ..granted.credential.clone()
+        };
+        assert_eq!(refresh_lead_ms(&aged(0), now + 3_600_000), 1_800_000);
+        let due = |credential: &StoredCredential| {
+            let exp = crate::db::accounts::parse_iso_ms(credential.expires_at.as_deref().unwrap()).unwrap();
+            exp - refresh_lead_ms(credential, exp) <= now
+        };
+        assert!(!due(&aged(20 * 60_000)));
+        assert!(due(&aged(31 * 60_000)), "past the halfway point it is");
+        // An eight-hour grant gets the whole lead, and a credential with no stamp the plain one.
+        let eight_hours = StoredCredential { issued_at: Some(iso(now)), ..granted.credential.clone() };
+        assert_eq!(refresh_lead_ms(&eight_hours, now + 8 * 3_600_000), REFRESH_LEAD_MS);
+        let unstamped = StoredCredential { issued_at: None, ..granted.credential.clone() };
+        assert_eq!(refresh_lead_ms(&unstamped, now + 3_600_000), REFRESH_LEAD_MS);
+    }
+
+    /// The provider states when the sign-in itself ends (`refresh_token_expires_in`). A refresh
+    /// that restates it moves the stored date; one that does not leaves it where it was, so the
+    /// notice is never lost to a refresh.
+    #[tokio::test]
+    async fn a_refresh_keeps_or_updates_the_sign_ins_stated_end() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::OK, json!({ "access_token": "second", "expires_in": 28_800 }));
+        transport.respond_json(
+            StatusCode::OK,
+            json!({ "access_token": "third", "expires_in": 28_800, "refresh_token_expires_in": 86_400 }),
+        );
+        let cx = test_state(pool.clone(), transport.clone());
+        let user = insert_user(&pool, "cc-ends@example.com").await;
+        let stated = "2031-01-01T00:00:00.000Z";
+        let first = StoredCredential {
+            access_token: "first".into(),
+            refresh_token: Some("rt".into()),
+            expires_at: Some("2020-01-01T00:00:00.000Z".into()),
+            refresh_expires_at: Some(stated.into()),
+            ..Default::default()
+        };
+        let row = insert_account(&pool, &user.id, "claude-code", &first).await;
+
+        let second = ClaudeCodeAdapter.refresh_if_needed(&cx, AcquiredAccount { row, credential: first }).await.unwrap();
+        assert_eq!(second.credential.access_token, "second");
+        assert_eq!(second.credential.refresh_expires_at.as_deref(), Some(stated), "not restated, so kept");
+
+        let expired = StoredCredential { expires_at: Some("2020-01-01T00:00:00.000Z".into()), ..second.credential.clone() };
+        crate::pool::acquire::save_credential(&cx, &second.row.id, &expired, None).await.unwrap();
+        let row = crate::db::accounts::get_account(&pool, &user.id, &second.row.id).await.unwrap().unwrap();
+        let third = ClaudeCodeAdapter.refresh_if_needed(&cx, AcquiredAccount { row, credential: expired }).await.unwrap();
+        assert_eq!(third.credential.access_token, "third");
+        let ends_in = crate::db::accounts::parse_iso_ms(third.credential.refresh_expires_at.as_deref().unwrap()).unwrap()
+            - crate::app::now_ms();
+        assert!((86_000_000..=86_400_000).contains(&ends_in), "a day from the refresh that restated it: {ends_in}");
     }
 
     #[tokio::test]

@@ -20,6 +20,16 @@ pub struct StoredCredential {
     pub refresh_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// When the access token was granted, where the adapter records it. It is what turns
+    /// `expires_at` into a lifetime, so a refresh lead can be capped to it
+    /// (docs/providers.md § Sign-in state "Refresh lead").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issued_at: Option<String>,
+    /// When the refresh token itself stops working, where the provider states it at sign-in or
+    /// refresh: the day this sign-in ends, however often the access token is renewed before
+    /// then (docs/providers.md § Sign-in state "Stated end").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_expires_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

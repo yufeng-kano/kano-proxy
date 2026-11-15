@@ -32,7 +32,7 @@ use crate::upstream::transport::{TransportError, UpstreamRequest, UpstreamRespon
 use crate::AppState;
 
 use super::antigravity_limits::{antigravity_bench_until, is_antigravity_no_capacity};
-use super::refresh::refresh_oauth_credential;
+use super::refresh::{refresh_oauth_credential, RefreshError};
 use super::types::{
     AdapterError, AudioInput, CallExtras, ChatCompletionRequest, DynAdapter, FetchedUsage, ListedModels,
     ProviderAdapter, UpstreamModel, UsageWindow,
@@ -152,13 +152,16 @@ async fn refresh_antigravity(cx: &AppState, account: AcquiredAccount) -> Acquire
     .await
 }
 
-async fn refresh_antigravity_credential(cx: &AppState, credential: StoredCredential) -> Option<StoredCredential> {
+async fn refresh_antigravity_credential(
+    cx: &AppState,
+    credential: StoredCredential,
+) -> Result<StoredCredential, RefreshError> {
     // Confidential client: Google rejects a refresh without the secret, and this deploy has
     // none unless the operator configured the pair. Keep the stored credential rather than
     // burning the refresh token on a call that cannot succeed — the eventual 401 benches the
     // account with a real cause.
-    let (configured_id, configured_secret) = antigravity_oauth_client(cx)?;
-    let refresh_token = credential.refresh_token.clone()?;
+    let (configured_id, configured_secret) = antigravity_oauth_client(cx).ok_or(RefreshError::NotAttempted)?;
+    let refresh_token = credential.refresh_token.clone().ok_or(RefreshError::NotAttempted)?;
     let client_id = credential.client_id.clone().filter(|v| !v.is_empty()).unwrap_or(configured_id);
     let url = credential.token_endpoint.clone().filter(|v| !v.is_empty()).unwrap_or_else(|| AntigravityOAuth::TOKEN_URL.to_string());
     let body = url::form_urlencoded::Serializer::new(String::new())
@@ -171,14 +174,14 @@ async fn refresh_antigravity_credential(cx: &AppState, credential: StoredCredent
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Bytes::from(body))
         .timeout(SIDE_FETCH_TIMEOUT);
-    let response = cx.transport().send(request).await.ok()?;
+    let response = cx.transport().send(request).await.map_err(|_| RefreshError::Unusable)?;
     if !response.status.is_success() {
-        return None;
+        return Err(RefreshError::from_response(response).await);
     }
-    let json = response.json_value().await.ok()?;
-    let access_token = json.get("access_token")?.as_str()?.to_string();
+    let json = response.json_value().await.map_err(|_| RefreshError::Unusable)?;
+    let access_token = json.get("access_token").and_then(Value::as_str).ok_or(RefreshError::Unusable)?.to_string();
     let expires_in = json.get("expires_in").and_then(Value::as_i64);
-    Some(StoredCredential {
+    Ok(StoredCredential {
         access_token,
         // Google does not rotate the refresh token on this grant, and omits it from the
         // response — keep the stored one rather than nulling it.

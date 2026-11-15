@@ -147,7 +147,7 @@ mod tests {
             id: "a".into(), user_id: "u".into(), provider: "codex".into(), external_account_id: None,
             label: None, custom_label: None, priority: 0, encrypted_payload: String::new(),
             account_meta_json: None, usage_snapshot_json: None, usage_fetched_at: None,
-            usage_fetching_at: None, bench_until: None, bench_reason: None, refreshing_at: None,
+            usage_fetching_at: None, bench_until: None, bench_reason: None, refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None,
             bench_scopes_json: None,
             edge_strikes: 0, edge_strike_at: None, allow_credits: false, strip_fast_mode: false,
             strip_claude_code_line: false, created_at: String::new(), updated_at: String::new(),

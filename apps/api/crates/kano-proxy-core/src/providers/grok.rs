@@ -28,7 +28,7 @@ use crate::providers::grok_reasoning_cache::{
 use crate::providers::grok_reasoning_recovery::{
     affinity_present, is_grok_opaque_decode_failure, strip_prompt_cache_key, strip_responses_opaque_state,
 };
-use crate::providers::refresh::refresh_oauth_credential;
+use crate::providers::refresh::{refresh_oauth_credential, RefreshError};
 use crate::providers::types::{
     AdapterError, AffinityIds, AudioInput, CallExtras, ChatCompletionRequest, DynAdapter, FetchedUsage, ListedModels,
     ProviderAdapter, UpstreamModel, UsageWindow,
@@ -149,8 +149,8 @@ async fn refresh_grok(cx: &AppState, account: AcquiredAccount) -> AcquiredAccoun
             let credential = credential.clone();
             let fallback_client_id = fallback_client_id.clone();
             async move {
-                let endpoint = credential.token_endpoint.clone()?;
-                let refresh_token = credential.refresh_token.clone()?;
+                let endpoint = credential.token_endpoint.clone().ok_or(RefreshError::NotAttempted)?;
+                let refresh_token = credential.refresh_token.clone().ok_or(RefreshError::NotAttempted)?;
                 let form = url::form_urlencoded::Serializer::new(String::new())
                     .append_pair("grant_type", "refresh_token")
                     .append_pair("refresh_token", &refresh_token)
@@ -163,12 +163,13 @@ async fn refresh_grok(cx: &AppState, account: AcquiredAccount) -> AcquiredAccoun
                     .header("content-type", "application/x-www-form-urlencoded")
                     .body(Bytes::from(form))
                     .timeout(REFRESH_TIMEOUT);
-                let res = cx.transport().send(req).await.ok()?;
+                let res = cx.transport().send(req).await.map_err(|_| RefreshError::Unusable)?;
                 if !res.status.is_success() {
-                    return None;
+                    return Err(RefreshError::from_response(res).await);
                 }
-                let json = res.json_value().await.ok()?;
-                let access_token = json.get("access_token")?.as_str()?.to_string();
+                let json = res.json_value().await.map_err(|_| RefreshError::Unusable)?;
+                let access_token =
+                    json.get("access_token").and_then(Value::as_str).ok_or(RefreshError::Unusable)?.to_string();
                 let refresh_token = json
                     .get("refresh_token")
                     .and_then(Value::as_str)
@@ -178,7 +179,7 @@ async fn refresh_grok(cx: &AppState, account: AcquiredAccount) -> AcquiredAccoun
                     Some(seconds) => Some(iso_from_ms(crate::app::now_ms() + seconds * 1000)),
                     None => credential.expires_at.clone(),
                 };
-                Some(StoredCredential { access_token, refresh_token, expires_at, ..credential })
+                Ok(StoredCredential { access_token, refresh_token, expires_at, ..credential })
             }
         },
     )

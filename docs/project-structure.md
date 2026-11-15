@@ -22,7 +22,7 @@ kano-proxy/
             proxy/       # protocol conversion, SSE handling, dispatch and the candidate walk
             providers/   # claude-code, codex, grok, antigravity, and the two BYO adapters
             routing/     # candidates -> facts -> strategy -> feedback: who to try, in what order
-            pool/        # bench, promote, credential persistence, the pool-extension contract
+            pool/        # bench, sign-in state, promote, credential persistence, the pool-extension contract
             tunnel/      # the in-process registry and WebSocket half of the CLI tunnel
             catalog/     # the model list for one user's bound providers
             pricing/     # per-request cost estimation
@@ -64,7 +64,7 @@ Every app owns its own manifest, lockfile and build, and nothing language-specif
 - `providers/*` — upstream transport + usage + OAuth specifics. The two custom-endpoint adapters are built fresh per request from a `custom_providers` row — never added to the static builtin registry.
 - `proxy/*` — format conversion and streaming. `dispatch_walk` is the **only** candidate loop: it plans, acquires, fetches (first-byte timeout, one 529 retry), asks `routing/feedback` whether to fail over, cancels superseded upstream bodies, and returns a `WalkOutcome` (`no_account` / `unavailable` / `exhausted` / `fetch_error` / `cancelled` / `response`) — it never decides who to try and never touches the client response. `dispatch` holds the two transports that turn an outcome into a client response: eager (walk runs inside the already-committed SSE stream, failures become terminal frames, one log row on close) and non-stream (walk runs first, HTTP status mirrors the outcome, `Retry-After` recomputed on exhaustion). Everything protocol-specific — SSE error/stall frames, JSON error envelopes, error-type extraction, usage sniffer/parser — lives behind the `Wire` interface (`wire_openai`, `wire_anthropic`); transports never branch on protocol. Audio transcriptions and the Anthropic→OpenAI conversion path are separate modules that reuse the walk, not copies of it.
 - `routing/*` — the single owner of account/target selection (docs/providers.md § Routing module): expand → flat candidate list, usability facts, ordering strategy, outcome penalties. Used identically by a group alias and a direct `provider/model` call.
-- `pool/*` — bench and credential persistence; provider-agnostic. `extension.rs` holds the **optional** `PoolExtension` contract an edition may pass to `build_router` ([cloud-edition.md](./cloud-edition.md) § Pool extension) — types plus the settle helper, no behavior; the core imports it only as a parameter threaded from the request context, never as a module-level registry.
+- `pool/*` — bench, sign-in state (`sign_in.rs`) and credential persistence; provider-agnostic. `extension.rs` holds the **optional** `PoolExtension` contract an edition may pass to `build_router` ([cloud-edition.md](./cloud-edition.md) § Pool extension) — types plus the settle helper, no behavior; the core imports it only as a parameter threaded from the request context, never as a module-level registry.
 - Vue: thin `App.vue`; logic in composables/services.
 - `apps/docs` — content only. No calls to `/api/*`, no session awareness, no shared code with `apps/web` beyond being copied into its `dist/`. The one piece of script is the origin fill ([docs-site.md](./docs-site.md)).
 
