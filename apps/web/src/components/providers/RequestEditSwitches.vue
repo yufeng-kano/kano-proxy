@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * One account's request-edit switches (docs/providers.md § Request edits):
- * Remove fast mode and Remove the Claude Code line, each a labelled checkbox
+ * Remove fast mode and Hide Claude Code identity, each a labelled checkbox
  * with one line saying what it does. The same pair on a builtin account row,
  * a custom endpoint and a CLI provider (docs/admin-ui.md § Providers page).
  *

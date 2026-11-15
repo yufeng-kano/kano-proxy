@@ -1122,8 +1122,8 @@ mod request_edit_tests {
         assert!(claude.get("speed").is_none());
         assert_eq!(
             claude["system"],
-            json!([{ "type": "text", "text": BILLING }, { "type": "text", "text": "rules" }]),
-            "no client copy and no proxy copy of the line"
+            json!([{ "type": "text", "text": "rules" }]),
+            "no client copy, no proxy copy and no billing block either"
         );
         let endpoint = calls[1].json();
         assert_eq!(endpoint["speed"], "fast", "the endpoint's own switches are off");

@@ -170,7 +170,7 @@ The endpoints themselves are undocumented and may change or be closed without no
 - `custom_label` renames: trimmed, max 64 chars, `null`/`""` clears it and falls back to the upstream identity.
 - `allow_credits` turns credit spillover on or off ([providers.md](./providers.md) § Codex "Credit spillover"). It must be a boolean, and the path's provider must support spillover (`codex` today); anything else is `400` before any row is looked up.
 - `strip_fast_mode`: boolean, **Remove fast mode** for this account ([providers.md](./providers.md) § Request edits). `400 strip_fast_mode is not supported for this provider` on `grok` and `antigravity`, whatever the value, before any row is looked up.
-- `strip_claude_code_line`: boolean, **Remove the Claude Code line** for this account, accepted for every provider.
+- `strip_claude_code_line`: boolean, **Hide Claude Code identity** for this account, accepted for every provider.
 - A value that is not a boolean is `400 invalid <field>`.
 
 With `allow_credits` or a switch in the body, the row must belong to the path's provider, else 404. For the switches the path's provider may also be the slug of the caller's own custom endpoint or CLI provider, whose one account row is the `account_id` the list routes return (below), so every switch is written by this one route.
