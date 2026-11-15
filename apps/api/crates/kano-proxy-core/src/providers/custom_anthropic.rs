@@ -4,7 +4,9 @@
 //! passthrough (mirrors claude-code's `forwardToAnthropic`) MINUS every Claude-Code-OAuth
 //! specific: no required-system prepend, no auto-added `effort-2025-11-24` beta, no fixed
 //! base betas — the `anthropic-beta` header is forwarded verbatim from the client (or
-//! omitted) rather than resolved. `chat_completions()` builds a request via the shared
+//! omitted) rather than resolved. One exception to the passthrough: an endpoint that answers
+//! 400 to an Anthropic-defined tool for its missing `input_schema` is sent the request once
+//! more without those tools (custom_anthropic_tools.rs). `chat_completions()` builds a request via the shared
 //! OpenAI↔Anthropic converters for the `/openai/v1` surface; `reasoning_effort` is dropped
 //! there on purpose (the native surface gives full `thinking` control).
 
@@ -14,9 +16,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::response::Response;
 use http::{HeaderMap, StatusCode};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use super::custom_openai::{header_or, into_response, model_list, non_empty_header, object_or_empty, rebuild};
+use super::custom_anthropic_tools::without_anthropic_defined_tools;
+use super::custom_openai::{
+    header_or, into_response, is_event_stream, model_list, non_empty_header, object_or_empty, rebuild,
+};
 use super::types::{
     AdapterError, CallExtras, ChatCompletionRequest, DynAdapter, ListedModels, ProviderAdapter,
 };
@@ -73,17 +78,34 @@ impl CustomAnthropicAdapter {
         extras: &CallExtras,
     ) -> Result<Response, AdapterError> {
         let raw = object_or_empty(body);
-        let mut request = UpstreamRequest::post(url)
-            .header("x-api-key", &account.credential.access_token)
-            .json(&Value::Object(raw))
-            .header("anthropic-version", header_or(headers, "anthropic-version", DEFAULT_ANTHROPIC_VERSION));
-        if let Some(beta) = non_empty_header(headers, "anthropic-beta") {
-            request = request.header("anthropic-beta", beta);
+        let native_post = |body: &Map<String, Value>| {
+            let mut request = UpstreamRequest::post(url.as_str())
+                .header("x-api-key", &account.credential.access_token)
+                .json(&Value::Object(body.clone()))
+                .header("anthropic-version", header_or(headers, "anthropic-version", DEFAULT_ANTHROPIC_VERSION));
+            if let Some(beta) = non_empty_header(headers, "anthropic-beta") {
+                request = request.header("anthropic-beta", beta);
+            }
+            if let Some(timeout) = extras.first_byte_timeout {
+                request = request.timeout(timeout);
+            }
+            request
+        };
+        let res = self.transport(cx).send(native_post(&raw)).await?;
+
+        if res.status != StatusCode::BAD_REQUEST || is_event_stream(&res) {
+            return Ok(into_response(res));
         }
-        if let Some(timeout) = extras.first_byte_timeout {
-            request = request.timeout(timeout);
-        }
-        Ok(into_response(self.transport(cx).send(request).await?))
+
+        // The one retry: the endpoint refused an Anthropic-defined tool for having no
+        // `input_schema`, so it gets the request again without those tools.
+        let status = res.status;
+        let res_headers = res.headers.clone();
+        let refusal = res.bytes().await.map_err(|e| AdapterError::Other(e.into()))?;
+        let Some(retry_body) = without_anthropic_defined_tools(&raw, &String::from_utf8_lossy(&refusal)) else {
+            return Ok(rebuild(status, res_headers, refusal));
+        };
+        Ok(into_response(self.transport(cx).send(native_post(&retry_body)).await?))
     }
 }
 
@@ -428,6 +450,148 @@ mod tests {
         assert_eq!(sent.header("x-api-key"), Some(KEY));
         assert_eq!(sent.header("anthropic-beta"), Some("x-beta"));
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    // -----------------------------------------------------------------------
+    // The one retry without Anthropic-defined tools
+
+    /// A local Messages server refusing an Anthropic-defined tool, in the wording Claude Code showed.
+    fn missing_input_schema_400(index: usize) -> crate::upstream::UpstreamResponse {
+        crate::upstream::UpstreamResponse::json(
+            StatusCode::BAD_REQUEST,
+            &json!({ "type": "error", "error": { "type": "invalid_request_error", "message": format!(
+                "1 validation error:\n    {{'type': 'missing', 'loc': 'body.tools.{index}.input_schema', 'msg': 'Field required', 'input': '<dict of 3 items>'}}"
+            ) } }),
+        )
+    }
+
+    fn body_with_server_tool() -> Value {
+        json!({
+            "model": "qwen",
+            "max_tokens": 64,
+            "stream": true,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "tools": [
+                { "name": "lookup", "description": "looks up", "input_schema": { "type": "object" } },
+                { "type": "web_search_20250305", "name": "web_search", "max_uses": 5 },
+            ],
+        })
+    }
+
+    #[tokio::test]
+    async fn a_refused_anthropic_defined_tool_is_dropped_on_one_retry_with_the_same_headers() {
+        let transport = MockTransport::new();
+        transport.expect(|_| Ok(missing_input_schema_400(1)));
+        transport.respond_sse(StatusCode::OK, "event: message_stop\ndata: {}\n\n");
+        let state = adapter_state(transport.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("anthropic-version", http::HeaderValue::from_static("2024-01-01"));
+        headers.insert("anthropic-beta", http::HeaderValue::from_static("x-beta"));
+        let client_body = body_with_server_tool();
+        let res = adapter()
+            .messages(&state, &account(KEY), &client_body, &headers, &CallExtras::default())
+            .await
+            .expect("messages");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        // The first send is still the client's body, untouched.
+        assert_eq!(requests[0].json(), client_body);
+        let mut expected = client_body.clone();
+        expected["tools"] = json!([client_body["tools"][0].clone()]);
+        assert_eq!(requests[1].json(), expected);
+        assert_eq!(requests[1].url, requests[0].url);
+        for name in ["x-api-key", "anthropic-version", "anthropic-beta"] {
+            assert!(requests[0].header(name).is_some(), "{name}");
+            assert_eq!(requests[1].header(name), requests[0].header(name), "{name}");
+        }
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_text(res).await, "event: message_stop\ndata: {}\n\n");
+    }
+
+    #[tokio::test]
+    async fn count_tokens_gets_the_same_retry() {
+        let transport = MockTransport::new();
+        transport.expect(|_| Ok(missing_input_schema_400(1)));
+        transport.respond_json(StatusCode::OK, json!({ "input_tokens": 12 }));
+        let state = adapter_state(transport.clone());
+        let res = adapter()
+            .count_tokens(&state, &account(KEY), &body_with_server_tool(), &HeaderMap::new(), &CallExtras::default())
+            .await
+            .expect("count tokens");
+
+        let requests = transport.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].url, "https://upstream.example.com/v1/messages/count_tokens");
+        assert_eq!(requests[1].json()["tools"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body_json(res).await, json!({ "input_tokens": 12 }));
+    }
+
+    #[tokio::test]
+    async fn a_400_that_is_not_about_an_anthropic_defined_tool_goes_back_once_with_its_headers() {
+        // Unrelated wording, and the right wording pointing at a tool that has its schema.
+        let unrelated = || {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-tunnel-upstream", http::HeaderValue::from_static("1"));
+            headers.insert("content-type", http::HeaderValue::from_static("application/json"));
+            crate::upstream::UpstreamResponse::from_bytes(
+                StatusCode::BAD_REQUEST,
+                headers,
+                r#"{"error":{"message":"max_tokens: Field required"}}"#,
+            )
+        };
+        let transport = MockTransport::new();
+        transport.expect(move |_| Ok(unrelated()));
+        let state = adapter_state(transport.clone());
+        let res = adapter()
+            .messages(&state, &account(KEY), &body_with_server_tool(), &HeaderMap::new(), &CallExtras::default())
+            .await
+            .expect("messages");
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(res.headers().get("x-tunnel-upstream").unwrap(), "1");
+        assert_eq!(body_json(res).await, json!({ "error": { "message": "max_tokens: Field required" } }));
+
+        let transport = MockTransport::new();
+        transport.expect(|_| Ok(missing_input_schema_400(0)));
+        let state = adapter_state(transport.clone());
+        let res = adapter()
+            .messages(&state, &account(KEY), &body_with_server_tool(), &HeaderMap::new(), &CallExtras::default())
+            .await
+            .expect("messages");
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn a_400_event_stream_is_returned_as_received_and_never_read_for_a_retry() {
+        const REFUSAL: &str =
+            "event: error\ndata: {\"message\":\"body.tools.1.input_schema: Field required\"}\n\n";
+        let transport = MockTransport::new();
+        transport.respond_sse(StatusCode::BAD_REQUEST, REFUSAL);
+        let state = adapter_state(transport.clone());
+        let res = adapter()
+            .messages(&state, &account(KEY), &body_with_server_tool(), &HeaderMap::new(), &CallExtras::default())
+            .await
+            .expect("messages");
+        assert_eq!(transport.requests().len(), 1);
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_text(res).await, REFUSAL);
+    }
+
+    #[tokio::test]
+    async fn the_retrys_own_answer_goes_back_without_a_third_send() {
+        let transport = MockTransport::new();
+        transport.expect(|_| Ok(missing_input_schema_400(1)));
+        transport.respond_json(StatusCode::BAD_REQUEST, json!({ "error": { "message": "context too long" } }));
+        let state = adapter_state(transport.clone());
+        let res = adapter()
+            .messages(&state, &account(KEY), &body_with_server_tool(), &HeaderMap::new(), &CallExtras::default())
+            .await
+            .expect("messages");
+        assert_eq!(transport.requests().len(), 2);
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(res).await, json!({ "error": { "message": "context too long" } }));
     }
 
     // -----------------------------------------------------------------------

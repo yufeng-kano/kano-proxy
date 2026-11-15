@@ -258,7 +258,7 @@ pub(crate) fn non_empty_header<'a>(headers: &'a HeaderMap, name: &str) -> Option
     headers.get(name).and_then(|v| v.to_str().ok()).filter(|v| !v.is_empty())
 }
 
-fn is_event_stream(res: &UpstreamResponse) -> bool {
+pub(crate) fn is_event_stream(res: &UpstreamResponse) -> bool {
     res.content_type().unwrap_or("").contains("text/event-stream")
 }
 
