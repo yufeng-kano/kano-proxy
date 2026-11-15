@@ -88,10 +88,10 @@ pub fn validate_strategy(strategy: &Value) -> Option<String> {
 
 /// `resolve_prefix` decides whether a target's `model` prefix is a valid builtin provider id
 /// or one of the caller's own custom slugs — sync, no DB. `resolve_account` decides whether a
-/// pinned `account_id` is an `upstream_accounts` row owned by the caller whose `provider`
-/// matches the target's prefix (docs/auth.md § Model groups) — async and DB-backed, so (like
-/// `resolve_prefix`) it is injected rather than queried here; this module stays free of DB
-/// access.
+/// pinned `account_id` is an `upstream_accounts` row whose `provider` matches the target's
+/// prefix and that the caller owns or a pool extension shares with them (docs/auth.md § Model
+/// groups) — async and DB-backed, so (like `resolve_prefix`) it is injected rather than
+/// queried here; this module stays free of DB access.
 ///
 /// Each target entry may be a bare `"provider/model"` string (shorthand for `{model}`, still
 /// accepted on the wire and in storage) or an object `{model, account_id?}`. Duplicate
@@ -152,7 +152,7 @@ where
                 };
                 if !resolve_account(id.clone(), split.prefix.clone()).await {
                     return Err(format!(
-                        "target \"{trimmed}\" account_id does not belong to this user's \"{}\" provider",
+                        "target \"{trimmed}\" account_id is not a \"{}\" account of this user or one shared with them",
                         split.prefix
                     ));
                 }

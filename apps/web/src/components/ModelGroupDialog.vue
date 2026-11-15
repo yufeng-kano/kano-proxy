@@ -11,12 +11,11 @@
  * the selected account. The picker itself is unchanged from v3: an inverted L
  * of provider tabs, account rail, and the model list between them.
  *
- * **Every target this dialog creates pins an account** — there is no "Any
- * account" entry in the rail (docs, 2026-08-13). The wire still accepts
- * unpinned targets, and a group created before this design still renders its
- * unpinned targets with the "Any account" tag; the picker just cannot make
- * new ones. Duplicate identity is model + account within one group model,
- * exactly as the server checks it.
+ * A builtin tab's rail starts with **"Any account"**, which adds an unpinned
+ * target (the provider's whole pool in pool order, shared rows included); the
+ * accounts below it, own or shared with the viewer, each add a pinned one
+ * (docs/admin-ui.md § Groups page). Duplicate identity is model + account
+ * within one group model, exactly as the server checks it.
  *
  * Delete lives in the footer, same reasoning as key revoke: rare and
  * irreversible, so it costs opening the group first and confirming.
@@ -239,11 +238,19 @@ const activeTabLabel = computed(
 
 /**
  * One rail entry: an account a target can pin, named the way the user named it.
- * `pin` is false only for a shared endpoint: its key is the owner's row, which a
- * target may never pin (docs/providers.md § Model groups), so a pick there adds
- * an unpinned target.
+ * `pin` is false for the "Any account" entry and for a shared endpoint, whose
+ * one key the unpinned target already means (docs/providers.md § Model groups),
+ * so a pick there adds an unpinned target. `mono` marks a hint that is code (a
+ * key mask) rather than prose (who shares it).
  */
-type RailAccount = { id: string; label: string; hint: string | null; pin: boolean }
+type RailAccount = { id: string; label: string; hint: string | null; pin: boolean; mono: boolean }
+
+/**
+ * The "Any account" entry's id. Never an account id (those carry no NUL), so it
+ * cannot collide with a row; it never leaves this dialog, since the entry pins
+ * nothing.
+ */
+const ANY_ACCOUNT_ID = "\u0000any"
 
 /** The user's own name wins, then the upstream identity, then a short id. */
 function accountName(account: ProviderAccount): string {
@@ -251,11 +258,13 @@ function accountName(account: ProviderAccount): string {
 }
 
 /**
- * The rail for a provider key. A builtin's is its bound accounts in pool order;
- * a custom endpoint's is the single `upstream_accounts` row holding its API key
- * (`account_id` on the list response), named after the endpoint and hinted with
- * its key mask. Uniform either way, which is what lets a target pin one of
- * either without the rest of this dialog caring which it got.
+ * The pinnable accounts for a provider key. A builtin's are its accounts in
+ * pool order, the rows teammates share with the viewer among them (hinted with
+ * who shares each; they pin like the viewer's own); a custom endpoint's is the
+ * single `upstream_accounts` row holding its API key (`account_id` on the list
+ * response), named after the endpoint and hinted with its key mask. Uniform
+ * either way, which is what lets a target pin one of either without the rest of
+ * this dialog caring which it got.
  */
 function railFor(providerKey: string): RailAccount[] {
   const builtin = asBuiltin(providerKey)
@@ -263,19 +272,20 @@ function railFor(providerKey: string): RailAccount[] {
     return (accounts.byProvider[builtin].data?.accounts ?? []).map((a) => ({
       id: a.id,
       label: accountName(a),
-      hint: null,
+      hint: a.share ? t("providers.account.shared", { owner: a.share.ownerLabel }) : null,
       pin: true,
+      mono: false,
     }))
   }
   const custom = (customProviders.state.data ?? []).find((cp) => cp.slug === providerKey)
   if (custom?.account_id) {
-    return [{ id: custom.account_id, label: custom.name, hint: custom.key_mask, pin: true }]
+    return [{ id: custom.account_id, label: custom.name, hint: custom.key_mask, pin: true, mono: true }]
   }
   // A CLI provider's rail is its one internal pool-state row, named after the
   // provider — the same single-entry shape as a custom endpoint's key.
   const cliProvider = (cli.state.providers ?? []).find((p) => p.slug === providerKey)
   if (cliProvider?.account_id) {
-    return [{ id: cliProvider.account_id, label: cliProvider.name, hint: null, pin: true }]
+    return [{ id: cliProvider.account_id, label: cliProvider.name, hint: null, pin: true, mono: false }]
   }
   const shared = sharedTargets.value.find((sp) => sp.slug === providerKey)
   if (shared) {
@@ -285,13 +295,33 @@ function railFor(providerKey: string): RailAccount[] {
         label: shared.name,
         hint: t("providers.account.shared", { owner: shared.share.ownerLabel }),
         pin: false,
+        mono: false,
       },
     ]
   }
   return []
 }
 
-const rail = computed(() => railFor(activeTab.value))
+/**
+ * What the rail shows: a builtin tab with any account leads with "Any account",
+ * the unpinned target over that whole pool; the other tabs are one key each, so
+ * their single entry already means it. Kept out of `railFor`, which answers
+ * "which account is this pin" — a question "Any account" is never the answer to.
+ */
+const rail = computed<RailAccount[]>(() => {
+  const list = railFor(activeTab.value)
+  if (!asBuiltin(activeTab.value) || !list.length) return list
+  return [
+    {
+      id: ANY_ACCOUNT_ID,
+      label: t("groups.account.any"),
+      hint: t("groups.account.anyHint", { count: list.length }),
+      pin: false,
+      mono: false,
+    },
+    ...list,
+  ]
+})
 
 /**
  * Whether the rail is still on its way. A *failed* load is not pending — the
@@ -493,7 +523,7 @@ function isAdded(modelId: string): boolean {
   return active.targets.some((t) => identityOf(t) === identity)
 }
 
-/** Adds the model pinned to the selected account (unpinned for a shared endpoint), into the active group model. */
+/** Adds the model pinned to the selected account (unpinned for "Any account" or a shared endpoint), into the active group model. */
 function addTarget(modelId: string) {
   const value = modelId.trim()
   const account = selectedAccount.value
@@ -874,8 +904,8 @@ async function remove() {
                 @click="selectedAccountId = account.id"
               >
                 <span class="rail-name">{{ account.label }}</span>
-                <!-- A key mask is code; a shared endpoint's lender is prose. -->
-                <span v-if="account.hint" class="rail-hint" :class="{ mono: account.pin }">{{ account.hint }}</span>
+                <!-- A key mask is code; who shares an account is prose. -->
+                <span v-if="account.hint" class="rail-hint" :class="{ mono: account.mono }">{{ account.hint }}</span>
               </button>
             </div>
 

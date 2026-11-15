@@ -81,7 +81,8 @@ pub struct SharedLabel {
 
 #[async_trait]
 pub trait PoolExtension: Send + Sync {
-    /// Rows the viewer may borrow for one builtin provider. Never called for pinned targets;
+    /// Rows the viewer may borrow for one builtin provider: the unpinned pool, and the row a pinned
+    /// target names when it is not one of the viewer's own (docs/providers.md § Model groups);
     /// custom endpoints go through [`PoolExtension::list_shared_custom`], CLI providers are never shared.
     async fn list_shared(&self, cx: &AppState, viewer_user_id: &str, provider: ProviderId, options: ListSharedOptions) -> anyhow::Result<Vec<SharedAccount>>;
     /// Custom endpoints other users share with the viewer, every slug at most once. Consulted
@@ -241,6 +242,12 @@ pub(crate) mod test_support {
     pub(crate) struct SharedCustomExtension {
         pub shared: Mutex<Vec<SharedCustomProvider>>,
         pub fail: bool,
+        /// Builtin rows lent to every viewer through `list_shared`.
+        pub accounts: Mutex<Vec<SharedAccount>>,
+        /// `list_shared` fails instead.
+        pub fail_accounts: bool,
+        /// The provider of every `list_shared` call.
+        pub account_calls: Mutex<Vec<ProviderId>>,
         /// `options.usage` of every `list_shared_custom` call.
         pub list_calls: Mutex<Vec<bool>>,
         /// `(account id, share is set, custom row is set)` of every reserved candidate.
@@ -279,8 +286,12 @@ pub(crate) mod test_support {
 
     #[async_trait]
     impl PoolExtension for SharedCustomExtension {
-        async fn list_shared(&self, _: &AppState, _: &str, _: ProviderId, _: ListSharedOptions) -> anyhow::Result<Vec<SharedAccount>> {
-            Ok(Vec::new())
+        async fn list_shared(&self, _: &AppState, _: &str, provider: ProviderId, _: ListSharedOptions) -> anyhow::Result<Vec<SharedAccount>> {
+            self.account_calls.lock().unwrap().push(provider);
+            if self.fail_accounts {
+                anyhow::bail!("extension store unreachable");
+            }
+            Ok(self.accounts.lock().unwrap().iter().filter(|s| s.account.provider == provider.as_str()).cloned().collect())
         }
         async fn list_shared_custom(&self, _: &AppState, _: &str, options: ListSharedOptions) -> anyhow::Result<Vec<SharedCustomProvider>> {
             self.list_calls.lock().unwrap().push(options.usage);

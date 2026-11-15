@@ -2,11 +2,13 @@
 //!
 //! A group is a slug-addressed endpoint (`/g/<slug>/…`) carrying 1..20 callable models, each
 //! with its own ordered target list. Targets are validated against the caller's own providers
-//! and accounts only — never another user's — and the read shape enriches each target with a
-//! read-time account label and the stored-state routing indicator the page draws.
+//! and accounts, plus what a pool extension shares with them — never anyone else's — and
+//! the read shape enriches each target with a read-time account label and the stored-state
+//! routing indicator the page draws.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -24,10 +26,11 @@ use crate::db::model_groups::{
     GroupTarget, ModelGroupRow,
 };
 use crate::providers::ProviderId;
-use crate::routing::candidates::{candidates_for_target, own_provider_slugs, resolve_target_prefix, SharedCustomLookup};
+use crate::routing::candidates::{candidates_for_target, own_provider_slugs, pinned_account, resolve_target_prefix, SharedLookup};
 use crate::routing::facts::{candidate_facts_list, earliest_unusable_until};
 use crate::routing::strategy::DEFAULT_STRATEGY;
 use crate::routing::types::CandidateFacts;
+use crate::utils::model::split_model_id;
 use crate::utils::model_group::{validate_display_name, validate_group_models, validate_group_slug, validate_strategy, MAX_MODEL_GROUPS_PER_USER};
 use crate::AppState;
 
@@ -56,10 +59,13 @@ fn object_body(body: &Bytes) -> Option<Map<String, Value>> {
 }
 
 /// Read-time display label for a pinned target — `custom_label` wins over the upstream
-/// `label`, `None` when unpinned or the account no longer exists. Never stored.
-async fn account_label(state: &AppState, user_id: &str, account_id: Option<&str>) -> Result<Option<String>, sqlx::Error> {
-    let Some(account_id) = account_id else { return Ok(None) };
-    let Some(row) = get_account(state.pool(), user_id, account_id).await? else { return Ok(None) };
+/// `label`, `None` when unpinned or the account no longer resolves (deleted, or no longer
+/// shared with the caller). The row is the one routing would pin, so the label and the
+/// routing indicator never disagree. Never stored.
+async fn account_label(state: &AppState, user_id: &str, lookup: &SharedLookup, target: &GroupTarget) -> Result<Option<String>, sqlx::Error> {
+    let Some(account_id) = target.account_id.as_deref() else { return Ok(None) };
+    let Some(split) = split_model_id(&target.model) else { return Ok(None) };
+    let Some((row, _)) = pinned_account(state, user_id, lookup, &split.prefix, account_id).await? else { return Ok(None) };
     Ok(row.custom_label.filter(|s| !s.is_empty()).or(row.label.filter(|s| !s.is_empty())))
 }
 
@@ -77,14 +83,14 @@ fn reason_for_facts(facts: &CandidateFacts) -> &'static str {
 async fn routing_for_target(
     state: &AppState,
     user_id: &str,
-    lookup: &SharedCustomLookup,
+    lookup: &SharedLookup,
     index: usize,
     target: &GroupTarget,
 ) -> anyhow::Result<Value> {
     let Some(resolved) = resolve_target_prefix(state, user_id, lookup, index, target).await? else {
         return Ok(json!({ "usable": false, "reason": "unresolved", "unusable_until": Value::Null }));
     };
-    let candidates = candidates_for_target(state, user_id, &resolved).await?;
+    let candidates = candidates_for_target(state, user_id, lookup, &resolved).await?;
     if candidates.is_empty() {
         return Ok(json!({ "usable": false, "reason": "no_account", "unusable_until": Value::Null }));
     }
@@ -105,7 +111,7 @@ async fn routing_for_target(
 async fn to_model_item(
     state: &AppState,
     user_id: &str,
-    lookup: &SharedCustomLookup,
+    lookup: &SharedLookup,
     name: &str,
     targets: &[GroupTarget],
 ) -> anyhow::Result<Value> {
@@ -114,7 +120,7 @@ async fn to_model_item(
         enriched.push(json!({
             "model": target.model,
             "account_id": target.account_id,
-            "account_label": account_label(state, user_id, target.account_id.as_deref()).await?,
+            "account_label": account_label(state, user_id, lookup, target).await?,
         }));
     }
     let mut routing_targets = Vec::with_capacity(targets.len());
@@ -135,7 +141,7 @@ async fn to_model_item(
 }
 
 /// `lookup` spans one whole response, so a list of many groups asks the extension once at most.
-async fn to_list_item(state: &AppState, user_id: &str, lookup: &SharedCustomLookup, row: &ModelGroupRow) -> anyhow::Result<Value> {
+async fn to_list_item(state: &AppState, user_id: &str, lookup: &SharedLookup, row: &ModelGroupRow) -> anyhow::Result<Value> {
     let model_rows = list_models_for_group(state.pool(), &row.id).await?;
     let mut models = Vec::with_capacity(model_rows.len());
     for model in &model_rows {
@@ -159,8 +165,9 @@ async fn to_list_item(state: &AppState, user_id: &str, lookup: &SharedCustomLook
 /// Validates `models`. `Err(message)` is the 400 body's text. A target's prefix is a builtin
 /// `ProviderId`, one of the caller's own custom or CLI provider slugs (docs/cli.md), or the
 /// slug of a custom endpoint a pool extension shares with the caller, never another user's
-/// otherwise. A pinned target is still checked against the caller's own rows, so it can never
-/// name a shared endpoint's account.
+/// otherwise. A pinned `account_id` is the caller's own row or, for a builtin prefix, a row the
+/// pool extension currently shares with the caller — never a shared endpoint's key row, since a
+/// shared slug is not a builtin.
 async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> anyhow::Result<Result<Vec<GroupModelInput>, String>> {
     let own = own_provider_slugs(state, user_id).await?;
     let missed_own = AtomicBool::new(false);
@@ -171,27 +178,47 @@ async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> any
         }
         known
     };
-    let pool = state.pool().clone();
-    let owner = user_id.to_string();
-    // A pinned `account_id` must be a row owned by the caller whose `provider` matches the
-    // target's prefix (docs/auth.md § Model groups) — never another user's row, and never a
-    // row that quietly belongs to a different provider than the target claims.
-    let resolve_account = move |account_id: String, provider: String| {
-        let pool = pool.clone();
-        let owner = owner.clone();
+    let lookup = SharedLookup::default();
+    // A storage or extension error while checking a pin. The validator only takes a yes/no, so
+    // the error is parked here and wins over its verdict: a 500, never a misleading 400.
+    let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
+    // A pinned `account_id` must match the target's prefix (docs/auth.md § Model groups) and be
+    // the caller's own row or one shared with them — never a row that quietly belongs to a
+    // different provider than the target claims. An own row of that id always decides.
+    let resolve_account = |account_id: String, provider: String| {
+        let (lookup, failure) = (&lookup, &failure);
         async move {
-            matches!(get_account(&pool, &owner, &account_id).await, Ok(Some(row)) if row.provider == provider)
+            let fail = |error: anyhow::Error| {
+                failure.lock().expect("failure slot").get_or_insert(error);
+                false
+            };
+            match get_account(state.pool(), user_id, &account_id).await {
+                Ok(Some(row)) => return row.provider == provider,
+                Ok(None) => {}
+                Err(error) => return fail(error.into()),
+            }
+            let Some(builtin) = ProviderId::parse(&provider) else { return false };
+            match lookup.shared_account(state, user_id, builtin, &account_id).await {
+                Ok(shared) => shared.is_some(),
+                Err(error) => fail(error),
+            }
         }
     };
+    let take_failure = || failure.lock().expect("failure slot").take();
     let mut validated = validate_group_models(models, &own_prefix, &resolve_account).await;
+    if let Some(error) = take_failure() {
+        return Err(error);
+    }
     // Only a prefix the caller's own namespace missed asks the extension, so a lost sharing
     // store never blocks a group made of the caller's own providers. When it is asked, its
     // error propagates: a 500, never a misleading 400 on a valid shared slug.
     if validated.is_err() && missed_own.load(Ordering::Relaxed) {
-        let shared: HashSet<String> =
-            SharedCustomLookup::default().all(state, user_id).await?.iter().map(|s| s.provider.slug.clone()).collect();
+        let shared: HashSet<String> = lookup.all(state, user_id).await?.iter().map(|s| s.provider.slug.clone()).collect();
         let any_prefix = |prefix: &str| ProviderId::parse(prefix).is_some() || own.contains(prefix) || shared.contains(prefix);
         validated = validate_group_models(models, &any_prefix, &resolve_account).await;
+        if let Some(error) = take_failure() {
+            return Err(error);
+        }
     }
     Ok(validated.map(|models| {
         models
@@ -212,7 +239,7 @@ async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
 /// (docs/cli.md § Server routes: one validator, one response shape).
 pub(crate) async fn list_for_user(state: &AppState, user_id: &str) -> Response {
     let Ok(rows) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
-    let lookup = SharedCustomLookup::default();
+    let lookup = SharedLookup::default();
     let mut groups = Vec::with_capacity(rows.len());
     for row in &rows {
         match to_list_item(state, user_id, &lookup, row).await {
@@ -271,7 +298,7 @@ pub(crate) async fn create_for_user(state: &AppState, user_id: &str, body: &Byte
     if replace_group_models(state.pool(), user_id, &row.id, &models).await.is_err() {
         return internal_error();
     }
-    match to_list_item(state, user_id, &SharedCustomLookup::default(), &row).await {
+    match to_list_item(state, user_id, &SharedLookup::default(), &row).await {
         Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
         Err(_) => internal_error(),
     }
@@ -349,7 +376,7 @@ pub(crate) async fn update_for_user(state: &AppState, user_id: &str, id: &str, b
         Err(_) => return internal_error(),
         Ok(row) => row.unwrap_or(existing),
     };
-    match to_list_item(state, user_id, &SharedCustomLookup::default(), &updated).await {
+    match to_list_item(state, user_id, &SharedLookup::default(), &updated).await {
         Ok(item) => Json(item).into_response(),
         Err(_) => internal_error(),
     }
@@ -978,6 +1005,75 @@ mod tests {
         let json = body_json(send(&state, "GET", "/api/model-groups", &cookie, None).await).await;
         assert_eq!(json["groups"].as_array().unwrap().len(), 2);
         assert_eq!(ext.list_calls.lock().unwrap().len(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn a_target_may_pin_a_builtin_account_while_it_is_shared_with_the_caller() {
+        use crate::pool::extension::test_support::share_info;
+        use crate::pool::SharedAccount;
+
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let ext = std::sync::Arc::new(SharedCustomExtension::default());
+        let state = state_with_extension(pool, MockTransport::new(), ext.clone());
+        let (user_id, cookie) = signed_in(&state, "borrower@example.com").await;
+        let owner = insert_user(state.pool(), "owner@example.com").await;
+        let stranger = insert_user(state.pool(), "stranger@example.com").await;
+        seed_account(&state, &user_id, "acc_mine", "claude-code", Some("me@example.com"), None).await;
+        seed_account(&state, &owner.id, "acc_lent", "claude-code", Some("owner@example.com"), Some("Owner Max")).await;
+        seed_account(&state, &stranger.id, "acc_unshared", "claude-code", Some("stranger@example.com"), None).await;
+        let lent = get_account(state.pool(), &owner.id, "acc_lent").await.unwrap().unwrap();
+        ext.accounts.lock().unwrap().push(SharedAccount { account: lent, priority: 0, share: share_info(), usage: None });
+        let pin = |model: &str, id: &str| json!({ "model": model, "account_id": id });
+        let models = |targets: Value| json!([{ "name": "opus", "targets": targets }]);
+
+        let ordered = json!([pin("claude-code/claude-opus-5", "acc_lent"), pin("claude-code/claude-opus-5", "acc_mine")]);
+        let response = create_group(&state, &cookie, json!({ "name": "Team", "slug": "team-ep", "models": models(ordered) })).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let json = body_json(response).await;
+        assert_eq!(json["models"][0]["targets"][0]["account_label"], "Owner Max");
+        assert_eq!(json["models"][0]["routing"]["current_target_index"], 0, "the shared pin is the route");
+
+        for (label, targets) in [
+            ("an account nobody shares with the caller", json!([pin("claude-code/claude-opus-5", "acc_unshared")])),
+            ("a shared account under another provider's prefix", json!([pin("codex/gpt-5", "acc_lent")])),
+        ] {
+            let response = create_group(&state, &cookie, json!({ "name": label, "slug": "probe-ep", "models": models(targets) })).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{label}");
+        }
+
+        // A second group with the same shared pin: listing both asks the extension once.
+        let again = json!([pin("claude-code/claude-opus-5", "acc_lent")]);
+        let response = create_group(&state, &cookie, json!({ "name": "Again", "slug": "again-ep", "models": models(again) })).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let before = ext.account_calls.lock().unwrap().len();
+        send(&state, "GET", "/api/model-groups", &cookie, None).await;
+        assert_eq!(ext.account_calls.lock().unwrap().len(), before + 1);
+
+        // Unshared: the pin stays stored but reads as gone, and the route falls to the own pin.
+        ext.accounts.lock().unwrap().clear();
+        let json = body_json(send(&state, "GET", "/api/model-groups", &cookie, None).await).await;
+        let team = json["groups"].as_array().unwrap().iter().find(|g| g["slug"] == "team-ep").expect("the group");
+        assert_eq!(team["models"][0]["targets"][0]["account_id"], "acc_lent");
+        assert_eq!(team["models"][0]["targets"][0]["account_label"], Value::Null);
+        assert_eq!(team["models"][0]["routing"]["targets"][0]["reason"], "no_account");
+        assert_eq!(team["models"][0]["routing"]["current_target_index"], 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_share_store_fails_a_shared_pin_write_but_never_an_own_one() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let ext = std::sync::Arc::new(SharedCustomExtension { fail_accounts: true, ..Default::default() });
+        let state = state_with_extension(pool, MockTransport::new(), ext.clone());
+        let (user_id, cookie) = signed_in(&state, "borrower@example.com").await;
+        seed_account(&state, &user_id, "acc_mine", "claude-code", None, None).await;
+        let models = |id: &str| json!([{ "name": "opus", "targets": [{ "model": "claude-code/claude-opus-5", "account_id": id }] }]);
+
+        let response = create_group(&state, &cookie, json!({ "name": "Own", "slug": "own-ep", "models": models("acc_mine") })).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert!(ext.account_calls.lock().unwrap().is_empty(), "an own pin never asks the extension");
+
+        let response = create_group(&state, &cookie, json!({ "name": "Other", "slug": "other-ep", "models": models("acc_elsewhere") })).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "a lost store is retryable, not a 400");
     }
 
     #[tokio::test]

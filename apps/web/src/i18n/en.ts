@@ -592,10 +592,13 @@ export const en = {
     "Add a model name clients will send on this endpoint, then pick its targets from the catalog on the left.",
   "groups.dialog.targetsEmpty":
     "No targets yet — pick an account on the left, then choose the models it should serve.",
-  // The account dimension. "Any account" is the unpinned state the picker no
-  // longer creates but older groups still hold — the provider's own pool and
-  // priority — and it reads the same on the list page and here.
+  // The account dimension. "Any account" is the unpinned state — the
+  // provider's whole pool in its own order, rows shared with the viewer
+  // included — and it reads the same on the list page and here. The hint sits
+  // under it in the picker's account rail and counts the rows it stands for.
   "groups.account.any": "Any account",
+  "groups.account.anyHint_one": "Pool order · {count} account",
+  "groups.account.anyHint_other": "Pool order · {count} accounts",
   "groups.account.missing": "Account removed",
   "groups.account.skipped": "Skipped until you pick another account",
   // --- Where the next request goes. "Current" marks the target the group

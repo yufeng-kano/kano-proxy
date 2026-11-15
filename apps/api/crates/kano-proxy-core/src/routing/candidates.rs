@@ -6,7 +6,8 @@
 //!
 //! - A **direct** call is one implicit unpinned target: that pool's accounts in priority order.
 //! - A **group model** expands each target of its list in array order: a pinned target
-//!   contributes exactly its one account (if it still exists); an unpinned target contributes
+//!   contributes exactly its one account (if it still exists, as the caller's own row or a
+//!   builtin row shared with them); an unpinned target contributes
 //!   every account of that provider's pool, in pool-priority order.
 //!
 //! A target whose prefix no longer resolves (e.g. a deleted custom provider) contributes
@@ -17,7 +18,7 @@
 //! account)` triples exist at all.
 
 use crate::db::accounts::{account_profile_meta, get_account, list_accounts, AccountRow};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::db::cli::{get_cli_provider_by_slug, list_cli_providers, CliProviderRow};
 use crate::db::custom_providers::{get_custom_provider_by_slug, list_custom_providers, CustomProviderRow};
@@ -25,7 +26,7 @@ use crate::db::model_groups::{
     get_group_model_by_name, parse_group_targets, GroupTarget, ModelGroupModelRow, ModelGroupRow,
 };
 use crate::db::provider_settings::get_provider_strategy;
-use crate::pool::extension::{shared_custom_providers, ListSharedOptions, ShareInfo, SharedCustomProvider};
+use crate::pool::extension::{shared_custom_providers, ListSharedOptions, ShareInfo, SharedAccount, SharedCustomProvider};
 use crate::providers::cli::create_cli_adapter;
 use crate::providers::custom_anthropic::custom_anthropic_adapter;
 use crate::providers::custom_openai::custom_openai_adapter;
@@ -76,19 +77,27 @@ pub fn cli_provider_adapter(cx: &AppState, row: &CliProviderRow) -> DynAdapter {
     create_cli_adapter(cx, row)
 }
 
-/// The custom endpoints other users share with the caller, asked of the pool extension at most
-/// once per resolution and only once a prefix has missed the caller's own namespace, so a
-/// request or a group with no shared or dangling target never calls the extension. Routing
-/// propagates an extension error: for a shared slug the borrowed endpoint is the whole request,
-/// so a lost store must read as a retryable failure, not as an unknown model.
+/// What other users share with the caller, asked of the pool extension at most once per
+/// resolution (one request, one group write, one `GET /api/model-groups`) and only once the
+/// caller's own namespace missed, so a request or a group with nothing shared or dangling never
+/// calls the extension.
+///
+/// - [`SharedLookup::all`]: the custom endpoints. Routing propagates its error: for a shared
+///   slug the borrowed endpoint is the whole request, so a lost store must read as a retryable
+///   failure, not as an unknown model.
+/// - [`SharedLookup::shared_account`]: one builtin row a pinned target names, out of that
+///   provider's `listShared` list (docs/providers.md § Model groups "Account pinning").
 #[derive(Default)]
-pub struct SharedCustomLookup(tokio::sync::OnceCell<Vec<SharedCustomProvider>>);
+pub struct SharedLookup {
+    custom: tokio::sync::OnceCell<Vec<SharedCustomProvider>>,
+    builtin: tokio::sync::Mutex<HashMap<ProviderId, Vec<SharedAccount>>>,
+}
 
-impl SharedCustomLookup {
+impl SharedLookup {
     pub async fn all(&self, cx: &AppState, user_id: &str) -> anyhow::Result<&[SharedCustomProvider]> {
         let Some(ext) = cx.pool_extension() else { return Ok(&[]) };
         let shared = self
-            .0
+            .custom
             .get_or_try_init(|| async {
                 ext.list_shared_custom(cx, user_id, ListSharedOptions::default())
                     .await
@@ -96,6 +105,28 @@ impl SharedCustomLookup {
             })
             .await?;
         Ok(shared)
+    }
+
+    /// The builtin row with this id that the extension currently shares with the caller under
+    /// `provider`, if any. A failed list is not cached, so the next ask retries it.
+    pub async fn shared_account(
+        &self,
+        cx: &AppState,
+        user_id: &str,
+        provider: ProviderId,
+        account_id: &str,
+    ) -> anyhow::Result<Option<SharedAccount>> {
+        let Some(ext) = cx.pool_extension() else { return Ok(None) };
+        let mut cache = self.builtin.lock().await;
+        let rows = match cache.entry(provider) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(
+                ext.list_shared(cx, user_id, provider, ListSharedOptions::default())
+                    .await
+                    .map_err(|error| error.context("pool extension listShared failed"))?,
+            ),
+        };
+        Ok(rows.iter().find(|s| s.account.id == account_id && s.account.provider == provider.as_str()).cloned())
     }
 }
 
@@ -105,7 +136,7 @@ impl SharedCustomLookup {
 async fn shared_custom_target(
     cx: &AppState,
     user_id: &str,
-    lookup: &SharedCustomLookup,
+    lookup: &SharedLookup,
     target_index: usize,
     prefix: &str,
     upstream_model: String,
@@ -142,7 +173,7 @@ pub struct ViewerSharedCustom {
 /// The endpoints shared with the viewer, each marked `shadowed` by the same namespace rule
 /// routing applies. For the display readers only (the list route, the catalog, the Overview):
 /// an extension error is logged and reads as nothing shared there, while routing propagates it
-/// through [`SharedCustomLookup`]. Without anything shared the caller's own slugs are never read.
+/// through [`SharedLookup`]. Without anything shared the caller's own slugs are never read.
 pub async fn viewer_shared_custom(cx: &AppState, user_id: &str, options: ListSharedOptions) -> Result<Vec<ViewerSharedCustom>, sqlx::Error> {
     let shared = shared_custom_providers(cx, user_id, options).await;
     if shared.is_empty() {
@@ -157,11 +188,11 @@ pub async fn viewer_shared_custom(cx: &AppState, user_id: &str, options: ListSha
 
 /// Split one group target's `model` string into a resolved provider/adapter, scoped to
 /// `user_id` — a target whose prefix no longer resolves returns `None` and is simply omitted.
-/// `lookup` is shared by every target of one resolution (see [`SharedCustomLookup`]).
+/// `lookup` is shared by every target of one resolution (see [`SharedLookup`]).
 pub async fn resolve_target_prefix(
     cx: &AppState,
     user_id: &str,
-    lookup: &SharedCustomLookup,
+    lookup: &SharedLookup,
     target_index: usize,
     target: &GroupTarget,
 ) -> anyhow::Result<Option<ResolvedTarget>> {
@@ -225,9 +256,9 @@ struct PoolRow {
 /// composed in a pool extension, the rows other users share with them (docs/cloud-edition.md
 /// § "Pool extension"). Both kinds are merged by `(priority DESC, created_at DESC)` — a shared
 /// row orders on the viewer's own `SharedAccount.priority`, never the owner's — and a `share`
-/// descriptor marks the borrowed ones for everything downstream. Pinned targets and the
-/// caller's own custom/CLI providers never consult the extension; a shared custom endpoint
-/// arrives already resolved, its one borrowed row standing in for the pool.
+/// descriptor marks the borrowed ones for everything downstream. Pinned targets resolve through
+/// [`pinned_account`] instead, and the caller's own custom/CLI providers never consult the
+/// extension; a shared custom endpoint arrives already resolved, its one borrowed row standing in for the pool.
 async fn pool_rows(cx: &AppState, user_id: &str, target: &ResolvedTarget) -> Result<Vec<PoolRow>, sqlx::Error> {
     if let Some(shared) = &target.shared {
         // One endpoint, one key: the borrowed row is the whole pool. Its `share` marks it for
@@ -284,18 +315,49 @@ async fn pool_candidates_for(
         .collect())
 }
 
+/// The row a pinned target names: the caller's own `upstream_accounts` row of that id, else —
+/// for a builtin target on a cloud edition — the row the pool extension currently shares with
+/// the caller under that id (docs/providers.md § Model groups "Account pinning"). An own row
+/// always wins, even one of another provider, so a share can never redirect a pin. `None` when
+/// neither resolves; an extension error is logged and reads as not shared, like the unpinned
+/// pool, since a pinned target is one step of an ordered walk that can move on.
+pub async fn pinned_account(
+    cx: &AppState,
+    user_id: &str,
+    lookup: &SharedLookup,
+    provider: &str,
+    account_id: &str,
+) -> Result<Option<(AccountRow, Option<ShareInfo>)>, sqlx::Error> {
+    if let Some(own) = get_account(cx.pool(), user_id, account_id).await? {
+        return Ok((own.provider == provider).then_some((own, None)));
+    }
+    let Some(builtin) = ProviderId::parse(provider) else { return Ok(None) };
+    match lookup.shared_account(cx, user_id, builtin, account_id).await {
+        Ok(shared) => Ok(shared.map(|s| (s.account, Some(s.share)))),
+        Err(error) => {
+            tracing::error!(%error, "pinned shared account lookup failed");
+            Ok(None)
+        }
+    }
+}
+
 /// The one candidate a pinned target contributes — exactly that `upstream_accounts` row, if it
 /// still exists and still belongs to the target's provider (docs/providers.md § Model groups
-/// "Account pinning"). A deleted account, or one that quietly belongs to a different provider
-/// than the target claims, contributes nothing: same as an empty pool for this target.
+/// "Account pinning"). A deleted account, one no longer shared with the caller, or one that
+/// quietly belongs to a different provider than the target claims, contributes nothing: same
+/// as an empty pool for this target. A shared row carries its `share` descriptor, so
+/// reserve/settle, member limits and owner-scoped bench writes apply as for the unpinned pool.
 async fn pinned_candidate_for(
     cx: &AppState,
     user_id: &str,
+    lookup: &SharedLookup,
     target: &ResolvedTarget,
 ) -> Result<Option<RoutingCandidate>, sqlx::Error> {
     let Some(account_id) = target.account_id.as_deref() else { return Ok(None) };
-    let Some(account) = get_account(cx.pool(), user_id, account_id).await? else { return Ok(None) };
-    if account.provider != target.provider || !eligible(target, &account) {
+    let Some((account, share)) = pinned_account(cx, user_id, lookup, &target.provider, account_id).await? else {
+        return Ok(None);
+    };
+    if !eligible(target, &account) {
         return Ok(None);
     }
     Ok(Some(RoutingCandidate {
@@ -307,18 +369,20 @@ async fn pinned_candidate_for(
         custom_provider: target.custom_provider.clone(),
         adapter: target.adapter.clone(),
         account,
-        share: None,
+        share,
     }))
 }
 
-/// Candidates for one already-resolved target, honoring pinning.
+/// Candidates for one already-resolved target, honoring pinning. `lookup` is shared by every
+/// target of one resolution.
 pub async fn candidates_for_target(
     cx: &AppState,
     user_id: &str,
+    lookup: &SharedLookup,
     target: &ResolvedTarget,
 ) -> Result<Vec<RoutingCandidate>, sqlx::Error> {
     if target.account_id.is_some() {
-        return Ok(pinned_candidate_for(cx, user_id, target).await?.into_iter().collect());
+        return Ok(pinned_candidate_for(cx, user_id, lookup, target).await?.into_iter().collect());
     }
     pool_candidates_for(cx, user_id, target).await
 }
@@ -352,7 +416,7 @@ pub async fn pool_candidates(
         account_id: target.account_id.clone(),
         shared: None,
     };
-    candidates_for_target(cx, user_id, &resolved).await
+    candidates_for_target(cx, user_id, &SharedLookup::default(), &resolved).await
 }
 
 pub struct GroupExpansion {
@@ -370,7 +434,7 @@ pub async fn group_model_candidates(
     model_row: &ModelGroupModelRow,
 ) -> anyhow::Result<GroupExpansion> {
     let targets = parse_group_targets(Some(&model_row.targets_json));
-    let lookup = SharedCustomLookup::default();
+    let lookup = SharedLookup::default();
     let mut resolved_targets = Vec::new();
     for (i, target) in targets.iter().enumerate() {
         if let Some(resolved) = resolve_target_prefix(cx, user_id, &lookup, i, target).await? {
@@ -379,7 +443,7 @@ pub async fn group_model_candidates(
     }
     let mut candidates = Vec::new();
     for target in &resolved_targets {
-        candidates.extend(candidates_for_target(cx, user_id, target).await?);
+        candidates.extend(candidates_for_target(cx, user_id, &lookup, target).await?);
     }
     Ok(GroupExpansion { candidates, resolved_targets })
 }
@@ -476,14 +540,14 @@ pub async fn resolve_candidates(
         }));
     }
 
-    let lookup = SharedCustomLookup::default();
+    let lookup = SharedLookup::default();
     let Some(target) = shared_custom_target(cx, user_id, &lookup, 0, &split.prefix, split.upstream_model).await? else {
         return Ok(None);
     };
     Ok(Some(RoutingResolution {
         raw: split.raw,
         group_name: None,
-        candidates: candidates_for_target(cx, user_id, &target).await?,
+        candidates: candidates_for_target(cx, user_id, &lookup, &target).await?,
         // One candidate, so no ordering to choose; the caller has no settings row for a slug
         // they do not own.
         strategy: DEFAULT_STRATEGY.to_string(),

@@ -964,6 +964,66 @@ mod provider_shape_tests {
         assert!(row.bench_until.is_some(), "the owner's account is benched");
     }
 
+    /// A group target pinned to a teammate's shared builtin account (docs/providers.md § Model
+    /// groups "Account pinning") goes ahead of the caller's own row when the group says so, and
+    /// carries the share like a borrowed pool row: reserved as shared, the owner's credential.
+    /// Once the row stops being shared the pin contributes nothing and the walk moves on.
+    #[tokio::test]
+    async fn a_pinned_shared_account_dispatches_in_group_order_until_the_share_ends() {
+        use crate::db::model_groups::{insert_model_group, replace_group_models, GroupModelInput, GroupTarget};
+        use crate::pool::extension::test_support::{share_info, SharedCustomExtension};
+        use crate::pool::{SharedAccount, StoredCredential};
+        use std::sync::Arc;
+
+        let ok = json!({ "id": "msg_1", "type": "message", "role": "assistant", "content": [], "usage": { "input_tokens": 3, "output_tokens": 1 } });
+        let ext = Arc::new(SharedCustomExtension::default());
+        let Some(f) = super::super::resolve_request::test_support::fixture_with_extension(ext.clone()).await else {
+            return skip_without_db();
+        };
+        let mine = crate::db::test_support::insert_account(
+            f.state.pool(),
+            &f.user.id,
+            "claude-code",
+            &StoredCredential { access_token: "token-mine".into(), ..Default::default() },
+        )
+        .await;
+        let owner = crate::db::test_support::insert_user(f.state.pool(), "owner@example.com").await;
+        let lent = crate::db::test_support::insert_account(
+            f.state.pool(),
+            &owner.id,
+            "claude-code",
+            &StoredCredential { access_token: "token-owner".into(), ..Default::default() },
+        )
+        .await;
+        ext.accounts.lock().unwrap().push(SharedAccount { account: lent.clone(), priority: 0, share: share_info(), usage: None });
+        let group = insert_model_group(f.state.pool(), &f.user.id, "Team", "team", None).await.unwrap();
+        let pinned = |id: &str| GroupTarget { model: "claude-code/claude-opus-5".into(), account_id: Some(id.to_string()) };
+        replace_group_models(
+            f.state.pool(),
+            &f.user.id,
+            &group.id,
+            &[GroupModelInput { name: "opus".into(), targets: vec![pinned(&lent.id), pinned(&mine.id)] }],
+        )
+        .await
+        .unwrap();
+        let body = json!({ "model": "opus", "max_tokens": 16, "messages": [{ "role": "user", "content": "hi" }] });
+
+        f.mock.respond_json(StatusCode::OK, ok.clone());
+        let response = f.router().oneshot(f.post("/g/team/anthropic/v1/messages", body.clone())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(f.mock.requests()[0].header("authorization"), Some("Bearer token-owner"));
+        assert_eq!(*ext.reserved.lock().unwrap(), [(lent.id.clone(), true, false)]);
+        assert_eq!(f.logs(1).await[0]["account_id"], lent.id.as_str());
+
+        // Unshared: the stored pin resolves to nothing, never to the owner's row regardless.
+        ext.accounts.lock().unwrap().clear();
+        f.mock.respond_json(StatusCode::OK, ok.clone());
+        let response = f.router().oneshot(f.post("/g/team/anthropic/v1/messages", body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(f.mock.requests()[1].header("authorization"), Some("Bearer token-mine"));
+        assert_eq!(ext.reserved.lock().unwrap()[1], (mine.id.clone(), false, false));
+    }
+
     #[tokio::test]
     async fn a_custom_openai_slug_takes_the_anthropic_to_openai_conversion_path() {
         let Some(f) = fixture().await else { return skip_without_db() };
