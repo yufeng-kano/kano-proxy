@@ -25,7 +25,7 @@ import { computed, onMounted, ref, watch } from "vue"
 import { useAccounts } from "@/composables/useAccounts"
 import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
-import { useCustomProviders } from "@/composables/useCustomProviders"
+import { reachableShared, useCustomProviders } from "@/composables/useCustomProviders"
 import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
@@ -210,11 +210,18 @@ const endpointPreview = computed(() => {
 
 /* --- Providers, accounts, models (picker) --------------------------------- */
 
-/** The tab strip: builtins in declared order, then custom endpoints, then CLI providers — every prefix a target may carry gets a tab (docs/cli.md). */
+/**
+ * Endpoints other users share with the viewer that a target can reach: a
+ * shadowed one is never routed to, so offering it would add a dead target.
+ */
+const sharedTargets = computed(() => reachableShared(customProviders.state.shared))
+
+/** The tab strip: builtins in declared order, then custom endpoints, then CLI providers, then shared endpoints — every prefix a target may carry gets a tab (docs/cli.md). */
 const tabs = computed<SectionItem[]>(() => [
   ...PROVIDERS.map((p) => ({ id: p.id, label: t(NAME_KEY[p.id]) })),
   ...(customProviders.state.data ?? []).map((cp) => ({ id: cp.slug, label: cp.name })),
   ...(cli.state.providers ?? []).map((cp) => ({ id: cp.slug, label: cp.name })),
+  ...sharedTargets.value.map((sp) => ({ id: sp.slug, label: sp.name })),
 ])
 
 /**
@@ -230,8 +237,13 @@ const activeTabLabel = computed(
   () => tabs.value.find((tab) => tab.id === activeTab.value)?.label ?? "",
 )
 
-/** One rail entry: an account a target can pin, named the way the user named it. */
-type RailAccount = { id: string; label: string; hint: string | null }
+/**
+ * One rail entry: an account a target can pin, named the way the user named it.
+ * `pin` is false only for a shared endpoint: its key is the owner's row, which a
+ * target may never pin (docs/providers.md § Model groups), so a pick there adds
+ * an unpinned target.
+ */
+type RailAccount = { id: string; label: string; hint: string | null; pin: boolean }
 
 /** The user's own name wins, then the upstream identity, then a short id. */
 function accountName(account: ProviderAccount): string {
@@ -252,17 +264,29 @@ function railFor(providerKey: string): RailAccount[] {
       id: a.id,
       label: accountName(a),
       hint: null,
+      pin: true,
     }))
   }
   const custom = (customProviders.state.data ?? []).find((cp) => cp.slug === providerKey)
   if (custom?.account_id) {
-    return [{ id: custom.account_id, label: custom.name, hint: custom.key_mask }]
+    return [{ id: custom.account_id, label: custom.name, hint: custom.key_mask, pin: true }]
   }
   // A CLI provider's rail is its one internal pool-state row, named after the
   // provider — the same single-entry shape as a custom endpoint's key.
   const cliProvider = (cli.state.providers ?? []).find((p) => p.slug === providerKey)
   if (cliProvider?.account_id) {
-    return [{ id: cliProvider.account_id, label: cliProvider.name, hint: null }]
+    return [{ id: cliProvider.account_id, label: cliProvider.name, hint: null, pin: true }]
+  }
+  const shared = sharedTargets.value.find((sp) => sp.slug === providerKey)
+  if (shared) {
+    return [
+      {
+        id: shared.account_id,
+        label: shared.name,
+        hint: t("providers.account.shared", { owner: shared.share.ownerLabel }),
+        pin: false,
+      },
+    ]
   }
   return []
 }
@@ -464,11 +488,12 @@ function isMissingAccount(target: ModelGroupTarget): boolean {
 function isAdded(modelId: string): boolean {
   const active = activeModel.value
   if (!active) return false
-  const identity = identityOf({ model: modelId, account_id: selectedAccountId.value })
+  const account = selectedAccount.value
+  const identity = identityOf({ model: modelId, account_id: account?.pin ? account.id : null })
   return active.targets.some((t) => identityOf(t) === identity)
 }
 
-/** Adds the model pinned to the selected account, into the active group model. */
+/** Adds the model pinned to the selected account (unpinned for a shared endpoint), into the active group model. */
 function addTarget(modelId: string) {
   const value = modelId.trim()
   const account = selectedAccount.value
@@ -486,8 +511,8 @@ function addTarget(modelId: string) {
   }
   const target: ModelGroupTarget = {
     model: value,
-    account_id: account.id,
-    account_label: account.label,
+    account_id: account.pin ? account.id : null,
+    account_label: account.pin ? account.label : null,
   }
   if (active.targets.some((t) => identityOf(t) === identityOf(target))) {
     // Rejected here rather than at save: the list is what the user is reading,
@@ -849,7 +874,8 @@ async function remove() {
                 @click="selectedAccountId = account.id"
               >
                 <span class="rail-name">{{ account.label }}</span>
-                <span v-if="account.hint" class="rail-hint mono">{{ account.hint }}</span>
+                <!-- A key mask is code; a shared endpoint's lender is prose. -->
+                <span v-if="account.hint" class="rail-hint" :class="{ mono: account.pin }">{{ account.hint }}</span>
               </button>
             </div>
 

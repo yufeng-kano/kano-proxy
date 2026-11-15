@@ -28,7 +28,7 @@ pub async fn resolve_request_model(
     user_id: &str,
     slug: Option<&str>,
     model_raw: &str,
-) -> Result<RequestModelResolution, sqlx::Error> {
+) -> anyhow::Result<RequestModelResolution> {
     let Some(slug) = slug else {
         return Ok(match resolve_candidates(cx, user_id, model_raw).await? {
             Some(resolution) => RequestModelResolution::Ok(Box::new(resolution)),
@@ -78,10 +78,20 @@ pub(crate) mod test_support {
     pub async fn fixture() -> Option<Fixture> {
         let pool = test_pool().await?;
         let mock = MockTransport::new();
-        let state = test_state(pool, mock.clone() as Arc<dyn UpstreamTransport>);
+        Some(with_state(test_state(pool, mock.clone() as Arc<dyn UpstreamTransport>), mock).await)
+    }
+
+    /// [`fixture`] on a state that composes in `ext` as its pool extension.
+    pub async fn fixture_with_extension(ext: Arc<dyn crate::pool::PoolExtension>) -> Option<Fixture> {
+        let pool = test_pool().await?;
+        let mock = MockTransport::new();
+        Some(with_state(crate::pool::extension::test_support::state_with_extension(pool, mock.clone(), ext), mock).await)
+    }
+
+    async fn with_state(state: AppState, mock: Arc<MockTransport>) -> Fixture {
         let user = insert_user(state.pool(), "routes@example.com").await;
         let (_, key) = insert_api_key(state.pool(), &user.id).await;
-        Some(Fixture { state, mock, user, key })
+        Fixture { state, mock, user, key }
     }
 
     impl Fixture {

@@ -5,4 +5,4 @@ pub mod bench;
 pub mod extension;
 
 pub use acquire::{AcquiredAccount, StoredCredential};
-pub use extension::{AttemptLease, ListSharedOptions, PoolExtension, ReserveOutcome, SharedAccount, ShareInfo};
+pub use extension::{AttemptLease, ListSharedOptions, PoolExtension, ReserveOutcome, SharedAccount, SharedCustomProvider, ShareInfo};

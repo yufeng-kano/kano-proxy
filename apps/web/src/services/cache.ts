@@ -26,7 +26,7 @@ import type {
   ChangelogResponse,
   CliDevice,
   CliProvider,
-  CustomProvider,
+  CustomProvidersResponse,
   LogsResponse,
   ModelGroup,
   ModelsResponse,
@@ -72,8 +72,10 @@ export const CACHE_TTL_MS = 120_000
  * its credits switch off until the TTL expired. v16: a shared Codex row may
  * carry `usage.credits` and `on_credits` — a v15 entry has neither, so a
  * member's row would miss its balance and On credits until the TTL expired.
+ * v17: the custom-providers entry became `{providers, shared}` to carry the
+ * endpoints other users share — a v16 entry is a bare array of own rows.
  */
-const CACHE_SCHEMA_VERSION = 16
+const CACHE_SCHEMA_VERSION = 17
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
 export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
@@ -291,13 +293,15 @@ export function writeModelsCache(
 /**
  * Custom providers list cache. `key_mask` is non-secret display data and is
  * fine to cache — the API response never carries the plaintext `api_key`, so
- * there is nothing key-shaped here to persist to disk.
+ * there is nothing key-shaped here to persist to disk. Shared rows carry even
+ * less (no base URL, no mask), and ride in the same per-user entry so the
+ * logout and account-switch sweeps clear them with the own list.
  */
 export function readCustomProvidersCache(
   userId: string | null | undefined,
-): CustomProvider[] | null {
+): CustomProvidersResponse | null {
   if (!userId) return null
-  return readTimed<CustomProvider[]>(customProvidersKey(userId))?.data ?? null
+  return readTimed<CustomProvidersResponse>(customProvidersKey(userId))?.data ?? null
 }
 
 export function isCustomProvidersCacheFresh(
@@ -305,14 +309,14 @@ export function isCustomProvidersCacheFresh(
   ttlMs = CACHE_TTL_MS,
 ): boolean {
   if (!userId) return false
-  const entry = readTimed<CustomProvider[]>(customProvidersKey(userId))
+  const entry = readTimed<CustomProvidersResponse>(customProvidersKey(userId))
   if (!entry) return false
   return Date.now() - entry.savedAt < ttlMs
 }
 
 export function writeCustomProvidersCache(
   userId: string | null | undefined,
-  data: CustomProvider[],
+  data: CustomProvidersResponse,
 ): void {
   if (!userId) return
   writeTimed(customProvidersKey(userId), data)

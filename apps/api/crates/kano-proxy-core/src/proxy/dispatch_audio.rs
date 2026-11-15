@@ -19,7 +19,7 @@ use http::header;
 use crate::db::custom_providers::CustomProviderRow;
 use crate::logging::request_log::{log_request, LogEntry};
 use crate::logging::usage_capture::{from_openai_usage, NormalizedUsage, UsageSniffer};
-use crate::pool::extension::{borrower_safe_headers, settle_lease, LeaseOutcome};
+use crate::pool::extension::{settle_lease, HeaderAudience, LeaseOutcome};
 use crate::providers::types::{AdapterError, AudioForm, CallExtras, DynAdapter};
 use crate::proxy::backpressure::backpressured_byte_stream;
 use crate::proxy::dispatch::{
@@ -155,7 +155,7 @@ impl NonStreamDelivery for AudioDelivery {
             .get(header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.contains("application/json"));
-        let shared = candidate.share.is_some();
+        let audience = HeaderAudience::of(&candidate);
 
         let entry = LogEntry {
             started_at_ms: Some(started_at_ms),
@@ -234,13 +234,13 @@ impl NonStreamDelivery for AudioDelivery {
                 },
             );
             let mut res = Response::builder().status(parts.status).body(Body::from_stream(stream)).expect("builds");
-            *res.headers_mut() = passthrough_stream_headers(&parts.headers, shared);
+            *res.headers_mut() = passthrough_stream_headers(&parts.headers, audience);
             return res;
         }
 
-        // Audio passes every upstream header through; a borrowed row drops the owner's
-        // rate-limit/identity ones first (docs/cloud-edition.md § "Pool extension").
-        let headers = if shared { borrower_safe_headers(&parts.headers) } else { parts.headers.clone() };
+        // Audio passes every upstream header through; a borrowed row's are filtered for its
+        // audience first (docs/cloud-edition.md § "Pool extension").
+        let headers = audience.filter(&parts.headers);
         let tap_saw_output = saw_output.clone();
         let tapped = stream_with_usage_tap(
             Box::pin(body_stream(body)),

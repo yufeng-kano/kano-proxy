@@ -10,6 +10,7 @@ import type {
   CustomProvider,
   CustomProviderFormat,
   CustomProviderModelsMode,
+  CustomProvidersResponse,
   CustomProviderTestResult,
   LoginStart,
   LogFacets,
@@ -346,9 +347,9 @@ export async function importAccount(
 // Custom providers — user-defined BYO OpenAI-/Anthropic-compatible endpoints.
 // Session-cookie auth, same as the routes above. See docs/auth.md.
 
-export async function listCustomProviders(): Promise<CustomProvider[]> {
-  const data = await request<{ providers: CustomProvider[] }>("/api/custom-providers")
-  return data.providers
+export async function listCustomProviders(): Promise<CustomProvidersResponse> {
+  const data = await request<CustomProvidersResponse>("/api/custom-providers")
+  return { providers: data.providers, shared: data.shared ?? [] }
 }
 
 export async function createCustomProvider(body: {

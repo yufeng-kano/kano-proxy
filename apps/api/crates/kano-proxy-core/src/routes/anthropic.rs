@@ -905,6 +905,65 @@ mod provider_shape_tests {
         assert!(calls[0].header("x-api-key").is_some());
     }
 
+    /// A custom endpoint another user shares (docs/cloud-edition.md § "Pool extension") goes
+    /// through the same walk as a borrowed builtin row: reserved, settled, the owner's key and
+    /// headers kept from the borrower, a failure benched on the owner's row.
+    #[tokio::test]
+    async fn a_shared_custom_endpoint_is_reserved_settled_and_benched_on_the_owners_row() {
+        use crate::pool::extension::test_support::{owner_endpoint, SharedCustomExtension};
+        use crate::pool::extension::LeaseOutcome;
+        use crate::upstream::UpstreamResponse;
+        use http::{HeaderMap, HeaderValue};
+        use std::sync::Arc;
+
+        let ext = Arc::new(SharedCustomExtension::default());
+        let Some(f) = super::super::resolve_request::test_support::fixture_with_extension(ext.clone()).await else {
+            return skip_without_db();
+        };
+        let owner = crate::db::test_support::insert_user(f.state.pool(), "owner@example.com").await;
+        let lent = owner_endpoint(f.state.pool(), &owner.id, "team-claude", "anthropic", "https://owner.example.com", None).await;
+        ext.shared.lock().unwrap().push(lent.clone());
+        let mut owner_headers = HeaderMap::new();
+        owner_headers.insert("content-type", HeaderValue::from_static("application/json"));
+        owner_headers.insert("anthropic-ratelimit-tokens-remaining", HeaderValue::from_static("5"));
+        owner_headers.insert("anthropic-organization-id", HeaderValue::from_static("org_owner"));
+        // What an arbitrary gateway in front of the owner's endpoint adds about itself.
+        for name in ["x-litellm-model-api-base", "set-cookie", "server", "via", "alt-svc"] {
+            owner_headers.insert(http::HeaderName::from_static(name), HeaderValue::from_static("owner-gateway.internal"));
+        }
+        f.mock.expect(move |_| {
+            let body = json!({ "id": "msg_1", "type": "message", "role": "assistant", "content": [], "usage": { "input_tokens": 3, "output_tokens": 1 } });
+            Ok(UpstreamResponse::from_bytes(StatusCode::OK, owner_headers.clone(), body.to_string()))
+        });
+        let body = json!({ "model": "team-claude/claude-3", "max_tokens": 16, "messages": [{ "role": "user", "content": "hi" }] });
+
+        let response = f.router().oneshot(f.post("/anthropic/v1/messages", body.clone())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get("anthropic-ratelimit-tokens-remaining").is_none());
+        assert!(response.headers().get("anthropic-organization-id").is_none());
+        assert_eq!(response.headers()["content-type"], "application/json");
+        for (name, value) in response.headers() {
+            assert!(!value.to_str().unwrap_or_default().contains("owner-gateway"), "{name} leaked the owner's gateway");
+        }
+        let calls = f.mock.requests();
+        assert_eq!(calls[0].url, "https://owner.example.com/v1/messages");
+        assert_eq!(calls[0].header("x-api-key"), Some("sk-owner-team-claude"));
+        assert_eq!(*ext.reserved.lock().unwrap(), [(lent.account.id.clone(), true, true)]);
+        assert_eq!(*ext.settled.lock().unwrap(), [LeaseOutcome::Consumed]);
+        let rows = f.logs(1).await;
+        assert_eq!(rows[0]["user_id"], f.user.id.as_str());
+        assert_eq!(rows[0]["provider"], "team-claude");
+        assert_eq!(rows[0]["account_id"], lent.account.id.as_str());
+
+        // A 429 benches the owner's row (not a no-op against the borrower's id) and releases.
+        f.mock.expect(|_| Ok(UpstreamResponse::json(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": { "message": "slow down" } }))));
+        let response = f.router().oneshot(f.post("/anthropic/v1/messages", body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(*ext.settled.lock().unwrap(), [LeaseOutcome::Consumed, LeaseOutcome::Released]);
+        let row = crate::db::accounts::get_account(f.state.pool(), &owner.id, &lent.account.id).await.unwrap().unwrap();
+        assert!(row.bench_until.is_some(), "the owner's account is benched");
+    }
+
     #[tokio::test]
     async fn a_custom_openai_slug_takes_the_anthropic_to_openai_conversion_path() {
         let Some(f) = fixture().await else { return skip_without_db() };

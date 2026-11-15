@@ -14,6 +14,7 @@ use http::{header, StatusCode};
 use serde_json::{json, Map, Value};
 
 use crate::db::custom_providers::CustomProviderRow;
+use crate::pool::extension::HeaderAudience;
 use crate::providers::types::{AffinityIds, ChatCompletionRequest, DynAdapter};
 use crate::proxy::dispatch::{
     body_stream, dispatch_chat_completions, is_event_stream, passthrough_stream_headers, ChatDispatchOptions,
@@ -159,7 +160,7 @@ pub async fn dispatch_anthropic_via_openai(cx: &AppState, opts: ViaOpenAiDispatc
         let stream =
             stream_with_keepalive(converted_stream, DEFAULT_KEEPALIVE_INTERVAL, StreamKeepaliveOpts::default());
         let mut res = Response::builder().status(status).body(Body::from_stream(stream)).expect("builds");
-        *res.headers_mut() = passthrough_stream_headers(&parts.headers, false);
+        *res.headers_mut() = passthrough_stream_headers(&parts.headers, HeaderAudience::Own);
         return res;
     }
 

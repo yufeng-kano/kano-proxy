@@ -16,9 +16,9 @@ use serde_json::{json, Value};
 
 use crate::auth::session::SessionUser;
 use crate::db::accounts::{iso_from_ms, parse_iso_ms};
-use crate::db::cli::list_cli_providers;
-use crate::db::custom_providers::list_custom_providers;
 use crate::db::request_logs::{usage_rows_in_range, FacetLogRow, RequestLogPageRow, UsageLogRow};
+use crate::pool::extension::ListSharedOptions;
+use crate::routing::candidates::{own_provider_slugs, viewer_shared_custom};
 use crate::pricing::litellm::{
     estimate_cost, get_price_table, has_source_tagged_price_tables, refresh_price_table, CostUsage, PriceTable,
 };
@@ -492,9 +492,17 @@ async fn summary(
     // Live slugs cover both user-defined kinds — a CLI provider's traffic is as real as a
     // custom endpoint's (docs/cli.md), and the filter would otherwise silently drop it from
     // every Overview total.
-    let mut slugs: Vec<String> =
-        list_custom_providers(state.pool(), &session.user.id).await.unwrap_or_default().into_iter().map(|p| p.slug).collect();
-    slugs.extend(list_cli_providers(state.pool(), &session.user.id).await.unwrap_or_default().into_iter().map(|p| p.slug));
+    let mut slugs: Vec<String> = own_provider_slugs(&state, &session.user.id).await.unwrap_or_default().into_iter().collect();
+    // A custom endpoint shared with the caller is live for them too (docs/cloud-edition.md §
+    // "Pool extension"); a shadowed one is already in the list under the caller's own slug.
+    slugs.extend(
+        viewer_shared_custom(&state, &session.user.id, ListSharedOptions::default())
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| !s.shadowed)
+            .map(|s| s.endpoint.provider.slug),
+    );
     let mut scoped = filter_to_live_providers(rows, &slugs);
 
     let table = read_time_price_table(&state).await;
@@ -849,6 +857,22 @@ mod tests {
         let json = body_json(get(&state, &cookie, "/api/usage/summary?days=7").await).await;
         assert_eq!(json["totals"]["requests"], 1, "another user's rows and rows before `from` never count");
         assert_eq!(json["totals"]["prompt_tokens"], 10);
+    }
+
+    #[tokio::test]
+    async fn traffic_to_a_shared_custom_endpoint_counts_as_a_live_provider() {
+        use crate::pool::extension::test_support::{owner_endpoint, SharedCustomExtension};
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let owner = insert_user(&pool, "owner@example.com").await;
+        let lent = owner_endpoint(&pool, &owner.id, "team-gw", "openai", "https://owner.example.com/v1", None).await;
+        let state = crate::pool::extension::test_support::state_with_extension(pool, offline(), SharedCustomExtension::lending(vec![lent]));
+        let (user_id, cookie) = signed_in(&state, "borrower@example.com").await;
+        let now = state.now_ms();
+        seed_log(&state, &user_id, json!({ "provider": "team-gw", "model": "team-gw/gpt-4o", "created_at": iso_from_ms(now - DAY_MS) })).await;
+        seed_log(&state, &user_id, json!({ "provider": "gone-gw", "model": "gone-gw/gpt-4o", "created_at": iso_from_ms(now - DAY_MS) })).await;
+
+        let json = body_json(get(&state, &cookie, "/api/usage/summary?days=7").await).await;
+        assert_eq!(json["totals"]["requests"], 1, "the borrowed endpoint's row stays, a deleted provider's goes");
     }
 
     #[tokio::test]
