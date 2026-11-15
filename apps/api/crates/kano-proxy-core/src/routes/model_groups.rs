@@ -6,6 +6,7 @@
 //! read-time account label and the stored-state routing indicator the page draws.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -52,17 +53,6 @@ fn object_body(body: &Bytes) -> Option<Map<String, Value>> {
         Ok(_) => Some(Map::new()),
         Err(_) => None,
     }
-}
-
-/// Builtin `ProviderId`, one of the caller's own custom or CLI provider slugs (docs/cli.md), or
-/// the slug of a custom endpoint a pool extension shares with the caller — never another
-/// user's otherwise. A pinned target is still checked against the caller's own rows below, so
-/// it can never name a shared endpoint's account.
-/// An extension error propagates (a 500, never a misleading 400 on a valid shared slug).
-async fn prefix_resolver(state: &AppState, user_id: &str) -> anyhow::Result<HashSet<String>> {
-    let mut slugs = own_provider_slugs(state, user_id).await?;
-    slugs.extend(SharedCustomLookup::default().all(state, user_id).await?.iter().map(|s| s.provider.slug.clone()));
-    Ok(slugs)
 }
 
 /// Read-time display label for a pinned target — `custom_label` wins over the upstream
@@ -166,11 +156,21 @@ async fn to_list_item(state: &AppState, user_id: &str, lookup: &SharedCustomLook
     }))
 }
 
-/// Validates `models` against the caller's own providers and accounts. `Err(message)` is the
-/// 400 body's text.
+/// Validates `models`. `Err(message)` is the 400 body's text. A target's prefix is a builtin
+/// `ProviderId`, one of the caller's own custom or CLI provider slugs (docs/cli.md), or the
+/// slug of a custom endpoint a pool extension shares with the caller, never another user's
+/// otherwise. A pinned target is still checked against the caller's own rows, so it can never
+/// name a shared endpoint's account.
 async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> anyhow::Result<Result<Vec<GroupModelInput>, String>> {
-    let slugs = prefix_resolver(state, user_id).await?;
-    let resolve_prefix = |prefix: &str| ProviderId::parse(prefix).is_some() || slugs.contains(prefix);
+    let own = own_provider_slugs(state, user_id).await?;
+    let missed_own = AtomicBool::new(false);
+    let own_prefix = |prefix: &str| {
+        let known = ProviderId::parse(prefix).is_some() || own.contains(prefix);
+        if !known {
+            missed_own.store(true, Ordering::Relaxed);
+        }
+        known
+    };
     let pool = state.pool().clone();
     let owner = user_id.to_string();
     // A pinned `account_id` must be a row owned by the caller whose `provider` matches the
@@ -183,7 +183,17 @@ async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> any
             matches!(get_account(&pool, &owner, &account_id).await, Ok(Some(row)) if row.provider == provider)
         }
     };
-    Ok(validate_group_models(models, &resolve_prefix, &resolve_account).await.map(|models| {
+    let mut validated = validate_group_models(models, &own_prefix, &resolve_account).await;
+    // Only a prefix the caller's own namespace missed asks the extension, so a lost sharing
+    // store never blocks a group made of the caller's own providers. When it is asked, its
+    // error propagates: a 500, never a misleading 400 on a valid shared slug.
+    if validated.is_err() && missed_own.load(Ordering::Relaxed) {
+        let shared: HashSet<String> =
+            SharedCustomLookup::default().all(state, user_id).await?.iter().map(|s| s.provider.slug.clone()).collect();
+        let any_prefix = |prefix: &str| ProviderId::parse(prefix).is_some() || own.contains(prefix) || shared.contains(prefix);
+        validated = validate_group_models(models, &any_prefix, &resolve_account).await;
+    }
+    Ok(validated.map(|models| {
         models
             .into_iter()
             .map(|m| GroupModelInput {
@@ -968,6 +978,18 @@ mod tests {
         let json = body_json(send(&state, "GET", "/api/model-groups", &cookie, None).await).await;
         assert_eq!(json["groups"].as_array().unwrap().len(), 2);
         assert_eq!(ext.list_calls.lock().unwrap().len(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_extension_never_blocks_a_group_of_the_callers_own_providers() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let ext = std::sync::Arc::new(SharedCustomExtension { fail: true, ..Default::default() });
+        let state = state_with_extension(pool, MockTransport::new(), ext.clone());
+        let (_, cookie) = signed_in(&state, "borrower@example.com").await;
+        let body = json!({ "name": "Own", "slug": "own-ep", "models": [{ "name": "sonnet", "targets": ["claude-code/claude-sonnet-4"] }] });
+        let response = create_group(&state, &cookie, body).await;
+        assert!(response.status().is_success(), "{}", response.status());
+        assert!(ext.list_calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
