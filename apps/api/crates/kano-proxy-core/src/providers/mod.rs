@@ -11,6 +11,7 @@ pub mod codex_reasoning_cache;
 pub mod codex_replay_history;
 pub mod codex_usage;
 pub mod custom_anthropic;
+pub mod custom_anthropic_tools;
 pub mod custom_openai;
 pub mod custom_openai_reasoning;
 pub mod grok;
