@@ -26,6 +26,8 @@ use crate::db::custom_providers::{
     update_custom_provider_fields, CustomProviderPatch, CustomProviderRow, NewCustomProvider, SlugRename,
 };
 use crate::pool::bench::{bench_until_from_row, clear_bench};
+use crate::pool::extension::{ListSharedOptions, SharedCustomProvider};
+use crate::routing::candidates::viewer_shared_custom;
 use crate::pool::StoredCredential;
 use crate::utils::custom_provider::{
     is_custom_provider_format, is_models_mode, mask_api_key, parse_manual_models, validate_api_key,
@@ -142,14 +144,46 @@ async fn list_items(state: &AppState, user_id: &str, rows: &[CustomProviderRow])
 
 // ------------------------------------------------------------------------------- GET /
 
+/// One endpoint another user shares with the caller (docs/cloud-edition.md § "Pool
+/// extension"): what a borrower may see and nothing that locates or unlocks it, so no base
+/// URL, count-tokens URL, key mask or manual model list.
+fn to_shared_item(shared: &SharedCustomProvider, shadowed: bool, now_ms: i64) -> Value {
+    json!({
+        "id": shared.provider.id,
+        "slug": shared.provider.slug,
+        "name": shared.provider.name,
+        "format": shared.provider.format,
+        "status": compute_status(std::slice::from_ref(&shared.account), now_ms),
+        "account_id": shared.account.id,
+        "share": {
+            "teamId": shared.share.team_id,
+            "teamName": shared.share.team_name,
+            "ownerLabel": shared.share.owner_label,
+        },
+        // The edition's own bars for this viewer, as on a shared account row.
+        "usage": shared.usage.as_ref().map(|u| json!({ "windows": u.windows })),
+        // The viewer's own custom or CLI provider of the same slug wins every request.
+        "shadowed": shadowed,
+        // The owner's request edits, read-only here: they are the ones that apply.
+        "strip_fast_mode": shared.account.strip_fast_mode,
+        "strip_claude_code_line": shared.account.strip_claude_code_line,
+    })
+}
+
 async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
-    let Ok(rows) = list_custom_providers(state.pool(), &session.user.id).await else {
+    let user_id = &session.user.id;
+    let Ok(rows) = list_custom_providers(state.pool(), user_id).await else {
         return internal_error();
     };
-    match list_items(&state, &session.user.id, &rows).await {
-        Ok(providers) => Json(json!({ "providers": providers })).into_response(),
-        Err(_) => internal_error(),
-    }
+    let Ok(providers) = list_items(&state, user_id, &rows).await else {
+        return internal_error();
+    };
+    let Ok(shared_rows) = viewer_shared_custom(&state, user_id, ListSharedOptions { usage: true }).await else {
+        return internal_error();
+    };
+    let now = state.now_ms();
+    let shared: Vec<Value> = shared_rows.iter().map(|s| to_shared_item(&s.endpoint, s.shadowed, now)).collect();
+    Json(json!({ "providers": providers, "shared": shared })).into_response()
 }
 
 // ------------------------------------------------------------------------------ POST /
@@ -896,9 +930,106 @@ mod tests {
             .unwrap();
         assert_eq!(listed(&state, &cookie).await["providers"][0]["status"], "benched");
 
-        // Another user sees none of it.
+        // Another user sees none of it, and a standalone install shares nothing.
         let (_, other) = signed_in(&state, "user_2@example.com").await;
         assert_eq!(listed(&state, &other).await["providers"], json!([]));
+        assert_eq!(listed(&state, &other).await["shared"], json!([]));
+    }
+
+    // ------------------------------------------------- endpoints shared by a pool extension
+
+    use crate::pool::extension::test_support::{owner_endpoint, SharedCustomExtension};
+    use crate::providers::{AccountUsage, UsageWindow};
+    use std::sync::Arc;
+
+    const OWNER_BASE_URL: &str = "https://owner-gateway.example.com/v1";
+
+    /// An owner lending `team-gw` (with bars for the viewer) and `mine` through an extension.
+    async fn lending_state() -> Option<(AppState, Arc<SharedCustomExtension>, Vec<SharedCustomProvider>)> {
+        let pool = test_pool().await?;
+        let owner = insert_user(&pool, "owner@example.com").await;
+        let mut team = owner_endpoint(&pool, &owner.id, "team-gw", "anthropic", OWNER_BASE_URL, Some(&["owner-only-model"])).await;
+        team.usage = Some(AccountUsage {
+            windows: vec![UsageWindow { label: "Allowance".into(), utilization: Some(40.0), resets_at: None, value: None, scope: None }],
+            show_credits: false,
+        });
+        sqlx::query("UPDATE upstream_accounts SET strip_fast_mode = TRUE WHERE id = $1").bind(&team.account.id).execute(&pool).await.unwrap();
+        team.account.strip_fast_mode = true;
+        let mine = owner_endpoint(&pool, &owner.id, "mine", "openai", OWNER_BASE_URL, None).await;
+        let lent = vec![team, mine];
+        let ext = SharedCustomExtension::lending(lent.clone());
+        let state = crate::pool::extension::test_support::state_with_extension(pool, MockTransport::new(), ext.clone());
+        Some((state, ext, lent))
+    }
+
+    #[tokio::test]
+    async fn the_list_carries_shared_endpoints_without_anything_that_locates_or_unlocks_them() {
+        let Some((state, ext, lent)) = lending_state().await else { return skip_without_db() };
+        let (_, cookie) = signed_in(&state, "borrower@example.com").await;
+        // The borrower's own `mine` shadows the owner's.
+        created(&state, &cookie, json!({ "slug": "mine" })).await;
+
+        let json = listed(&state, &cookie).await;
+        assert_eq!(json["providers"].as_array().unwrap().len(), 1, "the own list is unchanged");
+        let shared = json["shared"].as_array().unwrap();
+        assert_eq!(shared.len(), 2);
+        let mut keys: Vec<&str> = shared[0].as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "account_id", "format", "id", "name", "shadowed", "share", "slug", "status", "strip_claude_code_line",
+                "strip_fast_mode", "usage",
+            ]
+        );
+        assert_eq!(shared[0]["id"], lent[0].provider.id);
+        assert_eq!(shared[0]["slug"], "team-gw");
+        assert_eq!(shared[0]["format"], "anthropic");
+        assert_eq!(shared[0]["status"], "active");
+        assert_eq!(shared[0]["account_id"], lent[0].account.id);
+        assert_eq!(shared[0]["share"], json!({ "teamId": "team_1", "teamName": "Acme", "ownerLabel": "owner@example.com" }));
+        assert_eq!(shared[0]["usage"]["windows"][0]["utilization"], 40.0);
+        assert_eq!(shared[0]["shadowed"], false);
+        assert_eq!(shared[0]["strip_fast_mode"], true, "the owner's request edits, which are the ones that apply");
+        assert_eq!(shared[1]["slug"], "mine");
+        assert_eq!(shared[1]["shadowed"], true);
+        assert_eq!(shared[1]["usage"], Value::Null);
+        let text = json["shared"].to_string();
+        for secret in [OWNER_BASE_URL, "sk-owner", "owner-only-model", "key_mask", "count_tokens_url", "manual_models"] {
+            assert!(!text.contains(secret), "{secret} leaked into the borrower's list");
+        }
+        assert_eq!(*ext.list_calls.lock().unwrap(), [true], "the list asks for the edition's bars");
+    }
+
+    #[tokio::test]
+    async fn every_write_on_a_shared_endpoint_is_a_404_for_the_borrower() {
+        let Some((state, _, lent)) = lending_state().await else { return skip_without_db() };
+        let (_, cookie) = signed_in(&state, "borrower@example.com").await;
+        let team = &lent[0];
+        crate::pool::bench::mark_benched(state.pool(), &team.provider.user_id, "team-gw", &team.account.id, None, None, state.now_ms())
+            .await
+            .unwrap();
+        let id = &team.provider.id;
+        for (method, uri, body) in [
+            ("PUT", format!("/api/custom-providers/{id}"), Some(json!({ "name": "Taken over", "api_key": "sk-borrower-key-value" }))),
+            ("DELETE", format!("/api/custom-providers/{id}"), None),
+            ("POST", format!("/api/custom-providers/{id}/unpause"), None),
+            ("POST", "/api/custom-providers/test".to_string(), Some(json!({ "id": id }))),
+            (
+                "PATCH",
+                format!("/api/providers/team-gw/accounts/{}", team.account.id),
+                Some(json!({ "strip_fast_mode": false, "custom_label": "mine now" })),
+            ),
+        ] {
+            let res = call(&state, request(method, &uri, Some(&cookie), body)).await;
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+        }
+        let stored = get_custom_provider_by_id(state.pool(), &team.provider.user_id, id).await.unwrap().expect("still there");
+        assert_eq!(stored.name, team.provider.name);
+        let account = stored_accounts(state.pool(), &team.provider.user_id, "team-gw").await.remove(0);
+        assert_eq!(account.encrypted_payload, team.account.encrypted_payload);
+        assert!(account.strip_fast_mode && account.custom_label.is_none());
+        assert!(bench_until_from_row(&account, state.now_ms()).is_some(), "the owner's bench is theirs to clear");
     }
 
     #[tokio::test]

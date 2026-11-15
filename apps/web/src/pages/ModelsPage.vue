@@ -36,7 +36,7 @@ import type { SectionItem } from "@/components/ui/SectionNav.vue"
 import TextInput from "@/components/ui/TextInput.vue"
 import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
-import { useCustomProviders } from "@/composables/useCustomProviders"
+import { reachableShared, useCustomProviders } from "@/composables/useCustomProviders"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import { listModels } from "@/services/api"
@@ -54,7 +54,7 @@ import {
   type ProviderId,
 } from "@/types"
 
-type EmptyKind = "codex" | "custom" | "generic"
+type EmptyKind = "codex" | "custom" | "shared" | "generic"
 
 type ModelGroup = {
   key: string
@@ -68,6 +68,11 @@ type ModelGroup = {
    */
   blurb: string | null
   formatBadge: string | null
+  /**
+   * Who lends a shared endpoint (docs/cloud-edition.md), as the Providers page
+   * names them. Null for everything the viewer owns.
+   */
+  sharedBy: string | null
   models: CatalogModel[]
   /** Upstream error text: server data, shown verbatim, not catalog copy. */
   error: string | null
@@ -96,6 +101,7 @@ const NAME_KEY: Record<ProviderId, MessageKey> = {
 const GROUP_EMPTY_KEY: Record<EmptyKind, MessageKey> = {
   codex: "models.group.emptyCodex",
   custom: "models.group.emptyCustom",
+  shared: "models.group.emptyShared",
   generic: "models.group.emptyGeneric",
 }
 
@@ -142,6 +148,7 @@ const groups = computed<ModelGroup[]>(() => {
       name: t(NAME_KEY[p.id]),
       blurb: null,
       formatBadge: null,
+      sharedBy: null,
       models: byPrefix.get(p.id) ?? [],
       error: metaFor(p.id)?.error ?? null,
       emptyKind: p.id === "codex" ? "codex" : "generic",
@@ -159,6 +166,7 @@ const groups = computed<ModelGroup[]>(() => {
         cp.format === "anthropic"
           ? t("custom.dialog.formatAnthropic")
           : t("custom.dialog.formatOpenAI"),
+      sharedBy: null,
       models: byPrefix.get(cp.slug) ?? [],
       error: metaFor(cp.slug)?.error ?? null,
       emptyKind: "custom",
@@ -178,13 +186,36 @@ const groups = computed<ModelGroup[]>(() => {
         cp.format === "anthropic"
           ? t("custom.dialog.formatAnthropic")
           : t("custom.dialog.formatOpenAI"),
+      sharedBy: null,
       models: byPrefix.get(cp.slug) ?? [],
       error: metaFor(cp.slug)?.error ?? null,
       emptyKind: "generic",
     })
   }
 
-  // 4. Defensively, a prefix matching neither a builtin nor a known endpoint
+  // 4. One group per endpoint another user shares with the viewer, after
+  // everything the viewer owns. A shadowed one is skipped: its slug is the
+  // viewer's own provider above, and the catalog lists only that one. Its
+  // error is the server's fixed text, never the owner's upstream reply.
+  for (const sp of reachableShared(customProviders.state.shared)) {
+    if (seen.has(sp.slug)) continue
+    seen.add(sp.slug)
+    out.push({
+      key: sp.slug,
+      name: sp.name,
+      blurb: `${sp.slug}/*`,
+      formatBadge:
+        sp.format === "anthropic"
+          ? t("custom.dialog.formatAnthropic")
+          : t("custom.dialog.formatOpenAI"),
+      sharedBy: t("providers.account.shared", { owner: sp.share.ownerLabel }),
+      models: byPrefix.get(sp.slug) ?? [],
+      error: metaFor(sp.slug)?.error ?? null,
+      emptyKind: "shared",
+    })
+  }
+
+  // 5. Defensively, a prefix matching neither a builtin nor a known endpoint
   // (a stale cache right after a deletion) so its models still render. Model
   // groups no longer appear in this catalog at all (v4 — each group is its
   // own endpoint; see docs/api.md § Group endpoints).
@@ -195,6 +226,7 @@ const groups = computed<ModelGroup[]>(() => {
       name: key,
       blurb: null,
       formatBadge: null,
+      sharedBy: null,
       models: list,
       error: metaFor(key)?.error ?? null,
       emptyKind: "generic",
@@ -450,8 +482,9 @@ async function copyId(id: string) {
         <AppCard v-for="group in visibleGroups" :key="group.key" flush :title="group.name">
           <!-- Identity, not explanation: the format the endpoint speaks and the
                prefix its ids carry. A builtin adds neither. -->
-          <template v-if="group.formatBadge || group.blurb" #heading>
+          <template v-if="group.formatBadge || group.blurb || group.sharedBy" #heading>
             <Badge v-if="group.formatBadge">{{ group.formatBadge }}</Badge>
+            <Badge v-if="group.sharedBy">{{ group.sharedBy }}</Badge>
             <span v-if="group.blurb" class="group-prefix mono">{{ group.blurb }}</span>
           </template>
 

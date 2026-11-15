@@ -223,6 +223,7 @@ export const en = {
   "logs.picker.kind.subscription": "Subscription (OAuth)",
   "logs.picker.kind.endpoint": "API endpoint",
   "logs.picker.kind.cli": "CLI tunnel",
+  "logs.picker.kind.shared": "Shared API endpoint",
   // Rows: the alias names what the client sent, the arrow what it ran.
   "logs.noAliasRow": "no alias",
   // Columns control.
@@ -430,6 +431,10 @@ export const en = {
   "custom.field.endpoint": "Endpoint",
   "custom.field.key": "Key",
   "custom.field.countTokens": "Token count",
+  // An endpoint another user shares with the viewer (docs/admin-ui.md §
+  // Providers page "Shared endpoints"). Its own prefix wins every request.
+  "custom.shared.unavailable": "Unavailable",
+  "custom.shared.shadowed": "You already have a provider with this prefix, so requests go to yours.",
   "custom.removeTitle": "Remove \"{name}\"?",
   "custom.removeConfirm": "Its stored key is deleted too, and requests to {slug}/… stop resolving.",
   "custom.test.ok": "Connected",
@@ -526,6 +531,7 @@ export const en = {
   "models.group.emptyGeneric": "Connect an account to load these models.",
   "models.group.emptyCustom":
     "Add model ids to this endpoint, or let it load them automatically.",
+  "models.group.emptyShared": "Its owner manages this endpoint's model list.",
   "models.group.emptyCodex":
     "This provider doesn't publish a model list — use the model id from your ChatGPT plan.",
   // The catalog's fixed `group` section. Every other section is named by the

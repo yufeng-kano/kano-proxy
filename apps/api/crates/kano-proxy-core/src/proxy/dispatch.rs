@@ -26,7 +26,7 @@ use crate::db::custom_providers::CustomProviderRow;
 use crate::logging::request_log::{log_request, LogEntry};
 use crate::logging::usage_capture::{NormalizedUsage, UsageSniffer};
 use crate::pricing::litellm::{model_price, ModelPrice};
-use crate::pool::extension::{borrower_safe_headers, settle_lease, AttemptLease, LeaseOutcome};
+use crate::pool::extension::{settle_lease, AttemptLease, HeaderAudience, LeaseOutcome};
 use crate::providers::types::{AdapterError, CallExtras, ChatCompletionRequest, DynAdapter};
 use crate::proxy::request_edits::{edit_anthropic_body, edit_chat_request};
 use crate::providers::ProviderId;
@@ -190,11 +190,11 @@ pub fn is_event_stream(res: &Response) -> bool {
         .is_some_and(|ct| ct.contains("text/event-stream"))
 }
 
-/// `shared` = the candidate is a borrowed row: the owner's rate-limit and identity headers are
-/// dropped first (docs/cloud-edition.md § "Pool extension"). Own rows pass the default and are
-/// unchanged.
-pub fn passthrough_stream_headers(headers: &HeaderMap, shared: bool) -> HeaderMap {
-    let src = if shared { borrower_safe_headers(headers) } else { headers.clone() };
+/// A borrowed row's headers are filtered for its audience first (docs/cloud-edition.md §
+/// "Pool extension"): a builtin row drops the owner's rate-limit and identity headers, a custom
+/// endpoint keeps only `content-type`. Own rows are unchanged.
+pub fn passthrough_stream_headers(headers: &HeaderMap, audience: HeaderAudience) -> HeaderMap {
+    let src = audience.filter(headers);
     let mut out = HeaderMap::new();
     let content_type = src
         .get(header::CONTENT_TYPE)
@@ -637,7 +637,7 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
         let status = response.status();
         let relay_too_large = is_relay_request_too_large(&response);
         let event_stream = is_event_stream(&response);
-        let shared = candidate.share.is_some();
+        let audience = HeaderAudience::of(&candidate);
         let mut entry = t.candidate_entry(started_at_ms, &candidate);
         entry.status_code = status.as_u16() as i32;
         entry.latency_ms = latency_ms;
@@ -704,7 +704,7 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
                 },
             );
             let mut res = Response::builder().status(parts.status).body(Body::from_stream(stream)).expect("builds");
-            *res.headers_mut() = passthrough_stream_headers(&parts.headers, shared);
+            *res.headers_mut() = passthrough_stream_headers(&parts.headers, audience);
             return res;
         }
 
@@ -740,11 +740,10 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
                     .expect("response builds")
             }
             NonStreamResponse::AsReceived => {
-                // Same status and body as received; a borrowed row drops the owner's
-                // rate-limit/identity headers first.
+                // Same status and body as received; a borrowed row's headers are filtered for
+                // its audience first.
                 let mut res = Response::builder().status(parts.status).body(Body::from(text)).expect("builds");
-                *res.headers_mut() =
-                    if shared { borrower_safe_headers(&parts.headers) } else { parts.headers.clone() };
+                *res.headers_mut() = audience.filter(&parts.headers);
                 res
             }
         }
@@ -1293,15 +1292,23 @@ pub(crate) mod tests {
         h.insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
         h.insert("anthropic-ratelimit-tokens-remaining", HeaderValue::from_static("5"));
         h.insert("x-request-id", HeaderValue::from_static("abc"));
-        let own = passthrough_stream_headers(&h, false);
+        let own = passthrough_stream_headers(&h, HeaderAudience::Own);
         assert_eq!(own.get(header::CONTENT_TYPE).unwrap(), "text/event-stream");
         assert_eq!(own.get(header::CACHE_CONTROL).unwrap(), "no-cache");
         assert_eq!(own.get("anthropic-ratelimit-tokens-remaining").unwrap(), "5");
         assert!(own.get("x-request-id").is_none());
         // A borrowed row never leaks the owner's budgets.
-        let shared = passthrough_stream_headers(&h, true);
+        let shared = passthrough_stream_headers(&h, HeaderAudience::BorrowedBuiltin);
         assert!(shared.get("anthropic-ratelimit-tokens-remaining").is_none());
         assert_eq!(shared.get(header::CONTENT_TYPE).unwrap(), "text/event-stream");
+        // A borrowed custom gateway keeps nothing but the content type, budgets included.
+        let mut gateway = h.clone();
+        gateway.insert("x-litellm-model-api-base", HeaderValue::from_static("https://owner.internal"));
+        gateway.insert(header::SERVER, HeaderValue::from_static("nginx"));
+        let custom = passthrough_stream_headers(&gateway, HeaderAudience::BorrowedCustom);
+        let mut names: Vec<&str> = custom.keys().map(|k| k.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["cache-control", "content-type"]);
     }
 
     #[test]

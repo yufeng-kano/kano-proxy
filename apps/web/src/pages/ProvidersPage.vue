@@ -18,6 +18,7 @@ import RenameAccountDialog from "@/components/RenameAccountDialog.vue"
 import AccountCard from "@/components/providers/AccountCard.vue"
 import CliSection from "@/components/providers/CliSection.vue"
 import CustomProviderCard from "@/components/providers/CustomProviderCard.vue"
+import SharedEndpointCard from "@/components/providers/SharedEndpointCard.vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
@@ -29,7 +30,7 @@ import type { SectionItem } from "@/components/ui/SectionNav.vue"
 import { useAccounts } from "@/composables/useAccounts"
 import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
-import { useCustomProviders } from "@/composables/useCustomProviders"
+import { customEndpointCount, useCustomProviders } from "@/composables/useCustomProviders"
 import { useConfirm } from "@/composables/useConfirm"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
@@ -160,7 +161,7 @@ const navItems = computed<SectionItem[]>(() => [
   {
     id: CUSTOM,
     label: t("providers.group.custom"),
-    count: customProviders.state.data?.length ?? null,
+    count: customEndpointCount(customProviders.state.data, customProviders.state.shared),
   },
   {
     id: CLI,
@@ -177,7 +178,7 @@ const allCount = computed<number | null>(() => {
     if (n == null) return null
     sum += n
   }
-  const custom = customProviders.state.data?.length
+  const custom = customEndpointCount(customProviders.state.data, customProviders.state.shared)
   if (custom == null) return null
   const cliProviders = cli.state.providers?.length
   if (cliProviders == null) return null
@@ -788,7 +789,10 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
             </div>
           </div>
 
-          <div v-else-if="customProviders.state.data.length" class="rows">
+          <div
+            v-else-if="customProviders.state.data.length || customProviders.state.shared?.length"
+            class="rows"
+          >
             <CustomProviderCard
               v-for="(provider, index) in customProviders.state.data"
               :key="provider.id"
@@ -808,6 +812,13 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
               @drag-start="onCustomDragStart(provider.id)"
               @drag-enter="onCustomDragEnter(index)"
               @drag-end="onCustomDragEnd"
+            />
+            <!-- After the viewer's own, read-only: the section's gate reveals
+                 nothing on them (docs/admin-ui.md § Providers page). -->
+            <SharedEndpointCard
+              v-for="provider in customProviders.state.shared ?? []"
+              :key="`shared:${provider.id}`"
+              :provider="provider"
             />
           </div>
 

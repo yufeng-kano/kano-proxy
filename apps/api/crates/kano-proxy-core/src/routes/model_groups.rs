@@ -6,6 +6,7 @@
 //! read-time account label and the stored-state routing indicator the page draws.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::body::Bytes;
 use axum::extract::{Path, State};
@@ -17,15 +18,13 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::session::SessionUser;
 use crate::db::accounts::get_account;
-use crate::db::cli::list_cli_providers;
-use crate::db::custom_providers::list_custom_providers;
 use crate::db::model_groups::{
     count_model_groups, delete_model_group, get_model_group_by_id, insert_model_group, list_model_groups,
     list_models_for_group, parse_group_targets, replace_group_models, update_model_group_fields, GroupModelInput,
     GroupTarget, ModelGroupRow,
 };
 use crate::providers::ProviderId;
-use crate::routing::candidates::{candidates_for_target, resolve_target_prefix};
+use crate::routing::candidates::{candidates_for_target, own_provider_slugs, resolve_target_prefix, SharedCustomLookup};
 use crate::routing::facts::{candidate_facts_list, earliest_unusable_until};
 use crate::routing::strategy::DEFAULT_STRATEGY;
 use crate::routing::types::CandidateFacts;
@@ -56,15 +55,6 @@ fn object_body(body: &Bytes) -> Option<Map<String, Value>> {
     }
 }
 
-/// Builtin `ProviderId`, or one of the caller's own custom or CLI provider slugs
-/// (docs/cli.md) — never another user's.
-async fn prefix_resolver(state: &AppState, user_id: &str) -> Result<HashSet<String>, sqlx::Error> {
-    let mut slugs: HashSet<String> =
-        list_custom_providers(state.pool(), user_id).await?.into_iter().map(|r| r.slug).collect();
-    slugs.extend(list_cli_providers(state.pool(), user_id).await?.into_iter().map(|r| r.slug));
-    Ok(slugs)
-}
-
 /// Read-time display label for a pinned target — `custom_label` wins over the upstream
 /// `label`, `None` when unpinned or the account no longer exists. Never stored.
 async fn account_label(state: &AppState, user_id: &str, account_id: Option<&str>) -> Result<Option<String>, sqlx::Error> {
@@ -84,8 +74,14 @@ fn reason_for_facts(facts: &CandidateFacts) -> &'static str {
 
 /// One target's stored-state routing: what the ordered walk would do right now, from stored
 /// facts only — no upstream call (docs/providers.md § Routing module).
-async fn routing_for_target(state: &AppState, user_id: &str, index: usize, target: &GroupTarget) -> Result<Value, sqlx::Error> {
-    let Some(resolved) = resolve_target_prefix(state, user_id, index, target).await? else {
+async fn routing_for_target(
+    state: &AppState,
+    user_id: &str,
+    lookup: &SharedCustomLookup,
+    index: usize,
+    target: &GroupTarget,
+) -> anyhow::Result<Value> {
+    let Some(resolved) = resolve_target_prefix(state, user_id, lookup, index, target).await? else {
         return Ok(json!({ "usable": false, "reason": "unresolved", "unusable_until": Value::Null }));
     };
     let candidates = candidates_for_target(state, user_id, &resolved).await?;
@@ -106,7 +102,13 @@ async fn routing_for_target(state: &AppState, user_id: &str, index: usize, targe
 }
 
 /// One group model's read shape: name, enriched targets, per-model routing.
-async fn to_model_item(state: &AppState, user_id: &str, name: &str, targets: &[GroupTarget]) -> Result<Value, sqlx::Error> {
+async fn to_model_item(
+    state: &AppState,
+    user_id: &str,
+    lookup: &SharedCustomLookup,
+    name: &str,
+    targets: &[GroupTarget],
+) -> anyhow::Result<Value> {
     let mut enriched = Vec::with_capacity(targets.len());
     for target in targets {
         enriched.push(json!({
@@ -117,7 +119,7 @@ async fn to_model_item(state: &AppState, user_id: &str, name: &str, targets: &[G
     }
     let mut routing_targets = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
-        routing_targets.push(routing_for_target(state, user_id, index, target).await?);
+        routing_targets.push(routing_for_target(state, user_id, lookup, index, target).await?);
     }
     let current_target_index = routing_targets.iter().position(|t| t["usable"] == Value::Bool(true));
     Ok(json!({
@@ -132,11 +134,13 @@ async fn to_model_item(state: &AppState, user_id: &str, name: &str, targets: &[G
     }))
 }
 
-async fn to_list_item(state: &AppState, user_id: &str, row: &ModelGroupRow) -> Result<Value, sqlx::Error> {
+/// `lookup` spans one whole response, so a list of many groups asks the extension once at most.
+async fn to_list_item(state: &AppState, user_id: &str, lookup: &SharedCustomLookup, row: &ModelGroupRow) -> anyhow::Result<Value> {
     let model_rows = list_models_for_group(state.pool(), &row.id).await?;
     let mut models = Vec::with_capacity(model_rows.len());
     for model in &model_rows {
-        models.push(to_model_item(state, user_id, &model.name, &parse_group_targets(Some(&model.targets_json))).await?);
+        let targets = parse_group_targets(Some(&model.targets_json));
+        models.push(to_model_item(state, user_id, lookup, &model.name, &targets).await?);
     }
     Ok(json!({
         "id": row.id,
@@ -152,11 +156,21 @@ async fn to_list_item(state: &AppState, user_id: &str, row: &ModelGroupRow) -> R
     }))
 }
 
-/// Validates `models` against the caller's own providers and accounts. `Err(message)` is the
-/// 400 body's text.
-async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> Result<Result<Vec<GroupModelInput>, String>, sqlx::Error> {
-    let slugs = prefix_resolver(state, user_id).await?;
-    let resolve_prefix = |prefix: &str| ProviderId::parse(prefix).is_some() || slugs.contains(prefix);
+/// Validates `models`. `Err(message)` is the 400 body's text. A target's prefix is a builtin
+/// `ProviderId`, one of the caller's own custom or CLI provider slugs (docs/cli.md), or the
+/// slug of a custom endpoint a pool extension shares with the caller, never another user's
+/// otherwise. A pinned target is still checked against the caller's own rows, so it can never
+/// name a shared endpoint's account.
+async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> anyhow::Result<Result<Vec<GroupModelInput>, String>> {
+    let own = own_provider_slugs(state, user_id).await?;
+    let missed_own = AtomicBool::new(false);
+    let own_prefix = |prefix: &str| {
+        let known = ProviderId::parse(prefix).is_some() || own.contains(prefix);
+        if !known {
+            missed_own.store(true, Ordering::Relaxed);
+        }
+        known
+    };
     let pool = state.pool().clone();
     let owner = user_id.to_string();
     // A pinned `account_id` must be a row owned by the caller whose `provider` matches the
@@ -169,7 +183,17 @@ async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> Res
             matches!(get_account(&pool, &owner, &account_id).await, Ok(Some(row)) if row.provider == provider)
         }
     };
-    Ok(validate_group_models(models, &resolve_prefix, &resolve_account).await.map(|models| {
+    let mut validated = validate_group_models(models, &own_prefix, &resolve_account).await;
+    // Only a prefix the caller's own namespace missed asks the extension, so a lost sharing
+    // store never blocks a group made of the caller's own providers. When it is asked, its
+    // error propagates: a 500, never a misleading 400 on a valid shared slug.
+    if validated.is_err() && missed_own.load(Ordering::Relaxed) {
+        let shared: HashSet<String> =
+            SharedCustomLookup::default().all(state, user_id).await?.iter().map(|s| s.provider.slug.clone()).collect();
+        let any_prefix = |prefix: &str| ProviderId::parse(prefix).is_some() || own.contains(prefix) || shared.contains(prefix);
+        validated = validate_group_models(models, &any_prefix, &resolve_account).await;
+    }
+    Ok(validated.map(|models| {
         models
             .into_iter()
             .map(|m| GroupModelInput {
@@ -188,9 +212,10 @@ async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
 /// (docs/cli.md § Server routes: one validator, one response shape).
 pub(crate) async fn list_for_user(state: &AppState, user_id: &str) -> Response {
     let Ok(rows) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
+    let lookup = SharedCustomLookup::default();
     let mut groups = Vec::with_capacity(rows.len());
     for row in &rows {
-        match to_list_item(state, user_id, row).await {
+        match to_list_item(state, user_id, &lookup, row).await {
             Ok(item) => groups.push(item),
             Err(_) => return internal_error(),
         }
@@ -246,7 +271,7 @@ pub(crate) async fn create_for_user(state: &AppState, user_id: &str, body: &Byte
     if replace_group_models(state.pool(), user_id, &row.id, &models).await.is_err() {
         return internal_error();
     }
-    match to_list_item(state, user_id, &row).await {
+    match to_list_item(state, user_id, &SharedCustomLookup::default(), &row).await {
         Ok(item) => (StatusCode::CREATED, Json(item)).into_response(),
         Err(_) => internal_error(),
     }
@@ -324,7 +349,7 @@ pub(crate) async fn update_for_user(state: &AppState, user_id: &str, id: &str, b
         Err(_) => return internal_error(),
         Ok(row) => row.unwrap_or(existing),
     };
-    match to_list_item(state, user_id, &updated).await {
+    match to_list_item(state, user_id, &SharedCustomLookup::default(), &updated).await {
         Ok(item) => Json(item).into_response(),
         Err(_) => internal_error(),
     }
@@ -350,6 +375,7 @@ mod tests {
     use crate::db::custom_providers::{insert_custom_provider, NewCustomProvider};
     use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_router, test_state};
     use crate::upstream::MockTransport;
+    use crate::pool::extension::test_support::{owner_endpoint, state_with_extension, SharedCustomExtension};
     use crate::utils::model_group::{MAX_MODELS_PER_GROUP, MAX_TARGETS_PER_MODEL};
     use axum::body::Body;
     use axum::http::{header, Request};
@@ -911,5 +937,69 @@ mod tests {
         assert_eq!(json["groups"].as_array().unwrap().len(), 0);
         let models: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM model_group_models").fetch_one(state.pool()).await.unwrap();
         assert_eq!(models, 0);
+    }
+
+    #[tokio::test]
+    async fn a_target_may_name_a_shared_endpoint_slug_but_never_pin_its_account() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let owner = insert_user(&pool, "owner@example.com").await;
+        let lent = owner_endpoint(&pool, &owner.id, "team-gw", "openai", "https://owner.example.com/v1", None).await;
+        let stranger = insert_user(&pool, "stranger@example.com").await;
+        owner_endpoint(&pool, &stranger.id, "secret-gw", "openai", "https://stranger.example.com/v1", None).await;
+        let ext = SharedCustomExtension::lending(vec![lent.clone()]);
+        let state = state_with_extension(pool, MockTransport::new(), ext.clone());
+        let (_, cookie) = signed_in(&state, "borrower@example.com").await;
+        let models = |targets: Value| json!([{ "name": "gpt", "targets": targets }]);
+
+        let response =
+            create_group(&state, &cookie, json!({ "name": "Shared", "slug": "shared-ep", "models": models(json!(["team-gw/gpt-4o"])) })).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let json = body_json(response).await;
+        // The routing indicator walks the borrowed key like any other candidate.
+        assert_eq!(json["models"][0]["routing"]["current_target_index"], 0);
+
+        for (label, targets) in [
+            ("a stranger's unshared slug", json!(["secret-gw/gpt-4o"])),
+            ("a pin on the shared endpoint's account", json!([{ "model": "team-gw/gpt-4o", "account_id": lent.account.id }])),
+        ] {
+            let response = create_group(&state, &cookie, json!({ "name": label, "slug": "probe-ep", "models": models(targets) })).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{label}");
+        }
+
+        // Two groups with three targets on the shared slug: the whole list asks once.
+        let response = create_group(
+            &state,
+            &cookie,
+            json!({ "name": "More", "slug": "more-ep", "models": models(json!(["team-gw/gpt-4o-mini", "team-gw/o3"])) }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let before = ext.list_calls.lock().unwrap().len();
+        let json = body_json(send(&state, "GET", "/api/model-groups", &cookie, None).await).await;
+        assert_eq!(json["groups"].as_array().unwrap().len(), 2);
+        assert_eq!(ext.list_calls.lock().unwrap().len(), before + 1);
+    }
+
+    #[tokio::test]
+    async fn a_failing_extension_never_blocks_a_group_of_the_callers_own_providers() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let ext = std::sync::Arc::new(SharedCustomExtension { fail: true, ..Default::default() });
+        let state = state_with_extension(pool, MockTransport::new(), ext.clone());
+        let (_, cookie) = signed_in(&state, "borrower@example.com").await;
+        let body = json!({ "name": "Own", "slug": "own-ep", "models": [{ "name": "sonnet", "targets": ["claude-code/claude-sonnet-4"] }] });
+        let response = create_group(&state, &cookie, body).await;
+        assert!(response.status().is_success(), "{}", response.status());
+        assert!(ext.list_calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failing_extension_fails_the_write_instead_of_rejecting_a_shared_slug() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let ext = std::sync::Arc::new(SharedCustomExtension { fail: true, ..Default::default() });
+        let state = state_with_extension(pool, MockTransport::new(), ext);
+        let (_, cookie) = signed_in(&state, "borrower@example.com").await;
+        let body = json!({ "name": "Shared", "slug": "shared-ep", "models": [{ "name": "gpt", "targets": ["team-gw/gpt-4o"] }] });
+        let response = create_group(&state, &cookie, body).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

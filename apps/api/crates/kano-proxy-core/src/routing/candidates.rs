@@ -17,18 +17,21 @@
 //! account)` triples exist at all.
 
 use crate::db::accounts::{account_profile_meta, get_account, list_accounts, AccountRow};
-use crate::db::cli::{get_cli_provider_by_slug, CliProviderRow};
-use crate::db::custom_providers::{get_custom_provider_by_slug, CustomProviderRow};
+use std::collections::HashSet;
+
+use crate::db::cli::{get_cli_provider_by_slug, list_cli_providers, CliProviderRow};
+use crate::db::custom_providers::{get_custom_provider_by_slug, list_custom_providers, CustomProviderRow};
 use crate::db::model_groups::{
     get_group_model_by_name, parse_group_targets, GroupTarget, ModelGroupModelRow, ModelGroupRow,
 };
 use crate::db::provider_settings::get_provider_strategy;
-use crate::pool::extension::{ListSharedOptions, ShareInfo};
+use crate::pool::extension::{shared_custom_providers, ListSharedOptions, ShareInfo, SharedCustomProvider};
 use crate::providers::cli::create_cli_adapter;
 use crate::providers::custom_anthropic::custom_anthropic_adapter;
 use crate::providers::custom_openai::custom_openai_adapter;
 use crate::providers::registry::get_adapter;
 use crate::providers::{DynAdapter, ProviderId};
+use crate::routing::strategy::DEFAULT_STRATEGY;
 use crate::routing::types::RoutingCandidate;
 use crate::utils::model::split_model_id;
 use crate::AppState;
@@ -45,6 +48,18 @@ pub struct ResolvedTarget {
     pub adapter: DynAdapter,
     /// Pinned `upstream_accounts` id, or `None` for an unpinned (whole-pool) target.
     pub account_id: Option<String>,
+    /// Set when the prefix is a custom endpoint another user shares with the caller: that
+    /// endpoint's one key is the whole pool (docs/providers.md § Custom endpoints "Shared
+    /// endpoints"). `custom_provider` is then the owner's row.
+    pub shared: Option<SharedEndpoint>,
+}
+
+/// The owner's account row behind a shared custom endpoint, with the descriptor its candidate
+/// carries downstream.
+#[derive(Clone)]
+pub struct SharedEndpoint {
+    pub account: AccountRow,
+    pub share: ShareInfo,
 }
 
 /// The adapter for one custom (BYO base URL) provider row — `adapterFor(false, …)`.
@@ -61,14 +76,95 @@ pub fn cli_provider_adapter(cx: &AppState, row: &CliProviderRow) -> DynAdapter {
     create_cli_adapter(cx, row)
 }
 
+/// The custom endpoints other users share with the caller, asked of the pool extension at most
+/// once per resolution and only once a prefix has missed the caller's own namespace, so a
+/// request or a group with no shared or dangling target never calls the extension. Routing
+/// propagates an extension error: for a shared slug the borrowed endpoint is the whole request,
+/// so a lost store must read as a retryable failure, not as an unknown model.
+#[derive(Default)]
+pub struct SharedCustomLookup(tokio::sync::OnceCell<Vec<SharedCustomProvider>>);
+
+impl SharedCustomLookup {
+    pub async fn all(&self, cx: &AppState, user_id: &str) -> anyhow::Result<&[SharedCustomProvider]> {
+        let Some(ext) = cx.pool_extension() else { return Ok(&[]) };
+        let shared = self
+            .0
+            .get_or_try_init(|| async {
+                ext.list_shared_custom(cx, user_id, ListSharedOptions::default())
+                    .await
+                    .map_err(|error| error.context("pool extension listSharedCustom failed"))
+            })
+            .await?;
+        Ok(shared)
+    }
+}
+
+/// The fourth prefix branch (docs/cloud-edition.md § "Pool extension"): a custom endpoint
+/// another user shares with the caller, consulted only after the caller's own builtin, custom
+/// and CLI namespace missed, so the caller's own provider of the same slug always wins.
+async fn shared_custom_target(
+    cx: &AppState,
+    user_id: &str,
+    lookup: &SharedCustomLookup,
+    target_index: usize,
+    prefix: &str,
+    upstream_model: String,
+) -> anyhow::Result<Option<ResolvedTarget>> {
+    let Some(shared) = lookup.all(cx, user_id).await?.iter().find(|s| s.provider.slug == prefix).cloned() else {
+        return Ok(None);
+    };
+    Ok(Some(ResolvedTarget {
+        target_index,
+        provider: shared.provider.slug.clone(),
+        upstream_model,
+        is_builtin: false,
+        adapter: custom_provider_adapter(&shared.provider),
+        custom_provider: Some(shared.provider),
+        account_id: None,
+        shared: Some(SharedEndpoint { account: shared.account, share: shared.share }),
+    }))
+}
+
+/// The caller's own custom and CLI slugs: the namespace a shared endpoint can be shadowed by.
+pub async fn own_provider_slugs(cx: &AppState, user_id: &str) -> Result<HashSet<String>, sqlx::Error> {
+    let mut slugs: HashSet<String> = list_custom_providers(cx.pool(), user_id).await?.into_iter().map(|r| r.slug).collect();
+    slugs.extend(list_cli_providers(cx.pool(), user_id).await?.into_iter().map(|r| r.slug));
+    Ok(slugs)
+}
+
+/// One endpoint shared with the viewer, as the display readers see it.
+pub struct ViewerSharedCustom {
+    pub endpoint: SharedCustomProvider,
+    /// The viewer's own custom or CLI provider has this slug, so requests to it go to theirs.
+    pub shadowed: bool,
+}
+
+/// The endpoints shared with the viewer, each marked `shadowed` by the same namespace rule
+/// routing applies. For the display readers only (the list route, the catalog, the Overview):
+/// an extension error is logged and reads as nothing shared there, while routing propagates it
+/// through [`SharedCustomLookup`]. Without anything shared the caller's own slugs are never read.
+pub async fn viewer_shared_custom(cx: &AppState, user_id: &str, options: ListSharedOptions) -> Result<Vec<ViewerSharedCustom>, sqlx::Error> {
+    let shared = shared_custom_providers(cx, user_id, options).await;
+    if shared.is_empty() {
+        return Ok(Vec::new());
+    }
+    let own = own_provider_slugs(cx, user_id).await?;
+    Ok(shared
+        .into_iter()
+        .map(|endpoint| ViewerSharedCustom { shadowed: own.contains(&endpoint.provider.slug), endpoint })
+        .collect())
+}
+
 /// Split one group target's `model` string into a resolved provider/adapter, scoped to
 /// `user_id` — a target whose prefix no longer resolves returns `None` and is simply omitted.
+/// `lookup` is shared by every target of one resolution (see [`SharedCustomLookup`]).
 pub async fn resolve_target_prefix(
     cx: &AppState,
     user_id: &str,
+    lookup: &SharedCustomLookup,
     target_index: usize,
     target: &GroupTarget,
-) -> Result<Option<ResolvedTarget>, sqlx::Error> {
+) -> anyhow::Result<Option<ResolvedTarget>> {
     let Some(split) = split_model_id(&target.model) else { return Ok(None) };
     if let Some(provider) = ProviderId::parse(&split.prefix) {
         return Ok(Some(ResolvedTarget {
@@ -79,6 +175,7 @@ pub async fn resolve_target_prefix(
             custom_provider: None,
             adapter: get_adapter(provider),
             account_id: target.account_id.clone(),
+            shared: None,
         }));
     }
     if let Some(row) = get_custom_provider_by_slug(cx.pool(), user_id, &split.prefix).await? {
@@ -90,21 +187,27 @@ pub async fn resolve_target_prefix(
             adapter: custom_provider_adapter(&row),
             custom_provider: Some(row),
             account_id: target.account_id.clone(),
+            shared: None,
         }));
     }
     // Third prefix branch (docs/cli.md): builtin → custom slug → CLI slug.
-    let Some(cli_row) = get_cli_provider_by_slug(cx.pool(), user_id, &split.prefix).await? else {
+    if let Some(cli_row) = get_cli_provider_by_slug(cx.pool(), user_id, &split.prefix).await? {
+        return Ok(Some(ResolvedTarget {
+            target_index,
+            provider: cli_row.slug.clone(),
+            upstream_model: split.upstream_model,
+            is_builtin: false,
+            custom_provider: None,
+            adapter: cli_provider_adapter(cx, &cli_row),
+            account_id: target.account_id.clone(),
+            shared: None,
+        }));
+    }
+    // A pinned target never resolves to a shared endpoint: its key is not the caller's row.
+    if target.account_id.is_some() {
         return Ok(None);
-    };
-    Ok(Some(ResolvedTarget {
-        target_index,
-        provider: cli_row.slug.clone(),
-        upstream_model: split.upstream_model,
-        is_builtin: false,
-        custom_provider: None,
-        adapter: cli_provider_adapter(cx, &cli_row),
-        account_id: target.account_id.clone(),
-    }))
+    }
+    shared_custom_target(cx, user_id, lookup, target_index, &split.prefix, split.upstream_model).await
 }
 
 /// Whether this account's stored profile facts let it serve the target's model. Fails open.
@@ -122,9 +225,15 @@ struct PoolRow {
 /// composed in a pool extension, the rows other users share with them (docs/cloud-edition.md
 /// § "Pool extension"). Both kinds are merged by `(priority DESC, created_at DESC)` — a shared
 /// row orders on the viewer's own `SharedAccount.priority`, never the owner's — and a `share`
-/// descriptor marks the borrowed ones for everything downstream. Pinned targets and custom/CLI
-/// providers never consult the extension.
+/// descriptor marks the borrowed ones for everything downstream. Pinned targets and the
+/// caller's own custom/CLI providers never consult the extension; a shared custom endpoint
+/// arrives already resolved, its one borrowed row standing in for the pool.
 async fn pool_rows(cx: &AppState, user_id: &str, target: &ResolvedTarget) -> Result<Vec<PoolRow>, sqlx::Error> {
+    if let Some(shared) = &target.shared {
+        // One endpoint, one key: the borrowed row is the whole pool. Its `share` marks it for
+        // reserve/settle, owner-scoped bench writes and the borrower's header filter.
+        return Ok(vec![PoolRow { priority: shared.account.priority, account: shared.account.clone(), share: Some(shared.share.clone()) }]);
+    }
     let own = list_accounts(cx.pool(), user_id, &target.provider).await?;
     let mut rows: Vec<PoolRow> =
         own.into_iter().map(|account| PoolRow { priority: account.priority, account, share: None }).collect();
@@ -241,6 +350,7 @@ pub async fn pool_candidates(
         custom_provider: target.custom_provider.clone(),
         adapter: target.adapter.clone(),
         account_id: target.account_id.clone(),
+        shared: None,
     };
     candidates_for_target(cx, user_id, &resolved).await
 }
@@ -258,11 +368,12 @@ pub async fn group_model_candidates(
     cx: &AppState,
     user_id: &str,
     model_row: &ModelGroupModelRow,
-) -> Result<GroupExpansion, sqlx::Error> {
+) -> anyhow::Result<GroupExpansion> {
     let targets = parse_group_targets(Some(&model_row.targets_json));
+    let lookup = SharedCustomLookup::default();
     let mut resolved_targets = Vec::new();
     for (i, target) in targets.iter().enumerate() {
-        if let Some(resolved) = resolve_target_prefix(cx, user_id, i, target).await? {
+        if let Some(resolved) = resolve_target_prefix(cx, user_id, &lookup, i, target).await? {
             resolved_targets.push(resolved);
         }
     }
@@ -301,14 +412,14 @@ pub struct RoutingResolution {
 
 /// Shared model-id resolution for `/openai/v1` and `/anthropic`: split on the first "/", try
 /// the builtin `ProviderId` union first, then a per-user `custom_providers` lookup, then a CLI
-/// provider. A `model` with no "/" is `None` (`invalid_model`) — since v4 nothing bare resolves
-/// on the shared bases; group models live on their own endpoints and resolve via
-/// [`resolve_group_model_candidates`].
+/// provider, then a custom endpoint shared with the caller. A `model` with no "/" is `None`
+/// (`invalid_model`) — since v4 nothing bare resolves on the shared bases; group models live
+/// on their own endpoints and resolve via [`resolve_group_model_candidates`].
 pub async fn resolve_candidates(
     cx: &AppState,
     user_id: &str,
     model: &str,
-) -> Result<Option<RoutingResolution>, sqlx::Error> {
+) -> anyhow::Result<Option<RoutingResolution>> {
     let Some(split) = split_model_id(model) else { return Ok(None) };
 
     if let Some(provider) = ProviderId::parse(&split.prefix) {
@@ -348,22 +459,41 @@ pub async fn resolve_candidates(
     // Third prefix branch (docs/cli.md): a CLI provider behaves like any provider on the
     // routing surface — its one internal account row rides the same pool machinery, only the
     // adapter's transport differs.
-    let Some(cli_row) = get_cli_provider_by_slug(cx.pool(), user_id, &split.prefix).await? else {
+    if let Some(cli_row) = get_cli_provider_by_slug(cx.pool(), user_id, &split.prefix).await? {
+        let primary = PrimaryTarget {
+            provider: cli_row.slug.clone(),
+            upstream_model: split.upstream_model,
+            adapter: cli_provider_adapter(cx, &cli_row),
+            is_builtin: false,
+            custom_provider: None,
+        };
+        return Ok(Some(RoutingResolution {
+            raw: split.raw,
+            group_name: None,
+            candidates: pool_candidates(cx, user_id, &primary_pool_target(&primary)).await?,
+            strategy: get_provider_strategy(cx.pool(), user_id, &cli_row.slug).await?,
+            primary,
+        }));
+    }
+
+    let lookup = SharedCustomLookup::default();
+    let Some(target) = shared_custom_target(cx, user_id, &lookup, 0, &split.prefix, split.upstream_model).await? else {
         return Ok(None);
-    };
-    let primary = PrimaryTarget {
-        provider: cli_row.slug.clone(),
-        upstream_model: split.upstream_model,
-        adapter: cli_provider_adapter(cx, &cli_row),
-        is_builtin: false,
-        custom_provider: None,
     };
     Ok(Some(RoutingResolution {
         raw: split.raw,
         group_name: None,
-        candidates: pool_candidates(cx, user_id, &primary_pool_target(&primary)).await?,
-        strategy: get_provider_strategy(cx.pool(), user_id, &cli_row.slug).await?,
-        primary,
+        candidates: candidates_for_target(cx, user_id, &target).await?,
+        // One candidate, so no ordering to choose; the caller has no settings row for a slug
+        // they do not own.
+        strategy: DEFAULT_STRATEGY.to_string(),
+        primary: PrimaryTarget {
+            provider: target.provider,
+            upstream_model: target.upstream_model,
+            adapter: target.adapter,
+            is_builtin: false,
+            custom_provider: target.custom_provider,
+        },
     }))
 }
 
@@ -387,7 +517,7 @@ pub async fn resolve_group_model_candidates(
     user_id: &str,
     group: &ModelGroupRow,
     model: &str,
-) -> Result<Option<RoutingResolution>, sqlx::Error> {
+) -> anyhow::Result<Option<RoutingResolution>> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
         return Ok(None);
@@ -1004,5 +1134,124 @@ mod tests {
         assert!(pool_candidates(&state, "user_1", &fable).await.unwrap().is_empty());
         let row = crate::db::accounts::get_account(state.pool(), "user_1", "acc_team").await.unwrap().unwrap();
         assert!(row.bench_until.is_none(), "ineligibility never benches");
+    }
+
+    // ------------------------------------------- custom endpoints shared through the extension
+
+    use crate::pool::extension::test_support::{owner_endpoint, SharedCustomExtension};
+    use crate::pool::extension::SharedCustomProvider;
+
+    /// `user_1` as the borrower, plus an owner who lends `team-gw` through the extension.
+    async fn borrower_state(fail: bool) -> Option<(AppState, Arc<SharedCustomExtension>, SharedCustomProvider)> {
+        let pool = test_pool().await?;
+        seed_user(&pool).await;
+        let owner = crate::db::test_support::insert_user(&pool, "owner@example.com").await;
+        let lent = owner_endpoint(&pool, &owner.id, "team-gw", "openai", "https://owner.example.com/v1", None).await;
+        let ext = Arc::new(SharedCustomExtension { fail, ..Default::default() });
+        ext.shared.lock().unwrap().push(lent.clone());
+        let state = crate::pool::extension::test_support::state_with_extension(pool, MockTransport::new(), ext.clone());
+        Some((state, ext, lent))
+    }
+
+    #[tokio::test]
+    async fn a_shared_custom_slug_resolves_to_one_borrowed_candidate_on_the_owners_row() {
+        let Some((state, ext, lent)) = borrower_state(false).await else { return skip_without_db() };
+        let resolved = resolve_candidates(&state, "user_1", "team-gw/gpt-4o").await.unwrap().expect("resolves");
+        assert_eq!(resolved.primary.provider, "team-gw");
+        assert!(!resolved.primary.is_builtin);
+        assert_eq!(resolved.candidates.len(), 1);
+        let candidate = &resolved.candidates[0];
+        assert_eq!(candidate.account.id, lent.account.id);
+        // Owner-scoped writes (bench, strikes) key off this.
+        assert_eq!(candidate.account.user_id, lent.provider.user_id);
+        assert_eq!(candidate.share.as_ref(), Some(&lent.share));
+        assert!(!candidate.is_builtin && !candidate.pinned);
+        assert_eq!(candidate.custom_provider.as_ref().map(|r| r.id.as_str()), Some(lent.provider.id.as_str()));
+        assert_eq!(candidate.adapter.id(), "team-gw");
+        assert_eq!(candidate.upstream_model, "gpt-4o");
+        assert_eq!(*ext.list_calls.lock().unwrap(), [false], "routing never asks for usage");
+    }
+
+    #[tokio::test]
+    async fn the_callers_own_custom_or_cli_slug_shadows_a_shared_one() {
+        let Some((state, ext, _)) = borrower_state(false).await else { return skip_without_db() };
+        seed_custom_provider(state.pool(), "user_1", "team-gw", "openai").await;
+        seed_account(state.pool(), "user_1", "acc_own", "team-gw", 1).await;
+        let resolved = resolve_candidates(&state, "user_1", "team-gw/gpt-4o").await.unwrap().unwrap();
+        assert_eq!(ids(&resolved.candidates), ["acc_own"]);
+        assert!(resolved.candidates[0].share.is_none());
+        assert_eq!(resolved.primary.custom_provider.as_ref().unwrap().user_id, "user_1");
+
+        // A CLI slug is the caller's own namespace too, even with no account to route to.
+        sqlx::query("DELETE FROM custom_providers WHERE user_id = 'user_1'").execute(state.pool()).await.unwrap();
+        sqlx::query("DELETE FROM upstream_accounts WHERE user_id = 'user_1'").execute(state.pool()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO cli_providers (id, user_id, slug, name, format, sort_order, created_at, updated_at)
+             VALUES ('cli_1', 'user_1', 'team-gw', 'laptop', 'openai', 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
+        )
+        .execute(state.pool())
+        .await
+        .unwrap();
+        let resolved = resolve_candidates(&state, "user_1", "team-gw/gpt-4o").await.unwrap().unwrap();
+        assert!(resolved.primary.custom_provider.is_none());
+        assert!(resolved.candidates.is_empty());
+        assert!(ext.list_calls.lock().unwrap().is_empty(), "an own slug never consults the extension");
+    }
+
+    #[tokio::test]
+    async fn a_group_target_on_a_shared_slug_borrows_unless_it_is_pinned() {
+        let Some((state, _, lent)) = borrower_state(false).await else { return skip_without_db() };
+        seed_account(state.pool(), "user_1", "acc_grok", "grok", 1).await;
+        let expansion = group_model_candidates(
+            &state,
+            "user_1",
+            &model_row(json!([
+                { "model": "team-gw/gpt-4o", "account_id": lent.account.id },
+                "team-gw/gpt-4o",
+                "grok/grok-4.5",
+            ])),
+        )
+        .await
+        .unwrap();
+        // The pinned target names an account the caller does not own: nothing at all.
+        let targets: Vec<usize> = expansion.resolved_targets.iter().map(|t| t.target_index).collect();
+        assert_eq!(targets, [1, 2]);
+        let shape: Vec<(String, usize, bool)> =
+            expansion.candidates.iter().map(|c| (c.account.id.clone(), c.target_index, c.share.is_some())).collect();
+        assert_eq!(shape, vec![(lent.account.id.clone(), 1, true), ("acc_grok".to_string(), 2, false)]);
+    }
+
+    #[tokio::test]
+    async fn a_failing_extension_is_an_error_on_a_shared_slug_but_never_touches_own_prefixes() {
+        let Some((state, ext, _)) = borrower_state(true).await else { return skip_without_db() };
+        seed_account(state.pool(), "user_1", "acc_grok", "grok", 1).await;
+        // Borrowing is the whole request here: a lost store must surface as a failure the
+        // client can retry, not as an unknown model.
+        assert!(resolve_candidates(&state, "user_1", "team-gw/gpt-4o").await.is_err());
+        assert!(group_model_candidates(&state, "user_1", &model_row(json!(["team-gw/gpt-4o", "grok/grok-4.5"]))).await.is_err());
+        // Prefixes the caller's own namespace answers never ask the extension at all.
+        let own = resolve_candidates(&state, "user_1", "grok/grok-4.5").await.unwrap().unwrap();
+        assert_eq!(ids(&own.candidates), ["acc_grok"]);
+        assert_eq!(ext.list_calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn one_group_asks_the_extension_once_however_many_targets_miss_the_own_namespace() {
+        let Some((state, ext, lent)) = borrower_state(false).await else { return skip_without_db() };
+        seed_account(state.pool(), "user_1", "acc_grok", "grok", 1).await;
+        let expansion = group_model_candidates(
+            &state,
+            "user_1",
+            &model_row(json!(["team-gw/gpt-4o", "gone/a", "team-gw/gpt-4o-mini", "also-gone/b", "grok/grok-4.5"])),
+        )
+        .await
+        .unwrap();
+        let account = lent.account.id.as_str();
+        assert_eq!(ids(&expansion.candidates), [account, account, "acc_grok"]);
+        assert_eq!(ext.list_calls.lock().unwrap().len(), 1);
+
+        // A group whose targets all resolve in the caller's own namespace never asks.
+        group_model_candidates(&state, "user_1", &model_row(json!(["grok/grok-4.5"]))).await.unwrap();
+        assert_eq!(ext.list_calls.lock().unwrap().len(), 1);
     }
 }

@@ -34,7 +34,7 @@ import PageHeader from "@/components/ui/PageHeader.vue"
 import Segmented from "@/components/ui/Segmented.vue"
 import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
-import { useCustomProviders } from "@/composables/useCustomProviders"
+import { reachableShared, useCustomProviders } from "@/composables/useCustomProviders"
 import { useLogs } from "@/composables/useLogs"
 import { useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
@@ -135,6 +135,7 @@ function providerName(slug: string): string {
   return (
     customProviders.state.data?.find((cp) => cp.slug === slug)?.name ??
     cli.state.providers?.find((cp) => cp.slug === slug)?.name ??
+    reachableShared(customProviders.state.shared).find((sp) => sp.slug === slug)?.name ??
     slug
   )
 }
@@ -145,7 +146,8 @@ function tallyText(tally: LogFacetTally | null | undefined): string | null {
 }
 
 /**
- * All + the builtins + the user's live custom and CLI slugs — the same sources
+ * All + the builtins + the user's live custom and CLI slugs and the endpoints
+ * shared with them — the same sources
  * the Models and Providers pages filter by — each with its kind and today's
  * count. A slug the user filtered to and has since deleted stays as its own
  * bare option: its rows are still in the log.
@@ -175,6 +177,10 @@ const providerOptions = computed<ListPickerOption[]>(() => {
     ...PROVIDERS.map((p) => option(p.id, t(NAME_KEY[p.id]), "logs.picker.kind.subscription")),
     ...(customProviders.state.data ?? []).map((cp) => option(cp.slug, cp.name, "logs.picker.kind.endpoint")),
     ...(cli.state.providers ?? []).map((cp) => option(cp.slug, cp.name, "logs.picker.kind.cli")),
+    // A shadowed one shares its slug with the viewer's own option above.
+    ...reachableShared(customProviders.state.shared).map((sp) =>
+      option(sp.slug, sp.name, "logs.picker.kind.shared"),
+    ),
   ]
   const selected = providerFilter.value
   if (selected && !options.some((o) => o.key === selected)) {

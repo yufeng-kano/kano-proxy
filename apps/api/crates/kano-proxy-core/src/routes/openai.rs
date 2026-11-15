@@ -1152,6 +1152,44 @@ mod tests {
         assert!(body_text(response).await.contains("00:00:00,000 --> 00:00:01,000"));
     }
 
+    /// A borrowed custom gateway's own headers locate or identify it; the borrower gets the
+    /// content type and the core's own markers only (docs/cloud-edition.md § "Pool extension").
+    #[tokio::test]
+    async fn audio_from_a_shared_custom_endpoint_keeps_only_the_content_type_of_its_headers() {
+        use crate::pool::extension::test_support::{owner_endpoint, SharedCustomExtension};
+        let ext = std::sync::Arc::new(SharedCustomExtension::default());
+        let Some(f) = super::super::resolve_request::test_support::fixture_with_extension(ext.clone()).await else {
+            return skip_without_db();
+        };
+        let owner = crate::db::test_support::insert_user(f.state.pool(), "owner@example.com").await;
+        let lent = owner_endpoint(f.state.pool(), &owner.id, "team-gw", "openai", BASE_URL, None).await;
+        ext.shared.lock().unwrap().push(lent);
+        f.mock.expect(|_| {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(axum::http::header::CONTENT_TYPE, axum::http::HeaderValue::from_static("text/plain"));
+            for name in ["x-litellm-model-api-base", "set-cookie", "server", "via", "x-ratelimit-remaining-requests"] {
+                headers.insert(axum::http::HeaderName::from_static(name), axum::http::HeaderValue::from_static("owner.internal"));
+            }
+            Ok(UpstreamResponse::from_bytes(StatusCode::OK, headers, "hello"))
+        });
+
+        let response = f
+            .router()
+            .oneshot(f.multipart(
+                "/openai/v1/audio/transcriptions",
+                &[("model", "team-gw/whisper-1"), ("response_format", "text")],
+                Some(("clip.mp3", b"ID3")),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[axum::http::header::CONTENT_TYPE], "text/plain");
+        for (name, value) in response.headers() {
+            assert!(!value.to_str().unwrap_or_default().contains("owner.internal"), "{name} leaked the owner's gateway");
+        }
+        assert_eq!(body_text(response).await, "hello");
+    }
+
     /// Records the calls it saw and answers 429 without running the route, so the test can
     /// prove the middleware order the TypeScript relied on: authenticate, then policy, then
     /// handler.

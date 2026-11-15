@@ -6,10 +6,15 @@ import {
   readCustomProvidersCache,
   writeCustomProvidersCache,
 } from "@/services/cache"
-import type { CustomProvider, RequestEdits } from "@/types"
+import type { CustomProvider, RequestEdits, SharedCustomProvider } from "@/types"
 
 type CustomProvidersState = {
   data: CustomProvider[] | null
+  /**
+   * Endpoints other users share with the viewer (cloud editions only). Loaded,
+   * cached and cleared together with `data`; empty on a standalone install.
+   */
+  shared: SharedCustomProvider[] | null
   loading: boolean
   refreshing: boolean
   error: string | null
@@ -19,6 +24,7 @@ type CustomProvidersState = {
 function emptyState(): CustomProvidersState {
   return {
     data: null,
+    shared: null,
     loading: false,
     refreshing: false,
     error: null,
@@ -30,6 +36,29 @@ function emptyState(): CustomProvidersState {
 // is shared across every component that calls this composable, so navigating
 // Accounts -> Models reuses what's already loaded instead of re-fetching.
 const state = reactive<CustomProvidersState>(emptyState())
+
+/**
+ * The shared endpoints a request can actually reach. A shadowed one shares its
+ * slug with one of the viewer's own providers, which wins every request, so
+ * only the Providers page lists it (as Unavailable); every other page treats
+ * the slug as the viewer's own.
+ */
+export function reachableShared(shared: SharedCustomProvider[] | null): SharedCustomProvider[] {
+  return (shared ?? []).filter((s) => !s.shadowed)
+}
+
+/**
+ * The Custom tab's badge: the viewer's own endpoints plus the shared ones they
+ * can reach — a shadowed row only reads Unavailable. `null` until the list has
+ * loaded, so the chip never states a count the page is not sure of.
+ */
+export function customEndpointCount(
+  own: CustomProvider[] | null,
+  shared: SharedCustomProvider[] | null,
+): number | null {
+  if (own == null) return null
+  return own.length + reachableShared(shared).length
+}
 
 export function useCustomProviders() {
   const userId = ref<string | null>(null)
@@ -50,7 +79,8 @@ export function useCustomProviders() {
 
     const cached = readCustomProvidersCache(userId.value)
     if (cached) {
-      state.data = cached
+      state.data = cached.providers
+      state.shared = cached.shared
       state.fromCache = true
       state.loading = false
     } else if (!state.data) {
@@ -68,7 +98,8 @@ export function useCustomProviders() {
     state.error = null
     try {
       const data = await listCustomProviders()
-      state.data = data
+      state.data = data.providers
+      state.shared = data.shared
       state.fromCache = false
       writeCustomProvidersCache(userId.value, data)
     } catch (e) {
@@ -100,7 +131,9 @@ export function useCustomProviders() {
       const data = await reorderCustomProviders(ids)
       state.data = data
       state.fromCache = false
-      writeCustomProvidersCache(userId.value, data)
+      // The order write answers with the own list only; the shared rows are
+      // display-ordered by the edition and unchanged by it.
+      writeCustomProvidersCache(userId.value, { providers: data, shared: state.shared ?? [] })
       return true
     } catch (e) {
       state.data = previous
@@ -111,6 +144,7 @@ export function useCustomProviders() {
 
   function invalidateLocal() {
     state.data = null
+    state.shared = null
     state.fromCache = false
   }
 
@@ -124,7 +158,7 @@ export function useCustomProviders() {
     if (!row || !state.data) return
     row.strip_fast_mode = edits.strip_fast_mode
     row.strip_claude_code_line = edits.strip_claude_code_line
-    writeCustomProvidersCache(userId.value, state.data)
+    writeCustomProvidersCache(userId.value, { providers: state.data, shared: state.shared ?? [] })
   }
 
   return {

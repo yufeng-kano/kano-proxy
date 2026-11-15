@@ -23,7 +23,7 @@ use crate::pool::extension::ListSharedOptions;
 use crate::providers::registry::get_adapter;
 use crate::providers::types::UpstreamModel;
 use crate::providers::{ProviderId, PROVIDERS};
-use crate::routing::candidates::custom_provider_adapter;
+use crate::routing::candidates::{custom_provider_adapter, viewer_shared_custom};
 use crate::utils::custom_provider::parse_manual_models;
 use crate::AppState;
 
@@ -68,6 +68,9 @@ pub struct ProviderModelsSection {
 
 const MODELS_CACHE_TTL: Duration = Duration::from_secs(3600);
 
+/// The only error a borrower sees on a shared endpoint's section: no upstream text.
+pub const SHARED_MODELS_ERROR: &str = "models unavailable";
+
 /// `provider` is a builtin `ProviderId` or a custom provider's slug.
 fn models_cache_key(user_id: &str, provider: &str) -> String {
     format!("models:v1:{user_id}:{provider}")
@@ -107,8 +110,12 @@ async fn pick_usable_account(
     shared: Vec<AccountRow>,
 ) -> Option<AcquiredAccount> {
     let own = list_accounts(cx.pool(), user_id, provider).await.unwrap_or_default();
+    first_usable(cx, own.into_iter().chain(shared))
+}
+
+fn first_usable(cx: &AppState, rows: impl IntoIterator<Item = AccountRow>) -> Option<AcquiredAccount> {
     let now = now_ms();
-    for row in own.into_iter().chain(shared) {
+    for row in rows {
         if bench_until_from_row(&row, now).is_some() {
             continue;
         }
@@ -170,14 +177,17 @@ async fn fetch_provider_models(
 }
 
 /// manual → the stored manual list. auto → live `list_models` with an acquired key (same 1h
-/// cache as built-ins, keyed by slug); on failure, or when no usable key exists to query, fall
-/// back to the manual list if non-empty, else empty. Never fabricates a catalog.
+/// cache as built-ins, keyed by the row's **owner** and slug, so a shared endpoint's owner and
+/// borrowers read one entry); on failure, or when no usable key exists to query, fall back to
+/// the manual list if non-empty, else empty. Never fabricates a catalog. `shared_account` is
+/// the one key a shared endpoint lends; without it the caller's own rows are queried.
 async fn fetch_custom_provider_models(
     cx: &AppState,
-    user_id: &str,
     row: &CustomProviderRow,
+    shared_account: Option<AccountRow>,
     force: bool,
 ) -> ProviderModelsSection {
+    let user_id = row.user_id.as_str();
     let manual_models = || -> Vec<CatalogModel> {
         parse_manual_models(row.manual_models_json.as_deref())
             .into_iter()
@@ -205,7 +215,11 @@ async fn fetch_custom_provider_models(
         }
     }
 
-    let Some(account) = pick_usable_account(cx, user_id, &row.slug, Vec::new()).await else {
+    let usable = match shared_account {
+        Some(account) => first_usable(cx, [account]),
+        None => pick_usable_account(cx, user_id, &row.slug, Vec::new()).await,
+    };
+    let Some(account) = usable else {
         // No usable key to query live — same "don't cache aggressively" policy as built-ins.
         return ProviderModelsSection {
             provider: row.slug.clone(),
@@ -278,7 +292,7 @@ pub async fn list_models_for_user(cx: &AppState, user_id: &str, opts: ListModels
     }
 
     for row in list_custom_providers(cx.pool(), user_id).await.unwrap_or_default() {
-        sections.push(fetch_custom_provider_models(cx, user_id, &row, opts.force).await);
+        sections.push(fetch_custom_provider_models(cx, &row, None, opts.force).await);
     }
 
     // CLI providers (docs/cli.md § Model catalog): one section per provider, straight from the
@@ -291,6 +305,23 @@ pub async fn list_models_for_user(cx: &AppState, user_id: &str, opts: ListModels
             .map(|id| CatalogModel::new(&row.slug, &UpstreamModel { id, display_name: None }))
             .collect();
         sections.push(ProviderModelsSection { provider: row.slug, models, error: None, cached: false });
+    }
+
+    // Custom endpoints shared with the viewer (docs/cloud-edition.md § "Pool extension"), each
+    // queried with its shared key. One the viewer's own slug shadows is unreachable for them, so
+    // it lists nothing.
+    for shared in viewer_shared_custom(cx, user_id, ListSharedOptions::default()).await.unwrap_or_default() {
+        if shared.shadowed {
+            continue;
+        }
+        let endpoint = shared.endpoint;
+        let mut section = fetch_custom_provider_models(cx, &endpoint.provider, Some(endpoint.account), opts.force).await;
+        // The adapter's error text is the owner's to read: a connect error names their base
+        // URL. It is replaced here, not in the cache entry the owner shares with borrowers.
+        if section.error.is_some() {
+            section.error = Some(SHARED_MODELS_ERROR.to_string());
+        }
+        sections.push(section);
     }
 
     // Model groups are deliberately absent here (since v4): each group is its own endpoint whose
@@ -590,6 +621,80 @@ mod tests {
         provider_ids.sort();
         assert_eq!(provider_ids, ["antigravity", "claude-code", "codex", "grok"]);
         assert!(out.models.is_empty(), "nothing bound means nothing listed, never an invented catalog");
+    }
+
+    // ------------------------------------------- custom endpoints shared through the extension
+
+    use crate::pool::extension::test_support::{owner_endpoint, state_with_extension, SharedCustomExtension};
+
+    fn lending_state(pool: PgPool, transport: std::sync::Arc<MockTransport>, lent: Vec<crate::pool::SharedCustomProvider>) -> AppState {
+        state_with_extension(pool, transport, SharedCustomExtension::lending(lent))
+    }
+
+    #[tokio::test]
+    async fn a_shared_endpoint_lists_under_its_slug_with_the_shared_key_and_the_owners_cache_entry() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::OK, json!({ "data": [{ "id": "live-model" }] }));
+        let owner = seed_user(&pool).await;
+        let lent = owner_endpoint(&pool, &owner, "team-gw", "openai", "https://owner.example.com/v1", None).await;
+        let state = lending_state(pool.clone(), transport.clone(), vec![lent]);
+        let borrower = seed_user(&pool).await;
+
+        let out = list_models_for_user(&state, &borrower, ListModelsOptions::default()).await;
+        assert_eq!(ids(&out.models, "team-gw"), ["team-gw/live-model"]);
+        let calls = transport.requests();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].url, "https://owner.example.com/v1/models");
+        assert_eq!(calls[0].header("authorization"), Some("Bearer sk-owner-team-gw"));
+
+        // The owner reads the entry the borrower filled (the transport has nothing queued).
+        let own = list_models_for_user(&state, &owner, ListModelsOptions::default()).await;
+        assert!(section(&own.providers, "team-gw").unwrap().cached);
+        assert_eq!(ids(&own.models, "team-gw"), ["team-gw/live-model"]);
+    }
+
+    #[tokio::test]
+    async fn a_manual_shared_endpoint_lists_its_stored_models_and_an_own_slug_shadows_one() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let owner = seed_user(&pool).await;
+        let manual = owner_endpoint(&pool, &owner, "manual-gw", "openai", "https://owner.example.com/v1", Some(&["m1"])).await;
+        let dup = owner_endpoint(&pool, &owner, "dup-gw", "openai", "https://owner.example.com/v1", Some(&["theirs"])).await;
+        // Any live call would panic: nothing is queued.
+        let state = lending_state(pool.clone(), MockTransport::new(), vec![manual, dup]);
+        let borrower = seed_user(&pool).await;
+        seed_custom_provider(&pool, &borrower, "dup-gw", "openai", "manual", Some(&json!(["own"]).to_string())).await;
+
+        let out = list_models_for_user(&state, &borrower, ListModelsOptions::default()).await;
+        assert_eq!(ids(&out.models, "manual-gw"), ["manual-gw/m1"]);
+        assert_eq!(ids(&out.models, "dup-gw"), ["dup-gw/own"]);
+        assert_eq!(out.providers.iter().filter(|s| s.provider == "dup-gw").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_shared_endpoints_failure_reaches_the_borrower_without_any_upstream_text() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.expect(|_| {
+            Err(crate::upstream::TransportError::Connect(
+                "error sending request for url (https://owner-gateway.internal/v1/models)".into(),
+            ))
+        });
+        let owner = seed_user(&pool).await;
+        let lent = owner_endpoint(&pool, &owner, "team-gw", "openai", "https://owner-gateway.internal/v1", None).await;
+        let state = lending_state(pool.clone(), transport, vec![lent]);
+        let borrower = seed_user(&pool).await;
+
+        let out = list_models_for_user(&state, &borrower, ListModelsOptions::default()).await;
+        let borrowed = section(&out.providers, "team-gw").unwrap();
+        assert_eq!(borrowed.error.as_deref(), Some(SHARED_MODELS_ERROR));
+        assert!(!serde_json::to_string(&out.providers).unwrap().contains("owner-gateway"));
+
+        // The owner reads the same cache entry and keeps the real text.
+        let own = list_models_for_user(&state, &owner, ListModelsOptions::default()).await;
+        let theirs = section(&own.providers, "team-gw").unwrap();
+        assert!(theirs.cached);
+        assert!(theirs.error.as_deref().unwrap().contains("owner-gateway.internal"));
     }
 
     #[test]

@@ -329,6 +329,36 @@ export type CustomProvider = {
 }
 
 /**
+ * A custom endpoint another user shares with the viewer, on editions that
+ * installed a pool extension (docs/admin-ui.md § Providers page "Shared
+ * endpoints"). Read-only: nothing here locates or unlocks the endpoint — no
+ * base URL, token-count URL, key mask or manual models — and every write route
+ * answers 404 for its id.
+ */
+export type SharedCustomProvider = {
+  id: string
+  slug: string
+  name: string
+  format: CustomProviderFormat
+  status: CustomProviderStatus
+  account_id: string
+  share: { teamId: string; teamName: string; ownerLabel: string }
+  /** Whatever bars the edition hands this viewer; null when it hands none. */
+  usage: { windows: UsageWindow[] } | null
+  /** The viewer owns a provider with this slug, so requests to it go to their own. */
+  shadowed: boolean
+  /** The owner's request-edit switches, shown as tags only. */
+  strip_fast_mode: boolean
+  strip_claude_code_line: boolean
+}
+
+/** `GET /api/custom-providers` — the viewer's own endpoints, then the ones shared with them. */
+export type CustomProvidersResponse = {
+  providers: CustomProvider[]
+  shared: SharedCustomProvider[]
+}
+
+/**
  * One target of a model group.
  *
  * `account_id` null means the provider's whole pool, with its own priority and
