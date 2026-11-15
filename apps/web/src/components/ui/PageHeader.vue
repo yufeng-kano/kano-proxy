@@ -13,33 +13,71 @@
  * What went is the line *beneath* it explaining the page — there is no
  * `subtitle` prop.
  *
+ * The title is also the page's menu: Refresh, then the page's own items. It is
+ * the one place a page reloads from, the same on every page.
+ *
  * Chrome, not a surface: one compact title row over a heavy frosted wash of the
  * page bg, so a stuck header reads as the page frosting out under the controls,
  * never as a white slab sitting on it.
  */
-defineProps<{
+import { computed } from "vue"
+import ActionMenu, { type MenuItem } from "@/components/ui/ActionMenu.vue"
+import { useI18n } from "@/i18n"
+
+const props = defineProps<{
   /** The page's name — the visible `h1`, and the only one on the page. */
   title: string
+  /**
+   * Bound as `@refresh`. With it the title becomes the page's menu, Refresh
+   * first (docs/admin-ui.md § Page header). Declared as a prop rather than an
+   * emit so the header can tell a page that reloads from one that does not.
+   */
+  onRefresh?: () => unknown
+  /** The refresh the user chose is in flight: spinner in the chevron's place. */
+  refreshing?: boolean
+  /** What this page alone does from its title, after Refresh; chosen keys arrive as `select`. */
+  menu?: MenuItem[]
 }>()
 
+const emit = defineEmits<{ select: [string] }>()
+
 defineSlots<{
-  /**
-   * Replaces the title *text* inside the `h1` — for a page whose name is
-   * itself a control, such as a team name that opens the team's menu. The
-   * `h1` stays, so the page still has exactly one.
-   */
-  title?: () => unknown
   /** Primary + secondary actions, right-aligned on the title row. */
   actions?: () => unknown
   /** Section nav or tabs, on their own row below the title. */
   nav?: () => unknown
 }>()
+
+const { t } = useI18n()
+
+/* Not a page key: a page's own items are named by the page. */
+const REFRESH = "page-header:refresh"
+
+const items = computed<MenuItem[]>(() => [{ key: REFRESH, label: t("action.refresh") }, ...(props.menu ?? [])])
+
+function onSelect(key: string) {
+  if (key === REFRESH) void props.onRefresh?.()
+  else emit("select", key)
+}
 </script>
 
 <template>
   <header class="page-header">
     <div class="row">
-      <h1 class="title"><slot name="title">{{ title }}</slot></h1>
+      <h1 class="title">
+        <ActionMenu
+          v-if="onRefresh"
+          class="title-menu"
+          :items="items"
+          :loading="refreshing"
+          :aria-label="t('pageHeader.menu', { title })"
+          @select="onSelect"
+        >
+          {{ title }}
+          <svg v-if="!refreshing" class="title-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+        </ActionMenu>
+        <template v-else>{{ title }}</template>
+      </h1>
       <div v-if="$slots.actions" class="actions">
         <slot name="actions" />
       </div>
@@ -110,6 +148,29 @@ defineSlots<{
   font-weight: var(--weight-semibold);
   letter-spacing: var(--tracking-tight);
   line-height: 1.3;
+}
+
+/* The trigger reads as the title until hovered or open. The negative margin
+   keeps the text on the content column's edge while the hover wash extends
+   past it. Multi-root child, so the class is reached through :deep. */
+.title :deep(.title-menu) {
+  margin-left: calc(var(--space-2) * -1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-control);
+  transition: background var(--duration-fast) var(--ease);
+}
+.title :deep(.title-menu:hover:not(:disabled)),
+.title :deep(.title-menu[aria-expanded="true"]) {
+  background: var(--hover);
+}
+.title-chevron {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /*

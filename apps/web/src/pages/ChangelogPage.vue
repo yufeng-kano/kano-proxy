@@ -15,7 +15,6 @@
  * which is what makes `v-html` here correct rather than a hole.
  */
 import { computed, onMounted } from "vue"
-import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Badge from "@/components/ui/Badge.vue"
@@ -77,20 +76,7 @@ function onRefresh() {
 
 <template>
   <div>
-    <PageHeader :title="t('changelog.title')">
-      <template #actions>
-        <!-- Icon-only: the label is a tooltip and the accessible name, so the
-             control keeps its meaning without spending header width on a word
-             that repeats on every page. -->
-        <AppButton
-          icon-only
-          :label="t('action.refresh')"
-          :loading="refreshing"
-          @click="onRefresh"
-        >
-          <template #icon><ActionIcon name="refresh" /></template>
-        </AppButton>
-      </template>
+    <PageHeader :title="t('changelog.title')" :refreshing="refreshing" @refresh="onRefresh">
     </PageHeader>
 
     <!-- Capped list, not full width: this is long-form reading, and a

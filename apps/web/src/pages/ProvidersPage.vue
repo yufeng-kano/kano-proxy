@@ -586,18 +586,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 
 <template>
   <div>
-    <PageHeader :title="t('providers.title')">
-      <template #actions>
-        <!-- Icon-only: the label is a tooltip and the accessible name. -->
-        <AppButton
-          icon-only
-          :label="t('action.refresh')"
-          :loading="refreshing"
-          @click="refreshAll"
-        >
-          <template #icon><ActionIcon name="refresh" /></template>
-        </AppButton>
-      </template>
+    <PageHeader :title="t('providers.title')" :refreshing="refreshing" @refresh="refreshAll">
       <template #nav>
         <SectionNav
           :items="navItems"

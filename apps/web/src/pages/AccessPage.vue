@@ -107,6 +107,18 @@ async function load() {
   }
 }
 
+/** Both lists, whichever tab is open: the tab counts come from both. */
+const refreshing = ref(false)
+
+async function onRefresh() {
+  refreshing.value = true
+  try {
+    await Promise.all([load(), cli.load({ refresh: true })])
+  } finally {
+    refreshing.value = false
+  }
+}
+
 function openCreate() {
   editingKey.value = null
   showDialog.value = true
@@ -135,7 +147,7 @@ function spendCell(key: ApiKey): string {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('access.title')">
+    <PageHeader :title="t('access.title')" :refreshing="refreshing" @refresh="onRefresh">
       <template #actions>
         <AppButton v-if="tab === 'keys'" variant="primary" @click="openCreate">
           <template #icon><ActionIcon name="plus" /></template>
