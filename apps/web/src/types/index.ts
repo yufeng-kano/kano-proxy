@@ -90,6 +90,7 @@ export type ProviderAccount = {
    */
   strip_fast_mode?: boolean
   strip_claude_code_line?: boolean
+  force_cache_ttl_1h?: boolean
   /**
    * A bench is running on the row right now, whatever `status` says: an expired
    * sign-in reads `reauth` with or without one, and Resume is offered only while
@@ -152,6 +153,7 @@ export type AccountsResponse = {
 export type RequestEdits = {
   strip_fast_mode: boolean
   strip_claude_code_line: boolean
+  force_cache_ttl_1h: boolean
 }
 
 /** Reset window for a key's spend limit (docs/pricing.md). */
@@ -281,6 +283,7 @@ export type CliProvider = {
   /** The switches on its account row; absent (old cache entry) reads as off. */
   strip_fast_mode?: boolean
   strip_claude_code_line?: boolean
+  force_cache_ttl_1h?: boolean
   created_at: string
   updated_at: string
 }
@@ -324,6 +327,7 @@ export type CustomProvider = {
   /** The switches on its account row; absent (old cache entry) reads as off. */
   strip_fast_mode?: boolean
   strip_claude_code_line?: boolean
+  force_cache_ttl_1h?: boolean
   created_at: string
   updated_at: string
 }
@@ -350,6 +354,7 @@ export type SharedCustomProvider = {
   /** The owner's request-edit switches, shown as tags only. */
   strip_fast_mode: boolean
   strip_claude_code_line: boolean
+  force_cache_ttl_1h: boolean
 }
 
 /** `GET /api/custom-providers` — the viewer's own endpoints, then the ones shared with them. */

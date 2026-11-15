@@ -51,6 +51,7 @@ pub const CORE_MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0008_account_request_edits.sql"),
     },
     Migration { name: "0009_sign_in_state", sql: include_str!("../../migrations/0009_sign_in_state.sql") },
+    Migration { name: "0010_account_cache_ttl", sql: include_str!("../../migrations/0010_account_cache_ttl.sql") },
 ];
 
 pub async fn connect(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -157,6 +158,7 @@ mod tests {
                 "0007_provider_request_edits",
                 "0008_account_request_edits",
                 "0009_sign_in_state",
+                "0010_account_cache_ttl",
             ]
         );
         let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM cli_devices").fetch_all(&pool).await.unwrap();
@@ -207,6 +209,7 @@ mod tests {
                 "0007_provider_request_edits",
                 "0008_account_request_edits",
                 "0009_sign_in_state",
+                "0010_account_cache_ttl",
             ]
         );
         let old = crate::db::keys::list_keys(&pool, &user.id).await.unwrap();
@@ -254,6 +257,7 @@ mod tests {
                 "0007_provider_request_edits",
                 "0008_account_request_edits",
                 "0009_sign_in_state",
+                "0010_account_cache_ttl",
             ]
         );
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
@@ -292,7 +296,7 @@ mod tests {
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
         assert_eq!(
             applied,
-            ["0005_account_allow_credits", "0006_usage_notice", "0007_provider_request_edits", "0008_account_request_edits", "0009_sign_in_state"]
+            ["0005_account_allow_credits", "0006_usage_notice", "0007_provider_request_edits", "0008_account_request_edits", "0009_sign_in_state", "0010_account_cache_ttl"]
         );
         let row = crate::db::accounts::get_account(&pool, &user.id, "acc_old").await.unwrap().expect("the row type reads");
         assert!(!row.allow_credits, "existing accounts never start spending credits");
@@ -321,7 +325,7 @@ mod tests {
         let session = crate::db::sessions::insert_session(&pool, &user.id, "2030-01-01T00:00:00.000Z").await.expect("existing session");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0006_usage_notice", "0007_provider_request_edits", "0008_account_request_edits", "0009_sign_in_state"]);
+        assert_eq!(applied, ["0006_usage_notice", "0007_provider_request_edits", "0008_account_request_edits", "0009_sign_in_state", "0010_account_cache_ttl"]);
         let row = crate::db::users::find_user_by_id(&pool, &user.id).await.unwrap().expect("the row type reads");
         assert_eq!((row.email.as_str(), row.created_at.as_str()), ("upgrade6@example.com", user.created_at.as_str()));
         assert_eq!((row.notice_version, row.notice_accepted_at), (None, None), "nobody has accepted yet");
@@ -353,7 +357,7 @@ mod tests {
         .expect("existing settings");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0007_provider_request_edits", "0008_account_request_edits", "0009_sign_in_state"]);
+        assert_eq!(applied, ["0007_provider_request_edits", "0008_account_request_edits", "0009_sign_in_state", "0010_account_cache_ttl"]);
         let rows: Vec<(String, String, bool, bool)> = sqlx::query_as(
             "SELECT provider, strategy, strip_fast_mode, strip_claude_code_line FROM provider_settings
              WHERE user_id = $1 ORDER BY provider",
@@ -408,7 +412,7 @@ mod tests {
         .expect("existing switches");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0008_account_request_edits", "0009_sign_in_state"]);
+        assert_eq!(applied, ["0008_account_request_edits", "0009_sign_in_state", "0010_account_cache_ttl"]);
         let switches = |row: &crate::db::AccountRow| (row.id.clone(), row.strip_fast_mode, row.strip_claude_code_line);
         let mut mine = Vec::new();
         for provider in ["claude-code", "codex", "my-endpoint"] {
@@ -463,7 +467,7 @@ mod tests {
         .expect("existing accounts");
 
         let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
-        assert_eq!(applied, ["0009_sign_in_state"]);
+        assert_eq!(applied, ["0009_sign_in_state", "0010_account_cache_ttl"]);
         let benched = crate::db::accounts::get_account(&pool, &user.id, "acc_benched").await.unwrap().expect("the row type reads");
         assert_eq!(
             (benched.bench_until.as_deref(), benched.bench_reason.as_deref(), benched.refreshing_at.as_deref()),
@@ -482,5 +486,43 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0, "the user cascade still reaches the rows");
+    }
+
+    /// Upgrading a deployed 0009 schema: every existing account, own or a custom endpoint's key
+    /// row, starts with the cache switch off and keeps everything else, so no request changes.
+    #[tokio::test]
+    async fn upgrading_to_0010_leaves_every_existing_account_with_the_cache_switch_off() {
+        let Some(pool) = test_pool_at(&CORE_MIGRATIONS[..9]).await else { return skip_without_db() };
+        let user = insert_user_without_notice(&pool, "upgrade10@example.com").await;
+        sqlx::query(
+            "INSERT INTO upstream_accounts (id, user_id, provider, label, priority, encrypted_payload, strip_fast_mode,
+                                            strip_claude_code_line, sign_in_rejected_at, created_at, updated_at)
+             VALUES ('acc_cc', $1, 'claude-code', 'a', 2, 'blob', TRUE, TRUE, '2030-01-01T00:00:00.000Z', 'x', 'x'),
+                    ('acc_gw', $1, 'my-endpoint', NULL, 1, 'blob', FALSE, FALSE, NULL, 'x', 'x')",
+        )
+        .bind(&user.id)
+        .execute(&pool)
+        .await
+        .expect("existing accounts");
+
+        let applied = migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.expect("upgrade");
+        assert_eq!(applied, ["0010_account_cache_ttl"]);
+        let cc = crate::db::accounts::get_account(&pool, &user.id, "acc_cc").await.unwrap().expect("the row type reads");
+        assert!(!cc.force_cache_ttl_1h);
+        assert_eq!(
+            (cc.strip_fast_mode, cc.strip_claude_code_line, cc.priority, cc.sign_in_rejected_at.as_deref()),
+            (true, true, 2, Some("2030-01-01T00:00:00.000Z")),
+            "nothing else moves"
+        );
+        let gw = crate::db::accounts::get_account(&pool, &user.id, "acc_gw").await.unwrap().unwrap();
+        assert!(!gw.force_cache_ttl_1h);
+
+        let on = crate::db::accounts::AccountSettingsUpdate { force_cache_ttl_1h: Some(true), ..Default::default() };
+        let stored = crate::db::accounts::update_account_settings(&pool, &user.id, "acc_gw", Some("my-endpoint"), on)
+            .await
+            .unwrap()
+            .expect("own row");
+        assert!(stored.force_cache_ttl_1h && !stored.strip_fast_mode, "the new column takes a write and only that one");
+        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "nothing pending");
     }
 }

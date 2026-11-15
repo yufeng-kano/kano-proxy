@@ -378,6 +378,7 @@ watch(
                the owner's switches but still sees what they do to requests. -->
           <Badge v-if="account.strip_fast_mode">{{ t("providers.edits.fastModeOn") }}</Badge>
           <Badge v-if="account.strip_claude_code_line">{{ t("providers.edits.lineOn") }}</Badge>
+          <Badge v-if="account.force_cache_ttl_1h">{{ t("providers.edits.cacheOn") }}</Badge>
           <!-- The one fact on this row the viewer does not own: who lends it. The
                name can be long, so the pill caps its width and keeps the whole
                string in its title rather than clipping mid-word. -->
@@ -491,6 +492,8 @@ watch(
         :strip-claude-code-line="!!account.strip_claude_code_line"
         :fast-mode-hint="fastModeHint"
         :line-hint="lineHint"
+        :force-cache-ttl1h="!!account.force_cache_ttl_1h"
+        :cache-hint="provider === 'claude-code' ? t('providers.edits.cacheHint') : undefined"
         :busy="busy"
         @change="emit('edits', $event)"
       />

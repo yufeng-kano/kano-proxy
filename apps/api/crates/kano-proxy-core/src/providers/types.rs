@@ -137,13 +137,14 @@ pub struct CallExtras {
     pub edits: RequestEdits,
 }
 
-/// One candidate's request-edit switches (docs/providers.md § Request edits): the two columns
+/// One candidate's request-edit switches (docs/providers.md § Request edits): the columns
 /// on its account row. A shared row is the owner's account, so it carries the owner's switches,
 /// the only ones that apply to it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RequestEdits {
     pub strip_fast_mode: bool,
     pub strip_claude_code_line: bool,
+    pub force_cache_ttl_1h: bool,
 }
 
 #[derive(Debug, thiserror::Error)]

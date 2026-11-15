@@ -433,8 +433,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         } else {
             prepend_required_system(&anthropic_body)
         };
-        let with_system =
-            add_conversion_cache_control(&system, req.prompt_cache_key.as_deref().is_some_and(|k| !k.is_empty()));
+        // "Keep prompt cache for 1 hour" gives the message markers the conversation TTL too.
+        let conversation =
+            req.prompt_cache_key.as_deref().is_some_and(|k| !k.is_empty()) || extras.edits.force_cache_ttl_1h;
+        let with_system = add_conversion_cache_control(&system, conversation);
         let betas = [CONVERSION_BETAS[0], CONVERSION_BETAS[1], EFFORT_BETA].join(",");
         let mut upstream = UpstreamRequest::post(format!("{ANTHROPIC_API}/v1/messages"))
             .json(&Value::Object(with_system))
@@ -809,6 +811,34 @@ mod tests {
         assert_eq!(messages[0]["content"], json!([{ "type": "text", "text": "q1", "cache_control": { "type": "ephemeral", "ttl": "1h" } }]));
         assert!(!serde_json::to_string(&messages[1]).unwrap().contains("cache_control"));
         assert_eq!(serde_json::to_string(&sent).unwrap().matches("\"cache_control\"").count(), 4);
+    }
+
+    #[tokio::test]
+    async fn the_cache_switch_gives_the_message_markers_an_hour_without_a_prompt_cache_key() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::OK, message_json());
+        transport.respond_json(StatusCode::OK, message_json());
+        let cx = test_state(pool.clone(), transport.clone());
+        let account = account(&pool).await;
+        let messages = json!([
+            { "role": "user", "content": "q1" },
+            { "role": "assistant", "content": "a1" },
+            { "role": "user", "content": "q2" },
+        ]);
+        let req = chat_request(messages, None, None);
+        let forced = CallExtras {
+            edits: crate::providers::types::RequestEdits { force_cache_ttl_1h: true, ..Default::default() },
+            ..Default::default()
+        };
+        ClaudeCodeAdapter.chat_completions(&cx, &account, &req, &CallExtras::default()).await.unwrap();
+        ClaudeCodeAdapter.chat_completions(&cx, &account, &req, &forced).await.unwrap();
+
+        let sent = transport.requests();
+        let tail = |i: usize| sent[i].json()["messages"][2]["content"][0]["cache_control"].clone();
+        assert_eq!(tail(0), json!({ "type": "ephemeral" }), "off: a one-shot caller keeps the 5-minute default");
+        assert_eq!(tail(1), json!({ "type": "ephemeral", "ttl": "1h" }));
+        assert_eq!(sent[1].json()["messages"][0]["content"][0]["cache_control"], json!({ "type": "ephemeral", "ttl": "1h" }));
     }
 
     // ------------------------------------------------------- required system line

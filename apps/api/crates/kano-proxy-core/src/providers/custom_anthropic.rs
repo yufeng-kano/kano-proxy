@@ -198,8 +198,10 @@ impl ProviderAdapter for CustomAnthropicAdapter {
             thinking: None,
             output_config: None,
         });
-        // Proxy-placed cache breakpoints (docs/api.md § Prompt cache).
-        let outgoing = add_conversion_cache_control(&anthropic_body, req.prompt_cache_key.is_some());
+        // Proxy-placed cache breakpoints (docs/api.md § Prompt cache); "Keep prompt cache for 1
+        // hour" gives the message markers the conversation TTL too.
+        let conversation = req.prompt_cache_key.is_some() || extras.edits.force_cache_ttl_1h;
+        let outgoing = add_conversion_cache_control(&anthropic_body, conversation);
 
         let mut request = UpstreamRequest::post(format!("{}/v1/messages", self.base))
             .header("x-api-key", &account.credential.access_token)

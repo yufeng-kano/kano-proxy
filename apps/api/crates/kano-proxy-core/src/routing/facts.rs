@@ -155,6 +155,7 @@ mod tests {
             allow_credits: false,
             strip_fast_mode: false,
             strip_claude_code_line: false,
+            force_cache_ttl_1h: false,
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
         }

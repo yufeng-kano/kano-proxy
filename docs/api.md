@@ -243,7 +243,7 @@ Request shape: `multipart/form-data`
 
 Same providers as the OpenAI surface. Model id is always `provider/upstream` (not bare).
 
-Every row below describes the body **after** the candidate's account switches have run: **Remove fast mode** drops top-level `speed`, and **Hide Claude Code identity** drops Claude Code's identity sentence from `system` and keeps `claude-code` from adding its own ([providers.md](./providers.md) § Request edits). Both are off by default, and the same switches apply on the OpenAI surface.
+Every row below describes the body **after** the candidate's account switches have run: **Remove fast mode** drops top-level `speed`, **Hide Claude Code identity** drops Claude Code's identity sentence from `system` and keeps `claude-code` from adding its own, and **Keep prompt cache for 1 hour** sends every `cache_control` marker with `ttl: "1h"` ([providers.md](./providers.md) § Request edits). All are off by default, and the same switches apply on the OpenAI surface.
 
 ### `POST /anthropic/v1/messages`
 
@@ -412,6 +412,8 @@ Effort inputs, in priority order where applicable: (1) `reasoning_effort` (OpenA
 | `/anthropic` → custom, `format=anthropic` | **Strict passthrough** of all client `cache_control`, same as `claude-code` (no system prepend to keep byte-stable, though — there isn't one). |
 | `/openai/v1` → custom, `format=anthropic` | Same four proxy-placed breakpoints and TTL rule as `claude-code` above (no system prepend, so the system marker lands on the client's own last system block; a request without tools or system gets only the message markers). |
 | `/anthropic` → custom, `format=openai` | Strip `cache_control` on convert, same as `grok`/`codex`. |
+
+**Keep prompt cache for 1 hour** (an account switch, [providers.md](./providers.md) § Request edits) changes the lifetime on the `claude-code` and custom `format=anthropic` rows above and nothing else: with it on, the client's own markers on `/anthropic` are sent with `ttl: "1h"`, and on `/openai/v1` the proxy-placed message markers are `1h` whether or not the client sent `prompt_cache_key`. Strict passthrough otherwise still holds: no marker is added, moved or removed.
 
 ## Streaming
 

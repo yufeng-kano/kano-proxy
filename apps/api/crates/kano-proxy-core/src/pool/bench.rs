@@ -150,7 +150,7 @@ mod tests {
             usage_fetching_at: None, bench_until: None, bench_reason: None, refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None,
             bench_scopes_json: None,
             edge_strikes: 0, edge_strike_at: None, allow_credits: false, strip_fast_mode: false,
-            strip_claude_code_line: false, created_at: String::new(), updated_at: String::new(),
+            strip_claude_code_line: false, force_cache_ttl_1h: false, created_at: String::new(), updated_at: String::new(),
         };
         assert_eq!(bench_until_from_row(&row, 1_000), None);
         row.bench_until = Some(iso_from_ms(2_000));

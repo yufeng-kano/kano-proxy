@@ -103,6 +103,7 @@ pub async fn cli_provider_list_item(
         // written through `PATCH /api/providers/:slug/accounts/:account_id`.
         "strip_fast_mode": account.is_some_and(|a| a.strip_fast_mode),
         "strip_claude_code_line": account.is_some_and(|a| a.strip_claude_code_line),
+        "force_cache_ttl_1h": account.is_some_and(|a| a.force_cache_ttl_1h),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }))

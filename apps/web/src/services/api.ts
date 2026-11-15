@@ -292,7 +292,11 @@ export async function updateAccountEdits(
     `/api/providers/${encodeURIComponent(provider)}/accounts/${encodeURIComponent(id)}`,
     { method: "PATCH", body: JSON.stringify(patch) },
   )
-  return { strip_fast_mode: data.strip_fast_mode, strip_claude_code_line: data.strip_claude_code_line }
+  return {
+    strip_fast_mode: data.strip_fast_mode,
+    strip_claude_code_line: data.strip_claude_code_line,
+    force_cache_ttl_1h: data.force_cache_ttl_1h,
+  }
 }
 
 export async function removeAccount(
