@@ -127,6 +127,41 @@ it("gives each own account its own block, behind the gate, with that account's v
   expect(closed).not.toContain("Request edits for this account")
 })
 
+it("offers the cache switch only on Claude Code rows and Anthropic-format endpoints", async () => {
+  const claude = await render(AccountCard, {
+    account: account({ force_cache_ttl_1h: true }),
+    provider: "claude-code",
+    editing: true,
+  })
+  expect(claude).toContain("Keep prompt cache for 1 hour")
+  expect(claude).toContain("sent to this account lasts an hour instead of five minutes.")
+  expect(claude).toContain("Cache kept 1 hour")
+  expect(claude.match(/checked/g)).toHaveLength(1)
+  // Their conversion drops cache markers, so the switch would change nothing.
+  for (const provider of ["codex", "grok", "antigravity"]) {
+    const html = await render(AccountCard, { account: account(), provider, editing: true })
+    expect(html).not.toContain("Keep prompt cache for 1 hour")
+  }
+
+  const anthropic = await render(CustomProviderCard, { provider: endpoint(), editing: true })
+  expect(anthropic).toContain("in requests to this endpoint lasts an hour")
+  const openai = await render(CustomProviderCard, { provider: endpoint({ format: "openai" }), editing: true })
+  expect(openai).toContain("Hide Claude Code identity")
+  expect(openai).not.toContain("Keep prompt cache for 1 hour")
+
+  // The tag shows with the gate closed, and on a shared row as the owner's setting.
+  const closed = await render(CustomProviderCard, { provider: endpoint({ force_cache_ttl_1h: true }) })
+  expect(closed).toContain("Cache kept 1 hour")
+  expect(closed).not.toContain("Keep prompt cache for 1 hour")
+  const lent = await render(AccountCard, {
+    account: account({ share: shared, force_cache_ttl_1h: true }),
+    provider: "claude-code",
+    editing: true,
+  })
+  expect(lent).toContain("Cache kept 1 hour")
+  expect(lent).not.toContain("Keep prompt cache for 1 hour")
+})
+
 it("offers only the line on grok and antigravity rows", async () => {
   for (const provider of ["grok", "antigravity"]) {
     const html = await render(AccountCard, { account: account(), provider, editing: true })
@@ -160,6 +195,7 @@ it("sends only the switch that changed, to that account's own row", async () => 
         allow_credits: false,
         strip_fast_mode: true,
         strip_claude_code_line: false,
+        force_cache_ttl_1h: false,
       }),
       { status: 200 },
     ),
@@ -174,5 +210,5 @@ it("sends only the switch that changed, to that account's own row", async () => 
   // A write that also carried the other switch would overwrite a value the
   // user did not touch.
   expect(JSON.parse(init.body as string)).toEqual({ strip_fast_mode: true })
-  expect(stored).toEqual({ strip_fast_mode: true, strip_claude_code_line: false })
+  expect(stored).toEqual({ strip_fast_mode: true, strip_claude_code_line: false, force_cache_ttl_1h: false })
 })

@@ -344,6 +344,12 @@ export const en = {
   "providers.edits.lineHintEndpoint": "Drops Claude Code's identity line and billing marker from requests sent to this endpoint.",
   "providers.edits.fastModeOn": "Fast mode removed",
   "providers.edits.lineOn": "Claude Code identity hidden",
+  "providers.edits.cache": "Keep prompt cache for 1 hour",
+  "providers.edits.cacheHint":
+    "Every cache point in requests sent to this account lasts an hour instead of five minutes. Writing the cache costs more.",
+  "providers.edits.cacheHintEndpoint":
+    "Every cache point in requests to this endpoint lasts an hour instead of five minutes. Writing the cache costs more.",
+  "providers.edits.cacheOn": "Cache kept 1 hour",
 
   // --- Routing strategy ---------------------------------------------------
   // How a pool or a group decides what a request runs on. One option ships

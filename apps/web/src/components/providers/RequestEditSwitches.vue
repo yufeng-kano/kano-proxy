@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /**
  * One account's request-edit switches (docs/providers.md § Request edits):
- * Remove fast mode and Hide Claude Code identity, each a labelled checkbox
- * with one line saying what it does. The same pair on a builtin account row,
- * a custom endpoint and a CLI provider (docs/admin-ui.md § Providers page).
+ * Remove fast mode, Hide Claude Code identity and Keep prompt cache for 1
+ * hour, each a labelled checkbox with one line saying what it does. The same
+ * set on a builtin account row, a custom endpoint and a CLI provider
+ * (docs/admin-ui.md § Providers page).
  *
  * Presentational: whoever owns the provider's data writes the change and
  * reloads, and `busy` covers that write.
@@ -18,6 +19,9 @@ const props = defineProps<{
   /** The fast-mode switch's line. Absent hides the switch: the provider never forwards fast mode. */
   fastModeHint?: string
   lineHint: string
+  forceCacheTtl1h: boolean
+  /** The cache switch's line. Absent hides the switch: the upstream never reads Anthropic cache markers. */
+  cacheHint?: string
   busy?: boolean
 }>()
 
@@ -32,12 +36,14 @@ const { t } = useI18n()
  */
 const fastBox = ref<HTMLInputElement | null>(null)
 const lineBox = ref<HTMLInputElement | null>(null)
+const cacheBox = ref<HTMLInputElement | null>(null)
 watch(
   () => props.busy,
   (busy) => {
     if (busy) return
     if (fastBox.value) fastBox.value.checked = props.stripFastMode
     if (lineBox.value) lineBox.value.checked = props.stripClaudeCodeLine
+    if (cacheBox.value) cacheBox.value.checked = props.forceCacheTtl1h
   },
 )
 </script>
@@ -70,6 +76,19 @@ watch(
       <span class="check-text">
         <span class="check-title">{{ t("providers.edits.line") }}</span>
         <span class="check-hint">{{ lineHint }}</span>
+      </span>
+    </label>
+    <label v-if="cacheHint" class="check">
+      <input
+        ref="cacheBox"
+        type="checkbox"
+        :checked="forceCacheTtl1h"
+        :disabled="busy"
+        @change="emit('change', { force_cache_ttl_1h: ($event.target as HTMLInputElement).checked })"
+      />
+      <span class="check-text">
+        <span class="check-title">{{ t("providers.edits.cache") }}</span>
+        <span class="check-hint">{{ cacheHint }}</span>
       </span>
     </label>
   </div>

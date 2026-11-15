@@ -36,6 +36,8 @@ use crate::db::oauth_states::{
     OAuthLoginStateRow, LOGIN_STATE_TTL_MS,
 };
 use crate::db::provider_settings::{get_provider_strategy, set_provider_strategy};
+use crate::db::cli::get_cli_provider_by_slug;
+use crate::db::custom_providers::get_custom_provider_by_slug;
 use crate::ids::{new_id, now_iso};
 use crate::pool::bench::{bench_until_from_row, clear_bench};
 use crate::pool::extension::ListSharedOptions;
@@ -152,6 +154,7 @@ struct AccountView {
     /// are the owner's, read-only to the viewer, since they are the ones that apply.
     strip_fast_mode: bool,
     strip_claude_code_line: bool,
+    force_cache_ttl_1h: bool,
     /// Routable only because of credits: opted in, credits usable, an account-wide window
     /// exhausted (docs/providers.md § Routing module status surfaces).
     on_credits: bool,
@@ -183,6 +186,7 @@ impl AccountView {
             "on_credits": self.on_credits,
             "strip_fast_mode": self.strip_fast_mode,
             "strip_claude_code_line": self.strip_claude_code_line,
+            "force_cache_ttl_1h": self.force_cache_ttl_1h,
             "benched": self.benched,
             "sign_in_expires_at": self.sign_in_expires_at,
         });
@@ -390,6 +394,7 @@ async fn list_accounts_route(
             allow_credits: row.allow_credits,
             strip_fast_mode: row.strip_fast_mode,
             strip_claude_code_line: row.strip_claude_code_line,
+            force_cache_ttl_1h: row.force_cache_ttl_1h,
             on_credits: false,
             benched,
             sign_in_expires_at: match sign_in {
@@ -474,6 +479,7 @@ async fn list_accounts_route(
             allow_credits: false,
             strip_fast_mode: row.strip_fast_mode,
             strip_claude_code_line: row.strip_claude_code_line,
+            force_cache_ttl_1h: row.force_cache_ttl_1h,
             on_credits,
             benched: bench_until_from_row(row, now).is_some(),
             sign_in_expires_at: None,
@@ -585,15 +591,17 @@ async fn patch_account(
         }
         Some(_) => return error(StatusCode::BAD_REQUEST, "invalid custom_label"),
     };
-    let mut flags = [None, None, None];
-    for (slot, key) in flags.iter_mut().zip(["allow_credits", "strip_fast_mode", "strip_claude_code_line"]) {
+    let mut flags = [None, None, None, None];
+    for (slot, key) in
+        flags.iter_mut().zip(["allow_credits", "strip_fast_mode", "strip_claude_code_line", "force_cache_ttl_1h"])
+    {
         *slot = match body.get(key) {
             None => None,
             Some(Value::Bool(b)) => Some(*b),
             Some(_) => return error(StatusCode::BAD_REQUEST, &format!("invalid {key}")),
         };
     }
-    let [allow_credits, strip_fast_mode, strip_claude_code_line] = flags;
+    let [allow_credits, strip_fast_mode, strip_claude_code_line, force_cache_ttl_1h] = flags;
     if custom_label.is_none() && flags.iter().all(Option::is_none) {
         return error(StatusCode::BAD_REQUEST, "nothing to update");
     }
@@ -609,6 +617,29 @@ async fn patch_account(
     if strip_fast_mode.is_some() && matches!(ProviderId::parse(&provider), Some(ProviderId::Grok | ProviderId::Antigravity)) {
         return error(StatusCode::BAD_REQUEST, "strip_fast_mode is not supported for this provider");
     }
+    // Only an upstream that reads Anthropic `cache_control` gets anything from the cache TTL: a
+    // conversion to any other wire drops the markers (docs/providers.md § Request edits). A slug
+    // that is not one of the caller's endpoints or CLI providers goes on to the row's 404.
+    if force_cache_ttl_1h.is_some() {
+        let anthropic = match ProviderId::parse(&provider) {
+            Some(builtin) => builtin == ProviderId::ClaudeCode,
+            None => {
+                let user_id = &session.user.id;
+                let format = match get_custom_provider_by_slug(state.pool(), user_id, &provider).await {
+                    Err(_) => return internal_error(),
+                    Ok(Some(row)) => Some(row.format),
+                    Ok(None) => match get_cli_provider_by_slug(state.pool(), user_id, &provider).await {
+                        Err(_) => return internal_error(),
+                        Ok(row) => row.map(|r| r.format),
+                    },
+                };
+                format.is_none_or(|f| f == "anthropic")
+            }
+        };
+        if !anthropic {
+            return error(StatusCode::BAD_REQUEST, "force_cache_ttl_1h is not supported for this provider");
+        }
+    }
 
     // A flag is checked against the path's provider above, so the row must be that provider's
     // too. For a custom endpoint or CLI provider the path is its slug, which only its owner's
@@ -619,6 +650,7 @@ async fn patch_account(
         allow_credits,
         strip_fast_mode,
         strip_claude_code_line,
+        force_cache_ttl_1h,
     };
     match update_account_settings(state.pool(), &session.user.id, &id, provider_scope, update).await {
         Err(_) => internal_error(),
@@ -628,6 +660,7 @@ async fn patch_account(
             "allow_credits": stored.allow_credits,
             "strip_fast_mode": stored.strip_fast_mode,
             "strip_claude_code_line": stored.strip_claude_code_line,
+            "force_cache_ttl_1h": stored.force_cache_ttl_1h,
         }))
         .into_response(),
         // A row the viewer borrows exists, but changing it is the owner's right.
@@ -1667,7 +1700,7 @@ mod tests {
         )
         .await;
         assert_eq!(patch.status(), StatusCode::OK);
-        assert_eq!(body_json(patch).await, json!({ "ok": true, "custom_label": "Work Claude", "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
+        assert_eq!(body_json(patch).await, json!({ "ok": true, "custom_label": "Work Claude", "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false, "force_cache_ttl_1h": false }));
 
         let after = stored_row(&pool, &user.id, "acc_1").await;
         assert_eq!(after.custom_label.as_deref(), Some("Work Claude"));
@@ -1732,7 +1765,7 @@ mod tests {
         );
         let cleared = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": null })))).await;
         assert_eq!(cleared.status(), StatusCode::OK);
-        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
+        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false, "force_cache_ttl_1h": false }));
         let listed = call(&state, request("GET", "/api/providers/claude-code/accounts", Some(&cookie), None)).await;
         let json = body_json(listed).await;
         assert_eq!(json["accounts"][0]["label"], "fallback@example.com");
@@ -1744,7 +1777,7 @@ mod tests {
         );
         let cleared = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": "" })))).await;
         assert_eq!(cleared.status(), StatusCode::OK);
-        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
+        assert_eq!(body_json(cleared).await, json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false, "force_cache_ttl_1h": false }));
         let listed = call(&state, request("GET", "/api/providers/claude-code/accounts?refresh=true", Some(&cookie), None)).await;
         let json = body_json(listed).await;
         assert_eq!(json["accounts"][0]["label"], "fallback@example.com");
@@ -1798,7 +1831,7 @@ mod tests {
 
         let on = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "allow_credits": true })))).await;
         assert_eq!(on.status(), StatusCode::OK);
-        assert_eq!(body_json(on).await, json!({ "ok": true, "custom_label": "Work", "allow_credits": true, "strip_fast_mode": false, "strip_claude_code_line": false }));
+        assert_eq!(body_json(on).await, json!({ "ok": true, "custom_label": "Work", "allow_credits": true, "strip_fast_mode": false, "strip_claude_code_line": false, "force_cache_ttl_1h": false }));
         let after = stored_row(&pool, &user.id, "acc_1").await;
         assert!(after.allow_credits);
         assert_eq!(after.custom_label.as_deref(), Some("Work"));
@@ -1806,12 +1839,12 @@ mod tests {
 
         // And the reverse: a rename alone leaves the opt-in as stored.
         let renamed = call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": null })))).await;
-        assert_eq!(body_json(renamed).await, json!({ "ok": true, "custom_label": null, "allow_credits": true, "strip_fast_mode": false, "strip_claude_code_line": false }));
+        assert_eq!(body_json(renamed).await, json!({ "ok": true, "custom_label": null, "allow_credits": true, "strip_fast_mode": false, "strip_claude_code_line": false, "force_cache_ttl_1h": false }));
         assert!(stored_row(&pool, &user.id, "acc_1").await.allow_credits);
 
         let both =
             call(&state, request("PATCH", uri, Some(&cookie), Some(json!({ "custom_label": "Both", "allow_credits": false })))).await;
-        assert_eq!(body_json(both).await, json!({ "ok": true, "custom_label": "Both", "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false }));
+        assert_eq!(body_json(both).await, json!({ "ok": true, "custom_label": "Both", "allow_credits": false, "strip_fast_mode": false, "strip_claude_code_line": false, "force_cache_ttl_1h": false }));
 
         for (body, message) in [
             (json!({}), "nothing to update"),
@@ -2489,7 +2522,7 @@ mod tests {
         assert_eq!(fast.status(), StatusCode::OK);
         assert_eq!(
             body_json(fast).await,
-            json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": true, "strip_claude_code_line": false })
+            json!({ "ok": true, "custom_label": null, "allow_credits": false, "strip_fast_mode": true, "strip_claude_code_line": false, "force_cache_ttl_1h": false })
         );
         let line = call(&state, patch(json!({ "strip_claude_code_line": true }))).await;
         assert_eq!(body_json(line).await["strip_fast_mode"], true, "a write keeps the switch it was not sent");
@@ -2571,6 +2604,88 @@ mod tests {
         let stored: Vec<String> =
             sqlx::query_scalar("SELECT id FROM upstream_accounts WHERE strip_fast_mode ORDER BY id").fetch_all(&pool).await.unwrap();
         assert_eq!(stored, ["acc_box", "acc_endpoint"]);
+    }
+
+    #[tokio::test]
+    async fn the_cache_switch_is_taken_only_where_anthropic_reads_cache_control() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        let state = test_state(pool.clone(), transport.clone());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        for (slug, format) in [("gw-anthropic", "anthropic"), ("gw-openai", "openai")] {
+            crate::db::custom_providers::insert_custom_provider(
+                &pool,
+                crate::db::custom_providers::NewCustomProvider {
+                    user_id: &user.id, slug, name: slug, format, base_url: "https://upstream.example.com",
+                    count_tokens_url: None, models_mode: "auto", manual_models_json: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        for (slug, format) in [("box-anthropic", "anthropic"), ("box-openai", "openai")] {
+            crate::db::cli::insert_cli_provider(
+                &pool,
+                crate::db::cli::NewCliProvider {
+                    user_id: &user.id, device_id: None, slug, name: slug, format, models_json: None, model_filter_json: None,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        }
+        let rows = [
+            ("claude-code", "acc_claude", true),
+            ("codex", "acc_codex", false),
+            ("grok", "acc_grok", false),
+            ("antigravity", "acc_anti", false),
+            ("gw-anthropic", "acc_gw_a", true),
+            ("gw-openai", "acc_gw_o", false),
+            ("box-anthropic", "acc_box_a", true),
+            ("box-openai", "acc_box_o", false),
+        ];
+        for (provider, id, _) in rows {
+            seed_account(&pool, &user.id, id, provider, 1, json!({})).await;
+        }
+
+        for (provider, id, accepted) in rows {
+            let body = json!({ "force_cache_ttl_1h": true, "strip_claude_code_line": true });
+            let res =
+                call(&state, request("PATCH", &format!("/api/providers/{provider}/accounts/{id}"), Some(&cookie), Some(body))).await;
+            if accepted {
+                assert_eq!(res.status(), StatusCode::OK, "{provider}");
+                assert_eq!(body_json(res).await["force_cache_ttl_1h"], true);
+            } else {
+                assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{provider}");
+                assert_eq!(body_json(res).await["error"], "force_cache_ttl_1h is not supported for this provider");
+            }
+        }
+        // A refusal writes nothing, not even the other switch in the same body.
+        let stored: Vec<(String, bool, bool)> = sqlx::query_as(
+            "SELECT id, force_cache_ttl_1h, strip_claude_code_line FROM upstream_accounts WHERE force_cache_ttl_1h OR strip_claude_code_line ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let on = |id: &str| (id.to_string(), true, true);
+        assert_eq!(stored, [on("acc_box_a"), on("acc_claude"), on("acc_gw_a")]);
+        stub_claude_usage(&transport, 1, "upstream@example.com");
+        let listed = claude_accounts(&state, &cookie, false).await;
+        assert_eq!(listed["accounts"][0]["force_cache_ttl_1h"], true, "the list reads it back");
+
+        let invalid = call(
+            &state,
+            request("PATCH", "/api/providers/claude-code/accounts/acc_claude", Some(&cookie), Some(json!({ "force_cache_ttl_1h": "1h" }))),
+        )
+        .await;
+        assert_eq!(body_json(invalid).await["error"], "invalid force_cache_ttl_1h");
+        let unknown = call(
+            &state,
+            request("PATCH", "/api/providers/nobody/accounts/acc_claude", Some(&cookie), Some(json!({ "force_cache_ttl_1h": true }))),
+        )
+        .await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND, "a slug that is none of the caller's goes on to the row lookup");
     }
 
     #[tokio::test]
@@ -2972,6 +3087,7 @@ mod tests {
             allow_credits: false,
             strip_fast_mode: false,
             strip_claude_code_line: false,
+            force_cache_ttl_1h: false,
             created_at: NOW.into(),
             updated_at: NOW.into(),
         }

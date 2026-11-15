@@ -158,6 +158,7 @@ export function useCustomProviders() {
     if (!row || !state.data) return
     row.strip_fast_mode = edits.strip_fast_mode
     row.strip_claude_code_line = edits.strip_claude_code_line
+    row.force_cache_ttl_1h = edits.force_cache_ttl_1h
     writeCustomProvidersCache(userId.value, { providers: state.data, shared: state.shared ?? [] })
   }
 

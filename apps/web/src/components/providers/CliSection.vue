@@ -177,6 +177,7 @@ function modelsCell(provider: CliProvider): string {
             </Badge>
             <Badge v-if="row.strip_fast_mode">{{ t("providers.edits.fastModeOn") }}</Badge>
             <Badge v-if="row.strip_claude_code_line">{{ t("providers.edits.lineOn") }}</Badge>
+            <Badge v-if="row.force_cache_ttl_1h">{{ t("providers.edits.cacheOn") }}</Badge>
           </span>
         </div>
       </template>
@@ -241,6 +242,8 @@ function modelsCell(provider: CliProvider): string {
             :strip-claude-code-line="!!row.strip_claude_code_line"
             :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
             :line-hint="t('providers.edits.lineHintEndpoint')"
+            :force-cache-ttl1h="!!row.force_cache_ttl_1h"
+            :cache-hint="row.format === 'anthropic' ? t('providers.edits.cacheHintEndpoint') : undefined"
             :busy="settingsBusyId === row.id"
             @change="onEdits(row, row.account_id, $event)"
           />

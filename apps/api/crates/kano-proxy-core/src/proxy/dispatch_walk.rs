@@ -558,6 +558,7 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
         let edits = RequestEdits {
             strip_fast_mode: candidate.account.strip_fast_mode,
             strip_claude_code_line: candidate.account.strip_claude_code_line,
+            force_cache_ttl_1h: candidate.account.force_cache_ttl_1h,
         };
         let extras = CallExtras { edits, ..base_extras.clone() };
         idx += 1;
