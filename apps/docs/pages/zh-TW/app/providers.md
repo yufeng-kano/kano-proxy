@@ -70,7 +70,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 
 **Hide Claude Code identity** 會從 system prompt 拿掉 Claude Code 的身分宣告 `You are Claude Code, Anthropic's official CLI for Claude.`。Claude Agent SDK 用的兩種寫法也會一起拿掉：`You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` 和 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`。Claude Code 每個請求都會帶這一行。它透過 Kano Proxy 呼叫其他供應商的模型時，這一行也會送到那個供應商，所以每個帳號都有這個勾選項。如果是 Claude Code 帳號，Kano Proxy 也不會再自己補上這一行。少了它，Claude 可能拒絕請求，或改用額外用量點數計費。這個勾選項也會拿掉告訴上游「請求來自 Claude Code」的兩個標記：Claude Code 2.1.319 放在 system prompt 最前面的 `x-anthropic-billing-header` 區塊，以及自訂 Anthropic 端點上的 `claude-code-20250219` beta。Anthropic 依這些標記認定 Claude Code 用量：在只有免費 Console 點數的自訂 Anthropic 端點上，勾了才能讓 Claude Code 花那些點數。
 
-**Keep prompt cache for 1 hour** 讓請求裡每個 prompt cache 都保留一小時。Claude Code 每個請求自己決定 cache 留多久，常常只用預設的 5 分鐘。對話停超過 5 分鐘，整段歷史就得重新付費寫進 cache。勾選後，client 標記的每個 cache 都改成保留 1 小時送出。client 沒標記的地方，Kano Proxy 不會自己加。寫入 1 小時的 cache 是一般輸入價格的 2 倍，5 分鐘的是 1.25 倍，讀取價格一樣。常停超過 5 分鐘就划算，一次性的請求反而會比較貴。Codex 沒有這個勾選項：用 ChatGPT 登入時，Codex 的 cache 本來就不會過期。
+**Keep prompt cache for 1 hour** 讓請求裡每個 prompt cache 都保留一小時。Claude Code 每個請求自己決定 cache 留多久，常常只用預設的 5 分鐘。對話停超過 5 分鐘，整段歷史就得重新付費寫進 cache。勾選後，client 標記的每個 cache 都改成保留 1 小時送出，client 沒標記的地方，Kano Proxy 不會自己加。用 OpenAI 格式送進來的請求本身沒有 cache 標記，由 Kano Proxy 代為放置，勾選後這些也會保留 1 小時。自訂端點如果不支援 1 小時的 cache，勾選後可能會拒絕請求。寫入 1 小時的 cache 是一般輸入價格的 2 倍，5 分鐘的是 1.25 倍，讀取價格一樣。常停超過 5 分鐘就划算，一次性的請求反而會比較貴。Codex 沒有這個勾選項：用 ChatGPT 登入時，Codex 的 cache 本來就不會過期。
 
 勾選項在編輯模式下的位置：
 

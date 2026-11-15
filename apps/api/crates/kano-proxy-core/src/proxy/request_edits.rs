@@ -46,36 +46,36 @@ pub fn edit_anthropic_body(body: &mut Map<String, Value>, edits: RequestEdits) {
     }
 }
 
-/// Sets `ttl: "1h"` on every `cache_control` object the client placed, at the positions Anthropic
-/// accepts one: the top-level automatic field, tool definitions, `system` blocks, message
-/// content blocks and the blocks inside a `tool_result`'s content. Tool `input_schema` and
-/// `tool_use.input` are client data that may hold a key of that name, so only these positions
-/// are visited. No marker is added where there was none.
+/// Sets `ttl: "1h"` on every `cache_control` object the client placed: the top-level automatic
+/// field, and any marker inside `tools`, `system` or `messages` however deeply it is nested
+/// (a `tool_result`'s content, a `document`'s content blocks, a search result's blocks). A
+/// marker left at 5m among 1h ones would break Anthropic's longer-TTL-first rule, so every one
+/// is visited. A tool's `input_schema` and a `tool_use`'s `input` are client data that may hold
+/// a key of that name and are skipped. No marker is added where there was none.
 fn force_one_hour_cache(body: &mut Map<String, Value>) {
-    fn set_ttl(block: &mut Value) {
-        if let Some(Value::Object(marker)) = block.get_mut("cache_control") {
-            marker.insert("ttl".into(), Value::String("1h".into()));
+    fn visit(value: &mut Value) {
+        match value {
+            Value::Array(items) => items.iter_mut().for_each(visit),
+            Value::Object(map) => {
+                for (key, child) in map.iter_mut() {
+                    match (key.as_str(), child) {
+                        ("cache_control", Value::Object(marker)) => {
+                            marker.insert("ttl".into(), Value::String("1h".into()));
+                        }
+                        ("input_schema" | "input", _) => {}
+                        (_, child) => visit(child),
+                    }
+                }
+            }
+            _ => {}
         }
     }
     if let Some(Value::Object(marker)) = body.get_mut("cache_control") {
         marker.insert("ttl".into(), Value::String("1h".into()));
     }
-    for key in ["tools", "system"] {
-        if let Some(Value::Array(blocks)) = body.get_mut(key) {
-            blocks.iter_mut().for_each(set_ttl);
-        }
-    }
-    let Some(Value::Array(messages)) = body.get_mut("messages") else { return };
-    for message in messages {
-        let Some(Value::Array(blocks)) = message.get_mut("content") else { continue };
-        for block in blocks {
-            set_ttl(block);
-            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
-                continue;
-            }
-            if let Some(Value::Array(inner)) = block.get_mut("content") {
-                inner.iter_mut().for_each(set_ttl);
-            }
+    for key in ["tools", "system", "messages"] {
+        if let Some(value) = body.get_mut(key) {
+            visit(value);
         }
     }
 }
@@ -411,6 +411,13 @@ mod tests {
                         "content": [{ "type": "text", "text": "done", "cache_control": five }],
                     }],
                 },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "document",
+                        "source": { "type": "content", "content": [{ "type": "text", "text": "page", "cache_control": five }] },
+                    }],
+                },
                 { "role": "user", "content": "plain" },
             ],
         }))
@@ -426,10 +433,11 @@ mod tests {
         assert_eq!(body["system"][0]["cache_control"], hour, "a 5m marker is raised too");
         assert_eq!(body["messages"][0]["content"][0]["cache_control"], hour);
         assert_eq!(body["messages"][2]["content"][0]["content"][0]["cache_control"], hour, "inside a tool_result");
+        assert_eq!(body["messages"][3]["content"][0]["source"]["content"][0]["cache_control"], hour, "inside a document");
         // Count every marker: nothing was added where the client placed none.
-        assert_eq!(Value::Object(body.clone()).to_string().matches("\"ttl\":\"1h\"").count(), 5);
+        assert_eq!(Value::Object(body.clone()).to_string().matches("\"ttl\":\"1h\"").count(), 6);
         assert!(body["tools"][1].get("cache_control").is_none() && body["system"][1].get("cache_control").is_none());
-        assert_eq!(body["messages"][3]["content"], "plain");
+        assert_eq!(body["messages"][4]["content"], "plain");
     }
 
     #[test]

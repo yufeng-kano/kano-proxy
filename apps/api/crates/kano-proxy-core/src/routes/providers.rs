@@ -3086,7 +3086,8 @@ mod tests {
             edge_strike_at: None,
             allow_credits: false,
             strip_fast_mode: false,
-            strip_claude_code_line: false, force_cache_ttl_1h: false,
+            strip_claude_code_line: false,
+            force_cache_ttl_1h: false,
             created_at: NOW.into(),
             updated_at: NOW.into(),
         }
