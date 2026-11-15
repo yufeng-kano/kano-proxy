@@ -22,7 +22,6 @@ import {
   type MetricId,
   type MetricSeries,
 } from "@/components/overview/series"
-import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Banner from "@/components/ui/Banner.vue"
@@ -318,7 +317,7 @@ function coverageNote(row: ModelUsageRow): string | null {
 
 <template>
   <div>
-    <PageHeader :title="t('overview.title')">
+    <PageHeader :title="t('overview.title')" :refreshing="manualRefreshing" @refresh="onRefresh">
       <template #actions>
         <div class="range-segmented-wrap">
           <Segmented
@@ -336,15 +335,6 @@ function coverageNote(row: ModelUsageRow): string | null {
             @close="calendarOpen = false"
           />
         </div>
-        <!-- Icon-only: the label is a tooltip and the accessible name. -->
-        <AppButton
-          icon-only
-          :label="t('action.refresh')"
-          :loading="manualRefreshing"
-          @click="onRefresh"
-        >
-          <template #icon><ActionIcon name="refresh" /></template>
-        </AppButton>
       </template>
     </PageHeader>
 

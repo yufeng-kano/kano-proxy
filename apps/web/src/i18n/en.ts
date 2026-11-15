@@ -232,7 +232,6 @@ export const en = {
   "logs.columns.note": "Saved in this browser",
   "logs.columns.resize": "Resize {column}",
   // The title menu and the export dialog.
-  "logs.menu": "Logs actions",
   "logs.export.open": "Export…",
   "logs.export.title": "Export logs",
   "logs.export.intro": "Request metadata only. Prompts and replies are never stored, so they are not in the file.",

@@ -20,8 +20,6 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import LogDetailModal from "@/components/LogDetailModal.vue"
 import LogExportDialog from "@/components/LogExportDialog.vue"
-import ActionIcon from "@/components/ui/ActionIcon.vue"
-import ActionMenu from "@/components/ui/ActionMenu.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import AppCard from "@/components/ui/AppCard.vue"
 import Badge from "@/components/ui/Badge.vue"
@@ -467,13 +465,13 @@ async function onRefresh() {
 
 <template>
   <div class="page">
-    <PageHeader :title="t('logs.title')">
-      <template #title>
-        <ActionMenu :items="titleMenu" class="title-menu" :aria-label="t('logs.menu')" @select="exporting = true">
-          {{ t("logs.title") }}
-          <svg class="title-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
-        </ActionMenu>
-      </template>
+    <PageHeader
+      :title="t('logs.title')"
+      :menu="titleMenu"
+      :refreshing="manualRefreshing"
+      @refresh="onRefresh"
+      @select="exporting = true"
+    >
       <template #actions>
         <ListPicker
           :options="modelOptions"
@@ -535,16 +533,6 @@ async function onRefresh() {
             </div>
           </div>
         </div>
-
-        <!-- Icon-only: the label is a tooltip and the accessible name. -->
-        <AppButton
-          icon-only
-          :label="t('action.refresh')"
-          :loading="manualRefreshing"
-          @click="onRefresh"
-        >
-          <template #icon><ActionIcon name="refresh" /></template>
-        </AppButton>
       </template>
     </PageHeader>
 
@@ -724,29 +712,6 @@ async function onRefresh() {
 .list {
   flex: 1;
   min-height: 0;
-}
-
-/* The title reads as the title, with a chevron saying it opens something. */
-.title-menu {
-  margin-left: calc(var(--space-2) * -1);
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-control);
-  transition: background var(--duration-fast) var(--ease);
-}
-
-.title-menu:hover,
-.title-menu[aria-expanded="true"] {
-  background: var(--hover);
-}
-
-.title-chevron {
-  width: 16px;
-  height: 16px;
-  fill: none;
-  stroke: var(--muted);
-  stroke-width: 2.2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .picker-head {

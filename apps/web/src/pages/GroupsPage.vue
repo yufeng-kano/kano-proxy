@@ -201,22 +201,37 @@ async function load() {
   await Promise.all([loadGroups(), loadCatalog()])
 }
 
-async function loadGroups() {
-  await groups.load()
+async function loadGroups(opts?: { refresh?: boolean }) {
+  await groups.load(opts)
   if (groups.state.error) error.value = t("groups.error.load")
+}
+
+/** Only the user's own Refresh reports progress, on the title it was chosen from. */
+const refreshing = ref(false)
+
+async function onRefresh() {
+  refreshing.value = true
+  error.value = null
+  try {
+    await Promise.all([loadGroups({ refresh: true }), loadCatalog({ refresh: true })])
+  } finally {
+    refreshing.value = false
+  }
 }
 
 /**
  * Cache-first over the shared models entry: the picker only needs ids, and a
  * failure here leaves the page working.
  */
-async function loadCatalog() {
+async function loadCatalog(opts?: { refresh?: boolean }) {
   const uid = user.value?.id ?? null
   const cached = readModelsCache(uid)
   if (cached) catalog.value = cached.data
-  if (cached && isModelsCacheFresh(uid, CACHE_TTL_MS)) return
+  if (cached && !opts?.refresh && isModelsCacheFresh(uid, CACHE_TTL_MS)) return
 
   try {
+    // Past the local cache only: the picker needs ids, not a fresh upstream
+    // catalog, so the server's own catalog cache is left alone.
     const res = await listModels()
     catalog.value = res.data
     writeModelsCache(uid, res)
@@ -295,7 +310,7 @@ function endpointUrls(group: ModelGroup): Array<{ key: string; label: string; ur
 
 <template>
   <div class="page">
-    <PageHeader :title="t('groups.title')">
+    <PageHeader :title="t('groups.title')" :refreshing="refreshing" @refresh="onRefresh">
       <template #actions>
         <AppButton variant="primary" @click="openCreate">
           <template #icon><ActionIcon name="plus" /></template>

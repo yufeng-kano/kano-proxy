@@ -392,7 +392,7 @@ async function copyId(id: string) {
 
 <template>
   <div>
-    <PageHeader :title="t('models.title')">
+    <PageHeader :title="t('models.title')" :refreshing="refreshing" @refresh="onRefresh">
       <template #actions>
         <!-- The wrapping label is the field's accessible name; the placeholder
              carries the same words visually. -->
@@ -404,17 +404,6 @@ async function copyId(id: string) {
             :placeholder="t('models.searchPlaceholder')"
           />
         </label>
-        <!-- Icon-only: the label is a tooltip and the accessible name, so the
-             control keeps its meaning without spending header width on a word
-             that repeats on every page. -->
-        <AppButton
-          icon-only
-          :label="t('action.refresh')"
-          :loading="refreshing"
-          @click="onRefresh"
-        >
-          <template #icon><ActionIcon name="refresh" /></template>
-        </AppButton>
       </template>
 
       <template #nav>
@@ -559,9 +548,9 @@ async function copyId(id: string) {
  * A real `width`, not a flex basis. The actions box is sized to its content,
  * and an `<input>`'s content contribution is its *default* ~170px regardless
  * of any basis — so a 260px basis exceeds the box the browser just built and
- * flex wraps Refresh onto a line of its own before shrinking can rescue it.
- * A width feeds the intrinsic sizing instead, so the box is the field plus the
- * button and the row stays one line.
+ * flex wraps the field onto a line of its own before shrinking can rescue it.
+ * A width feeds the intrinsic sizing instead, so the box is the field and the
+ * row stays one line.
  */
 .search {
   display: block;
@@ -579,8 +568,8 @@ async function copyId(id: string) {
  *
  * Layout arithmetic, so a raw px value rather than a spacing token: at the
  * narrowest phone (320px, minus this breakpoint's 16px gutters) the line holds
- * the title (~62px), two gaps, and the 40px coarse-pointer Refresh — leaving
- * ~160px. "Search models" reads fine at that width.
+ * the title menu (~100px with its chevron and padding) and one gap, leaving
+ * ~170px. "Search models" reads fine at that width.
  */
 @media (max-width: 640px) {
   .search {
