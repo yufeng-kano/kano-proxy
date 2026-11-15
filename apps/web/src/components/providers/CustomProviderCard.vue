@@ -155,6 +155,7 @@ async function runTest() {
           <Badge>{{ formatLabel }}</Badge>
           <Badge v-if="provider.strip_fast_mode">{{ t("providers.edits.fastModeOn") }}</Badge>
           <Badge v-if="provider.strip_claude_code_line">{{ t("providers.edits.lineOn") }}</Badge>
+          <Badge v-if="provider.force_cache_ttl_1h">{{ t("providers.edits.cacheOn") }}</Badge>
           <!-- A word, not a tint: the drag state has to survive a color-blind
                reader and a high-contrast mode. -->
           <span v-if="dragging" class="moving">{{ t("custom.reorder.moving") }}</span>
@@ -263,6 +264,8 @@ async function runTest() {
         :strip-claude-code-line="!!provider.strip_claude_code_line"
         :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
         :line-hint="t('providers.edits.lineHintEndpoint')"
+        :force-cache-ttl1h="!!provider.force_cache_ttl_1h"
+        :cache-hint="provider.format === 'anthropic' ? t('providers.edits.cacheHintEndpoint') : undefined"
         :busy="busy"
         @change="emit('edits', $event)"
       />

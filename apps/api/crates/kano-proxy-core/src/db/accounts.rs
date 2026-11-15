@@ -40,6 +40,7 @@ pub struct AccountRow {
     /// are the owner's, the only ones that apply to it.
     pub strip_fast_mode: bool,
     pub strip_claude_code_line: bool,
+    pub force_cache_ttl_1h: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -141,6 +142,7 @@ pub struct AccountSettingsUpdate<'a> {
     pub allow_credits: Option<bool>,
     pub strip_fast_mode: Option<bool>,
     pub strip_claude_code_line: Option<bool>,
+    pub force_cache_ttl_1h: Option<bool>,
 }
 
 /// The operator's own settings on one account, as that write stored them.
@@ -150,6 +152,7 @@ pub struct AccountSettings {
     pub allow_credits: bool,
     pub strip_fast_mode: bool,
     pub strip_claude_code_line: bool,
+    pub force_cache_ttl_1h: bool,
 }
 
 /// Writes `update` in one statement. `provider`, when given, must match the row. `None` when
@@ -167,15 +170,17 @@ pub async fn update_account_settings(
              allow_credits = COALESCE($3, allow_credits),
              strip_fast_mode = COALESCE($4, strip_fast_mode),
              strip_claude_code_line = COALESCE($5, strip_claude_code_line),
-             updated_at = $6
-         WHERE id = $7 AND user_id = $8 AND ($9::text IS NULL OR provider = $9)
-         RETURNING custom_label, allow_credits, strip_fast_mode, strip_claude_code_line",
+             force_cache_ttl_1h = COALESCE($6, force_cache_ttl_1h),
+             updated_at = $7
+         WHERE id = $8 AND user_id = $9 AND ($10::text IS NULL OR provider = $10)
+         RETURNING custom_label, allow_credits, strip_fast_mode, strip_claude_code_line, force_cache_ttl_1h",
     )
     .bind(update.custom_label.is_some())
     .bind(update.custom_label.flatten())
     .bind(update.allow_credits)
     .bind(update.strip_fast_mode)
     .bind(update.strip_claude_code_line)
+    .bind(update.force_cache_ttl_1h)
     .bind(now_iso())
     .bind(account_id)
     .bind(user_id)
@@ -244,7 +249,7 @@ pub async fn insert_account(db: &PgPool, input: NewAccount<'_>) -> Result<Accoun
         edge_strike_at: None,
         allow_credits: false,
         strip_fast_mode: false,
-        strip_claude_code_line: false,
+        strip_claude_code_line: false, force_cache_ttl_1h: false,
         created_at: ts.clone(),
         updated_at: ts,
     })
@@ -625,7 +630,7 @@ mod tests {
             usage_fetched_at: None, usage_fetching_at: None, bench_until: None, bench_reason: None,
             bench_scopes_json: None,
             refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None, edge_strikes: 0, edge_strike_at: None, allow_credits: false,
-            strip_fast_mode: false, strip_claude_code_line: false,
+            strip_fast_mode: false, strip_claude_code_line: false, force_cache_ttl_1h: false,
             created_at: String::new(), updated_at: String::new(),
         };
         let snap = read_usage_snapshot(&row).unwrap();

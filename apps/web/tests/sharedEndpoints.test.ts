@@ -21,6 +21,7 @@ function shared(overrides: Partial<SharedCustomProvider> = {}): SharedCustomProv
     shadowed: false,
     strip_fast_mode: true,
     strip_claude_code_line: false,
+    force_cache_ttl_1h: false,
     ...overrides,
   }
 }

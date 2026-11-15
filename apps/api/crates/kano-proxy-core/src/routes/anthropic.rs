@@ -1190,6 +1190,43 @@ mod request_edit_tests {
     }
 
     #[tokio::test]
+    async fn only_the_candidate_with_the_cache_switch_sends_its_markers_for_an_hour() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.account("claude-code").await;
+        f.custom_provider("mygw", "anthropic", "https://upstream.example.com").await;
+        f.group("team", "fast", &["claude-code/claude-opus-5", "mygw/local-model"]).await;
+        sqlx::query("UPDATE upstream_accounts SET force_cache_ttl_1h = TRUE WHERE user_id = $1 AND provider = 'claude-code'")
+            .bind(&f.user.id)
+            .execute(f.state.pool())
+            .await
+            .unwrap();
+        f.mock.respond_json(StatusCode::TOO_MANY_REQUESTS, json!({ "type": "error" }));
+        f.mock.respond_json(StatusCode::OK, anthropic_ok());
+        let five = json!({ "type": "ephemeral" });
+        let body = json!({
+            "model": "fast",
+            "max_tokens": 16,
+            "tools": [{ "name": "f", "input_schema": { "type": "object" }, "cache_control": five }],
+            "system": [{ "type": "text", "text": "rules", "cache_control": five }],
+            "messages": [{ "role": "user", "content": [{ "type": "text", "text": "hi", "cache_control": five }] }],
+        });
+
+        let response = f.router().oneshot(f.post("/g/team/anthropic/v1/messages", body.clone())).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = f.mock.requests();
+        assert_eq!(calls.len(), 2);
+        let claude = calls[0].json();
+        let hour = json!({ "type": "ephemeral", "ttl": "1h" });
+        assert_eq!(claude["tools"][0]["cache_control"], hour);
+        assert_eq!(claude["system"].as_array().unwrap().last().unwrap()["cache_control"], hour);
+        assert_eq!(claude["messages"][0]["content"][0]["cache_control"], hour);
+        let endpoint = calls[1].json();
+        assert_eq!((endpoint["tools"].clone(), endpoint["system"].clone(), endpoint["messages"].clone()),
+            (body["tools"].clone(), body["system"].clone(), body["messages"].clone()), "the endpoint's switch is off");
+    }
+
+    #[tokio::test]
     async fn count_tokens_gets_the_same_edits() {
         let Some(f) = fixture().await else { return skip_without_db() };
         f.account("claude-code").await;

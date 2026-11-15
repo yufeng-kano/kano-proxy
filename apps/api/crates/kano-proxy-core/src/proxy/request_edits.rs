@@ -1,6 +1,7 @@
-//! Per-account request edits (docs/providers.md § Request edits): "Remove fast mode" and
-//! "Remove the Claude Code line", applied by each dispatch caller to the copy of the body one
-//! candidate's call gets. The walk takes each candidate's switches from its account row.
+//! Per-account request edits (docs/providers.md § Request edits): "Remove fast mode", "Hide
+//! Claude Code identity" and "Keep prompt cache for 1 hour", applied by each dispatch caller to
+//! the copy of the body one candidate's call gets. The walk takes each candidate's switches from
+//! its account row.
 
 use serde_json::{Map, Value};
 
@@ -24,6 +25,9 @@ pub const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
 
 /// An Anthropic Messages / count_tokens body.
 pub fn edit_anthropic_body(body: &mut Map<String, Value>, edits: RequestEdits) {
+    if edits.force_cache_ttl_1h {
+        force_one_hour_cache(body);
+    }
     if edits.strip_fast_mode {
         // The `fast-mode-2026-02-01` beta stays: it is inert without `speed`.
         body.remove("speed");
@@ -39,6 +43,40 @@ pub fn edit_anthropic_body(body: &mut Map<String, Value>, edits: RequestEdits) {
         };
     if emptied {
         body.remove("system");
+    }
+}
+
+/// Sets `ttl: "1h"` on every `cache_control` object the client placed, at the positions Anthropic
+/// accepts one: the top-level automatic field, tool definitions, `system` blocks, message
+/// content blocks and the blocks inside a `tool_result`'s content. Tool `input_schema` and
+/// `tool_use.input` are client data that may hold a key of that name, so only these positions
+/// are visited. No marker is added where there was none.
+fn force_one_hour_cache(body: &mut Map<String, Value>) {
+    fn set_ttl(block: &mut Value) {
+        if let Some(Value::Object(marker)) = block.get_mut("cache_control") {
+            marker.insert("ttl".into(), Value::String("1h".into()));
+        }
+    }
+    if let Some(Value::Object(marker)) = body.get_mut("cache_control") {
+        marker.insert("ttl".into(), Value::String("1h".into()));
+    }
+    for key in ["tools", "system"] {
+        if let Some(Value::Array(blocks)) = body.get_mut(key) {
+            blocks.iter_mut().for_each(set_ttl);
+        }
+    }
+    let Some(Value::Array(messages)) = body.get_mut("messages") else { return };
+    for message in messages {
+        let Some(Value::Array(blocks)) = message.get_mut("content") else { continue };
+        for block in blocks {
+            set_ttl(block);
+            if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                continue;
+            }
+            if let Some(Value::Array(inner)) = block.get_mut("content") {
+                inner.iter_mut().for_each(set_ttl);
+            }
+        }
     }
 }
 
@@ -165,7 +203,7 @@ mod tests {
 
     const CC: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
     const BILLING: &str = "x-anthropic-billing-header: cc_version=2.1.319; cc_entrypoint=cli;";
-    const BOTH: RequestEdits = RequestEdits { strip_fast_mode: true, strip_claude_code_line: true };
+    const BOTH: RequestEdits = RequestEdits { strip_fast_mode: true, strip_claude_code_line: true, force_cache_ttl_1h: false };
 
     fn object(value: Value) -> Map<String, Value> {
         value.as_object().cloned().unwrap()
@@ -339,5 +377,71 @@ mod tests {
             edit_chat_request(&mut req, BOTH);
             assert_eq!(req.raw_body.get("service_tier"), Some(&json!(tier)));
         }
+    }
+
+    const ONE_HOUR: RequestEdits = RequestEdits { strip_fast_mode: false, strip_claude_code_line: false, force_cache_ttl_1h: true };
+
+    fn cached_body() -> Map<String, Value> {
+        let five = json!({ "type": "ephemeral" });
+        object(json!({
+            "cache_control": five,
+            "tools": [
+                {
+                    "name": "write",
+                    "input_schema": { "type": "object", "properties": { "cache_control": { "type": "object" } } },
+                    "cache_control": five,
+                },
+                { "name": "read", "input_schema": { "type": "object" } },
+            ],
+            "system": [
+                { "type": "text", "text": "rules", "cache_control": { "type": "ephemeral", "ttl": "5m" } },
+                { "type": "text", "text": "more" },
+            ],
+            "messages": [
+                { "role": "user", "content": [{ "type": "text", "text": "q1", "cache_control": five }] },
+                {
+                    "role": "assistant",
+                    "content": [{ "type": "tool_use", "id": "t1", "name": "write", "input": { "cache_control": "kept" } }],
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{ "type": "text", "text": "done", "cache_control": five }],
+                    }],
+                },
+                { "role": "user", "content": "plain" },
+            ],
+        }))
+    }
+
+    #[test]
+    fn the_cache_switch_gives_every_client_marker_an_hour() {
+        let mut body = cached_body();
+        edit_anthropic_body(&mut body, ONE_HOUR);
+        let hour = json!({ "type": "ephemeral", "ttl": "1h" });
+        assert_eq!(body["cache_control"], hour, "the top-level automatic field");
+        assert_eq!(body["tools"][0]["cache_control"], hour);
+        assert_eq!(body["system"][0]["cache_control"], hour, "a 5m marker is raised too");
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"], hour);
+        assert_eq!(body["messages"][2]["content"][0]["content"][0]["cache_control"], hour, "inside a tool_result");
+        // Count every marker: nothing was added where the client placed none.
+        assert_eq!(Value::Object(body.clone()).to_string().matches("\"ttl\":\"1h\"").count(), 5);
+        assert!(body["tools"][1].get("cache_control").is_none() && body["system"][1].get("cache_control").is_none());
+        assert_eq!(body["messages"][3]["content"], "plain");
+    }
+
+    #[test]
+    fn the_cache_switch_leaves_client_data_and_everything_else_alone() {
+        let mut body = cached_body();
+        edit_anthropic_body(&mut body, ONE_HOUR);
+        let before = cached_body();
+        assert_eq!(body["tools"][0]["input_schema"], before["tools"][0]["input_schema"], "a schema property is not a marker");
+        assert_eq!(body["messages"][1], before["messages"][1], "tool_use input is the model's data");
+
+        let mut untouched = cached_body();
+        edit_anthropic_body(&mut untouched, RequestEdits::default());
+        assert_eq!(untouched, cached_body(), "off by default");
     }
 }

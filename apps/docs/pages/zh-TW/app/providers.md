@@ -64,20 +64,23 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 
 ### 轉送前的修改
 
-這些勾選項會改變 Kano Proxy 轉送給帳號的內容，每個帳號最多兩個，預設都不勾選。每個帳號各自設定，所以兩個 Claude Code 帳號可以勾得不一樣。勾選或取消勾選都會立刻儲存。
+這些勾選項會改變 Kano Proxy 轉送給帳號的內容，每個帳號最多三個，預設都不勾選。每個帳號各自設定，所以兩個 Claude Code 帳號可以勾得不一樣。勾選或取消勾選都會立刻儲存。
 
 **Remove fast mode** 讓請求以標準速度送出。Claude 的 fast mode 一律以額外用量點數（usage credits）計費，方案額度還有剩也一樣。Codex 的 fast mode 會更快耗掉方案額度。
 
 **Hide Claude Code identity** 會從 system prompt 拿掉 Claude Code 的身分宣告 `You are Claude Code, Anthropic's official CLI for Claude.`。Claude Agent SDK 用的兩種寫法也會一起拿掉：`You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` 和 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`。Claude Code 每個請求都會帶這一行。它透過 Kano Proxy 呼叫其他供應商的模型時，這一行也會送到那個供應商，所以每個帳號都有這個勾選項。如果是 Claude Code 帳號，Kano Proxy 也不會再自己補上這一行。少了它，Claude 可能拒絕請求，或改用額外用量點數計費。這個勾選項也會拿掉告訴上游「請求來自 Claude Code」的兩個標記：Claude Code 2.1.319 放在 system prompt 最前面的 `x-anthropic-billing-header` 區塊，以及自訂 Anthropic 端點上的 `claude-code-20250219` beta。Anthropic 依這些標記認定 Claude Code 用量：在只有免費 Console 點數的自訂 Anthropic 端點上，勾了才能讓 Claude Code 花那些點數。
 
+**Keep prompt cache for 1 hour** 讓請求裡每個 prompt cache 都保留一小時。Claude Code 每個請求自己決定 cache 留多久，常常只用預設的 5 分鐘。對話停超過 5 分鐘，整段歷史就得重新付費寫進 cache。勾選後，client 標記的每個 cache 都改成保留 1 小時送出。client 沒標記的地方，Kano Proxy 不會自己加。寫入 1 小時的 cache 是一般輸入價格的 2 倍，5 分鐘的是 1.25 倍，讀取價格一樣。常停超過 5 分鐘就划算，一次性的請求反而會比較貴。Codex 沒有這個勾選項：用 ChatGPT 登入時，Codex 的 cache 本來就不會過期。
+
 勾選項在編輯模式下的位置：
 
-- **Claude Code** 和 **Codex** 帳號：兩個都有，在你自己每個帳號那一列最下面的 **Request edits for this account**。
+- **Claude Code** 帳號：三個都有，在你自己每個帳號那一列最下面的 **Request edits for this account**。
+- **Codex** 帳號：**Remove fast mode** 和 **Hide Claude Code identity**，位置一樣。
 - **Grok** 和 **Antigravity** 帳號：只有 **Hide Claude Code identity**，位置一樣。Kano Proxy 本來就不會把 fast mode 送給這兩個供應商。
-- 每個自訂端點：兩個都有，在該列的端點資訊下方。
-- 每個 CLI 供應商：兩個都有，在 **CLI providers** 表格下方，每個供應商一組。
+- 每個自訂端點：**Remove fast mode** 和 **Hide Claude Code identity**，在該列的端點資訊下方。Anthropic 格式的端點另外多一個 **Keep prompt cache for 1 hour**。
+- 每個 CLI 供應商：跟自訂端點一樣，在 **CLI providers** 表格下方，每個供應商一組。
 
-勾選後會出現標記：**Fast mode removed** 或 **Claude Code identity hidden**。訂閱帳號顯示在該列的狀態和方案後面，自訂端點顯示在名稱下方的狀態和格式旁，CLI 供應商顯示在前綴和格式旁。不管編輯模式開著還是關著，標記都會一直顯示。
+勾選後會出現標記：**Fast mode removed**、**Claude Code identity hidden** 或 **Cache kept 1 hour**。訂閱帳號顯示在該列的狀態和方案後面，自訂端點顯示在名稱下方的狀態和格式旁，CLI 供應商顯示在前綴和格式旁。不管編輯模式開著還是關著，標記都會一直顯示。
 
 每個帳號只套用自己的勾選項。請求換到帳號池的下一個帳號，或[群組](/zh-TW/app/groups)從一個供應商備援到另一個時，下一個帳號套用它自己的勾選項。勾選之後，供應商的回應可能不一樣，也可能直接拒絕請求。
 
@@ -130,7 +133,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 訂閱帳號：
 
 1. 在該供應商的卡片上按鉛筆。
-2. 在該帳號那一列最下面的 **Request edits for this account**，勾選 **Remove fast mode** 或 **Hide Claude Code identity**。會立刻儲存，那一列也會馬上出現對應的標記。
+2. 在該帳號那一列最下面的 **Request edits for this account**，勾選 **Remove fast mode**、**Hide Claude Code identity** 或 **Keep prompt cache for 1 hour**。會立刻儲存，那一列也會馬上出現對應的標記。
 3. 按打勾按鈕收起編輯模式。
 
 每個帳號在自己那一列設定，要改幾個帳號，就在每一列各做一次第 2 步。自訂端點：在 **Custom endpoints** 卡片上按鉛筆，再到該端點那一列勾選。CLI 供應商：在 **CLI providers** 卡片上按鉛筆，再到表格下方該供應商那一組勾選。要還原，用同樣的方式取消勾選。
@@ -180,7 +183,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 - 鉛筆（**Edit**）：打開同一個表單。**API key** 留空代表沿用原本的金鑰。
 - 垃圾桶（**Remove**）：確認後刪除端點和它的金鑰。`<prefix>/…` 的請求會立刻失效。
 - **Move up** 和 **Move down**：只改變這個頁面上的顯示順序，不影響分配。
-- **Remove fast mode** 和 **Hide Claude Code identity**：說明見[轉送前的修改](#轉送前的修改)。
+- **Remove fast mode**、**Hide Claude Code identity**，以及 Anthropic 格式端點的 **Keep prompt cache for 1 hour**：說明見[轉送前的修改](#轉送前的修改)。
 
 修改既有端點的 **Model prefix** 時，會先跳出確認畫面，列出哪些群組目標會被改成新前綴。還在呼叫舊前綴的客戶端，在你更新之前都會收到模型無效的錯誤。
 

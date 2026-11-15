@@ -119,6 +119,7 @@ export function useAccounts() {
     if (!data || !row) return
     row.strip_fast_mode = edits.strip_fast_mode
     row.strip_claude_code_line = edits.strip_claude_code_line
+    row.force_cache_ttl_1h = edits.force_cache_ttl_1h
     writeAccountsCache(userId.value, provider, data)
   }
 

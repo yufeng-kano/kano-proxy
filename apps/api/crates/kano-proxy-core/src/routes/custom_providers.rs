@@ -129,6 +129,7 @@ async fn to_list_item(state: &AppState, user_id: &str, row: &CustomProviderRow) 
         // written through `PATCH /api/providers/:slug/accounts/:account_id`.
         "strip_fast_mode": account.is_some_and(|a| a.strip_fast_mode),
         "strip_claude_code_line": account.is_some_and(|a| a.strip_claude_code_line),
+        "force_cache_ttl_1h": account.is_some_and(|a| a.force_cache_ttl_1h),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }))
@@ -167,6 +168,7 @@ fn to_shared_item(shared: &SharedCustomProvider, shadowed: bool, now_ms: i64) ->
         // The owner's request edits, read-only here: they are the ones that apply.
         "strip_fast_mode": shared.account.strip_fast_mode,
         "strip_claude_code_line": shared.account.strip_claude_code_line,
+        "force_cache_ttl_1h": shared.account.force_cache_ttl_1h,
     })
 }
 
@@ -978,7 +980,7 @@ mod tests {
         assert_eq!(
             keys,
             [
-                "account_id", "format", "id", "name", "shadowed", "share", "slug", "status", "strip_claude_code_line",
+                "account_id", "force_cache_ttl_1h", "format", "id", "name", "shadowed", "share", "slug", "status", "strip_claude_code_line",
                 "strip_fast_mode", "usage",
             ]
         );

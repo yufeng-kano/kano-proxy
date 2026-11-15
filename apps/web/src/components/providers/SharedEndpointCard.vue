@@ -48,6 +48,7 @@ const windows = computed(() => props.provider.usage?.windows ?? [])
         <Badge>{{ formatLabel }}</Badge>
         <Badge v-if="provider.strip_fast_mode">{{ t("providers.edits.fastModeOn") }}</Badge>
         <Badge v-if="provider.strip_claude_code_line">{{ t("providers.edits.lineOn") }}</Badge>
+        <Badge v-if="provider.force_cache_ttl_1h">{{ t("providers.edits.cacheOn") }}</Badge>
         <!-- Same capped pill as a shared account row: the owner name is
              open-ended text, kept whole in the title. -->
         <Badge class="share" :title="sharedBy">
