@@ -42,16 +42,20 @@ const popoverRef = ref<HTMLElement | null>(null)
 const viewYear = ref(props.selectedDate.getFullYear())
 const viewMonth = ref(props.selectedDate.getMonth()) // 0-11
 
+// Read once on open, and again whenever the selection moves: a popover left
+// open across midnight sees the Overview roll over (docs/admin-ui.md §
+// Overview page, Following today), and its today mark must move with it.
+const today = ref(new Date())
+
 // Reset view on anchor date / kind changes
 watch(
   () => props.selectedDate,
   (d) => {
+    today.value = new Date()
     viewYear.value = d.getFullYear()
     viewMonth.value = d.getMonth()
   },
 )
-
-const today = new Date()
 
 // Every name below goes through `format`, never a literal locale tag: adding a
 // language must stay a catalog change, not an edit here (docs/i18n.md).
@@ -76,19 +80,19 @@ const viewTitle = computed(() => {
 
 const isCurrentViewPeriod = computed(() => {
   if (props.kind === "month") {
-    return viewYear.value === today.getFullYear()
+    return viewYear.value === today.value.getFullYear()
   }
   return (
-    viewYear.value === today.getFullYear() && viewMonth.value === today.getMonth()
+    viewYear.value === today.value.getFullYear() && viewMonth.value === today.value.getMonth()
   )
 })
 
 const canGoNext = computed(() => {
   if (props.kind === "month") {
-    return viewYear.value < today.getFullYear()
+    return viewYear.value < today.value.getFullYear()
   }
   const nextMonthDate = new Date(viewYear.value, viewMonth.value + 1, 1)
-  const currentMonthStart = getStartOfMonth(today)
+  const currentMonthStart = getStartOfMonth(today.value)
   return nextMonthDate <= currentMonthStart
 })
 
@@ -120,14 +124,14 @@ function next() {
 }
 
 function jumpCurrent() {
-  viewYear.value = today.getFullYear()
-  viewMonth.value = today.getMonth()
+  viewYear.value = today.value.getFullYear()
+  viewMonth.value = today.value.getMonth()
   if (props.kind === "day") {
-    selectDate(today)
+    selectDate(today.value)
   } else if (props.kind === "week") {
-    selectDate(getStartOfWeek(today))
+    selectDate(getStartOfWeek(today.value))
   } else {
-    selectDate(getStartOfMonth(today))
+    selectDate(getStartOfMonth(today.value))
   }
 }
 
@@ -156,7 +160,7 @@ const calendarDays = computed<DayCell[]>(() => {
   const daysInPrevMonth = new Date(year, month, 0).getDate()
 
   const cells: DayCell[] = []
-  const todayStart = getStartOfDay(today)
+  const todayStart = getStartOfDay(today.value)
 
   // Prev month padding
   for (let i = firstDayWeekday - 1; i >= 0; i--) {
@@ -167,7 +171,7 @@ const calendarDays = computed<DayCell[]>(() => {
       date: d,
       dayNumber: d.getDate(),
       isOtherMonth: true,
-      isToday: isSameDay(d, today),
+      isToday: isSameDay(d, today.value),
       isSelectedDay: isSameDay(d, props.selectedDate),
       isSelectedWeek: isSameWeek(d, props.selectedDate),
       isFuture,
@@ -185,7 +189,7 @@ const calendarDays = computed<DayCell[]>(() => {
       date: d,
       dayNumber: i,
       isOtherMonth: false,
-      isToday: isSameDay(d, today),
+      isToday: isSameDay(d, today.value),
       isSelectedDay: isSameDay(d, props.selectedDate),
       isSelectedWeek: isSameWeek(d, props.selectedDate),
       isFuture,
@@ -206,7 +210,7 @@ const calendarDays = computed<DayCell[]>(() => {
         date: d,
         dayNumber: i,
         isOtherMonth: true,
-        isToday: isSameDay(d, today),
+        isToday: isSameDay(d, today.value),
         isSelectedDay: isSameDay(d, props.selectedDate),
         isSelectedWeek: isSameWeek(d, props.selectedDate),
         isFuture,
@@ -256,7 +260,7 @@ function isDayCellSelected(cell: DayCell): boolean {
 // Month Grid calculations
 // ---------------------------------------------------------------------------
 function isMonthThisMonth(monthIndex: number): boolean {
-  return viewYear.value === today.getFullYear() && monthIndex === today.getMonth()
+  return viewYear.value === today.value.getFullYear() && monthIndex === today.value.getMonth()
 }
 
 function isMonthSelected(monthIndex: number): boolean {
@@ -267,8 +271,8 @@ function isMonthSelected(monthIndex: number): boolean {
 }
 
 function isMonthFuture(monthIndex: number): boolean {
-  if (viewYear.value > today.getFullYear()) return true
-  if (viewYear.value === today.getFullYear() && monthIndex > today.getMonth()) return true
+  if (viewYear.value > today.value.getFullYear()) return true
+  if (viewYear.value === today.value.getFullYear() && monthIndex > today.value.getMonth()) return true
   return false
 }
 
