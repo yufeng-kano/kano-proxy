@@ -251,10 +251,12 @@ function onModelPick(key: string) {
 
 const visibleKeys = computed(() => LOG_COLUMN_KEYS.filter((key) => !hidden.value.includes(key)))
 
+/* Model never gets a track: it takes the card's width beyond the others, so
+   the table always spans the card. A Model width stored by an older build is
+   ignored. */
 function width(key: LogColumnKey): string | undefined {
-  const dragged = widths.value[key]
-  if (dragged) return `${dragged}px`
-  return key === "model" ? undefined : `${DEFAULT_WIDTHS[key]}px`
+  if (key === "model") return undefined
+  return `${widths.value[key] ?? DEFAULT_WIDTHS[key]}px`
 }
 
 const numericValue: Partial<Record<LogColumnKey, (row: RequestLogRow) => string>> = {

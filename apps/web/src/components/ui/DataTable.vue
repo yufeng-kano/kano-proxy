@@ -99,9 +99,16 @@ const props = defineProps<{
    */
   fixed?: boolean
   /**
-   * Under `fixed`, each header's right edge becomes a resize handle — a pointer
-   * drag, or ←/→ on the focused handle — that emits `resize(key, px)`. The
-   * page owns the widths and keeps them.
+   * Under `fixed`, each column with a pixel track gets a resize handle — a
+   * pointer drag, or ←/→ on the focused handle — that emits `resize(key, px)`.
+   * The page owns the widths and keeps them.
+   *
+   * The handle sits on the edge that faces the flexible column: the right edge
+   * for a column left of it, the left edge for one right of it. The flexible
+   * column takes up whatever the dragged one gives or takes, so that edge is
+   * the one that moves with the pointer; a right-edge handle on a column right
+   * of it would stay put while the column grew leftwards. The flexible column
+   * has no handle of its own: its width is the card's remainder.
    */
   resizable?: boolean
   /** The handle's accessible name for a column, e.g. "Resize Account". */
@@ -168,7 +175,21 @@ const fixedStyle = computed(() => {
   return flexible ? { minWidth: `${total}px` } : { width: `${total}px` }
 })
 
-let drag: { key: string; x: number; width: number } | null = null
+/** Index of the one column without a track, or -1. */
+const flexIndex = computed(() => (props.fixed ? props.columns.findIndex((column) => !column.width) : -1))
+
+/** Which edge of column `index` carries its handle; null = none. */
+function handleEdge(index: number): "start" | "end" | null {
+  if (!props.fixed || !props.resizable || index === flexIndex.value) return null
+  return flexIndex.value !== -1 && index > flexIndex.value ? "start" : "end"
+}
+
+/** +1 when moving the pointer right widens the column, -1 when it narrows it. */
+function direction(index: number): number {
+  return handleEdge(index) === "start" ? -1 : 1
+}
+
+let drag: { key: string; x: number; width: number; direction: number } | null = null
 
 function headerWidth(event: Event): number {
   return (event.currentTarget as HTMLElement).closest("th")?.getBoundingClientRect().width ?? MIN_WIDTH
@@ -178,25 +199,27 @@ function clampWidth(width: number): number {
   return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(width)))
 }
 
-function onResizeStart(event: PointerEvent, key: string) {
+function onResizeStart(event: PointerEvent, key: string, index: number) {
   event.preventDefault()
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  drag = { key, x: event.clientX, width: headerWidth(event) }
+  drag = { key, x: event.clientX, width: headerWidth(event), direction: direction(index) }
 }
 
 function onResizeMove(event: PointerEvent) {
   if (!drag) return
-  emit("resize", drag.key, clampWidth(drag.width + event.clientX - drag.x))
+  emit("resize", drag.key, clampWidth(drag.width + drag.direction * (event.clientX - drag.x)))
 }
 
 function onResizeEnd() {
   drag = null
 }
 
-function onResizeKey(event: KeyboardEvent, key: string) {
+/* The arrow moves the edge, as a drag does: ← on a left-edge handle widens. */
+function onResizeKey(event: KeyboardEvent, key: string, index: number) {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
   event.preventDefault()
-  emit("resize", key, clampWidth(headerWidth(event) + (event.key === "ArrowRight" ? KEY_STEP : -KEY_STEP)))
+  const step = (event.key === "ArrowRight" ? KEY_STEP : -KEY_STEP) * direction(index)
+  emit("resize", key, clampWidth(headerWidth(event) + step))
 }
 </script>
 
@@ -207,7 +230,7 @@ function onResizeKey(event: KeyboardEvent, key: string) {
       <thead>
         <tr>
           <th
-            v-for="column in columns"
+            v-for="(column, index) in columns"
             :key="column.key"
             scope="col"
             :class="{ numeric: column.numeric, end: column.align === 'end' }"
@@ -219,17 +242,18 @@ function onResizeKey(event: KeyboardEvent, key: string) {
             >{{ column.header || column.srHeader }}</span>
             <template v-else>{{ column.header }}</template>
             <span
-              v-if="fixed && resizable"
+              v-if="handleEdge(index)"
               class="resize"
+              :class="{ start: handleEdge(index) === 'start' }"
               role="separator"
               aria-orientation="vertical"
               tabindex="0"
               :aria-label="resizeLabel?.(column.header) ?? column.header"
-              @pointerdown="onResizeStart($event, column.key)"
+              @pointerdown="onResizeStart($event, column.key, index)"
               @pointermove="onResizeMove"
               @pointerup="onResizeEnd"
               @pointercancel="onResizeEnd"
-              @keydown="onResizeKey($event, column.key)"
+              @keydown="onResizeKey($event, column.key, index)"
             />
           </th>
         </tr>
@@ -416,9 +440,10 @@ function onResizeKey(event: KeyboardEvent, key: string) {
   line-height: 22px;
 }
 
-/* The resize handle: an 8px strip inside the header's right edge (inside, so
-   the next sticky header cannot paint over it), a rule only while pointed at
-   or focused, so the header row reads as plain labels. */
+/* The resize handle: an 8px strip inside the header's edge (inside, so the
+   neighbouring sticky header cannot paint over it), a rule only while pointed
+   at or focused, so the header row reads as plain labels. Right edge by
+   default, left edge (`.start`) for a column right of the flexible one. */
 .resize {
   position: absolute;
   top: 0;
@@ -440,6 +465,16 @@ function onResizeKey(event: KeyboardEvent, key: string) {
   border-radius: 1px;
   background: transparent;
   transition: background var(--duration-fast) var(--ease);
+}
+
+.resize.start {
+  right: auto;
+  left: 0;
+}
+
+.resize.start::after {
+  right: auto;
+  left: 0;
 }
 
 .resize:hover::after,
