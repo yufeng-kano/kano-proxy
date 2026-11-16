@@ -103,15 +103,16 @@ const props = defineProps<{
    * pointer drag, or ←/→ on the focused handle — that emits `resize(key, px)`.
    * The page owns the widths and keeps them.
    *
-   * While the flexible column is above its floor it takes up whatever the
+   * While the flexible column has width to spare it takes up whatever the
    * dragged one gives or takes, so the handle sits on the edge that faces it:
    * the right edge for a column left of it, the left edge for one right of it.
    * That edge is the one that moves with the pointer; a right-edge handle on a
-   * column right of it would stay put while the column grew leftwards. A drag
-   * on a left-edge handle stops when the flexible column reaches its floor.
-   * From there the table grows past the card instead, so every handle is on
-   * its right edge, as in any left-anchored table. The flexible column has no
-   * handle of its own: its width is the card's remainder.
+   * column right of it would stay put while the column grew leftwards. Once
+   * the flexible column is at its floor the table itself grows and shrinks,
+   * so every handle is on its right edge, as in any left-anchored table. A
+   * drag stops where it would cross from one regime to the other, and the
+   * next one starts on the other edge. The flexible column has no handle of
+   * its own: its width is the card's remainder.
    */
   resizable?: boolean
   /** The handle's accessible name for a column, e.g. "Resize Account". */
@@ -181,10 +182,23 @@ const fixedStyle = computed(() => {
 /** Index of the one column without a track, or -1. */
 const flexIndex = computed(() => (props.fixed ? props.columns.findIndex((column) => !column.width) : -1))
 
-/* The flexible column's header, watched so the handles can move to the right
-   edges once it is down to its floor (see `resizable`). */
+/*
+ * Which regime the table is in, for the handles of columns right of the
+ * flexible one (see `resizable`): while the flexible column has width to give
+ * it absorbs a drag; once it is at its floor (the table fills or overflows the
+ * card) the table itself grows or shrinks. Measured only between gestures, so
+ * a handle never jumps edges mid-drag.
+ */
+const wrapEl = ref<HTMLElement | null>(null)
+const tableEl = ref<HTMLElement | null>(null)
 const flexHeader = ref<HTMLElement | null>(null)
-const flexAtFloor = ref(false)
+const overflowing = ref(false)
+
+/** How far the table runs past the card, in px. */
+function overflowPx(): number {
+  if (!wrapEl.value || !tableEl.value) return 0
+  return Math.max(0, tableEl.value.getBoundingClientRect().width - wrapEl.value.getBoundingClientRect().width)
+}
 
 /** Width the flexible column can still give up, in px; 0 without one. */
 function flexSlack(): number {
@@ -194,19 +208,20 @@ function flexSlack(): number {
   return Math.max(0, header.getBoundingClientRect().width - (column.minWidth ?? 0))
 }
 
-watch(flexHeader, (header, _previous, onCleanup) => {
-  if (!header) return
-  const observer = new ResizeObserver(() => {
-    flexAtFloor.value = flexSlack() < 1
-  })
-  observer.observe(header)
+function measure() {
+  if (!drag) overflowing.value = overflowPx() >= 1 || (flexIndex.value !== -1 && flexSlack() < 1)
+}
+
+watch([wrapEl, tableEl, flexHeader], (elements, _previous, onCleanup) => {
+  const observer = new ResizeObserver(measure)
+  for (const element of elements) if (element) observer.observe(element)
   onCleanup(() => observer.disconnect())
 })
 
 /** Which edge of column `index` carries its handle; null = none. */
 function handleEdge(index: number): "start" | "end" | null {
   if (!props.fixed || !props.resizable || index === flexIndex.value) return null
-  return flexIndex.value !== -1 && index > flexIndex.value && !flexAtFloor.value ? "start" : "end"
+  return flexIndex.value !== -1 && index > flexIndex.value && !overflowing.value ? "start" : "end"
 }
 
 /** +1 when moving the pointer right widens the column, -1 when it narrows it. */
@@ -214,36 +229,48 @@ function direction(index: number): number {
   return handleEdge(index) === "start" ? -1 : 1
 }
 
-/* A left-edge handle widens its column only out of the flexible column's
-   slack: past that the left edge would stop following the pointer. */
-function maxWidth(index: number, width: number): number {
-  return handleEdge(index) === "start" ? width + flexSlack() : Infinity
+/*
+ * The widths a column right of the flexible one may take in one gesture.
+ * Its dragged edge follows the pointer only within the current regime, so a
+ * drag stops where the regime would change: a left-edge handle when the
+ * flexible column reaches its floor, a right-edge one when the table fits the
+ * card again. The next gesture starts in the new regime, on the other edge.
+ * The one exception is a table that exactly fills the card with the flexible
+ * column at its floor: there a right-edge handle may still narrow its column
+ * (the flexible column takes the width back), or it could never get narrower.
+ */
+function bounds(index: number, width: number): { min: number; max: number } {
+  if (flexIndex.value === -1 || index < flexIndex.value) return { min: 0, max: Infinity }
+  if (handleEdge(index) === "start") return { min: 0, max: width + flexSlack() }
+  const overflow = overflowPx()
+  return { min: overflow >= 1 ? width - overflow : 0, max: Infinity }
 }
 
-let drag: { key: string; x: number; width: number; direction: number; max: number } | null = null
+let drag: { key: string; x: number; width: number; direction: number; min: number; max: number } | null = null
 
 function headerWidth(event: Event): number {
   return (event.currentTarget as HTMLElement).closest("th")?.getBoundingClientRect().width ?? MIN_WIDTH
 }
 
-function clampWidth(width: number): number {
-  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(width)))
+function clampWidth(width: number, { min, max }: { min: number; max: number }): number {
+  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(Math.min(max, Math.max(min, width)))))
 }
 
 function onResizeStart(event: PointerEvent, key: string, index: number) {
   event.preventDefault()
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
   const width = headerWidth(event)
-  drag = { key, x: event.clientX, width, direction: direction(index), max: maxWidth(index, width) }
+  drag = { key, x: event.clientX, width, direction: direction(index), ...bounds(index, width) }
 }
 
 function onResizeMove(event: PointerEvent) {
   if (!drag) return
-  emit("resize", drag.key, clampWidth(Math.min(drag.max, drag.width + drag.direction * (event.clientX - drag.x))))
+  emit("resize", drag.key, clampWidth(drag.width + drag.direction * (event.clientX - drag.x), drag))
 }
 
 function onResizeEnd() {
   drag = null
+  measure()
 }
 
 /* The arrow moves the edge, as a drag does: ← on a left-edge handle widens. */
@@ -252,13 +279,13 @@ function onResizeKey(event: KeyboardEvent, key: string, index: number) {
   event.preventDefault()
   const width = headerWidth(event)
   const step = (event.key === "ArrowRight" ? KEY_STEP : -KEY_STEP) * direction(index)
-  emit("resize", key, clampWidth(Math.min(maxWidth(index, width), width + step)))
+  emit("resize", key, clampWidth(width + step, bounds(index, width)))
 }
 </script>
 
 <template>
-  <div class="table-wrap">
-    <table class="table" :class="{ fixed, headerless: hideHeader }" :style="fixedStyle">
+  <div ref="wrapEl" class="table-wrap">
+    <table ref="tableEl" class="table" :class="{ fixed, headerless: hideHeader }" :style="fixedStyle">
       <caption class="sr-only">{{ caption }}</caption>
       <thead>
         <tr>
