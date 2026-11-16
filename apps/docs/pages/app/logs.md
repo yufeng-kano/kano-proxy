@@ -36,7 +36,7 @@ Rows are grouped under a heading per day, newest first. The page loads more rows
 | **Cost** | Estimated USD at the model's API list price. `—` when the model has no known price |
 | **Latency** | How long the provider took to answer. For a streamed response, the time until the stream started, not until the last token |
 
-**Time** and **Model** are always shown. Drag the edge of a column header to change its width. Your column choice and widths are saved in this browser, not in your account. Narrow screens hide some columns. Each row is one line; point at a cut-off cell to see the full text.
+**Time** and **Model** are always shown. Drag the line between two column headers to change the width of the column on its left, as in a spreadsheet; the columns to its right move over. Your column choice and widths are saved in this browser, not in your account. Narrow screens hide some columns. Each row is one line; point at a cut-off cell to see the full text.
 
 Labels next to a name:
 
