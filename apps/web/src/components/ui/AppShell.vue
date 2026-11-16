@@ -207,8 +207,12 @@ const settingsOpen = computed(() => typeof route.query.settings === "string")
 function openSettings() {
   accountOpen.value = false
   // The dialog returns focus to whatever had it when it opened; the menu item
-  // is about to unmount, so hand that role to the menu's own trigger.
-  accountButton.value?.focus()
+  // is about to unmount, so hand that role to the menu's own trigger. Opened
+  // from the drawer, the drawer closes first (only the query changes, so the
+  // route watcher would leave it open with its Tab trap fighting the dialog's)
+  // and its own watcher hands focus to the header's menu button instead.
+  if (drawerOpen.value && isDrawerLayout()) drawerOpen.value = false
+  else accountButton.value?.focus()
   void router.push({ query: { ...route.query, settings: "general" } })
 }
 
