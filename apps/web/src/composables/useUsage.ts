@@ -54,11 +54,19 @@ export function useUsage() {
     ? parseAnchor(initialKind, initialPrefs.pinnedAnchor)
     : null
   const activeDate = ref<Date>(pinnedDate ?? new Date())
-  /** Whether the selection covers today, so it rolls over with the clock. */
-  const followsToday = ref(pinnedDate === null)
-
   const range = computed<UsageRange>(() => buildUsageRange(rangeKind.value, activeDate.value))
   const rangeKey = computed(() => `${range.value.kind}:${range.value.anchor}`)
+
+  function isCurrentPeriod(): boolean {
+    return range.value.anchor === buildUsageRange(rangeKind.value, new Date()).anchor
+  }
+
+  /**
+   * Whether the selection covers today, so it rolls over with the clock. The
+   * same test `persistRange` applies, so a stored pin that happens to cover
+   * today (a clock or timezone change) follows too.
+   */
+  const followsToday = ref(isCurrentPeriod())
 
   function setUserId(id: string | null) {
     userId.value = id
@@ -115,10 +123,12 @@ export function useUsage() {
    * last set.
    */
   function rollToToday(): boolean {
-    if (!followsToday.value) return false
-    const before = rangeKey.value
+    // Assign only on a real change: a fresh Date on every check would re-fire
+    // the selected-date watchers (the open calendar snaps back to its month)
+    // and move a picked weekday inside a week that has not ended.
+    if (!followsToday.value || isCurrentPeriod()) return false
     activeDate.value = new Date()
-    return rangeKey.value !== before
+    return true
   }
 
   /** Load or refresh the currently active range, rolling it to today first when it follows today. */
@@ -135,7 +145,7 @@ export function useUsage() {
    */
   function persistRange() {
     const kind = range.value.kind
-    followsToday.value = range.value.anchor === buildUsageRange(kind, new Date()).anchor
+    followsToday.value = isCurrentPeriod()
     const mappedDays: UsageDays = kind === "day" ? 1 : kind === "month" ? 30 : 7
     setOverviewPrefs({
       rangeKind: kind,
@@ -146,9 +156,12 @@ export function useUsage() {
 
   /** Change the range granularity (day / week / month), optionally setting a date. */
   function setRangeKind(kind: UsageRangeKind, date?: Date) {
+    // Catch up a followed selection the clock has passed before switching, in
+    // the granularity it was chosen in; a pinned day stays put, so Day -> Week
+    // -> Day returns to the same day.
+    rollToToday()
     rangeKind.value = kind
     if (date) activeDate.value = date
-    else rollToToday()
     persistRange()
     void loadRange(range.value)
   }
@@ -160,34 +173,26 @@ export function useUsage() {
     void loadRange(range.value)
   }
 
-  // Roll over while the page is open: a timer at the next local midnight
-  // (week and month boundaries are midnights too), plus a re-check when the
-  // tab becomes visible, since background tabs throttle or freeze timers.
-  let midnightTimer: ReturnType<typeof setTimeout> | undefined
-
-  function onBoundary() {
+  // Roll over while the page is open. A once-a-minute check rather than a
+  // timer aimed at midnight: a timeout's clock can stall while the machine
+  // sleeps, so a laptop woken at 8 AM with the tab in front would sit on
+  // yesterday for hours. The check is one Date and a string compare. Tab
+  // focus re-checks at once, since background tabs throttle timers.
+  function onTick() {
     if (rollToToday()) void loadRange(range.value)
-    scheduleMidnight()
-  }
-
-  function scheduleMidnight() {
-    clearTimeout(midnightTimer)
-    const now = new Date()
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1)
-    // One second past midnight so the new Date() inside lands on the new day.
-    midnightTimer = setTimeout(onBoundary, next.getTime() - now.getTime() + 1000)
   }
 
   function onVisibilityChange() {
-    if (document.visibilityState === "visible") onBoundary()
+    if (document.visibilityState === "visible") onTick()
   }
 
+  let ticker: ReturnType<typeof setInterval> | undefined
   onMounted(() => {
-    scheduleMidnight()
+    ticker = setInterval(onTick, 60_000)
     document.addEventListener("visibilitychange", onVisibilityChange)
   })
   onBeforeUnmount(() => {
-    clearTimeout(midnightTimer)
+    clearInterval(ticker)
     document.removeEventListener("visibilitychange", onVisibilityChange)
   })
 

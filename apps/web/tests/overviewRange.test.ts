@@ -95,3 +95,32 @@ it("a followed week rolls to the next week on Monday", async () => {
   await usage.refresh()
   expect(usage.range.value.anchor).toBe("2026-11-16")
 })
+
+it("Day -> Week -> Day returns to the picked day while that week lasts", () => {
+  const usage = useUsage()
+  usage.setRangeKind("day")
+  usage.setDate(new Date(2026, 10, 13))
+  usage.setRangeKind("week")
+  usage.setRangeKind("day")
+  expect(usage.range.value.anchor).toBe("2026-11-13")
+})
+
+it("a check within the same period leaves the selected date untouched", async () => {
+  const usage = useUsage()
+  usage.setRangeKind("week")
+  usage.setDate(new Date(2026, 10, 11))
+  const before = usage.activeDate.value
+  await usage.refresh()
+  expect(usage.activeDate.value).toBe(before)
+})
+
+it("a stored pin that covers today follows the clock", async () => {
+  store.set(
+    "kano-proxy:prefs",
+    JSON.stringify({ overview: { rangeKind: "day", days: 1, pinnedAnchor: "2026-11-15" } }),
+  )
+  const usage = useUsage()
+  vi.setSystemTime(new Date(2026, 10, 16, 0, 0, 5))
+  await usage.refresh()
+  expect(usage.range.value.anchor).toBe("2026-11-16")
+})
