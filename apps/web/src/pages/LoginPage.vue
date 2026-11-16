@@ -178,18 +178,16 @@ h1 {
   margin-top: var(--space-4);
 }
 
-@media (prefers-color-scheme: dark) {
-  /* Google's dark-theme button variant. */
-  .btn-google {
-    --g-bg: #131314;
-    --g-border: #8e918f;
-    --g-text: #e3e3e3;
-    --g-hover: #1e1f20;
-  }
+/* Google's dark-theme button variant, on the resolved theme (docs/admin-ui.md § Theme). */
+:global(:root[data-theme="dark"] .btn-google) {
+  --g-bg: #131314;
+  --g-border: #8e918f;
+  --g-text: #e3e3e3;
+  --g-hover: #1e1f20;
+}
 
-  .btn-google:hover {
-    box-shadow: none;
-  }
+:global(:root[data-theme="dark"] .btn-google:hover) {
+  box-shadow: none;
 }
 
 /* ---- Responsive ---- */

@@ -29,6 +29,11 @@ const props = withDefaults(
      * panel, so the question is read out and Enter cannot fire the action.
      */
     alert?: boolean
+    /**
+     * No body padding and no body scroll: the content lays itself out edge to
+     * edge and scrolls its own regions (the Settings dialog's list and pane).
+     */
+    flush?: boolean
   }>(),
   { size: "sm" },
 )
@@ -158,7 +163,7 @@ onBeforeUnmount(() => {
           </button>
         </header>
 
-        <div :id="bodyId" class="panel-body">
+        <div :id="bodyId" class="panel-body" :class="{ flush }">
           <slot />
         </div>
 
@@ -298,6 +303,13 @@ onBeforeUnmount(() => {
      behind the overlay — the second layer under the region lock above. */
   overscroll-behavior: contain;
   padding: var(--space-5);
+}
+
+.panel-body.flush {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
 }
 
 .panel-foot {

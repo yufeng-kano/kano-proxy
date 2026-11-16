@@ -21,6 +21,21 @@ export interface AccountMenuItem {
 }
 
 /**
+ * A section an edition adds to the Settings dialog, after the core's General
+ * and Account (docs/admin-ui.md § Settings dialog). The dialog draws the list
+ * entry and the heading; `component` renders only the section's groups.
+ */
+export interface SettingsSection {
+  /** The `?settings=` value. A name the core already uses is ignored. */
+  name: string
+  label: string
+  icon: Component
+  component: Component
+  /** One-shot query keys the section reads (a payment return), dropped when the dialog closes. */
+  clearQuery?: readonly string[]
+}
+
+/**
  * Shell chrome an edition may reshape. Every field defaults to the standalone
  * layout (docs/admin-ui.md § Layout: the shell).
  */
@@ -45,6 +60,7 @@ export interface WebExtensions {
   routes?: RouteRecordRaw[]
   navigation?: readonly NavigationItem[]
   accountMenu?: readonly AccountMenuItem[]
+  settingsSections?: readonly SettingsSection[]
   shell?: ShellOptions
   /**
    * Path of a `public` route in `routes`, the edition's landing page. A

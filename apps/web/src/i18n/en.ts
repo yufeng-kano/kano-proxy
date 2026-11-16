@@ -29,6 +29,30 @@ export const en = {
   "app.account": "Account",
   "app.updateAvailable": "Update available",
 
+  // --- Settings dialog (docs/admin-ui.md § Settings dialog) ---------------
+  "settings.title": "Settings",
+  "settings.sections": "Settings sections",
+  "settings.general": "General",
+  "settings.account": "Account",
+  "settings.appearance": "Appearance",
+  "settings.theme": "Theme",
+  "settings.themeHint": "System follows your device's light or dark setting.",
+  "settings.theme.system": "System",
+  "settings.theme.light": "Light",
+  "settings.theme.dark": "Dark",
+  "settings.thisBrowser": "This browser",
+  "settings.resetViews": "Reset remembered views",
+  "settings.resetViewsHint":
+    "Column widths and hidden columns, page filters, the Overview range and scroll positions. Your data is not touched.",
+  "settings.reset": "Reset",
+  "settings.browserNote": "Theme and remembered views are kept in this browser only.",
+  "settings.signedInWithGoogle": "Signed in with Google",
+  "settings.notice": "Usage notice",
+  "settings.noticeAgreed": "You agreed to the notice of {date}",
+  "settings.noticeHint": "What Kano Proxy is, and the risks of using accounts through it.",
+  "settings.risks": "Risks and terms",
+  "settings.signOutHint": "Ends this browser's session. API keys and CLI devices keep working.",
+
   // --- Navigation ---------------------------------------------------------
   "nav.overview": "Overview",
   "nav.logs": "Logs",
