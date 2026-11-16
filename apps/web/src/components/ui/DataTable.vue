@@ -63,7 +63,7 @@ export type Column<Row> = {
 </script>
 
 <script setup lang="ts" generic="Row">
-import { computed } from "vue"
+import { computed, ref, watch } from "vue"
 
 const props = defineProps<{
   columns: Column<Row>[]
@@ -99,9 +99,20 @@ const props = defineProps<{
    */
   fixed?: boolean
   /**
-   * Under `fixed`, each header's right edge becomes a resize handle — a pointer
-   * drag, or ←/→ on the focused handle — that emits `resize(key, px)`. The
-   * page owns the widths and keeps them.
+   * Under `fixed`, each column with a pixel track gets a resize handle — a
+   * pointer drag, or ←/→ on the focused handle — that emits `resize(key, px)`.
+   * The page owns the widths and keeps them.
+   *
+   * While the flexible column has width to spare it takes up whatever the
+   * dragged one gives or takes, so the handle sits on the edge that faces it:
+   * the right edge for a column left of it, the left edge for one right of it.
+   * That edge is the one that moves with the pointer; a right-edge handle on a
+   * column right of it would stay put while the column grew leftwards. Once
+   * the flexible column is at its floor the table itself grows and shrinks,
+   * so every handle is on its right edge, as in any left-anchored table. A
+   * drag stops where it would cross from one regime to the other, and the
+   * next one starts on the other edge. The flexible column has no handle of
+   * its own: its width is the card's remainder.
    */
   resizable?: boolean
   /** The handle's accessible name for a column, e.g. "Resize Account". */
@@ -168,47 +179,120 @@ const fixedStyle = computed(() => {
   return flexible ? { minWidth: `${total}px` } : { width: `${total}px` }
 })
 
-let drag: { key: string; x: number; width: number } | null = null
+/** Index of the one column without a track, or -1. */
+const flexIndex = computed(() => (props.fixed ? props.columns.findIndex((column) => !column.width) : -1))
+
+/*
+ * Which regime the table is in, for the handles of columns right of the
+ * flexible one (see `resizable`): while the flexible column has width to give
+ * it absorbs a drag; once it is at its floor (the table fills or overflows the
+ * card) the table itself grows or shrinks. Measured only between gestures, so
+ * a handle never jumps edges mid-drag.
+ */
+const wrapEl = ref<HTMLElement | null>(null)
+const tableEl = ref<HTMLElement | null>(null)
+const flexHeader = ref<HTMLElement | null>(null)
+const overflowing = ref(false)
+
+/** How far the table runs past the card, in px. */
+function overflowPx(): number {
+  if (!wrapEl.value || !tableEl.value) return 0
+  return Math.max(0, tableEl.value.getBoundingClientRect().width - wrapEl.value.getBoundingClientRect().width)
+}
+
+/** Width the flexible column can still give up, in px; 0 without one. */
+function flexSlack(): number {
+  const header = flexHeader.value
+  const column = props.columns[flexIndex.value]
+  if (!header || !column) return 0
+  return Math.max(0, header.getBoundingClientRect().width - (column.minWidth ?? 0))
+}
+
+function measure() {
+  if (!drag) overflowing.value = overflowPx() >= 1 || (flexIndex.value !== -1 && flexSlack() < 1)
+}
+
+watch([wrapEl, tableEl, flexHeader], (elements, _previous, onCleanup) => {
+  const observer = new ResizeObserver(measure)
+  for (const element of elements) if (element) observer.observe(element)
+  onCleanup(() => observer.disconnect())
+})
+
+/** Which edge of column `index` carries its handle; null = none. */
+function handleEdge(index: number): "start" | "end" | null {
+  if (!props.fixed || !props.resizable || index === flexIndex.value) return null
+  return flexIndex.value !== -1 && index > flexIndex.value && !overflowing.value ? "start" : "end"
+}
+
+/** +1 when moving the pointer right widens the column, -1 when it narrows it. */
+function direction(index: number): number {
+  return handleEdge(index) === "start" ? -1 : 1
+}
+
+/*
+ * The widths a column right of the flexible one may take in one gesture.
+ * Its dragged edge follows the pointer only within the current regime, so a
+ * drag stops where the regime would change: a left-edge handle when the
+ * flexible column reaches its floor, a right-edge one when the table fits the
+ * card again. The next gesture starts in the new regime, on the other edge.
+ * The one exception is a table that exactly fills the card with the flexible
+ * column at its floor: there a right-edge handle may still narrow its column
+ * (the flexible column takes the width back), or it could never get narrower.
+ */
+function bounds(index: number, width: number): { min: number; max: number } {
+  if (flexIndex.value === -1 || index < flexIndex.value) return { min: 0, max: Infinity }
+  if (handleEdge(index) === "start") return { min: 0, max: width + flexSlack() }
+  const overflow = overflowPx()
+  return { min: overflow >= 1 ? width - overflow : 0, max: Infinity }
+}
+
+let drag: { key: string; x: number; width: number; direction: number; min: number; max: number } | null = null
 
 function headerWidth(event: Event): number {
   return (event.currentTarget as HTMLElement).closest("th")?.getBoundingClientRect().width ?? MIN_WIDTH
 }
 
-function clampWidth(width: number): number {
-  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(width)))
+function clampWidth(width: number, { min, max }: { min: number; max: number }): number {
+  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.round(Math.min(max, Math.max(min, width)))))
 }
 
-function onResizeStart(event: PointerEvent, key: string) {
+function onResizeStart(event: PointerEvent, key: string, index: number) {
   event.preventDefault()
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  drag = { key, x: event.clientX, width: headerWidth(event) }
+  const width = headerWidth(event)
+  drag = { key, x: event.clientX, width, direction: direction(index), ...bounds(index, width) }
 }
 
 function onResizeMove(event: PointerEvent) {
   if (!drag) return
-  emit("resize", drag.key, clampWidth(drag.width + event.clientX - drag.x))
+  emit("resize", drag.key, clampWidth(drag.width + drag.direction * (event.clientX - drag.x), drag))
 }
 
 function onResizeEnd() {
   drag = null
+  measure()
 }
 
-function onResizeKey(event: KeyboardEvent, key: string) {
+/* The arrow moves the edge, as a drag does: ← on a left-edge handle widens. */
+function onResizeKey(event: KeyboardEvent, key: string, index: number) {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
   event.preventDefault()
-  emit("resize", key, clampWidth(headerWidth(event) + (event.key === "ArrowRight" ? KEY_STEP : -KEY_STEP)))
+  const width = headerWidth(event)
+  const step = (event.key === "ArrowRight" ? KEY_STEP : -KEY_STEP) * direction(index)
+  emit("resize", key, clampWidth(width + step, bounds(index, width)))
 }
 </script>
 
 <template>
-  <div class="table-wrap">
-    <table class="table" :class="{ fixed, headerless: hideHeader }" :style="fixedStyle">
+  <div ref="wrapEl" class="table-wrap">
+    <table ref="tableEl" class="table" :class="{ fixed, headerless: hideHeader }" :style="fixedStyle">
       <caption class="sr-only">{{ caption }}</caption>
       <thead>
         <tr>
           <th
-            v-for="column in columns"
+            v-for="(column, index) in columns"
             :key="column.key"
+            :ref="(el) => { if (index === flexIndex) flexHeader = el as HTMLElement | null }"
             scope="col"
             :class="{ numeric: column.numeric, end: column.align === 'end' }"
             :style="column.width ? { width: column.width } : undefined"
@@ -219,17 +303,18 @@ function onResizeKey(event: KeyboardEvent, key: string) {
             >{{ column.header || column.srHeader }}</span>
             <template v-else>{{ column.header }}</template>
             <span
-              v-if="fixed && resizable"
+              v-if="handleEdge(index)"
               class="resize"
+              :class="{ start: handleEdge(index) === 'start' }"
               role="separator"
               aria-orientation="vertical"
               tabindex="0"
               :aria-label="resizeLabel?.(column.header) ?? column.header"
-              @pointerdown="onResizeStart($event, column.key)"
+              @pointerdown="onResizeStart($event, column.key, index)"
               @pointermove="onResizeMove"
               @pointerup="onResizeEnd"
               @pointercancel="onResizeEnd"
-              @keydown="onResizeKey($event, column.key)"
+              @keydown="onResizeKey($event, column.key, index)"
             />
           </th>
         </tr>
@@ -416,9 +501,10 @@ function onResizeKey(event: KeyboardEvent, key: string) {
   line-height: 22px;
 }
 
-/* The resize handle: an 8px strip inside the header's right edge (inside, so
-   the next sticky header cannot paint over it), a rule only while pointed at
-   or focused, so the header row reads as plain labels. */
+/* The resize handle: an 8px strip inside the header's edge (inside, so the
+   neighbouring sticky header cannot paint over it), a rule only while pointed
+   at or focused, so the header row reads as plain labels. Right edge by
+   default, left edge (`.start`) for a column right of the flexible one. */
 .resize {
   position: absolute;
   top: 0;
@@ -440,6 +526,16 @@ function onResizeKey(event: KeyboardEvent, key: string) {
   border-radius: 1px;
   background: transparent;
   transition: background var(--duration-fast) var(--ease);
+}
+
+.resize.start {
+  right: auto;
+  left: 0;
+}
+
+.resize.start::after {
+  right: auto;
+  left: 0;
 }
 
 .resize:hover::after,

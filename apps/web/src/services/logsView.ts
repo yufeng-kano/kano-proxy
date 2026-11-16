@@ -27,9 +27,9 @@ export type LogColumnKey = (typeof LOG_COLUMN_KEYS)[number]
 export const LOCKED_COLUMNS: readonly LogColumnKey[] = ["time", "model"]
 
 /**
- * Default tracks in px. Model has none: it takes whatever the card has beyond
- * the others, down to `MODEL_MIN_WIDTH`, until the user drags it. Together they
- * fit a ~940px card (a 1280px window with the sidebar open).
+ * Default tracks in px. Model has none, ever: it takes whatever the card has
+ * beyond the others, down to `MODEL_MIN_WIDTH`, so the table always spans the
+ * card. Together they fit a ~940px card (a 1280px window with the sidebar open).
  */
 export const DEFAULT_WIDTHS: Record<Exclude<LogColumnKey, "model">, number> = {
   time: 80,
