@@ -49,10 +49,13 @@ export type Prefs = {
     days: UsageDays
     rangeKind: UsageRangeKind
     /**
-     * Which day / week / month the picker is on: "YYYY-MM-DD" for Day and
-     * Week (the week's Monday), "YYYY-MM" for Month. null = follow today.
+     * The past day / week / month the user pinned: "YYYY-MM-DD" for Day and
+     * Week (the week's Monday), "YYYY-MM" for Month. null = follow today, the
+     * value for any selection that covers today. Replaces the earlier
+     * `anchor` key, which stored today's date too and so froze a reopened tab
+     * on yesterday; that key is deliberately not read.
      */
-    anchor: string | null
+    pinnedAnchor: string | null
     chartView: ChartView
   }
   models: {
@@ -80,7 +83,7 @@ function defaults(): Prefs {
     lastPath: null,
     scroll: {},
     // `days` and `rangeKind` are two views of one choice — keep them in step.
-    overview: { days: 7, rangeKind: "week", anchor: null, chartView: "tokens" },
+    overview: { days: 7, rangeKind: "week", pinnedAnchor: null, chartView: "tokens" },
     models: { provider: null },
     providers: { tab: null },
     logs: { provider: null, view: "model", hidden: [], widths: {} },
@@ -115,7 +118,7 @@ function parse(raw: string): Prefs {
   base.scroll = readScroll(parsed.scroll)
 
   if (isRecord(parsed.overview)) {
-    const { days, rangeKind, anchor, chartView } = parsed.overview
+    const { days, rangeKind, pinnedAnchor, chartView } = parsed.overview
     if (USAGE_DAYS.includes(days as UsageDays)) base.overview.days = days as UsageDays
     // The pre-2.1 "cache-rate" value (and the removed showTable flag) simply
     // fail these checks and fall back — exactly the degradation this parser
@@ -130,8 +133,8 @@ function parse(raw: string): Prefs {
     } else if (days === 30) {
       base.overview.rangeKind = "month"
     }
-    if (typeof anchor === "string" && ANCHOR_RE.test(anchor)) {
-      base.overview.anchor = anchor
+    if (typeof pinnedAnchor === "string" && ANCHOR_RE.test(pinnedAnchor)) {
+      base.overview.pinnedAnchor = pinnedAnchor
     }
     if (CHART_VIEWS.includes(chartView as ChartView)) {
       base.overview.chartView = chartView as ChartView
