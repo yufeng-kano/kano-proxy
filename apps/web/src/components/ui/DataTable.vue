@@ -63,7 +63,7 @@ export type Column<Row> = {
 </script>
 
 <script setup lang="ts" generic="Row">
-import { computed } from "vue"
+import { computed, ref, watch } from "vue"
 
 const props = defineProps<{
   columns: Column<Row>[]
@@ -103,12 +103,15 @@ const props = defineProps<{
    * pointer drag, or ←/→ on the focused handle — that emits `resize(key, px)`.
    * The page owns the widths and keeps them.
    *
-   * The handle sits on the edge that faces the flexible column: the right edge
-   * for a column left of it, the left edge for one right of it. The flexible
-   * column takes up whatever the dragged one gives or takes, so that edge is
-   * the one that moves with the pointer; a right-edge handle on a column right
-   * of it would stay put while the column grew leftwards. The flexible column
-   * has no handle of its own: its width is the card's remainder.
+   * While the flexible column is above its floor it takes up whatever the
+   * dragged one gives or takes, so the handle sits on the edge that faces it:
+   * the right edge for a column left of it, the left edge for one right of it.
+   * That edge is the one that moves with the pointer; a right-edge handle on a
+   * column right of it would stay put while the column grew leftwards. A drag
+   * on a left-edge handle stops when the flexible column reaches its floor.
+   * From there the table grows past the card instead, so every handle is on
+   * its right edge, as in any left-anchored table. The flexible column has no
+   * handle of its own: its width is the card's remainder.
    */
   resizable?: boolean
   /** The handle's accessible name for a column, e.g. "Resize Account". */
@@ -178,10 +181,32 @@ const fixedStyle = computed(() => {
 /** Index of the one column without a track, or -1. */
 const flexIndex = computed(() => (props.fixed ? props.columns.findIndex((column) => !column.width) : -1))
 
+/* The flexible column's header, watched so the handles can move to the right
+   edges once it is down to its floor (see `resizable`). */
+const flexHeader = ref<HTMLElement | null>(null)
+const flexAtFloor = ref(false)
+
+/** Width the flexible column can still give up, in px; 0 without one. */
+function flexSlack(): number {
+  const header = flexHeader.value
+  const column = props.columns[flexIndex.value]
+  if (!header || !column) return 0
+  return Math.max(0, header.getBoundingClientRect().width - (column.minWidth ?? 0))
+}
+
+watch(flexHeader, (header, _previous, onCleanup) => {
+  if (!header) return
+  const observer = new ResizeObserver(() => {
+    flexAtFloor.value = flexSlack() < 1
+  })
+  observer.observe(header)
+  onCleanup(() => observer.disconnect())
+})
+
 /** Which edge of column `index` carries its handle; null = none. */
 function handleEdge(index: number): "start" | "end" | null {
   if (!props.fixed || !props.resizable || index === flexIndex.value) return null
-  return flexIndex.value !== -1 && index > flexIndex.value ? "start" : "end"
+  return flexIndex.value !== -1 && index > flexIndex.value && !flexAtFloor.value ? "start" : "end"
 }
 
 /** +1 when moving the pointer right widens the column, -1 when it narrows it. */
@@ -189,7 +214,13 @@ function direction(index: number): number {
   return handleEdge(index) === "start" ? -1 : 1
 }
 
-let drag: { key: string; x: number; width: number; direction: number } | null = null
+/* A left-edge handle widens its column only out of the flexible column's
+   slack: past that the left edge would stop following the pointer. */
+function maxWidth(index: number, width: number): number {
+  return handleEdge(index) === "start" ? width + flexSlack() : Infinity
+}
+
+let drag: { key: string; x: number; width: number; direction: number; max: number } | null = null
 
 function headerWidth(event: Event): number {
   return (event.currentTarget as HTMLElement).closest("th")?.getBoundingClientRect().width ?? MIN_WIDTH
@@ -202,12 +233,13 @@ function clampWidth(width: number): number {
 function onResizeStart(event: PointerEvent, key: string, index: number) {
   event.preventDefault()
   ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-  drag = { key, x: event.clientX, width: headerWidth(event), direction: direction(index) }
+  const width = headerWidth(event)
+  drag = { key, x: event.clientX, width, direction: direction(index), max: maxWidth(index, width) }
 }
 
 function onResizeMove(event: PointerEvent) {
   if (!drag) return
-  emit("resize", drag.key, clampWidth(drag.width + drag.direction * (event.clientX - drag.x)))
+  emit("resize", drag.key, clampWidth(Math.min(drag.max, drag.width + drag.direction * (event.clientX - drag.x))))
 }
 
 function onResizeEnd() {
@@ -218,8 +250,9 @@ function onResizeEnd() {
 function onResizeKey(event: KeyboardEvent, key: string, index: number) {
   if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return
   event.preventDefault()
+  const width = headerWidth(event)
   const step = (event.key === "ArrowRight" ? KEY_STEP : -KEY_STEP) * direction(index)
-  emit("resize", key, clampWidth(headerWidth(event) + step))
+  emit("resize", key, clampWidth(Math.min(maxWidth(index, width), width + step)))
 }
 </script>
 
@@ -232,6 +265,7 @@ function onResizeKey(event: KeyboardEvent, key: string, index: number) {
           <th
             v-for="(column, index) in columns"
             :key="column.key"
+            :ref="(el) => { if (index === flexIndex) flexHeader = el as HTMLElement | null }"
             scope="col"
             :class="{ numeric: column.numeric, end: column.align === 'end' }"
             :style="column.width ? { width: column.width } : undefined"
