@@ -49,7 +49,7 @@ export type Column<Row> = {
    * card's width beyond the others.
    */
   width?: string
-  /** Under `fixed`, the floor (px) of the one column without a `width`. */
+  /** Under `fixed`, the column's floor in px: for the flexible column, and for resizing (48 without one). */
   minWidth?: number
   /**
    * Accessible name for a column whose `header` is intentionally blank — an
@@ -99,24 +99,25 @@ const props = defineProps<{
    */
   fixed?: boolean
   /**
-   * Under `fixed`, every border between two columns is a resize handle — a
-   * pointer drag, or ←/→ on the focused handle — and moving it trades width
-   * between the two columns beside it and no others: one gets wider by what
-   * the other gives up, so the table keeps its width and every other column
-   * stays where it is. The card's own right edge is not a handle. Each column
-   * stops at its floor (48px, or a flexible column's `minWidth`) and a tracked
-   * one at 800px. The drag
-   * emits `resize(key, px)` for each of the two that has a pixel track; the
-   * flexible column has none and takes the difference by itself. The page
-   * owns the widths and keeps them.
+   * Under `fixed`, each column's right edge is a resize handle, as in a
+   * spreadsheet — a pointer drag, or ←/→ on the focused handle — that changes
+   * that column's width alone: every column to its right moves over by the
+   * same amount and keeps its own width. The edge can be grabbed from either
+   * side of the line (a 12px target centred on it), so a column's left edge,
+   * which is its neighbour's right edge, answers too. A column stops at its
+   * `minWidth` (48px without one) and at 4000px, wider than any card, so
+   * pinning the flexible column never cuts it.
    *
-   * While the table overflows the card the flexible column is at its floor and
-   * stays there, so a border beside it can only narrow its other neighbour,
-   * and only until the table fits the card: the table shrinks instead of the
-   * flexible column growing.
+   * The drag emits `resize(key, px)`. A flexible column has no track to
+   * resize, so the first drag also emits its rendered width, pinning it:
+   * otherwise it would absorb the change and the dragged edge would stay put.
+   * From then on every column is a track and the table is as wide as their
+   * sum; what is left of the card is a blank filler column that carries the
+   * header fill and row rules to the card's edge. The page owns the widths
+   * and keeps them; clearing them brings the flexible column back.
    */
   resizable?: boolean
-  /** A border's accessible name from "Left / Right", e.g. "Resize Account / API key". */
+  /** The handle's accessible name for a column, e.g. "Resize Account". */
   resizeLabel?: (header: string) => string
   /**
    * Under `fixed`, a label per row: a full-width separator row goes in
@@ -148,7 +149,7 @@ const emit = defineEmits<{ rowClick: [Row]; resize: [key: string, width: number]
 defineSlots<Record<string, (props: { row: Row }) => unknown>>()
 
 const MIN_WIDTH = 48
-const MAX_WIDTH = 800
+const MAX_WIDTH = 4000
 const KEY_STEP = 16
 
 /** Each row with the group heading that goes above it, if any. */
@@ -162,79 +163,51 @@ const entries = computed(() => {
   })
 })
 
+/** Index of the one column without a track, or -1. */
+const flexIndex = computed(() => (props.fixed ? props.columns.findIndex((column) => !column.width) : -1))
+
+/* With every column a track the table is their sum, and a blank last column
+   takes the rest of the card so the header fill and row rules reach its edge
+   (see `resizable`). */
+const filler = computed(() => props.fixed && flexIndex.value === -1)
+
 /**
  * The narrowest the fixed table may get: every pixel track plus the flexible
- * column's floor. With no flexible column the table is exactly its tracks.
+ * column's floor. It is still `width: 100%`, so a wider card goes to the
+ * flexible column, or to the filler when there is none.
  */
 const fixedStyle = computed(() => {
   if (!props.fixed) return undefined
   let total = 0
-  let flexible = false
-  for (const column of props.columns) {
-    if (column.width) total += Number.parseFloat(column.width)
-    else {
-      flexible = true
-      total += column.minWidth ?? 0
-    }
-  }
-  return flexible ? { minWidth: `${total}px` } : { width: `${total}px` }
+  for (const column of props.columns) total += column.width ? Number.parseFloat(column.width) : (column.minWidth ?? 0)
+  return { minWidth: `${total}px` }
 })
 
-/*
- * One gesture on the border between column `index` and the next. Widths are
- * read once, at the start: everything after is the pointer's travel, clamped
- * so neither neighbour passes its floor or ceiling.
- */
-type Drag = {
-  left: { key: string; width: number; tracked: boolean }
-  right: { key: string; width: number; tracked: boolean }
-  /** Allowed travel in px, right positive: the left column gains it, the right loses it. */
-  min: number
-  max: number
-}
+/* One gesture on column `index`'s right edge: its width at the start, then
+   the pointer's travel, clamped to the column's floor and ceiling. */
+let drag: { key: string; width: number; floor: number; x: number } | null = null
 
-let drag: (Drag & { x: number }) | null = null
-
-function begin(event: Event, index: number): Drag | null {
-  const header = (event.currentTarget as HTMLElement).closest("th")
-  const next = header?.nextElementSibling
-  const leftColumn = props.columns[index]
-  const rightColumn = props.columns[index + 1]
-  if (!header || !(next instanceof HTMLElement) || !leftColumn || !rightColumn) return null
-  const table = header.closest("table")
-  const overflow = table?.parentElement
-    ? Math.max(0, table.getBoundingClientRect().width - table.parentElement.getBoundingClientRect().width)
-    : 0
-
-  const side = (column: Column<Row>, element: HTMLElement) => {
-    // A track's own value, not its rendered width: zoom makes that fractional,
-    // and rounding two fractions separately would let the pair drift a pixel.
-    const width = column.width ? Number.parseFloat(column.width) : element.getBoundingClientRect().width
-    const tracked = !!column.width
-    return {
-      key: column.key,
-      width,
-      tracked,
-      floor: tracked ? MIN_WIDTH : (column.minWidth ?? 0),
-      // While the table overflows, the flexible column stays at its floor and
-      // what it "takes" is the overflow: the table shrinks until it fits.
-      ceiling: tracked ? MAX_WIDTH : overflow >= 1 ? width + overflow : Infinity,
-    }
+function begin(event: Event, index: number): { key: string; width: number; floor: number } | null {
+  const column = props.columns[index]
+  const header = (event.currentTarget as HTMLElement).closest("tr")?.children[index]
+  if (!column || !(header instanceof HTMLElement)) return null
+  // Pin the flexible column where it is before anything moves (see `resizable`).
+  const flex = props.columns[flexIndex.value]
+  const flexHeader = header.parentElement?.children[flexIndex.value]
+  if (flex && flexHeader) {
+    // Floor, not round: a pin a fraction wider than the card would overflow it.
+    emit("resize", flex.key, Math.min(MAX_WIDTH, Math.floor(flexHeader.getBoundingClientRect().width)))
   }
-  const left = side(leftColumn, header)
-  const right = side(rightColumn, next)
   return {
-    left: { key: left.key, width: left.width, tracked: left.tracked },
-    right: { key: right.key, width: right.width, tracked: right.tracked },
-    min: Math.min(0, Math.max(left.floor - left.width, right.width - right.ceiling)),
-    max: Math.max(0, Math.min(left.ceiling - left.width, right.width - right.floor)),
+    key: column.key,
+    // A track's own value: zoom makes the rendered width fractional.
+    width: column.width ? Number.parseFloat(column.width) : Math.round(header.getBoundingClientRect().width),
+    floor: column.minWidth ?? MIN_WIDTH,
   }
 }
 
-function move(gesture: Drag, travel: number) {
-  const delta = Math.round(Math.min(gesture.max, Math.max(gesture.min, travel)))
-  if (gesture.left.tracked) emit("resize", gesture.left.key, Math.round(gesture.left.width + delta))
-  if (gesture.right.tracked) emit("resize", gesture.right.key, Math.round(gesture.right.width - delta))
+function move(gesture: { key: string; width: number; floor: number }, travel: number) {
+  emit("resize", gesture.key, Math.min(MAX_WIDTH, Math.max(gesture.floor, Math.round(gesture.width + travel))))
 }
 
 function onResizeStart(event: PointerEvent, index: number) {
@@ -280,17 +253,38 @@ function onResizeKey(event: KeyboardEvent, index: number) {
             >{{ column.header || column.srHeader }}</span>
             <template v-else>{{ column.header }}</template>
             <span
-              v-if="fixed && resizable && index < columns.length - 1"
+              v-if="fixed && resizable"
               class="resize"
               role="separator"
               aria-orientation="vertical"
               tabindex="0"
-              :aria-label="resizeLabel?.(`${column.header} / ${columns[index + 1]?.header}`) ?? column.header"
+              :aria-label="resizeLabel?.(column.header) ?? column.header"
               @pointerdown="onResizeStart($event, index)"
               @pointermove="onResizeMove"
               @pointerup="onResizeEnd"
               @pointercancel="onResizeEnd"
               @keydown="onResizeKey($event, index)"
+            />
+            <!-- The previous column's edge, grabbed from this side of the line.
+                 Pointer only: the keyboard reaches each edge once, above. -->
+            <span
+              v-if="fixed && resizable && index > 0"
+              class="resize start"
+              aria-hidden="true"
+              @pointerdown="onResizeStart($event, index - 1)"
+              @pointermove="onResizeMove"
+              @pointerup="onResizeEnd"
+              @pointercancel="onResizeEnd"
+            />
+          </th>
+          <th v-if="filler" class="filler" aria-hidden="true">
+            <span
+              v-if="resizable"
+              class="resize start"
+              @pointerdown="onResizeStart($event, columns.length - 1)"
+              @pointermove="onResizeMove"
+              @pointerup="onResizeEnd"
+              @pointercancel="onResizeEnd"
             />
           </th>
         </tr>
@@ -298,7 +292,7 @@ function onResizeKey(event: KeyboardEvent, index: number) {
       <tbody>
         <template v-for="{ row, group } in entries" :key="rowKey(row)">
           <tr v-if="group !== null" class="group-row">
-            <th scope="colgroup" :colspan="columns.length">{{ group }}</th>
+            <th scope="colgroup" :colspan="columns.length + (filler ? 1 : 0)">{{ group }}</th>
           </tr>
           <tr
             :class="{ clickable: rowClickable }"
@@ -328,6 +322,7 @@ function onResizeKey(event: KeyboardEvent, index: number) {
                 {{ column.value?.(row) ?? "" }}
               </slot>
             </td>
+            <td v-if="filler" class="filler" aria-hidden="true" />
           </tr>
         </template>
       </tbody>
@@ -477,16 +472,16 @@ function onResizeKey(event: KeyboardEvent, index: number) {
   line-height: 22px;
 }
 
-/* The resize handle: an 8px strip inside the header's right edge (inside, so
+/* The resize handle: a 6px strip inside the header's right edge (inside, so
    the next sticky header cannot paint over it), a rule only while pointed at
-   or focused, so the header row reads as plain labels. It is the border
-   between this column and the next, and drags both. */
+   or focused, so the header row reads as plain labels. `.start` below is the
+   same edge's strip on the next header's side. */
 .resize {
   position: absolute;
   top: 0;
   right: 0;
   z-index: 2;
-  width: 8px;
+  width: 6px;
   height: 100%;
   cursor: col-resize;
   touch-action: none;
@@ -502,6 +497,30 @@ function onResizeKey(event: KeyboardEvent, index: number) {
   border-radius: 1px;
   background: transparent;
   transition: background var(--duration-fast) var(--ease);
+}
+
+/* The other half of an edge's hit area, inside the next header's left edge.
+   Together the two make a 12px target centred on the line. */
+.resize.start {
+  right: auto;
+  left: 0;
+}
+
+/* One line per edge, wherever the pointer is on it: the rule belongs to the
+   left half, and lights from either half. */
+.resize.start::after {
+  display: none;
+}
+
+.table th:has(+ th > .resize.start:hover) > .resize:not(.start)::after {
+  background: var(--ring-border);
+}
+
+/* Blank: it only carries the header fill and the row rules to the card's
+   edge, and takes no width the tracks need. */
+.table.fixed th.filler,
+.table.fixed td.filler {
+  padding: 0;
 }
 
 .resize:hover::after,
@@ -598,7 +617,8 @@ function onResizeKey(event: KeyboardEvent, index: number) {
     text-align: left;
   }
 
-  .table td.hide-mobile {
+  .table td.hide-mobile,
+  .table .filler {
     display: none;
   }
 

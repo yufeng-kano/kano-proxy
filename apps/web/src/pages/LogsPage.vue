@@ -251,12 +251,13 @@ function onModelPick(key: string) {
 
 const visibleKeys = computed(() => LOG_COLUMN_KEYS.filter((key) => !hidden.value.includes(key)))
 
-/* Model never gets a track: it takes the card's width beyond the others, so
-   the table always spans the card, and a border beside it trades with that
-   remainder. A Model width stored by an older build is ignored. */
+/* Model has no default track: until the user resizes a column it takes the
+   card's width beyond the others. The first resize pins it (DataTable emits
+   its rendered width), and Reset brings the fill back. */
 function width(key: LogColumnKey): string | undefined {
-  if (key === "model") return undefined
-  return `${widths.value[key] ?? DEFAULT_WIDTHS[key]}px`
+  const stored = widths.value[key]
+  if (stored) return `${stored}px`
+  return key === "model" ? undefined : `${DEFAULT_WIDTHS[key]}px`
 }
 
 const numericValue: Partial<Record<LogColumnKey, (row: RequestLogRow) => string>> = {
