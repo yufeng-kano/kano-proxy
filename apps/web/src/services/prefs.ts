@@ -201,6 +201,16 @@ function write(prefs: Prefs): void {
   }
 }
 
+/** Settings' "Reset remembered views": forget every view preference at once (docs/admin-ui.md § Settings dialog). */
+export function resetPrefs(): void {
+  if (typeof localStorage === "undefined") return
+  try {
+    localStorage.removeItem(PREFS_KEY)
+  } catch {
+    /* private mode: nothing was persisted to forget */
+  }
+}
+
 /** Read-modify-write so two independent callers (router, page) never clobber each other's slice. */
 export function patchPrefs(patch: (current: Prefs) => Prefs): void {
   write(patch(readPrefs()))

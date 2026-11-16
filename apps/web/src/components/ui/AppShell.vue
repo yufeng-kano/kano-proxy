@@ -23,6 +23,7 @@ import { useI18n } from "@/i18n"
 import { resetScroll, setScrollRegion } from "@/services/scrollRegion"
 import { useWebExtensions } from "@/extensions"
 import NavIcon from "./NavIcon.vue"
+import SettingsDialog from "@/components/settings/SettingsDialog.vue"
 
 const { navigation = [], accountMenu = [], shell = {} } = useWebExtensions()
 // Edition choices about the chrome itself (docs/admin-ui.md § Layout). The
@@ -200,6 +201,17 @@ onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", onPointerDown)
 })
 
+/** The Settings dialog is the route's `?settings=` query (docs/admin-ui.md § Settings dialog). */
+const settingsOpen = computed(() => typeof route.query.settings === "string")
+
+function openSettings() {
+  accountOpen.value = false
+  // The dialog returns focus to whatever had it when it opened; the menu item
+  // is about to unmount, so hand that role to the menu's own trigger.
+  accountButton.value?.focus()
+  void router.push({ query: { ...route.query, settings: "general" } })
+}
+
 async function onSignOut() {
   await logout()
   await router.push({ name: "login" })
@@ -300,6 +312,10 @@ async function onSignOut() {
           :aria-label="t('app.account')"
         >
           <p v-if="user?.email" class="account-email" :title="user.email">{{ user.email }}</p>
+          <button type="button" role="menuitem" class="menu-item" @click="openSettings">
+            <NavIcon name="settings" />
+            <span class="menu-label">{{ t("settings.title") }}</span>
+          </button>
           <RouterLink
             v-for="item in accountMenu"
             :key="item.name"
@@ -324,7 +340,7 @@ async function onSignOut() {
             <NavIcon name="docs" />
             <span class="menu-label">{{ t("nav.docs") }}</span>
           </a>
-          <div v-if="accountMenu.length || docsInAccountMenu" class="menu-rule" role="separator" />
+          <div class="menu-rule" role="separator" />
           <button type="button" role="menuitem" class="menu-item" @click="onSignOut">
             <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path
@@ -366,6 +382,8 @@ async function onSignOut() {
           <slot />
         </div>
       </main>
+
+      <SettingsDialog v-if="settingsOpen" />
     </div>
   </div>
 </template>

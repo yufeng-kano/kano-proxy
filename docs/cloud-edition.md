@@ -90,7 +90,7 @@ Teams themselves (membership, limits, ledgers, UI) stay in the private edition.
 
 ## Web shell (composition-time, optional)
 
-`createWebApp` takes `shell` beside `routes`, `navigation` and `accountMenu`:
+`createWebApp` takes `shell` beside `routes`, `navigation`, `accountMenu` and `settingsSections`:
 
 ```ts
 export interface ShellOptions {
@@ -100,6 +100,20 @@ export interface ShellOptions {
 ```
 
 Both exist for a hosted edition whose release notes are written for its operator, not for the people signed in to it ([admin-ui.md](./admin-ui.md) § Layout: edition options). The API keeps serving `/api/changelog`; an edition that hides the page also leaves `GITHUB_REPO` unset so the route reports unavailable.
+
+`settingsSections` adds sections to the Settings dialog after the core's General and Account ([admin-ui.md](./admin-ui.md) § Settings dialog):
+
+```ts
+export interface SettingsSection {
+  name: string          // the `?settings=` value; a core name is ignored
+  label: string
+  icon: Component
+  component: Component  // renders the section's groups; the dialog draws its heading
+  clearQuery?: string[] // one-shot query keys this section reads, dropped when the dialog closes
+}
+```
+
+An edition that moves an account page into Settings keeps its old path as a redirect to `/overview?settings=<name>`, carrying the rest of the query, so bookmarks and payment returns still land on it. `SettingsGroup` and `SettingsRow` are exported for its sections to draw with.
 
 Extension routes passed in `routes` read two `meta` flags the same way core routes do:
 

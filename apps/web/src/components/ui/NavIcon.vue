@@ -10,7 +10,7 @@
  * Always decorative — every nav item ships a text label beside it.
  */
 defineProps<{
-  name: "overview" | "logs" | "providers" | "models" | "groups" | "access" | "docs" | "changelog"
+  name: "overview" | "logs" | "providers" | "models" | "groups" | "access" | "docs" | "changelog" | "settings" | "account"
 }>()
 </script>
 
@@ -25,8 +25,20 @@ defineProps<{
     aria-hidden="true"
     focusable="false"
   >
+    <!-- Settings: a gear, hub and eight short teeth -->
+    <template v-if="name === 'settings'">
+      <circle cx="8" cy="8" r="2.2" />
+      <path d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7L3.6 3.6" />
+    </template>
+
+    <!-- Account: head and shoulders -->
+    <template v-else-if="name === 'account'">
+      <circle cx="8" cy="5.5" r="2.5" />
+      <path d="M3 13.5c.6-2.4 2.6-3.8 5-3.8s4.4 1.4 5 3.8" />
+    </template>
+
     <!-- Overview: bar chart -->
-    <template v-if="name === 'overview'">
+    <template v-else-if="name === 'overview'">
       <path d="M2 13.5h12" />
       <path d="M4.25 13.5V8M8 13.5V3.5M11.75 13.5V6.25" />
     </template>
