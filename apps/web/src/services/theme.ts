@@ -33,11 +33,20 @@ function apply() {
   document.documentElement.dataset.theme = choice === "system" ? (darkQuery?.matches ? "dark" : "light") : choice
 }
 
-/** Called once at boot: applies the stored choice and follows the device while on System. */
+/**
+ * Called once at boot: applies the stored choice, follows the device while on
+ * System, and follows a choice made in another tab of this browser.
+ */
 export function initTheme() {
   apply()
   darkQuery?.addEventListener("change", () => {
     if (themeChoice.value === "system") apply()
+  })
+  if (typeof window === "undefined") return
+  window.addEventListener("storage", (event) => {
+    if (event.key !== THEME_KEY && event.key !== null) return
+    themeChoice.value = readChoice()
+    apply()
   })
 }
 

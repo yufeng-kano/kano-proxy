@@ -7,7 +7,7 @@
  * the shell mounts this component only while that query is present.
  */
 import { computed, ref, watch, type Component } from "vue"
-import { useRoute, useRouter } from "vue-router"
+import { useRoute, useRouter, type LocationQueryRaw } from "vue-router"
 import { useWebExtensions } from "@/extensions"
 import { useI18n } from "@/i18n"
 import Modal from "@/components/ui/Modal.vue"
@@ -49,16 +49,26 @@ watch(
   },
 )
 
+/** Leaving a section drops the one-shot query it read, so coming back does not replay it. */
 function select(name: string) {
   if (name === active.value.name) return
-  void router.replace({ query: { ...route.query, settings: name } })
+  const query: LocationQueryRaw = { ...route.query, settings: name }
+  for (const key of active.value.clearQuery ?? []) delete query[key]
+  void router.replace({ query })
 }
 
+/**
+ * Back where the menu's push came from when that is the entry behind this
+ * one, so the browser's Back button is not left pointing at the same page;
+ * otherwise (a deep link, a payment return) the URL is rewritten in place.
+ */
 function close() {
   const query = { ...route.query }
   delete query.settings
   for (const section of sections.value) for (const key of section.clearQuery ?? []) delete query[key]
-  void router.replace({ query })
+  const back: unknown = window.history.state?.back
+  if (typeof back === "string" && back === router.resolve({ query }).fullPath) router.back()
+  else void router.replace({ query })
 }
 </script>
 

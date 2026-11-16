@@ -43,7 +43,7 @@ export const en = {
   "settings.thisBrowser": "This browser",
   "settings.resetViews": "Reset remembered views",
   "settings.resetViewsHint":
-    "Column widths and hidden columns, page filters, the Overview range, the last page and scroll positions. Your data is not touched.",
+    "Column widths and hidden columns, page filters, the Overview range and scroll positions. Your data is not touched.",
   "settings.reset": "Reset",
   "settings.browserNote": "Theme and remembered views are kept in this browser only.",
   "settings.signedInWithGoogle": "Signed in with Google",
