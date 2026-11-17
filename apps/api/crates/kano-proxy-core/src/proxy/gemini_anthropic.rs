@@ -23,7 +23,8 @@ use serde_json::{json, Map, Value};
 use crate::providers::ProviderId;
 use crate::proxy::anthropic_client_tools;
 use crate::proxy::gemini_wire::{
-    anthropic_stop_reason, block_reason, first_finish_reason, gemini_parts, has_no_candidates,
+    anthropic_stop_reason, block_reason, empty_turn_failure, first_finish_reason, gemini_parts,
+    has_no_candidates,
     inline_data_of, normalize_gemini_usage, open_with_user_turn, random_hex, sanitize_json_schema,
     schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines,
 };
@@ -124,20 +125,26 @@ pub const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 /// that already uses it is not stripped.
 const CONTEXT_ENGINEERING_SIGNATURE: &str = "context_engineering_is_the_way_to_go";
 
-/// Whether a replayed `thinking.signature` can be Gemini's own `thoughtSignature`.
-/// Gemini signs with a long standard-base64 blob; a model group that fails over
-/// to another provider hands the client signatures in that provider's shape
-/// (UUIDs, prefixed envelopes) which Gemini then rejects as
-/// `Corrupted thought signature`. The check is a shape test, not a proof: a
-/// foreign signature that also happens to be long base64 still passes.
-fn is_plausible_gemini_signature(signature: &str) -> bool {
+/// Every Gemini `thoughtSignature` this converter hands out as a
+/// `thinking.signature` carries this prefix, so a replay can tell it from a
+/// signature another provider minted. A shape test cannot: Claude-native
+/// signatures are long base64 too, and Gemini answers them with 400
+/// `Invalid thought signature` (docs/providers.md § Antigravity "Thinking").
+const SIGNATURE_MARKER: &str = "kano-proxy:gemini-sig:v1:";
+
+fn mark_signature(signature: &str) -> String {
+    format!("{SIGNATURE_MARKER}{signature}")
+}
+
+/// The Gemini `thoughtSignature` inside a replayed `thinking.signature`, or
+/// `None` for a foreign one: anything this proxy did not mark, unmarked Gemini
+/// signatures handed out before the marker existed included. Google's two
+/// documented placeholders pass bare.
+fn replayed_gemini_signature(signature: &str) -> Option<&str> {
     if signature == SKIP_THOUGHT_SIGNATURE || signature == CONTEXT_ENGINEERING_SIGNATURE {
-        return true;
+        return Some(signature);
     }
-    signature.len() >= 32
-        && signature
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+    signature.strip_prefix(SIGNATURE_MARKER).filter(|s| !s.is_empty())
 }
 
 fn blocks_to_parts(content: Option<&Value>) -> Vec<Value> {
@@ -178,7 +185,7 @@ fn blocks_to_parts(content: Option<&Value>) -> Vec<Value> {
                         let signature = block
                             .get("signature")
                             .and_then(Value::as_str)
-                            .filter(|s| is_plausible_gemini_signature(s))
+                            .and_then(replayed_gemini_signature)
                             .unwrap_or("");
                         if !thinking_text.is_empty() || !signature.is_empty() {
                             let mut part = Map::new();
@@ -654,7 +661,7 @@ pub fn gemini_response_to_anthropic(
                 block.insert("type".into(), json!("thinking"));
                 block.insert("thinking".into(), json!(thinking));
                 if !thinking_signature.is_empty() {
-                    block.insert("signature".into(), json!(thinking_signature));
+                    block.insert("signature".into(), json!(mark_signature(&thinking_signature)));
                 }
                 content.push(Value::Object(block));
                 thinking.clear();
@@ -794,6 +801,8 @@ struct AnthropicStream {
     /// A candidate reported a `finishReason` — Gemini's terminal frame. A clean
     /// EOF without one is a truncated stream, not a completion.
     saw_terminal: bool,
+    /// A text, tool_use or image block went out — the turn answered something.
+    saw_output: bool,
     block_reason: String,
     /// Merged field-wise across frames — see `usage_to_anthropic`.
     usage: Map<String, Value>,
@@ -864,7 +873,7 @@ impl AnthropicStream {
             return;
         };
         if kind == BlockKind::Thinking && !self.pending_signature.is_empty() {
-            let signature = std::mem::take(&mut self.pending_signature);
+            let signature = mark_signature(&std::mem::take(&mut self.pending_signature));
             self.emit(
                 "content_block_delta",
                 json!({
@@ -912,6 +921,18 @@ impl AnthropicStream {
             );
             self.done = true;
             return;
+        }
+        // A terminal frame that ends a turn with nothing in it is only an answer for the
+        // reasons that say so (`empty_turn_failure`); anything else fails visibly.
+        if self.saw_terminal && !self.saw_output {
+            if let Some(message) = empty_turn_failure(self.finish_reason.as_deref()) {
+                self.emit(
+                    "error",
+                    json!({ "type": "error", "error": { "type": "api_error", "message": message } }),
+                );
+                self.done = true;
+                return;
+            }
         }
         let stop_reason = if !self.saw_terminal && !self.block_reason.is_empty() {
             "refusal".to_string()
@@ -980,6 +1001,7 @@ impl AnthropicStream {
                     continue;
                 };
                 self.saw_tool_call = true;
+                self.saw_output = true;
                 let index = self.next_index;
                 self.next_index += 1;
                 let mut content_block = block.as_object().cloned().unwrap_or_default();
@@ -1013,6 +1035,7 @@ impl AnthropicStream {
                 continue;
             }
             if let Some(inline) = inline_data_of(&part) {
+                self.saw_output = true;
                 self.close_block();
                 let index = self.next_index;
                 self.next_index += 1;
@@ -1072,6 +1095,7 @@ impl AnthropicStream {
                     self.pending_signature = sig;
                 }
             }
+            self.saw_output = true;
             self.open_block(BlockKind::Text, json!({ "type": "text", "text": "" }));
             let index = self.open.map(|(_, i)| i).unwrap_or(0);
             self.emit(
@@ -1150,6 +1174,7 @@ pub fn gemini_sse_to_anthropic_stream(
         saw_tool_call: false,
         finish_reason: None,
         saw_terminal: false,
+        saw_output: false,
         block_reason: String::new(),
         usage,
         saw_input_tokens: false,
@@ -1168,6 +1193,11 @@ mod tests {
     /// A signature in the shape Gemini actually mints: long, standard base64.
     fn sig(tag: &str) -> String {
         format!("{:A<40}", tag.replace('-', ""))
+    }
+
+    /// The same signature as a client replays it: wrapped in this proxy's marker.
+    fn marked(tag: &str) -> String {
+        mark_signature(&sig(tag))
     }
 
     fn request(body: Value) -> Value {
@@ -1393,7 +1423,7 @@ mod tests {
         let out = request(json!({
             "messages": [
                 { "role": "user", "content": "hi" },
-                { "role": "assistant", "content": [{ "type": "thinking", "thinking": "", "signature": sig("sig-1") }] }
+                { "role": "assistant", "content": [{ "type": "thinking", "thinking": "", "signature": marked("sig-1") }] }
             ]
         }));
         assert_eq!(
@@ -1408,7 +1438,7 @@ mod tests {
             "messages": [
                 { "role": "user", "content": "search" },
                 { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "", "signature": sig("sig-fc") },
+                    { "type": "thinking", "thinking": "", "signature": marked("sig-fc") },
                     { "type": "tool_use", "id": "toolu_1", "name": "search", "input": { "q": "x" } }
                 ] },
                 { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }] }
@@ -1427,7 +1457,7 @@ mod tests {
     fn moves_a_textual_thinking_signature_to_a_following_tool_call() {
         let out = request(json!({
             "messages": [{ "role": "assistant", "content": [
-                { "type": "thinking", "thinking": "reasoning", "signature": sig("sig-thought") },
+                { "type": "thinking", "thinking": "reasoning", "signature": marked("sig-thought") },
                 { "type": "tool_use", "id": "toolu_1", "name": "search", "input": {} }
             ] }]
         }));
@@ -1450,7 +1480,7 @@ mod tests {
                 { "role": "user", "content": "send it" },
                 { "role": "assistant", "content": [
                     { "type": "thinking", "thinking": "plan" },
-                    { "type": "thinking", "thinking": "", "signature": sig("sig-call") },
+                    { "type": "thinking", "thinking": "", "signature": marked("sig-call") },
                     { "type": "text", "text": "Sending now." },
                     { "type": "tool_use", "id": "toolu_1", "name": "send_message", "input": {} }
                 ] }
@@ -1472,7 +1502,7 @@ mod tests {
             "messages": [
                 { "role": "user", "content": "run both" },
                 { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "", "signature": sig("sig-first") },
+                    { "type": "thinking", "thinking": "", "signature": marked("sig-first") },
                     { "type": "tool_use", "id": "toolu_1", "name": "a", "input": {} },
                     { "type": "text", "text": "and" },
                     { "type": "tool_use", "id": "toolu_2", "name": "b", "input": {} }
@@ -1572,9 +1602,9 @@ mod tests {
             "messages": [
                 { "role": "user", "content": "run both" },
                 { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "reasoning", "signature": sig("sig-1") },
+                    { "type": "thinking", "thinking": "reasoning", "signature": marked("sig-1") },
                     { "type": "tool_use", "id": "toolu_1", "name": "Bash", "input": { "command": "ls" } },
-                    { "type": "thinking", "thinking": "", "signature": sig("sig-2") },
+                    { "type": "thinking", "thinking": "", "signature": marked("sig-2") },
                     { "type": "tool_use", "id": "toolu_2", "name": "Bash", "input": { "command": "pwd" } }
                 ] },
                 { "role": "user", "content": [
@@ -1610,7 +1640,7 @@ mod tests {
     fn round_trips_a_thinking_block_with_its_signature() {
         let out = request(json!({
             "messages": [{ "role": "assistant", "content": [
-                { "type": "thinking", "thinking": "hmm", "signature": sig("sig-abc") },
+                { "type": "thinking", "thinking": "hmm", "signature": marked("sig-abc") },
                 { "type": "text", "text": "done" }
             ] }]
         }));
@@ -1699,7 +1729,7 @@ mod tests {
         assert_eq!(
             out["content"],
             json!([
-                { "type": "thinking", "thinking": "reasoning", "signature": "sig" },
+                { "type": "thinking", "thinking": "reasoning", "signature": mark_signature("sig") },
                 { "type": "text", "text": "answer" },
                 { "type": "tool_use", "id": "fc1", "name": "search", "input": { "q": "x" } }
             ])
@@ -1739,7 +1769,7 @@ mod tests {
         assert_eq!(
             out["content"],
             json!([
-                { "type": "thinking", "thinking": "reasoning", "signature": "sig-7" },
+                { "type": "thinking", "thinking": "reasoning", "signature": mark_signature("sig-7") },
                 { "type": "text", "text": "answer" }
             ])
         );
@@ -1759,7 +1789,7 @@ mod tests {
         assert_eq!(
             out["content"],
             json!([
-                { "type": "thinking", "thinking": "", "signature": "sig-fc" },
+                { "type": "thinking", "thinking": "", "signature": mark_signature("sig-fc") },
                 { "type": "tool_use", "id": "t1", "name": "search", "input": {} }
             ])
         );
@@ -1778,7 +1808,7 @@ mod tests {
         assert_eq!(
             out["content"],
             json!([
-                { "type": "thinking", "thinking": "reasoning", "signature": "sig-t" },
+                { "type": "thinking", "thinking": "reasoning", "signature": mark_signature("sig-t") },
                 { "type": "text", "text": "answer" }
             ])
         );
@@ -1797,7 +1827,7 @@ mod tests {
         assert_eq!(
             out["content"],
             json!([
-                { "type": "thinking", "thinking": "", "signature": "sig-t" },
+                { "type": "thinking", "thinking": "", "signature": mark_signature("sig-t") },
                 { "type": "text", "text": "answer" }
             ])
         );
@@ -1885,7 +1915,7 @@ mod tests {
                 "message_stop",
             ]
         );
-        assert_eq!(seq[3].1["delta"], json!({ "type": "signature_delta", "signature": "sig" }));
+        assert_eq!(seq[3].1["delta"], json!({ "type": "signature_delta", "signature": mark_signature("sig") }));
         assert_eq!(seq[5].1["content_block"], json!({ "type": "text", "text": "" }));
         let message_delta = &seq[seq.len() - 2].1;
         assert_eq!(message_delta["delta"]["stop_reason"], "end_turn");
@@ -2032,7 +2062,7 @@ mod tests {
             .iter()
             .find(|(e, d)| e == "content_block_delta" && d["delta"]["type"] == "signature_delta")
             .unwrap();
-        assert_eq!(signature.1["delta"]["signature"], "sig-3");
+        assert_eq!(signature.1["delta"]["signature"], mark_signature("sig-3"));
     }
 
     #[tokio::test]
@@ -2055,7 +2085,7 @@ mod tests {
             .iter()
             .position(|(e, d)| e == "content_block_delta" && d["delta"]["type"] == "signature_delta")
             .expect("a signature_delta is emitted");
-        assert_eq!(seq[signature_at].1["delta"]["signature"], "sig-t");
+        assert_eq!(seq[signature_at].1["delta"]["signature"], mark_signature("sig-t"));
         let text_start_at = seq
             .iter()
             .position(|(e, d)| e == "content_block_start" && d["content_block"]["type"] == "text")
@@ -2135,5 +2165,112 @@ mod tests {
         let _ = converted.next().await; // first converted event
         tokio::task::yield_now().await;
         assert!(served.load(Ordering::SeqCst) < 6);
+    }
+
+    #[test]
+    fn drops_an_unmarked_base64_signature_such_as_a_claude_native_one() {
+        // Long standard base64 passed the old shape test: an Opus-written history
+        // put Claude signatures on Gemini functionCall parts and gemini-3.8-flash
+        // answered 400 `Invalid thought signature` (2026-11-17). An unmarked Gemini
+        // signature from before the marker lands here too.
+        let claude_signature = format!("EqQBCkgIBhABGAIiQ{}", "A".repeat(200));
+        let out = request(json!({
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "plan", "signature": claude_signature },
+                    { "type": "tool_use", "id": "toolu_1", "name": "a", "input": {} }
+                ] }
+            ]
+        }));
+        assert_eq!(
+            out["contents"][1]["parts"],
+            json!([
+                { "text": "plan", "thought": true },
+                { "functionCall": { "id": "toolu_1", "name": "a", "args": {} }, "thoughtSignature": SKIP_THOUGHT_SIGNATURE }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_streamed_function_call_signature_survives_the_client_round_trip() {
+        let raw = read_sse(gemini_sse_to_anthropic_stream(
+            sse(&[json!({ "response": {
+                "candidates": [{
+                    "content": { "parts": [{ "functionCall": { "id": "t1", "name": "search", "args": {} }, "thoughtSignature": sig("gemini") }] },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": { "promptTokenCount": 4, "candidatesTokenCount": 1 }
+            } })]),
+            "m",
+            GeminiThinkingMode::Default,
+        ))
+        .await;
+        let signature = events(&raw)
+            .into_iter()
+            .find(|(_, d)| d["delta"]["type"] == "signature_delta")
+            .map(|(_, d)| d["delta"]["signature"].clone())
+            .expect("signature_delta");
+        // What Claude Code stores and sends back on the next turn.
+        let out = request(json!({
+            "messages": [
+                { "role": "user", "content": "search" },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "", "signature": signature },
+                    { "type": "tool_use", "id": "t1", "name": "search", "input": {} }
+                ] },
+                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "t1", "content": "ok" }] }
+            ]
+        }));
+        assert_eq!(out["contents"][1]["parts"][0]["thoughtSignature"], json!(sig("gemini")));
+    }
+
+    #[tokio::test]
+    async fn fails_a_stream_that_ends_the_turn_empty_for_a_failure_reason() {
+        let raw = read_sse(gemini_sse_to_anthropic_stream(
+            sse(&[json!({ "response": {
+                "candidates": [{ "content": { "parts": [] }, "finishReason": "MALFORMED_FUNCTION_CALL" }],
+                "usageMetadata": { "promptTokenCount": 9 }
+            } })]),
+            "m",
+            GeminiThinkingMode::Default,
+        ))
+        .await;
+        let seq = events(&raw);
+        assert_eq!(names(&seq), vec!["error"]);
+        assert!(seq[0].1["error"]["message"].as_str().unwrap().contains("MALFORMED_FUNCTION_CALL"));
+    }
+
+    #[tokio::test]
+    async fn fails_a_turn_of_thinking_alone_that_ends_for_a_failure_reason() {
+        let raw = read_sse(gemini_sse_to_anthropic_stream(
+            sse(&[json!({ "response": {
+                "candidates": [{ "content": { "parts": [{ "text": "hmm", "thought": true }] }, "finishReason": "OTHER" }],
+                "usageMetadata": { "promptTokenCount": 9 }
+            } })]),
+            "m",
+            GeminiThinkingMode::Default,
+        ))
+        .await;
+        let seq = events(&raw);
+        assert_eq!(seq.last().unwrap().0, "error");
+        assert!(!seq.iter().any(|(e, _)| e == "message_stop"));
+    }
+
+    #[tokio::test]
+    async fn still_ends_an_empty_stop_turn() {
+        let raw = read_sse(gemini_sse_to_anthropic_stream(
+            sse(&[json!({ "response": {
+                "candidates": [{ "content": { "parts": [] }, "finishReason": "STOP" }],
+                "usageMetadata": { "promptTokenCount": 9 }
+            } })]),
+            "m",
+            GeminiThinkingMode::Default,
+        ))
+        .await;
+        let seq = events(&raw);
+        assert_eq!(seq.last().unwrap().0, "message_stop");
+        let delta = seq.iter().find(|(e, _)| e == "message_delta").unwrap();
+        assert_eq!(delta.1["delta"]["stop_reason"], "end_turn");
     }
 }

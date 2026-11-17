@@ -198,6 +198,45 @@ pub fn anthropic_stop_reason(finish_reason: Option<&str>, saw_tool_call: bool) -
     "end_turn"
 }
 
+/// A part the client sees as output: a function call, an image, or answer text.
+/// Thought parts do not count — a turn of thinking alone answers nothing.
+pub fn is_output_part(part: &Value) -> bool {
+    if part.get("functionCall").is_some_and(|c| !c.is_null()) || inline_data_of(part).is_some() {
+        return true;
+    }
+    let thought = part.get("thought").and_then(Value::as_bool).unwrap_or(false);
+    !thought && part.get("text").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+}
+
+/// Why a turn that produced no output part must fail instead of ending as a
+/// successful blank message, or `None` when the empty turn is an honest answer:
+/// `STOP` (the model finished), `MAX_TOKENS` and the block reasons, which map to
+/// their own stop reasons. A missing reason means Google aborted the turn
+/// (docs/providers.md § Antigravity "An empty turn is not an answer either").
+pub fn empty_turn_failure(finish_reason: Option<&str>) -> Option<String> {
+    let Some(reason) = finish_reason.filter(|r| !r.is_empty()) else {
+        return Some("upstream ended the turn with no output and no finish reason".into());
+    };
+    let upper = reason.to_ascii_uppercase();
+    if upper == "STOP" || upper == "MAX_TOKENS" || BLOCKED_FINISH_REASONS.contains(&upper.as_str()) {
+        return None;
+    }
+    Some(format!("upstream ended the turn with no output (finishReason {reason})"))
+}
+
+/// [`empty_turn_failure`] for a whole non-stream body. A blocked prompt
+/// (`promptFeedback.blockReason`, no candidates) is a real answer, not a failure.
+pub fn empty_response_failure(json_body: &Value) -> Option<String> {
+    let resp = unwrap_antigravity_response(json_body);
+    if has_no_candidates(resp) && block_reason(resp).is_some() {
+        return None;
+    }
+    if gemini_parts(resp).iter().any(is_output_part) {
+        return None;
+    }
+    empty_turn_failure(first_finish_reason(resp))
+}
+
 // ── SSE line splitting ─────────────────────────────────────────────────────
 
 /// Split an SSE body into `data:` payload strings without buffering the whole
@@ -533,5 +572,57 @@ mod tests {
         let body: ByteStream = Box::pin(futures::stream::iter(chunks));
         let mut lines = SseDataLines::new(body);
         assert_eq!(lines.next_data().await.unwrap().unwrap(), "{\"t\":\"資料\"}");
+    }
+
+    // ── empty turns ────────────────────────────────────────────────────────
+
+    #[test]
+    fn an_empty_candidate_without_a_finish_reason_is_a_failure() {
+        // The non-stream shape gemini-4-hydrogen answered with (2026-11-17).
+        let body = json!({ "response": {
+            "candidates": [{ "content": {} }],
+            "usageMetadata": { "promptTokenCount": 172533, "cachedContentTokenCount": 169319 }
+        } });
+        assert!(empty_response_failure(&body).is_some());
+    }
+
+    #[test]
+    fn an_empty_turn_names_the_failing_finish_reason() {
+        let body = json!({ "response": { "candidates": [{ "content": { "parts": [] }, "finishReason": "MALFORMED_FUNCTION_CALL" }] } });
+        assert!(empty_response_failure(&body).unwrap().contains("MALFORMED_FUNCTION_CALL"));
+    }
+
+    #[test]
+    fn thinking_alone_does_not_answer_the_turn() {
+        let body = json!({ "response": { "candidates": [{ "content": { "parts": [
+            { "text": "", "thought": true, "thoughtSignature": "sig" }
+        ] } }] } });
+        assert!(empty_response_failure(&body).is_some());
+    }
+
+    #[test]
+    fn empty_turns_that_are_real_answers_are_not_failures() {
+        for body in [
+            // The model finished and said nothing.
+            json!({ "response": { "candidates": [{ "content": { "parts": [] }, "finishReason": "STOP" }] } }),
+            json!({ "response": { "candidates": [{ "finishReason": "MAX_TOKENS" }] } }),
+            json!({ "response": { "candidates": [{ "finishReason": "SAFETY" }] } }),
+            // A blocked prompt: no candidate at all.
+            json!({ "response": { "promptFeedback": { "blockReason": "SAFETY" } } }),
+        ] {
+            assert_eq!(empty_response_failure(&body), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn any_output_part_makes_the_turn_an_answer_whatever_the_reason() {
+        for part in [
+            json!({ "text": "hi" }),
+            json!({ "functionCall": { "name": "f", "args": {} } }),
+            json!({ "inlineData": { "mimeType": "image/png", "data": "AAAB" } }),
+        ] {
+            let body = json!({ "response": { "candidates": [{ "content": { "parts": [part] }, "finishReason": "OTHER" }] } });
+            assert_eq!(empty_response_failure(&body), None, "{body}");
+        }
     }
 }

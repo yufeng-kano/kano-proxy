@@ -28,6 +28,7 @@ use crate::proxy::gemini_anthropic::{
     anthropic_to_gemini_request, gemini_response_to_anthropic, gemini_sse_to_anthropic_stream,
 };
 use crate::proxy::gemini_openai::{gemini_response_to_openai, gemini_sse_to_openai_stream, openai_to_gemini_request};
+use crate::proxy::gemini_wire::empty_response_failure;
 use crate::upstream::transport::{TransportError, UpstreamRequest, UpstreamResponse};
 use crate::AppState;
 
@@ -894,6 +895,14 @@ impl ProviderAdapter for AntigravityAdapter {
             return Ok(sse_response(gemini_sse_to_openai_stream(response.body, &req.raw_model)));
         }
         let json = response.json_value().await.map_err(|e| AdapterError::Other(e.into()))?;
+        // Same verdict the stream converter reaches with its error line: an empty turn
+        // Google aborted is a failure the client can fail over on, not a blank `stop`.
+        if let Some(message) = empty_response_failure(&json) {
+            return Ok(json_response(
+                StatusCode::BAD_GATEWAY,
+                &json!({ "error": { "message": message, "type": "upstream_error" } }),
+            ));
+        }
         Ok(json_response(StatusCode::OK, &gemini_response_to_openai(&json, &req.raw_model)))
     }
 
@@ -953,6 +962,14 @@ impl ProviderAdapter for AntigravityAdapter {
             return Ok(sse_response(gemini_sse_to_anthropic_stream(response.body, &display_model, converted.thinking_mode)));
         }
         let json = response.json_value().await.map_err(|e| AdapterError::Other(e.into()))?;
+        // Same verdict the stream converter reaches with its `error` event: an empty turn
+        // Google aborted is a failure the client can fail over on, not a blank `end_turn`.
+        if let Some(message) = empty_response_failure(&json) {
+            return Ok(json_response(
+                StatusCode::BAD_GATEWAY,
+                &json!({ "type": "error", "error": { "type": "api_error", "message": message } }),
+            ));
+        }
         Ok(json_response(
             StatusCode::OK,
             &gemini_response_to_anthropic(&json, &display_model, converted.thinking_mode),
@@ -2218,5 +2235,49 @@ mod tests {
 
         AntigravityAdapter.chat_completions(&cx, &account, &chat_request(), &CallExtras::default()).await.unwrap();
         assert_eq!(transport.requests()[1].header("user-agent"), Some(CLI_UA));
+    }
+
+    fn empty_generate() -> UpstreamResponse {
+        // What gemini-4-hydrogen answered non-stream (2026-11-17).
+        UpstreamResponse::json(
+            StatusCode::OK,
+            &json!({ "response": {
+                "candidates": [{ "content": {} }],
+                "usageMetadata": { "promptTokenCount": 3, "totalTokenCount": 3 }
+            } }),
+        )
+    }
+
+    #[tokio::test]
+    async fn answers_an_aborted_empty_turn_with_a_502_on_the_anthropic_surface() {
+        let transport = MockTransport::new();
+        transport.expect(|_| Ok(empty_generate()));
+        let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
+
+        let body = json!({ "model": "gemini-3-flash", "messages": [{ "role": "user", "content": "hi" }], "max_tokens": 64 });
+        let res = AntigravityAdapter
+            .messages(&cx, &account, &body, &headers_with_raw_model("antigravity/gemini-3-flash"), &CallExtras::default())
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        let json = body_json(res).await;
+        assert_eq!(json["type"], json!("error"));
+        assert_eq!(json["error"]["type"], json!("api_error"));
+    }
+
+    #[tokio::test]
+    async fn answers_an_aborted_empty_turn_with_a_502_on_the_openai_surface() {
+        let transport = MockTransport::new();
+        transport.expect(|_| Ok(empty_generate()));
+        let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
+
+        let res = AntigravityAdapter
+            .chat_completions(&cx, &account, &chat_request(), &CallExtras::default())
+            .await
+            .unwrap();
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(body_json(res).await["error"]["type"], json!("upstream_error"));
     }
 }

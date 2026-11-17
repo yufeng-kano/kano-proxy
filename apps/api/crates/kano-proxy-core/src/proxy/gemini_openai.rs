@@ -20,7 +20,8 @@ use serde_json::{json, Map, Value};
 use crate::providers::types::ChatCompletionRequest;
 use crate::providers::ProviderId;
 use crate::proxy::gemini_wire::{
-    block_reason, first_finish_reason, gemini_parts, has_no_candidates, inline_data_of,
+    block_reason, empty_turn_failure, first_finish_reason, gemini_parts, has_no_candidates,
+    inline_data_of,
     normalize_gemini_usage, openai_finish_reason, random_hex, sanitize_json_schema,
     schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines,
 };
@@ -603,6 +604,10 @@ struct OpenAiStream {
     /// A candidate reported a `finishReason` — Gemini's terminal frame. A clean
     /// EOF without one is a truncated stream, not a completion.
     saw_terminal: bool,
+    /// The terminal frame's own `finishReason`, before the OpenAI mapping.
+    upstream_finish_reason: Option<String>,
+    /// Content, a tool call or an image went out — the turn answered something.
+    saw_output: bool,
     block_reason: String,
     usage: Option<Value>,
     role_sent: bool,
@@ -648,6 +653,14 @@ impl OpenAiStream {
             }));
             return;
         }
+        // A terminal frame that ends a turn with nothing in it is only an answer for the
+        // reasons that say so (`empty_turn_failure`); anything else fails visibly.
+        if self.saw_terminal && !self.saw_output {
+            if let Some(message) = empty_turn_failure(self.upstream_finish_reason.as_deref()) {
+                self.emit(json!({ "error": { "message": message, "type": "upstream_error" } }));
+                return;
+            }
+        }
         let terminal_finish = if self.saw_tool_call {
             "tool_calls".to_string()
         } else if !self.saw_terminal && !self.block_reason.is_empty() {
@@ -686,6 +699,7 @@ impl OpenAiStream {
                 };
                 self.tool_index += 1;
                 self.saw_tool_call = true;
+                self.saw_output = true;
                 let mut delta = Map::new();
                 delta.insert("tool_calls".into(), json!([call]));
                 self.chunk(delta);
@@ -696,6 +710,7 @@ impl OpenAiStream {
                 // streamed images by index must not see them all collapse onto slot 0.
                 let index = self.image_index;
                 self.image_index += 1;
+                self.saw_output = true;
                 let mut delta = Map::new();
                 delta.insert(
                     "images".into(),
@@ -733,6 +748,7 @@ impl OpenAiStream {
             // A signature on a plain text part is the same chain of thought a thought
             // part carries — it goes out on this text delta, or it is lost for the
             // client's next replay.
+            self.saw_output = true;
             let mut delta = Map::new();
             delta.insert("content".into(), json!(text));
             if let Some(sig) = signature {
@@ -742,6 +758,7 @@ impl OpenAiStream {
         }
         if let Some(reason) = first_finish_reason(resp).filter(|r| !r.is_empty()) {
             self.saw_terminal = true;
+            self.upstream_finish_reason = Some(reason.to_string());
             self.finish_reason = Some(openai_finish_reason(Some(reason)).to_string());
         }
         if let Some(usage) = usage_to_openai(resp) {
@@ -800,6 +817,8 @@ pub fn gemini_sse_to_openai_stream(body: ByteStream, model: &str) -> ByteStream 
         saw_tool_call: false,
         finish_reason: None,
         saw_terminal: false,
+        upstream_finish_reason: None,
+        saw_output: false,
         block_reason: String::new(),
         usage: None,
         role_sent: false,
@@ -1581,5 +1600,31 @@ mod tests {
         // buffering the remaining generation.
         tokio::task::yield_now().await;
         assert!(served.load(Ordering::SeqCst) < 6);
+    }
+
+    #[tokio::test]
+    async fn fails_a_stream_that_ends_the_turn_empty_for_a_failure_reason() {
+        let raw = read_sse(gemini_sse_to_openai_stream(
+            sse(&[json!({ "response": {
+                "candidates": [{ "content": { "parts": [] }, "finishReason": "MALFORMED_FUNCTION_CALL" }],
+                "usageMetadata": { "promptTokenCount": 9 }
+            } })]),
+            "m",
+        ))
+        .await;
+        assert!(!raw.contains("[DONE]"));
+        let last = chunks_of(&raw).last().cloned().unwrap();
+        assert_eq!(last["error"]["type"], "upstream_error");
+        assert!(last["error"]["message"].as_str().unwrap().contains("MALFORMED_FUNCTION_CALL"));
+    }
+
+    #[tokio::test]
+    async fn still_finishes_an_empty_stop_turn() {
+        let raw = read_sse(gemini_sse_to_openai_stream(
+            sse(&[json!({ "response": { "candidates": [{ "content": { "parts": [] }, "finishReason": "STOP" }] } })]),
+            "m",
+        ))
+        .await;
+        assert!(raw.ends_with("data: [DONE]\n\n"));
     }
 }
