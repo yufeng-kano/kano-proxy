@@ -19,6 +19,13 @@ use crate::upstream::transport::ByteStream;
 
 const EMPTY_PARTS: &[Value] = &[];
 
+/// What a converting stream yields for a Gemini frame that converts to nothing (Google's
+/// heartbeat while a long `functionCall` is generated, a usage-only frame). Clients ignore an
+/// SSE comment, but the relay counts it as a real upstream chunk, so the 120s idle timeout
+/// measures upstream silence rather than converted output (docs/api.md § Keepalive and idle
+/// timeout).
+pub const UPSTREAM_HEARTBEAT: &[u8] = b": upstream-heartbeat\n\n";
+
 /// Gemini validates `contents` from the top: a `functionCall` in a model turn
 /// must follow a user turn, and the first content has nothing before it, so a
 /// history opening with a model turn is rejected outright ("Please ensure that

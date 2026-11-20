@@ -23,7 +23,7 @@ use crate::proxy::gemini_wire::{
     block_reason, empty_turn_failure, first_finish_reason, gemini_parts, has_no_candidates,
     inline_data_of,
     normalize_gemini_usage, openai_finish_reason, random_hex, sanitize_json_schema,
-    schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines,
+    schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines, UPSTREAM_HEARTBEAT,
 };
 use crate::upstream::transport::ByteStream;
 use crate::utils::audio::audio_inline;
@@ -783,7 +783,12 @@ impl OpenAiStream {
                     self.finished = true;
                     self.terminal();
                 }
-                Some(Ok(data)) => self.frame(&data),
+                Some(Ok(data)) => {
+                    self.frame(&data);
+                    if self.out.is_empty() {
+                        return Some(Bytes::from_static(UPSTREAM_HEARTBEAT));
+                    }
+                }
                 // Mid-stream upstream failure: an OpenAI-shaped error line ends the
                 // turn, never a fabricated successful finish (same rule as codex).
                 Some(Err(e)) => {
@@ -895,8 +900,10 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
+    /// The chunks a client sees: SSE comment blocks (the upstream heartbeat) are skipped.
     fn chunks_of(raw: &str) -> Vec<Value> {
         raw.split("\n\n")
+            .filter(|block| !block.starts_with(':'))
             .map(|block| block.trim_start_matches("data:").trim())
             .filter(|d| !d.is_empty() && *d != "[DONE]")
             .map(|d| serde_json::from_str(d).unwrap())

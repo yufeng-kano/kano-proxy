@@ -26,7 +26,7 @@ use crate::proxy::gemini_wire::{
     anthropic_stop_reason, block_reason, empty_turn_failure, first_finish_reason, gemini_parts,
     has_no_candidates,
     inline_data_of, normalize_gemini_usage, open_with_user_turn, random_hex, sanitize_json_schema,
-    schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines,
+    schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines, UPSTREAM_HEARTBEAT,
 };
 use crate::upstream::transport::ByteStream;
 use crate::utils::reasoning::{map_reasoning, parse_reasoning_effort};
@@ -1125,7 +1125,12 @@ impl AnthropicStream {
             match self.lines.next_data().await {
                 None => self.terminal(),
                 Some(Ok(data)) if data == "[DONE]" => self.terminal(),
-                Some(Ok(data)) => self.frame(&data),
+                Some(Ok(data)) => {
+                    self.frame(&data);
+                    if self.out.is_empty() {
+                        return Some(Bytes::from_static(UPSTREAM_HEARTBEAT));
+                    }
+                }
                 // Mid-stream failure ends the turn as an Anthropic `error` event,
                 // not a fabricated message_stop (docs/api.md § Errors).
                 Some(Err(e)) => {
@@ -1232,9 +1237,62 @@ mod tests {
     }
 
     /// `[(event, data)]` in emission order.
+    /// Google's rhythm while Neon generates a long `functionCall` (docs/api.md § Keepalive and
+    /// idle timeout): thoughts, then empty frames spaced inside the idle timeout but spanning
+    /// more than it, then the call. The relay must see those frames as upstream life.
+    #[tokio::test]
+    async fn empty_frames_keep_a_long_function_call_alive_under_the_idle_timeout() {
+        use crate::proxy::sse::{stream_with_keepalive, StreamCloseReason, StreamKeepaliveOpts, DEFAULT_KEEPALIVE_INTERVAL};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let frame = |v: Value| Bytes::from(format!("data: {}\n\n", serde_json::to_string(&v).unwrap()));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let upstream: ByteStream =
+            Box::pin(tokio_stream::wrappers::UnboundedReceiverStream::new(rx).map(Ok::<Bytes, std::io::Error>));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let out = stream_with_keepalive(
+            gemini_sse_to_anthropic_stream(upstream, "antigravity/gemini-4-neon-high", GeminiThinkingMode::Default),
+            DEFAULT_KEEPALIVE_INTERVAL,
+            StreamKeepaliveOpts {
+                idle_timeout: Some(Duration::from_millis(60)),
+                stall_frame: Some(Bytes::from_static(b"STALL\n\n")),
+                on_close: Some(Box::new(move |reason| sink.lock().unwrap().push(reason))),
+                ..Default::default()
+            },
+        );
+        let collected = tokio::spawn(read_sse(out));
+        tx.send(frame(json!({ "response": {
+            "candidates": [{ "content": { "parts": [{ "text": "plan", "thought": true }] } }],
+            "usageMetadata": { "promptTokenCount": 9 }
+        } })))
+        .unwrap();
+        for _ in 0..3 {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            tx.send(frame(json!({ "response": { "candidates": [{ "content": { "role": "model", "parts": [] } }] } })))
+                .unwrap();
+        }
+        tx.send(frame(json!({ "response": {
+            "candidates": [{ "content": { "parts": [{ "functionCall": { "name": "Write", "args": { "file_path": "/tmp/x" } } }] }, "finishReason": "STOP" }],
+            "usageMetadata": { "promptTokenCount": 9, "candidatesTokenCount": 5 }
+        } })))
+        .unwrap();
+        drop(tx);
+
+        let raw = collected.await.unwrap();
+        assert!(!raw.contains("STALL"), "{raw}");
+        assert_eq!(*seen.lock().unwrap(), vec![StreamCloseReason::Done]);
+        let seq = events(&raw);
+        assert!(seq.iter().any(|(_, d)| d["content_block"]["type"] == json!("tool_use")), "{raw}");
+        assert_eq!(seq.last().unwrap().0, "message_stop");
+    }
+
+    /// The events a client sees: SSE comment blocks (the upstream heartbeat) are skipped, as
+    /// every SSE client skips them.
     fn events(raw: &str) -> Vec<(String, Value)> {
         raw.split("\n\n")
-            .filter(|block| !block.trim().is_empty())
+            .filter(|block| !block.trim().is_empty() && !block.starts_with(':'))
             .map(|block| {
                 let mut event = String::new();
                 let mut data = String::from("{}");
