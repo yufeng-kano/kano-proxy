@@ -310,9 +310,11 @@ const fastModeHint = computed(() => {
   return undefined
 })
 
-const lineHint = computed(() =>
-  props.provider === "claude-code" ? t("providers.edits.lineHintClaude") : t("providers.edits.lineHint"),
-)
+const lineHint = computed(() => {
+  if (props.provider === "claude-code") return t("providers.edits.lineHintClaude")
+  if (props.provider === "antigravity") return t("providers.edits.lineHintAntigravity")
+  return t("providers.edits.lineHint")
+})
 
 /**
  * The native checkbox flips itself on click, and Vue patches nothing back

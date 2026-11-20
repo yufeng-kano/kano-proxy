@@ -365,6 +365,8 @@ export const en = {
   "providers.edits.lineHintClaude":
     "Drops Claude Code's identity line from system prompts sent to this account, and Kano Proxy stops adding it. Claude may refuse or bill requests without it.",
   "providers.edits.lineHint": "Drops Claude Code's identity line and billing marker from requests sent to this account.",
+  "providers.edits.lineHintAntigravity":
+    "Drops Claude Code's identity line and billing marker, and rewrites the system-prompt sentences Google answers with a false 429.",
   "providers.edits.lineHintEndpoint": "Drops Claude Code's identity line and billing marker from requests sent to this endpoint.",
   "providers.edits.fastModeOn": "Fast mode removed",
   "providers.edits.lineOn": "Claude Code identity hidden",
