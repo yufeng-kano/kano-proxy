@@ -1,12 +1,10 @@
-//! the CLI tunnel's request
-//! multiplexer (docs/cli.md § Wire protocol / § Failover semantics).
+//! The CLI tunnel's request multiplexer (docs/cli.md § Wire protocol / § Failover semantics).
 //!
 //! One mux serves one live socket. In-flight state is memory-only by design: if
 //! the socket drops, the CLI aborts its local requests and every open request
 //! here faults; frames that arrive for an id nobody awaits are answered with
 //! `cancel` so the CLI stops streaming into the void. The transport is behind
-//! [`MuxSocket`] so tests drive both ends with in-memory frames, exactly as the
-//! vitest suite drove the TypeScript mux.
+//! [`MuxSocket`] so tests drive both ends with in-memory frames.
 
 use std::collections::HashMap;
 use std::io;
@@ -25,7 +23,7 @@ use serde_json::json;
 use super::protocol::{
     decode_binary_frame, encode_binary_frame, encode_control_frame, fault_from_res_err_reason,
     parse_control_frame, validate_models_report, TunnelFaultReason, ControlFrame, BODY_KIND_REQUEST,
-    BODY_KIND_RESPONSE, FIRST_RES_TIMEOUT_MS, MAX_CHUNK_BYTES, MAX_INFLIGHT,
+    BODY_KIND_RESPONSE, MAX_CHUNK_BYTES, MAX_INFLIGHT,
     REQUEST_BODY_LIMIT_BYTES, RESPONSE_BUFFER_LIMIT_BYTES,
 };
 use crate::upstream::transport::ByteStream;
@@ -45,31 +43,9 @@ impl TunnelFault {
     pub fn new(reason: TunnelFaultReason) -> Self {
         Self { reason }
     }
-    pub fn into_upstream_response(self) -> UpstreamResponse {
-        agent_fault_response(self.reason)
-    }
 }
 
-impl std::fmt::Display for TunnelFault {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "CLI tunnel fault: {}", self.reason)
-    }
-}
-
-impl std::error::Error for TunnelFault {}
-
-impl axum::response::IntoResponse for TunnelFault {
-    fn into_response(self) -> axum::response::Response {
-        let body = json!({ "error": { "type": "agent_fault", "reason": self.reason.as_str() } });
-        let mut response = (StatusCode::BAD_GATEWAY, axum::Json(body)).into_response();
-        response
-            .headers_mut()
-            .insert(TUNNEL_FAULT_HEADER, HeaderValue::from_static(self.reason.as_str()));
-        response
-    }
-}
-
-/// The fault answer the routing layer reads markers off (`agentFaultResponse`).
+/// The fault answer the routing layer reads markers off.
 pub fn agent_fault_response(reason: TunnelFaultReason) -> UpstreamResponse {
     let mut headers = HeaderMap::new();
     headers.insert(TUNNEL_FAULT_HEADER, HeaderValue::from_static(reason.as_str()));
@@ -85,8 +61,7 @@ pub enum OutFrame {
     Binary(Vec<u8>),
 }
 
-/// The socket seam (`MuxSocket` in TypeScript): `ws.send`, with a dead socket
-/// reported instead of thrown.
+/// The socket seam: a send, with a dead socket reported as an error.
 pub trait MuxSocket: Send + Sync + 'static {
     fn send(&self, frame: OutFrame) -> Result<(), SocketClosed>;
 }
@@ -149,10 +124,6 @@ pub struct TunnelMux {
 }
 
 impl TunnelMux {
-    pub fn new(socket: Arc<dyn MuxSocket>) -> Self {
-        Self::with_options(socket, None, Duration::from_millis(FIRST_RES_TIMEOUT_MS))
-    }
-
     pub fn with_options(
         socket: Arc<dyn MuxSocket>,
         hook: Option<Arc<dyn ModelsReportHook>>,
@@ -169,7 +140,8 @@ impl TunnelMux {
         }
     }
 
-    pub fn inflight_count(&self) -> usize {
+    #[cfg(test)]
+    fn inflight_count(&self) -> usize {
         self.inner.pending.lock().expect("mux lock").len()
     }
 
@@ -206,8 +178,7 @@ impl TunnelMux {
         match rx.await {
             Ok(result) => result,
             // The entry was dropped without settling (only reachable through a
-            // `res_end` for a request that never saw `res`); the TypeScript
-            // promise hung there, a fault is the honest answer.
+            // `res_end` for a request that never saw `res`): a fault is the honest answer.
             Err(_) => Err(TunnelFault::new(TunnelFaultReason::Protocol)),
         }
     }
@@ -238,8 +209,8 @@ impl TunnelMux {
                     self.inner.fail_pending(frame.id, TunnelFaultReason::Protocol, true);
                     return MessageOutcome::Handled;
                 }
-                let (id, chunk) = (frame.id, Bytes::copy_from_slice(frame.chunk));
-                self.inner.handle_response_chunk(id, chunk);
+                // The chunk is the frame's tail: slice the refcounted message, no copy.
+                self.inner.handle_response_chunk(frame.id, data.slice(data.len() - frame.chunk.len()..));
                 MessageOutcome::Handled
             }
             MuxMessage::Text(text) => {
@@ -512,9 +483,10 @@ impl Drop for ResponseBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tunnel::protocol::FIRST_RES_TIMEOUT_MS;
     use serde_json::Value;
 
-    /// The vitest `recordingSocket`: every frame the mux sends, kept for assertions.
+    /// Every frame the mux sends, kept for assertions.
     #[derive(Default)]
     struct RecordingSocket {
         sent: Mutex<Vec<OutFrame>>,
@@ -569,18 +541,11 @@ mod tests {
     struct RecordingHook {
         reports: Mutex<Vec<Vec<String>>>,
         fail: bool,
-        delay: Duration,
     }
 
     impl RecordingHook {
-        fn new() -> Arc<Self> {
-            Arc::new(Self { reports: Mutex::new(Vec::new()), fail: false, delay: Duration::ZERO })
-        }
-        fn failing() -> Arc<Self> {
-            Arc::new(Self { reports: Mutex::new(Vec::new()), fail: true, delay: Duration::ZERO })
-        }
-        fn slow() -> Arc<Self> {
-            Arc::new(Self { reports: Mutex::new(Vec::new()), fail: false, delay: Duration::from_millis(20) })
+        fn new(fail: bool) -> Arc<Self> {
+            Arc::new(Self { reports: Mutex::new(Vec::new()), fail })
         }
         fn reports(&self) -> Vec<Vec<String>> {
             self.reports.lock().unwrap().clone()
@@ -590,9 +555,10 @@ mod tests {
     #[async_trait]
     impl ModelsReportHook for RecordingHook {
         async fn on_models_report(&self, models: Vec<String>) -> anyhow::Result<()> {
-            tokio::time::sleep(self.delay).await;
+            // A slow write: `handle_message` must await it, or the 4008 close could not follow a failure.
+            tokio::time::sleep(Duration::from_millis(20)).await;
             if self.fail {
-                anyhow::bail!("d1 write failed");
+                anyhow::bail!("write failed");
             }
             self.reports.lock().unwrap().push(models);
             Ok(())
@@ -614,7 +580,7 @@ mod tests {
     }
 
     fn mux_with(socket: Arc<RecordingSocket>) -> TunnelMux {
-        TunnelMux::new(socket)
+        TunnelMux::with_options(socket, None, Duration::from_millis(FIRST_RES_TIMEOUT_MS))
     }
 
     fn post(path: &str, body: Option<ByteStream>) -> OpenRequest {
@@ -633,7 +599,7 @@ mod tests {
         MuxMessage::Binary(Bytes::from(encode_binary_frame(id, kind, chunk)))
     }
 
-    /// Lets the spawned body pump run, the vitest `flush()`.
+    /// Lets the spawned body pump run.
     async fn flush() {
         for _ in 0..8 {
             tokio::task::yield_now().await;
@@ -714,9 +680,6 @@ mod tests {
         flush().await;
         let fault = expect_fault(mux.open_request(post("/chat/completions", None)).await);
         assert_eq!(fault.reason, TunnelFaultReason::Busy);
-        let response = fault.into_upstream_response();
-        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(response.headers.get(TUNNEL_FAULT_HEADER).unwrap(), "busy");
     }
 
     #[tokio::test]
@@ -751,7 +714,7 @@ mod tests {
         mux.abort_all(TunnelFaultReason::Offline);
         assert_eq!(expect_fault(a.await.unwrap()).reason, TunnelFaultReason::Offline);
         assert_eq!(expect_fault(b.await.unwrap()).reason, TunnelFaultReason::Offline);
-        // abortAll never sends cancel: the socket is already gone.
+        // abort_all never sends cancel: the socket is already gone.
         assert!(socket.controls("cancel").is_empty());
     }
 
@@ -850,7 +813,7 @@ mod tests {
     #[tokio::test]
     async fn delivers_valid_models_reports_and_ignores_out_of_bounds_ones() {
         let socket = RecordingSocket::new();
-        let hook = RecordingHook::new();
+        let hook = RecordingHook::new(false);
         let mux = TunnelMux::with_options(socket, Some(hook.clone() as Arc<dyn ModelsReportHook>), Duration::from_millis(FIRST_RES_TIMEOUT_MS));
         assert_eq!(
             mux.handle_message(text_frame(json!({"t":"models","models":["llama3.3:70b"]}))).await,
@@ -863,21 +826,12 @@ mod tests {
     #[tokio::test]
     async fn a_failed_models_write_asks_for_the_retryable_close() {
         let socket = RecordingSocket::new();
-        let hook = RecordingHook::failing();
+        let hook = RecordingHook::new(true);
         let mux = TunnelMux::with_options(socket, Some(hook as Arc<dyn ModelsReportHook>), Duration::from_millis(FIRST_RES_TIMEOUT_MS));
         assert_eq!(
             mux.handle_message(text_frame(json!({"t":"models","models":["llama3"]}))).await,
             MessageOutcome::ModelsPersistFailed
         );
-    }
-
-    #[tokio::test]
-    async fn handle_message_awaits_the_models_hook() {
-        let socket = RecordingSocket::new();
-        let hook = RecordingHook::slow();
-        let mux = TunnelMux::with_options(socket, Some(hook.clone() as Arc<dyn ModelsReportHook>), Duration::from_millis(FIRST_RES_TIMEOUT_MS));
-        mux.handle_message(text_frame(json!({"t":"models","models":["llama3"]}))).await;
-        assert_eq!(hook.reports(), vec![vec!["llama3".to_string()]]);
     }
 
     #[tokio::test]
@@ -955,16 +909,5 @@ mod tests {
         flush().await;
         let ids: Vec<u64> = socket.controls("req").iter().map(|f| f["id"].as_u64().unwrap()).collect();
         assert_eq!(ids, vec![1, 2]);
-    }
-
-    #[tokio::test]
-    async fn fault_response_carries_the_marker_and_a_json_body() {
-        let response = agent_fault_response(TunnelFaultReason::Offline);
-        assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-        assert_eq!(response.headers.get(TUNNEL_FAULT_HEADER).unwrap(), "offline");
-        assert_eq!(
-            response.json_value().await.unwrap(),
-            json!({"error":{"type":"agent_fault","reason":"offline"}})
-        );
     }
 }

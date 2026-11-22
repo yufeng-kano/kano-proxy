@@ -38,7 +38,7 @@ const describedBy = computed(
       <span v-if="optionalText" class="field-optional">{{ optionalText }}</span>
     </label>
 
-    <p v-if="hintAbove && hint" :id="hintId" class="field-hint"><slot name="hint">{{ hint }}</slot></p>
+    <p v-if="hintAbove && hint" :id="hintId" class="field-hint">{{ hint }}</p>
 
     <slot
       :id="id"
@@ -47,7 +47,7 @@ const describedBy = computed(
     />
 
     <p v-if="error" :id="errorId" class="field-error">{{ error }}</p>
-    <p v-else-if="hint && !hintAbove" :id="hintId" class="field-hint"><slot name="hint">{{ hint }}</slot></p>
+    <p v-else-if="hint && !hintAbove" :id="hintId" class="field-hint">{{ hint }}</p>
   </div>
 </template>
 

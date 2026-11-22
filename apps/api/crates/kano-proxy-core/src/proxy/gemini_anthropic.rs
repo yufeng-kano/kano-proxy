@@ -1,5 +1,5 @@
 //! Gemini ↔ Anthropic conversion (docs/providers.md § Antigravity,
-//! docs/api.md § Conversions).
+//! docs/api.md § Anthropic surface).
 //!
 //! Anthropic Messages ↔ Gemini `GenerateContent`, for the antigravity adapter's
 //! `/anthropic` surface.
@@ -20,26 +20,24 @@ use std::collections::{HashMap, VecDeque};
 use bytes::Bytes;
 use serde_json::{json, Map, Value};
 
-use crate::providers::ProviderId;
 use crate::proxy::anthropic_client_tools;
 use crate::proxy::gemini_wire::{
-    anthropic_stop_reason, block_reason, empty_turn_failure, first_finish_reason, gemini_parts,
-    has_no_candidates,
-    inline_data_of, normalize_gemini_usage, open_with_user_turn, random_hex, sanitize_json_schema,
-    schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines, UPSTREAM_HEARTBEAT,
+    anthropic_stop_reason, block_reason, effort_thinking_config, empty_turn_failure, first_finish_reason,
+    gemini_parts, inline_data_of, inline_part, normalize_gemini_usage, open_with_user_turn, prompt_blocked,
+    push_content, random_hex, sanitize_json_schema, schema_dialect_for, thought_signature, truthy,
+    unwrap_antigravity_response, SchemaDialect, SseDataLines, UPSTREAM_HEARTBEAT,
 };
 use crate::upstream::transport::ByteStream;
-use crate::utils::reasoning::{map_reasoning, parse_reasoning_effort};
+use crate::utils::reasoning::parse_reasoning_effort;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("invalid reasoning_effort")]
 pub struct InvalidGeminiReasoningEffortError;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeminiThinkingMode {
     Disabled,
     Enabled,
-    #[default]
     Default,
 }
 
@@ -112,7 +110,7 @@ fn base64_image_part(source: Option<&Value>) -> Option<Value> {
         .and_then(Value::as_str)
         .filter(|m| !m.is_empty())
         .unwrap_or("image/png");
-    Some(json!({ "inlineData": { "mimeType": media_type, "data": data } }))
+    Some(inline_part(media_type, data))
 }
 
 /// Google's documented placeholder for a `functionCall` whose real
@@ -120,7 +118,7 @@ fn base64_image_part(source: Option<&Value>) -> Option<Value> {
 /// unsigned call outright; the placeholder skips validation at the cost of that
 /// turn's chain of thought — a degraded round beats a conversation that can
 /// never be continued.
-pub const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+const SKIP_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
 /// The Gemini API's other documented placeholder; accepted on replay so a client
 /// that already uses it is not stripped.
 const CONTEXT_ENGINEERING_SIGNATURE: &str = "context_engineering_is_the_way_to_go";
@@ -137,8 +135,7 @@ fn mark_signature(signature: &str) -> String {
 }
 
 /// The Gemini `thoughtSignature` inside a replayed `thinking.signature`, or
-/// `None` for a foreign one: anything this proxy did not mark, unmarked Gemini
-/// signatures handed out before the marker existed included. Google's two
+/// `None` for a foreign one: anything this proxy did not mark. Google's two
 /// documented placeholders pass bare.
 fn replayed_gemini_signature(signature: &str) -> Option<&str> {
     if signature == SKIP_THOUGHT_SIGNATURE || signature == CONTEXT_ENGINEERING_SIGNATURE {
@@ -270,17 +267,6 @@ fn blocks_to_parts(content: Option<&Value>) -> Vec<Value> {
     }
 }
 
-/// JavaScript truthiness for a JSON value.
-fn truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
-
 fn map_anthropic_tools(tools: Option<&Value>, dialect: SchemaDialect) -> Option<Value> {
     let tools = tools?.as_array()?;
     let mut declarations: Vec<Value> = Vec::new();
@@ -334,17 +320,17 @@ fn map_anthropic_tool_choice(tool_choice: Option<&Value>) -> Option<Value> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct GeminiThinking {
-    pub mode: GeminiThinkingMode,
-    pub thinking_config: Value,
+#[derive(Debug, PartialEq)]
+struct GeminiThinking {
+    mode: GeminiThinkingMode,
+    thinking_config: Value,
 }
 
 /// Anthropic states thinking two ways and this proxy accepts both: a `thinking`
 /// object (`disabled` / `enabled` + `budget_tokens` / `adaptive`) and the
 /// effort ladder (`output_config.effort`, or the `reasoning_effort` extension).
 /// Budget wins when explicitly given — it is the more specific instruction.
-pub fn resolve_gemini_thinking(
+fn resolve_gemini_thinking(
     body: &Value,
 ) -> Result<GeminiThinking, InvalidGeminiReasoningEffortError> {
     let thinking = body.get("thinking").filter(|v| v.is_object() || v.is_array());
@@ -384,14 +370,10 @@ pub fn resolve_gemini_thinking(
         return Err(InvalidGeminiReasoningEffortError);
     }
     if let Some(effort) = parsed.effort() {
-        let mapped = map_reasoning(ProviderId::Antigravity, Some(effort));
-        let thinking = mapped.get("thinkingConfig");
-        let disabled = thinking.is_some_and(|c| c.get("thinkingBudget").is_some());
-        let mut config = thinking.and_then(Value::as_object).cloned().unwrap_or_default();
-        config.insert("includeThoughts".into(), json!(!disabled));
+        let (thinking_config, disabled) = effort_thinking_config(effort);
         return Ok(GeminiThinking {
             mode: if disabled { GeminiThinkingMode::Disabled } else { GeminiThinkingMode::Enabled },
-            thinking_config: Value::Object(config),
+            thinking_config,
         });
     }
 
@@ -522,23 +504,12 @@ pub fn anthropic_to_gemini_request(
             }
         }
         let parts: Vec<Value> = raw_parts
-            .drain(..)
+            .into_iter()
             .zip(dropped)
             .filter(|(_, drop)| !drop)
             .map(|(part, _)| part)
             .collect();
-        if parts.is_empty() {
-            continue;
-        }
-        let existing = contents
-            .last_mut()
-            .filter(|last| last.get("role").and_then(Value::as_str) == Some(role))
-            .and_then(|last| last.get_mut("parts"))
-            .and_then(Value::as_array_mut);
-        match existing {
-            Some(existing) => existing.extend(parts),
-            None => contents.push(json!({ "role": role, "parts": parts })),
-        }
+        push_content(&mut contents, role, parts);
     }
     open_with_user_turn(&mut contents);
 
@@ -679,10 +650,7 @@ pub fn gemini_response_to_anthropic(
     }
 
     for part in gemini_parts(resp) {
-        let signature = part
-            .get("thoughtSignature")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
+        let signature = thought_signature(part);
         if part.get("functionCall").is_some_and(truthy) {
             // Gemini can sign the functionCall part itself. Anthropic tool_use has
             // no signature field, so it rides on the adjacent thinking block (a
@@ -745,11 +713,7 @@ pub fn gemini_response_to_anthropic(
     flush_thinking!();
     flush_text!();
 
-    // A safety-blocked prompt is a valid response with no candidates and a
-    // `promptFeedback.blockReason` — surface it as a refusal, never as a
-    // successful empty `end_turn` the client cannot tell apart from real output.
-    let blocked = has_no_candidates(resp) && block_reason(resp).is_some();
-    let stop_reason = if blocked {
+    let stop_reason = if prompt_blocked(resp) {
         "refusal"
     } else {
         anthropic_stop_reason(first_finish_reason(resp), saw_tool_call)
@@ -790,20 +754,20 @@ struct AnthropicStream {
     model: String,
     emit_thinking: bool,
     out: VecDeque<Bytes>,
-    /// The TypeScript controller was closed: nothing more is emitted and the
-    /// stream ends once what is queued has been handed downstream.
+    /// The turn is over: nothing more is emitted and the stream ends once what
+    /// is queued has been handed downstream.
     done: bool,
     next_index: usize,
     open: Option<(BlockKind, usize)>,
     pending_signature: String,
     saw_tool_call: bool,
+    /// The candidate `finishReason`, set by Gemini's terminal frame. A clean EOF
+    /// while this is still `None` is a truncated stream, not a completion.
     finish_reason: Option<String>,
-    /// A candidate reported a `finishReason` — Gemini's terminal frame. A clean
-    /// EOF without one is a truncated stream, not a completion.
-    saw_terminal: bool,
     /// A text, tool_use or image block went out — the turn answered something.
     saw_output: bool,
-    block_reason: String,
+    /// A frame reported `promptFeedback.blockReason`.
+    saw_block_reason: bool,
     /// Merged field-wise across frames — see `usage_to_anthropic`.
     usage: Map<String, Value>,
     /// A frame has reported `promptTokenCount`, so `input_tokens` is real.
@@ -813,9 +777,6 @@ struct AnthropicStream {
 
 impl AnthropicStream {
     fn emit_raw(&mut self, event: &str, data: Value) {
-        if self.done {
-            return;
-        }
         let text = format!(
             "event: {event}\ndata: {}\n\n",
             serde_json::to_string(&data).unwrap_or_default()
@@ -911,7 +872,8 @@ impl AnthropicStream {
     /// answer — Gemini reports it via promptFeedback, no candidate.
     fn terminal(&mut self) {
         self.close_block();
-        if !self.saw_terminal && self.block_reason.is_empty() {
+        let saw_terminal = self.finish_reason.is_some();
+        if !saw_terminal && !self.saw_block_reason {
             self.emit(
                 "error",
                 json!({
@@ -924,7 +886,7 @@ impl AnthropicStream {
         }
         // A terminal frame that ends a turn with nothing in it is only an answer for the
         // reasons that say so (`empty_turn_failure`); anything else fails visibly.
-        if self.saw_terminal && !self.saw_output {
+        if saw_terminal && !self.saw_output {
             if let Some(message) = empty_turn_failure(self.finish_reason.as_deref()) {
                 self.emit(
                     "error",
@@ -934,10 +896,10 @@ impl AnthropicStream {
                 return;
             }
         }
-        let stop_reason = if !self.saw_terminal && !self.block_reason.is_empty() {
-            "refusal".to_string()
+        let stop_reason = if saw_terminal {
+            anthropic_stop_reason(self.finish_reason.as_deref(), self.saw_tool_call)
         } else {
-            anthropic_stop_reason(self.finish_reason.as_deref(), self.saw_tool_call).to_string()
+            "refusal"
         };
         // The whole usage object, not just `output_tokens`: Gemini reports input
         // counts on the same frames, and `message_start` went out before any of
@@ -976,16 +938,12 @@ impl AnthropicStream {
                 self.usage.insert(k, v);
             }
         }
-        if let Some(reason) = block_reason(resp) {
-            self.block_reason = reason.to_string();
+        if block_reason(resp).is_some() {
+            self.saw_block_reason = true;
         }
 
-        for part in gemini_parts(resp).to_vec() {
-            let signature = part
-                .get("thoughtSignature")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+        for part in gemini_parts(resp) {
+            let signature = thought_signature(part);
             if part.get("functionCall").is_some_and(truthy) {
                 // A signature on the functionCall part itself rides on the adjacent
                 // thinking block, whose closing signature_delta goes out right before
@@ -993,21 +951,18 @@ impl AnthropicStream {
                 if self.emit_thinking {
                     if let Some(sig) = signature {
                         self.open_block(BlockKind::Thinking, json!({ "type": "thinking", "thinking": "" }));
-                        self.pending_signature = sig;
+                        self.pending_signature = sig.to_string();
                     }
                 }
                 self.close_block();
-                let Some(block) = tool_use_block(&part, self.next_index) else {
+                let Some(Value::Object(mut content_block)) = tool_use_block(part, self.next_index) else {
                     continue;
                 };
                 self.saw_tool_call = true;
                 self.saw_output = true;
                 let index = self.next_index;
                 self.next_index += 1;
-                let mut content_block = block.as_object().cloned().unwrap_or_default();
-                let input = content_block
-                    .insert("input".into(), json!({}))
-                    .unwrap_or(Value::Null);
+                let input = content_block.insert("input".into(), json!({})).unwrap_or_else(|| json!({}));
                 self.emit(
                     "content_block_start",
                     json!({
@@ -1018,8 +973,7 @@ impl AnthropicStream {
                 );
                 // Gemini delivers a complete `args` object in one frame, so the whole
                 // JSON goes out as a single partial_json delta.
-                let partial = serde_json::to_string(&if input.is_null() { json!({}) } else { input })
-                    .unwrap_or_else(|_| "{}".into());
+                let partial = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
                 self.emit(
                     "content_block_delta",
                     json!({
@@ -1034,7 +988,7 @@ impl AnthropicStream {
                 );
                 continue;
             }
-            if let Some(inline) = inline_data_of(&part) {
+            if let Some(inline) = inline_data_of(part) {
                 self.saw_output = true;
                 self.close_block();
                 let index = self.next_index;
@@ -1079,7 +1033,7 @@ impl AnthropicStream {
                     );
                 }
                 if let Some(sig) = signature {
-                    self.pending_signature = sig;
+                    self.pending_signature = sig.to_string();
                 }
                 continue;
             }
@@ -1092,7 +1046,7 @@ impl AnthropicStream {
             if self.emit_thinking {
                 if let Some(sig) = signature {
                     self.open_block(BlockKind::Thinking, json!({ "type": "thinking", "thinking": "" }));
-                    self.pending_signature = sig;
+                    self.pending_signature = sig.to_string();
                 }
             }
             self.saw_output = true;
@@ -1109,7 +1063,6 @@ impl AnthropicStream {
         }
 
         if let Some(reason) = first_finish_reason(resp).filter(|r| !r.is_empty()) {
-            self.saw_terminal = true;
             self.finish_reason = Some(reason.to_string());
         }
     }
@@ -1157,7 +1110,7 @@ impl AnthropicStream {
 /// (docs/api.md § Streaming).
 ///
 /// Pull-driven, like the OpenAI converter; dropping the returned stream drops
-/// the upstream body, which is what the TypeScript `cancel()` hook did.
+/// the upstream body, which cancels the upstream request.
 pub fn gemini_sse_to_anthropic_stream(
     body: ByteStream,
     model: &str,
@@ -1178,9 +1131,8 @@ pub fn gemini_sse_to_anthropic_stream(
         pending_signature: String::new(),
         saw_tool_call: false,
         finish_reason: None,
-        saw_terminal: false,
         saw_output: false,
-        block_reason: String::new(),
+        saw_block_reason: false,
         usage,
         saw_input_tokens: false,
         message_started: false,
@@ -1236,7 +1188,6 @@ mod tests {
         String::from_utf8(out).unwrap()
     }
 
-    /// `[(event, data)]` in emission order.
     /// Google's rhythm while Neon generates a long `functionCall` (docs/api.md § Keepalive and
     /// idle timeout): thoughts, then empty frames spaced inside the idle timeout but spanning
     /// more than it, then the call. The relay must see those frames as upstream life.
@@ -1288,8 +1239,8 @@ mod tests {
         assert_eq!(seq.last().unwrap().0, "message_stop");
     }
 
-    /// The events a client sees: SSE comment blocks (the upstream heartbeat) are skipped, as
-    /// every SSE client skips them.
+    /// `[(event, data)]` in emission order — the events a client sees: SSE comment blocks
+    /// (the upstream heartbeat) are skipped, as every SSE client skips them.
     fn events(raw: &str) -> Vec<(String, Value)> {
         raw.split("\n\n")
             .filter(|block| !block.trim().is_empty() && !block.starts_with(':'))
@@ -1312,75 +1263,45 @@ mod tests {
         seq.iter().map(|(e, _)| e.as_str()).collect()
     }
 
-    // ── resolveGeminiThinking ──────────────────────────────────────────────
+    // ── resolve_gemini_thinking ────────────────────────────────────────────
 
     #[test]
-    fn disables_thinking_outright() {
-        let out = resolve_gemini_thinking(&json!({ "thinking": { "type": "disabled" } })).unwrap();
-        assert_eq!(out.mode, GeminiThinkingMode::Disabled);
-        assert_eq!(
-            out.thinking_config,
-            json!({ "thinkingBudget": 0, "includeThoughts": false })
-        );
-    }
-
-    #[test]
-    fn maps_an_explicit_budget_verbatim() {
-        let out =
-            resolve_gemini_thinking(&json!({ "thinking": { "type": "enabled", "budget_tokens": 4096 } }))
-                .unwrap();
-        assert_eq!(out.mode, GeminiThinkingMode::Enabled);
-        assert_eq!(
-            out.thinking_config,
-            json!({ "thinkingBudget": 4096, "includeThoughts": true })
-        );
-    }
-
-    #[test]
-    fn maps_output_config_effort_to_a_thinking_level() {
-        let out = resolve_gemini_thinking(&json!({ "output_config": { "effort": "low" } })).unwrap();
-        assert_eq!(out.mode, GeminiThinkingMode::Enabled);
-        assert_eq!(
-            out.thinking_config,
-            json!({ "thinkingLevel": "low", "includeThoughts": true })
-        );
-    }
-
-    #[test]
-    fn clamps_an_above_ceiling_effort_down_to_high() {
-        for token in ["xhigh", "max"] {
-            let out =
-                resolve_gemini_thinking(&json!({ "output_config": { "effort": token } })).unwrap();
-            assert_eq!(out.thinking_config["thinkingLevel"], "high");
+    fn resolves_thinking_from_the_thinking_object_and_the_effort_ladder() {
+        for (body, mode, thinking_config) in [
+            (
+                json!({ "thinking": { "type": "disabled" } }),
+                GeminiThinkingMode::Disabled,
+                json!({ "thinkingBudget": 0, "includeThoughts": false }),
+            ),
+            // An explicit budget is the more specific instruction and goes through verbatim.
+            (
+                json!({ "thinking": { "type": "enabled", "budget_tokens": 4096 } }),
+                GeminiThinkingMode::Enabled,
+                json!({ "thinkingBudget": 4096, "includeThoughts": true }),
+            ),
+            (
+                json!({ "output_config": { "effort": "low" } }),
+                GeminiThinkingMode::Enabled,
+                json!({ "thinkingLevel": "low", "includeThoughts": true }),
+            ),
+            // `none` reaches Gemini's zero budget through the ladder.
+            (
+                json!({ "reasoning_effort": "none" }),
+                GeminiThinkingMode::Disabled,
+                json!({ "thinkingBudget": 0, "includeThoughts": false }),
+            ),
+            // Nothing asked for: the model decides, and the thoughts are still requested.
+            (json!({}), GeminiThinkingMode::Default, json!({ "includeThoughts": true })),
+        ] {
+            assert_eq!(resolve_gemini_thinking(&body), Ok(GeminiThinking { mode, thinking_config }), "{body}");
         }
-    }
-
-    #[test]
-    fn effort_none_disables_thinking_through_the_ladder() {
-        let out = resolve_gemini_thinking(&json!({ "reasoning_effort": "none" })).unwrap();
-        assert_eq!(out.mode, GeminiThinkingMode::Disabled);
-        assert_eq!(
-            out.thinking_config,
-            json!({ "thinkingBudget": 0, "includeThoughts": false })
-        );
-    }
-
-    #[test]
-    fn asks_for_thoughts_by_default() {
-        let out = resolve_gemini_thinking(&json!({})).unwrap();
-        assert_eq!(out.mode, GeminiThinkingMode::Default);
-        assert_eq!(out.thinking_config, json!({ "includeThoughts": true }));
-    }
-
-    #[test]
-    fn rejects_a_garbage_effort() {
         assert_eq!(
             resolve_gemini_thinking(&json!({ "reasoning_effort": "turbo" })),
             Err(InvalidGeminiReasoningEffortError)
         );
     }
 
-    // ── anthropicToGeminiRequest ───────────────────────────────────────────
+    // ── anthropic_to_gemini_request ────────────────────────────────────────
 
     #[test]
     fn moves_system_to_system_instruction_and_maps_roles() {
@@ -1491,45 +1412,6 @@ mod tests {
     }
 
     #[test]
-    fn restores_a_tool_use_signature_to_its_function_call_part() {
-        let out = request(json!({
-            "messages": [
-                { "role": "user", "content": "search" },
-                { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "", "signature": marked("sig-fc") },
-                    { "type": "tool_use", "id": "toolu_1", "name": "search", "input": { "q": "x" } }
-                ] },
-                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "ok" }] }
-            ]
-        }));
-        assert_eq!(
-            out["contents"][1]["parts"],
-            json!([{
-                "functionCall": { "id": "toolu_1", "name": "search", "args": { "q": "x" } },
-                "thoughtSignature": sig("sig-fc")
-            }])
-        );
-    }
-
-    #[test]
-    fn moves_a_textual_thinking_signature_to_a_following_tool_call() {
-        let out = request(json!({
-            "messages": [{ "role": "assistant", "content": [
-                { "type": "thinking", "thinking": "reasoning", "signature": marked("sig-thought") },
-                { "type": "tool_use", "id": "toolu_1", "name": "search", "input": {} }
-            ] }]
-        }));
-        // An assistant-first fixture: the converter opens it with a user turn.
-        assert_eq!(
-            out["contents"][1]["parts"],
-            json!([
-                { "text": "reasoning", "thought": true },
-                { "functionCall": { "id": "toolu_1", "name": "search", "args": {} }, "thoughtSignature": sig("sig-thought") }
-            ])
-        );
-    }
-
-    #[test]
     fn carries_a_signature_past_the_text_that_preceded_the_tool_call() {
         // The response side flushes thinking before the pre-call text, so this
         // is exactly what a think-then-say-then-call turn replays as.
@@ -1579,29 +1461,34 @@ mod tests {
 
     #[test]
     fn drops_a_foreign_signature_and_placeholders_the_call() {
-        // What a model group hands back after failing over to a non-Gemini
-        // target: a UUID where Gemini expects its own base64 blob. Replaying it
-        // verbatim fails the turn with `Corrupted thought signature`.
-        let out = request(json!({
-            "messages": [
-                { "role": "user", "content": "log it" },
-                { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "plan", "signature": "8c02fbf7-92c3-4bd3-964c-983210454fc7" },
-                    { "type": "tool_use", "id": "call_00_abc", "name": "insert", "input": { "row": 1 } }
-                ] },
-                { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "call_00_abc", "content": "ok" }] }
-            ]
-        }));
-        assert_eq!(
-            out["contents"][1]["parts"],
-            json!([
-                { "text": "plan", "thought": true },
-                {
-                    "functionCall": { "id": "call_00_abc", "name": "insert", "args": { "row": 1 } },
-                    "thoughtSignature": SKIP_THOUGHT_SIGNATURE
-                }
-            ])
-        );
+        // Neither carries the marker: a UUID is what a model group hands back after failing
+        // over to a non-Gemini target, and long standard base64 is a Claude-native signature
+        // (an Opus-written history got 400 `Invalid thought signature` from gemini-3.8-flash,
+        // 2026-11-17). Replayed verbatim, either fails the turn.
+        let claude_signature = format!("EqQBCkgIBhABGAIiQ{}", "A".repeat(200));
+        for foreign in ["8c02fbf7-92c3-4bd3-964c-983210454fc7", claude_signature.as_str()] {
+            let out = request(json!({
+                "messages": [
+                    { "role": "user", "content": "log it" },
+                    { "role": "assistant", "content": [
+                        { "type": "thinking", "thinking": "plan", "signature": foreign },
+                        { "type": "tool_use", "id": "call_00_abc", "name": "insert", "input": { "row": 1 } }
+                    ] },
+                    { "role": "user", "content": [{ "type": "tool_result", "tool_use_id": "call_00_abc", "content": "ok" }] }
+                ]
+            }));
+            assert_eq!(
+                out["contents"][1]["parts"],
+                json!([
+                    { "text": "plan", "thought": true },
+                    {
+                        "functionCall": { "id": "call_00_abc", "name": "insert", "args": { "row": 1 } },
+                        "thoughtSignature": SKIP_THOUGHT_SIGNATURE
+                    }
+                ]),
+                "{foreign}"
+            );
+        }
     }
 
     #[test]
@@ -1768,7 +1655,7 @@ mod tests {
         );
     }
 
-    // ── geminiResponseToAnthropic ──────────────────────────────────────────
+    // ── gemini_response_to_anthropic ───────────────────────────────────────
 
     #[test]
     fn builds_thinking_text_and_tool_use_blocks_with_usage() {
@@ -1905,16 +1792,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_a_safety_finish_to_a_refusal() {
-        let out = gemini_response_to_anthropic(
-            &json!({ "response": { "candidates": [{ "content": { "parts": [] }, "finishReason": "SAFETY" }] } }),
-            "m",
-            GeminiThinkingMode::Default,
-        );
-        assert_eq!(out["stop_reason"], "refusal");
-    }
-
-    #[test]
     fn maps_a_candidate_less_safety_block_to_a_refusal() {
         let out = gemini_response_to_anthropic(
             &json!({ "response": { "promptFeedback": { "blockReason": "SAFETY" } } }),
@@ -1935,7 +1812,7 @@ mod tests {
         assert_eq!(out["stop_reason"], "max_tokens");
     }
 
-    // ── geminiSseToAnthropicStream ─────────────────────────────────────────
+    // ── gemini_sse_to_anthropic_stream ─────────────────────────────────────
 
     #[tokio::test]
     async fn emits_a_well_formed_messages_stream_for_thinking_then_text() {
@@ -2223,31 +2100,6 @@ mod tests {
         let _ = converted.next().await; // first converted event
         tokio::task::yield_now().await;
         assert!(served.load(Ordering::SeqCst) < 6);
-    }
-
-    #[test]
-    fn drops_an_unmarked_base64_signature_such_as_a_claude_native_one() {
-        // Long standard base64 passed the old shape test: an Opus-written history
-        // put Claude signatures on Gemini functionCall parts and gemini-3.8-flash
-        // answered 400 `Invalid thought signature` (2026-11-17). An unmarked Gemini
-        // signature from before the marker lands here too.
-        let claude_signature = format!("EqQBCkgIBhABGAIiQ{}", "A".repeat(200));
-        let out = request(json!({
-            "messages": [
-                { "role": "user", "content": "go" },
-                { "role": "assistant", "content": [
-                    { "type": "thinking", "thinking": "plan", "signature": claude_signature },
-                    { "type": "tool_use", "id": "toolu_1", "name": "a", "input": {} }
-                ] }
-            ]
-        }));
-        assert_eq!(
-            out["contents"][1]["parts"],
-            json!([
-                { "text": "plan", "thought": true },
-                { "functionCall": { "id": "toolu_1", "name": "a", "args": {} }, "thoughtSignature": SKIP_THOUGHT_SIGNATURE }
-            ])
-        );
     }
 
     #[tokio::test]

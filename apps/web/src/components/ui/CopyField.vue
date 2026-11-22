@@ -7,6 +7,7 @@
  */
 import { ref } from "vue"
 import { useI18n } from "@/i18n"
+import ActionIcon from "./ActionIcon.vue"
 import AppButton from "./AppButton.vue"
 
 const props = defineProps<{
@@ -51,23 +52,7 @@ async function copy() {
             stroke-linejoin="round"
           />
         </svg>
-        <svg v-else viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <rect
-            x="5.75"
-            y="5.75"
-            width="8.5"
-            height="8.5"
-            rx="1.75"
-            stroke="currentColor"
-            stroke-width="1.4"
-          />
-          <path
-            d="M10.25 3.75A1.75 1.75 0 008.5 2h-4.75A1.75 1.75 0 002 3.75V8.5c0 .966.784 1.75 1.75 1.75"
-            stroke="currentColor"
-            stroke-width="1.4"
-            stroke-linecap="round"
-          />
-        </svg>
+        <ActionIcon v-else name="copy" />
       </template>
       {{ copied ? t("action.copied") : t("action.copy") }}
     </AppButton>

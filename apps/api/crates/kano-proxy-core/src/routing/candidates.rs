@@ -20,19 +20,17 @@
 use crate::db::accounts::{account_profile_meta, get_account, list_accounts, AccountRow};
 use std::collections::{HashMap, HashSet};
 
-use crate::db::cli::{get_cli_provider_by_slug, list_cli_providers, CliProviderRow};
+use crate::db::cli::{get_cli_provider_by_slug, list_cli_providers};
 use crate::db::custom_providers::{get_custom_provider_by_slug, list_custom_providers, CustomProviderRow};
 use crate::db::model_groups::{
     get_group_model_by_name, parse_group_targets, GroupTarget, ModelGroupModelRow, ModelGroupRow,
 };
-use crate::db::provider_settings::get_provider_strategy;
 use crate::pool::extension::{shared_custom_providers, ListSharedOptions, ShareInfo, SharedAccount, SharedCustomProvider};
 use crate::providers::cli::create_cli_adapter;
 use crate::providers::custom_anthropic::custom_anthropic_adapter;
 use crate::providers::custom_openai::custom_openai_adapter;
 use crate::providers::registry::get_adapter;
 use crate::providers::{DynAdapter, ProviderId};
-use crate::routing::strategy::DEFAULT_STRATEGY;
 use crate::routing::types::RoutingCandidate;
 use crate::utils::model::split_model_id;
 use crate::AppState;
@@ -41,7 +39,6 @@ use crate::AppState;
 /// looked up.
 #[derive(Clone)]
 pub struct ResolvedTarget {
-    pub target_index: usize,
     pub provider: String,
     pub upstream_model: String,
     pub is_builtin: bool,
@@ -55,6 +52,29 @@ pub struct ResolvedTarget {
     pub shared: Option<SharedEndpoint>,
 }
 
+impl ResolvedTarget {
+    fn candidate(&self, account: AccountRow, share: Option<ShareInfo>) -> RoutingCandidate {
+        RoutingCandidate {
+            provider: self.provider.clone(),
+            upstream_model: self.upstream_model.clone(),
+            is_builtin: self.is_builtin,
+            custom_provider: self.custom_provider.clone(),
+            adapter: self.adapter.clone(),
+            account,
+            share,
+        }
+    }
+
+    fn primary(&self) -> PrimaryTarget {
+        PrimaryTarget {
+            provider: self.provider.clone(),
+            upstream_model: self.upstream_model.clone(),
+            adapter: self.adapter.clone(),
+            is_builtin: self.is_builtin,
+        }
+    }
+}
+
 /// The owner's account row behind a shared custom endpoint, with the descriptor its candidate
 /// carries downstream.
 #[derive(Clone)]
@@ -63,18 +83,13 @@ pub struct SharedEndpoint {
     pub share: ShareInfo,
 }
 
-/// The adapter for one custom (BYO base URL) provider row — `adapterFor(false, …)`.
+/// The adapter for one custom (BYO base URL) provider row.
 pub fn custom_provider_adapter(row: &CustomProviderRow) -> DynAdapter {
     if row.format == "anthropic" {
         custom_anthropic_adapter(row.clone())
     } else {
         custom_openai_adapter(row.clone())
     }
-}
-
-/// The adapter for one CLI provider row (docs/cli.md).
-pub fn cli_provider_adapter(cx: &AppState, row: &CliProviderRow) -> DynAdapter {
-    create_cli_adapter(cx, row)
 }
 
 /// What other users share with the caller, asked of the pool extension at most once per
@@ -137,7 +152,6 @@ async fn shared_custom_target(
     cx: &AppState,
     user_id: &str,
     lookup: &SharedLookup,
-    target_index: usize,
     prefix: &str,
     upstream_model: String,
 ) -> anyhow::Result<Option<ResolvedTarget>> {
@@ -145,7 +159,6 @@ async fn shared_custom_target(
         return Ok(None);
     };
     Ok(Some(ResolvedTarget {
-        target_index,
         provider: shared.provider.slug.clone(),
         upstream_model,
         is_builtin: false,
@@ -193,13 +206,11 @@ pub async fn resolve_target_prefix(
     cx: &AppState,
     user_id: &str,
     lookup: &SharedLookup,
-    target_index: usize,
     target: &GroupTarget,
 ) -> anyhow::Result<Option<ResolvedTarget>> {
     let Some(split) = split_model_id(&target.model) else { return Ok(None) };
     if let Some(provider) = ProviderId::parse(&split.prefix) {
         return Ok(Some(ResolvedTarget {
-            target_index,
             provider: provider.as_str().to_string(),
             upstream_model: split.upstream_model,
             is_builtin: true,
@@ -211,7 +222,6 @@ pub async fn resolve_target_prefix(
     }
     if let Some(row) = get_custom_provider_by_slug(cx.pool(), user_id, &split.prefix).await? {
         return Ok(Some(ResolvedTarget {
-            target_index,
             provider: row.slug.clone(),
             upstream_model: split.upstream_model,
             is_builtin: false,
@@ -224,12 +234,11 @@ pub async fn resolve_target_prefix(
     // Third prefix branch (docs/cli.md): builtin → custom slug → CLI slug.
     if let Some(cli_row) = get_cli_provider_by_slug(cx.pool(), user_id, &split.prefix).await? {
         return Ok(Some(ResolvedTarget {
-            target_index,
             provider: cli_row.slug.clone(),
             upstream_model: split.upstream_model,
             is_builtin: false,
             custom_provider: None,
-            adapter: cli_provider_adapter(cx, &cli_row),
+            adapter: create_cli_adapter(cx, &cli_row),
             account_id: target.account_id.clone(),
             shared: None,
         }));
@@ -238,7 +247,7 @@ pub async fn resolve_target_prefix(
     if target.account_id.is_some() {
         return Ok(None);
     }
-    shared_custom_target(cx, user_id, lookup, target_index, &split.prefix, split.upstream_model).await
+    shared_custom_target(cx, user_id, lookup, &split.prefix, split.upstream_model).await
 }
 
 /// Whether this account's stored profile facts let it serve the target's model. Fails open.
@@ -269,7 +278,7 @@ async fn pool_rows(cx: &AppState, user_id: &str, target: &ResolvedTarget) -> Res
     let mut rows: Vec<PoolRow> =
         own.into_iter().map(|account| PoolRow { priority: account.priority, account, share: None }).collect();
     let Some(ext) = cx.pool_extension() else { return Ok(rows) };
-    if !target.is_builtin || target.account_id.is_some() {
+    if !target.is_builtin {
         return Ok(rows);
     }
     let Some(provider) = ProviderId::parse(&target.provider) else { return Ok(rows) };
@@ -301,17 +310,7 @@ async fn pool_candidates_for(
     Ok(rows
         .into_iter()
         .filter(|row| eligible(target, &row.account))
-        .map(|row| RoutingCandidate {
-            target_index: target.target_index,
-            pinned: false,
-            provider: target.provider.clone(),
-            upstream_model: target.upstream_model.clone(),
-            is_builtin: target.is_builtin,
-            custom_provider: target.custom_provider.clone(),
-            adapter: target.adapter.clone(),
-            account: row.account,
-            share: row.share,
-        })
+        .map(|row| target.candidate(row.account, row.share))
         .collect())
 }
 
@@ -357,20 +356,7 @@ async fn pinned_candidate_for(
     let Some((account, share)) = pinned_account(cx, user_id, lookup, &target.provider, account_id).await? else {
         return Ok(None);
     };
-    if !eligible(target, &account) {
-        return Ok(None);
-    }
-    Ok(Some(RoutingCandidate {
-        target_index: target.target_index,
-        pinned: true,
-        provider: target.provider.clone(),
-        upstream_model: target.upstream_model.clone(),
-        is_builtin: target.is_builtin,
-        custom_provider: target.custom_provider.clone(),
-        adapter: target.adapter.clone(),
-        account,
-        share,
-    }))
+    Ok(eligible(target, &account).then(|| target.candidate(account, share)))
 }
 
 /// Candidates for one already-resolved target, honoring pinning. `lookup` is shared by every
@@ -387,8 +373,8 @@ pub async fn candidates_for_target(
     pool_candidates_for(cx, user_id, target).await
 }
 
-/// One implicit target — the direct `provider/model` case, or dispatch's single-pool fallback
-/// when it wasn't handed a pre-built candidate list.
+/// One implicit target, for tests that need one pool's candidate list with their own adapter.
+#[cfg(test)]
 #[derive(Clone)]
 pub struct PoolTarget {
     pub provider: String,
@@ -400,14 +386,14 @@ pub struct PoolTarget {
     pub account_id: Option<String>,
 }
 
-/// One implicit target's candidates (`target_index: 0`).
+/// One implicit target's candidates.
+#[cfg(test)]
 pub async fn pool_candidates(
     cx: &AppState,
     user_id: &str,
     target: &PoolTarget,
 ) -> Result<Vec<RoutingCandidate>, sqlx::Error> {
     let resolved = ResolvedTarget {
-        target_index: 0,
         provider: target.provider.clone(),
         upstream_model: target.upstream_model.clone(),
         is_builtin: target.is_builtin,
@@ -426,8 +412,8 @@ pub struct GroupExpansion {
     pub resolved_targets: Vec<ResolvedTarget>,
 }
 
-/// Expand every target of one group model, in array order, into the flat candidate list — the
-/// same failover loop now runs cross-target and in-pool.
+/// Expand every target of one group model, in array order, into the flat candidate list, so one
+/// failover loop runs cross-target and in-pool.
 pub async fn group_model_candidates(
     cx: &AppState,
     user_id: &str,
@@ -436,8 +422,8 @@ pub async fn group_model_candidates(
     let targets = parse_group_targets(Some(&model_row.targets_json));
     let lookup = SharedLookup::default();
     let mut resolved_targets = Vec::new();
-    for (i, target) in targets.iter().enumerate() {
-        if let Some(resolved) = resolve_target_prefix(cx, user_id, &lookup, i, target).await? {
+    for target in &targets {
+        if let Some(resolved) = resolve_target_prefix(cx, user_id, &lookup, target).await? {
             resolved_targets.push(resolved);
         }
     }
@@ -458,7 +444,6 @@ pub struct PrimaryTarget {
     pub upstream_model: String,
     pub adapter: DynAdapter,
     pub is_builtin: bool,
-    pub custom_provider: Option<CustomProviderRow>,
 }
 
 /// Top-level combinator result for a raw `model` string — used by routes.
@@ -469,107 +454,28 @@ pub struct RoutingResolution {
     pub group_name: Option<String>,
     pub primary: PrimaryTarget,
     pub candidates: Vec<RoutingCandidate>,
-    /// `model_groups.strategy` (group hit) or `provider_settings.strategy` (direct call) — raw
-    /// stored value, dispatch normalizes it.
-    pub strategy: String,
 }
 
-/// Shared model-id resolution for `/openai/v1` and `/anthropic`: split on the first "/", try
-/// the builtin `ProviderId` union first, then a per-user `custom_providers` lookup, then a CLI
-/// provider, then a custom endpoint shared with the caller. A `model` with no "/" is `None`
-/// (`invalid_model`) — since v4 nothing bare resolves on the shared bases; group models live
-/// on their own endpoints and resolve via [`resolve_group_model_candidates`].
+/// Shared model-id resolution for `/openai/v1` and `/anthropic`: the model is one implicit
+/// unpinned target, resolved like a group target (builtin `ProviderId`, then the caller's
+/// custom slug, then a CLI slug, then a custom endpoint shared with the caller). A `model` with
+/// no "/" is `None` (`invalid_model`): nothing bare resolves on the shared bases; group models
+/// live on their own endpoints and resolve via [`resolve_group_model_candidates`].
 pub async fn resolve_candidates(
     cx: &AppState,
     user_id: &str,
     model: &str,
 ) -> anyhow::Result<Option<RoutingResolution>> {
-    let Some(split) = split_model_id(model) else { return Ok(None) };
-
-    if let Some(provider) = ProviderId::parse(&split.prefix) {
-        let primary = PrimaryTarget {
-            provider: provider.as_str().to_string(),
-            upstream_model: split.upstream_model.clone(),
-            adapter: get_adapter(provider),
-            is_builtin: true,
-            custom_provider: None,
-        };
-        return Ok(Some(RoutingResolution {
-            raw: split.raw,
-            group_name: None,
-            candidates: pool_candidates(cx, user_id, &primary_pool_target(&primary)).await?,
-            strategy: get_provider_strategy(cx.pool(), user_id, provider.as_str()).await?,
-            primary,
-        }));
-    }
-
-    if let Some(row) = get_custom_provider_by_slug(cx.pool(), user_id, &split.prefix).await? {
-        let primary = PrimaryTarget {
-            provider: row.slug.clone(),
-            upstream_model: split.upstream_model.clone(),
-            adapter: custom_provider_adapter(&row),
-            is_builtin: false,
-            custom_provider: Some(row.clone()),
-        };
-        return Ok(Some(RoutingResolution {
-            raw: split.raw,
-            group_name: None,
-            candidates: pool_candidates(cx, user_id, &primary_pool_target(&primary)).await?,
-            strategy: get_provider_strategy(cx.pool(), user_id, &row.slug).await?,
-            primary,
-        }));
-    }
-
-    // Third prefix branch (docs/cli.md): a CLI provider behaves like any provider on the
-    // routing surface — its one internal account row rides the same pool machinery, only the
-    // adapter's transport differs.
-    if let Some(cli_row) = get_cli_provider_by_slug(cx.pool(), user_id, &split.prefix).await? {
-        let primary = PrimaryTarget {
-            provider: cli_row.slug.clone(),
-            upstream_model: split.upstream_model,
-            adapter: cli_provider_adapter(cx, &cli_row),
-            is_builtin: false,
-            custom_provider: None,
-        };
-        return Ok(Some(RoutingResolution {
-            raw: split.raw,
-            group_name: None,
-            candidates: pool_candidates(cx, user_id, &primary_pool_target(&primary)).await?,
-            strategy: get_provider_strategy(cx.pool(), user_id, &cli_row.slug).await?,
-            primary,
-        }));
-    }
-
     let lookup = SharedLookup::default();
-    let Some(target) = shared_custom_target(cx, user_id, &lookup, 0, &split.prefix, split.upstream_model).await? else {
-        return Ok(None);
-    };
+    let direct = GroupTarget { model: model.to_string(), account_id: None };
+    let Some(target) = resolve_target_prefix(cx, user_id, &lookup, &direct).await? else { return Ok(None) };
+    let candidates = candidates_for_target(cx, user_id, &lookup, &target).await?;
     Ok(Some(RoutingResolution {
-        raw: split.raw,
+        raw: model.trim().to_string(),
         group_name: None,
-        candidates: candidates_for_target(cx, user_id, &lookup, &target).await?,
-        // One candidate, so no ordering to choose; the caller has no settings row for a slug
-        // they do not own.
-        strategy: DEFAULT_STRATEGY.to_string(),
-        primary: PrimaryTarget {
-            provider: target.provider,
-            upstream_model: target.upstream_model,
-            adapter: target.adapter,
-            is_builtin: false,
-            custom_provider: target.custom_provider,
-        },
+        primary: target.primary(),
+        candidates,
     }))
-}
-
-fn primary_pool_target(primary: &PrimaryTarget) -> PoolTarget {
-    PoolTarget {
-        provider: primary.provider.clone(),
-        upstream_model: primary.upstream_model.clone(),
-        is_builtin: primary.is_builtin,
-        custom_provider: primary.custom_provider.clone(),
-        adapter: primary.adapter.clone(),
-        account_id: None,
-    }
 }
 
 /// Group-endpoint resolution (docs/api.md § Group endpoints): the route has already resolved
@@ -596,21 +502,13 @@ pub async fn resolve_group_model_candidates(
     Ok(Some(RoutingResolution {
         raw: trimmed.to_string(),
         group_name: Some(format!("{}/{}", group.slug, model_row.name)),
-        primary: PrimaryTarget {
-            provider: first.provider.clone(),
-            upstream_model: first.upstream_model.clone(),
-            adapter: first.adapter.clone(),
-            is_builtin: first.is_builtin,
-            custom_provider: first.custom_provider.clone(),
-        },
+        primary: first.primary(),
         candidates,
-        strategy: group.strategy.clone(),
     }))
 }
 
-/// Row builders and test adapters shared by the routing, dispatch and catalog tests. Builtin
-/// adapters are still placeholders in `providers::registry`, so eligibility and dispatch are
-/// exercised with adapters defined here.
+/// Row builders and test adapters shared by the routing, dispatch and catalog tests. Eligibility
+/// and dispatch are exercised with adapters defined here, so no builtin's own rules enter them.
 #[cfg(test)]
 pub(crate) mod tests_support {
     use super::*;
@@ -683,10 +581,8 @@ pub(crate) mod tests_support {
         Arc::new(InertAdapter { id: id.into(), reject_model_for_plan: None })
     }
 
-    pub(crate) fn candidate_with(account_id: &str, provider: &str, target_index: usize) -> RoutingCandidate {
+    pub(crate) fn candidate_with(account_id: &str, provider: &str) -> RoutingCandidate {
         RoutingCandidate {
-            target_index,
-            pinned: false,
             provider: provider.into(),
             upstream_model: "model-x".into(),
             is_builtin: true,
@@ -721,8 +617,7 @@ mod tests {
     use serde_json::{json, Value};
     use sqlx::PgPool;
 
-    /// The fixed `user_1` the TypeScript suite used, as a real row (every table below has a
-    /// foreign key to it).
+    /// The fixed `user_1` as a real row (every table below has a foreign key to it).
     async fn seed_user(pool: &PgPool) {
         sqlx::query(
             "INSERT INTO users (id, google_sub, email, created_at, updated_at)
@@ -787,7 +682,7 @@ mod tests {
              VALUES ('mgmodel_1', $1, 'mgrp_1', 'opus', $2, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
         )
         .bind(user_id)
-        .bind(targets.to_string())
+        .bind(stored_targets(targets))
         .execute(pool)
         .await
         .expect("seed group model");
@@ -797,13 +692,21 @@ mod tests {
             .expect("group exists")
     }
 
+    /// Fixtures write a bare `"provider/model"` for an unpinned target; storage holds objects.
+    fn stored_targets(targets: Value) -> String {
+        let Value::Array(entries) = targets else { return targets.to_string() };
+        let objects: Vec<Value> =
+            entries.into_iter().map(|t| if t.is_string() { json!({ "model": t }) } else { t }).collect();
+        Value::Array(objects).to_string()
+    }
+
     fn model_row(targets: Value) -> ModelGroupModelRow {
         ModelGroupModelRow {
             id: "mgmodel_1".into(),
             user_id: "user_1".into(),
             group_id: "mgrp_1".into(),
             name: "opus".into(),
-            targets_json: targets.to_string(),
+            targets_json: stored_targets(targets),
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
         }
@@ -833,8 +736,6 @@ mod tests {
         seed_account(state.pool(), "user_1", "acc_low", "grok", 1).await;
         let candidates = pool_candidates(&state, "user_1", &target("grok", "grok-4.5", None)).await.unwrap();
         assert_eq!(ids(&candidates), ["acc_high", "acc_low"]);
-        assert!(candidates.iter().all(|c| !c.pinned));
-        assert!(candidates.iter().all(|c| c.target_index == 0));
         assert!(candidates.iter().all(|c| c.share.is_none()));
     }
 
@@ -856,7 +757,6 @@ mod tests {
         let candidates =
             pool_candidates(&state, "user_1", &target("grok", "grok-4.5", Some("acc_low"))).await.unwrap();
         assert_eq!(ids(&candidates), ["acc_low"]);
-        assert!(candidates[0].pinned);
     }
 
     #[tokio::test]
@@ -887,7 +787,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(ids(&expansion.candidates), ["acc_pinned"]);
-        assert!(expansion.candidates[0].pinned);
     }
 
     #[tokio::test]
@@ -908,17 +807,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let shape: Vec<(String, usize, bool)> = expansion
-            .candidates
-            .iter()
-            .map(|c| (c.account.id.clone(), c.target_index, c.pinned))
-            .collect();
+        let shape: Vec<(String, String)> =
+            expansion.candidates.iter().map(|c| (c.account.id.clone(), c.provider.clone())).collect();
         assert_eq!(
             shape,
             vec![
-                ("acc_pinned".to_string(), 0, true),
-                ("acc_grok_high".to_string(), 1, false),
-                ("acc_grok_low".to_string(), 1, false),
+                ("acc_pinned".to_string(), "claude-code".to_string()),
+                ("acc_grok_high".to_string(), "grok".to_string()),
+                ("acc_grok_low".to_string(), "grok".to_string()),
             ]
         );
     }
@@ -1011,7 +907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_direct_model_resolves_to_its_pool_with_the_default_strategy() {
+    async fn a_direct_model_resolves_to_its_pool() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool, MockTransport::new());
         seed_user(state.pool()).await;
@@ -1021,7 +917,6 @@ mod tests {
         assert_eq!(resolved.primary.upstream_model, "grok-4.5");
         assert!(resolved.primary.is_builtin);
         assert_eq!(ids(&resolved.candidates), ["acc_grok"]);
-        assert_eq!(resolved.strategy, "ordered");
         assert!(resolved.group_name.is_none());
     }
 
@@ -1075,10 +970,9 @@ mod tests {
         assert_eq!(ids(&resolved.candidates), ["acc_grok"]);
     }
 
-    /// The Claude Code Fable seat rule lives in that adapter's `supports_model`
-    ///; this exercises the
-    /// eligibility machinery candidates.rs owns, with an adapter that rejects one model for one
-    /// stored plan.
+    /// The Claude Code Fable seat rule lives in that adapter's `supports_model`; this exercises
+    /// the eligibility machinery candidates.rs owns, with an adapter that rejects one model for
+    /// one stored plan.
     #[tokio::test]
     async fn an_account_whose_adapter_rejects_the_model_contributes_nothing() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -1230,7 +1124,7 @@ mod tests {
         // Owner-scoped writes (bench, strikes) key off this.
         assert_eq!(candidate.account.user_id, lent.provider.user_id);
         assert_eq!(candidate.share.as_ref(), Some(&lent.share));
-        assert!(!candidate.is_builtin && !candidate.pinned);
+        assert!(!candidate.is_builtin);
         assert_eq!(candidate.custom_provider.as_ref().map(|r| r.id.as_str()), Some(lent.provider.id.as_str()));
         assert_eq!(candidate.adapter.id(), "team-gw");
         assert_eq!(candidate.upstream_model, "gpt-4o");
@@ -1245,7 +1139,7 @@ mod tests {
         let resolved = resolve_candidates(&state, "user_1", "team-gw/gpt-4o").await.unwrap().unwrap();
         assert_eq!(ids(&resolved.candidates), ["acc_own"]);
         assert!(resolved.candidates[0].share.is_none());
-        assert_eq!(resolved.primary.custom_provider.as_ref().unwrap().user_id, "user_1");
+        assert_eq!(resolved.candidates[0].custom_provider.as_ref().unwrap().user_id, "user_1");
 
         // A CLI slug is the caller's own namespace too, even with no account to route to.
         sqlx::query("DELETE FROM custom_providers WHERE user_id = 'user_1'").execute(state.pool()).await.unwrap();
@@ -1258,7 +1152,6 @@ mod tests {
         .await
         .unwrap();
         let resolved = resolve_candidates(&state, "user_1", "team-gw/gpt-4o").await.unwrap().unwrap();
-        assert!(resolved.primary.custom_provider.is_none());
         assert!(resolved.candidates.is_empty());
         assert!(ext.list_calls.lock().unwrap().is_empty(), "an own slug never consults the extension");
     }
@@ -1279,11 +1172,12 @@ mod tests {
         .await
         .unwrap();
         // The pinned target names an account the caller does not own: nothing at all.
-        let targets: Vec<usize> = expansion.resolved_targets.iter().map(|t| t.target_index).collect();
-        assert_eq!(targets, [1, 2]);
-        let shape: Vec<(String, usize, bool)> =
-            expansion.candidates.iter().map(|c| (c.account.id.clone(), c.target_index, c.share.is_some())).collect();
-        assert_eq!(shape, vec![(lent.account.id.clone(), 1, true), ("acc_grok".to_string(), 2, false)]);
+        let targets: Vec<(&str, Option<&str>)> =
+            expansion.resolved_targets.iter().map(|t| (t.provider.as_str(), t.account_id.as_deref())).collect();
+        assert_eq!(targets, [("team-gw", None), ("grok", None)]);
+        let shape: Vec<(String, bool)> =
+            expansion.candidates.iter().map(|c| (c.account.id.clone(), c.share.is_some())).collect();
+        assert_eq!(shape, vec![(lent.account.id.clone(), true), ("acc_grok".to_string(), false)]);
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ const props = defineProps<{
   title: string
   /**
    * Bound as `@refresh`. With it the title becomes the page's menu, Refresh
-   * first (docs/admin-ui.md § Page header). Declared as a prop rather than an
+   * first (docs/admin-ui.md § Layout: the shell). Declared as a prop rather than an
    * emit so the header can tell a page that reloads from one that does not.
    */
   onRefresh?: () => unknown

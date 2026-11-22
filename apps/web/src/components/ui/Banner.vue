@@ -4,16 +4,13 @@
  * confirmation, a caution.
  *
  * Errors and warnings announce themselves (`role="alert"`) since they usually
- * appear in response to something the user just did; neutral and success tones
- * are polite, so a background refresh succeeding does not interrupt a screen
- * reader mid-sentence.
+ * appear in response to something the user just did; success is polite, so a
+ * background refresh succeeding does not interrupt a screen reader
+ * mid-sentence.
  */
 import { computed } from "vue"
 
-const props = withDefaults(
-  defineProps<{ tone?: "neutral" | "ok" | "warn" | "error" }>(),
-  { tone: "neutral" },
-)
+const props = defineProps<{ tone: "ok" | "warn" | "error" }>()
 
 const assertive = computed(() => props.tone === "error" || props.tone === "warn")
 </script>

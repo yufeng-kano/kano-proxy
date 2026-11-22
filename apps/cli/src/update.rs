@@ -123,9 +123,7 @@ pub async fn cmd_update() -> Result<()> {
         bail!("no release asset exists for this platform");
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("kano-proxy-cli/", env!("CARGO_PKG_VERSION")))
-        .build()?;
+    let client = crate::api::client();
     let releases: Vec<Release> = client
         .get(format!("https://api.github.com/repos/{REPO}/releases?per_page=30"))
         .send()
@@ -171,15 +169,17 @@ pub async fn cmd_update() -> Result<()> {
         bail!("checksum mismatch for {asset_name} — refusing to install");
     }
 
-    let binary = extract_binary(&archive, if cfg!(windows) { "zip" } else { "tar.gz" })?;
+    let binary = extract_binary(&archive)?;
     replace_self(&exe, &binary)?;
     eprintln!("✓ updated to v{version}");
     Ok(())
 }
 
-fn extract_binary(archive: &[u8], ext: &str) -> Result<Vec<u8>> {
+/// The binary out of this platform's archive: a zip on Windows, a tarball elsewhere
+/// (as `asset_name` names it).
+fn extract_binary(archive: &[u8]) -> Result<Vec<u8>> {
     let wanted = if cfg!(windows) { "kano-proxy.exe" } else { "kano-proxy" };
-    if ext == "zip" {
+    if cfg!(windows) {
         let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
         for i in 0..zip.len() {
             let mut entry = zip.by_index(i)?;

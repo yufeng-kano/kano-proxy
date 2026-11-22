@@ -1,12 +1,11 @@
-//! the AgentTunnel Durable Object as
-//! an in-process registry (docs/cli.md § AgentTunnel Durable Object,
-//! docs/rust-server.md § Storage: "a tunnel registry keyed by `cli_providers.id`").
+//! The in-process tunnel registry (docs/cli.md § The tunnel registry,
+//! docs/rust-server.md: "a registry keyed by `cli_providers.id`").
 //!
 //! One live socket per `cli_providers.id`: a second connect replaces the first
 //! with close `4001 replaced`, the access token's `exp` schedules a
-//! `4003 token_expired` close (the DO's alarm), and a failed models-report write
-//! closes `4008` retryably so the reconnect re-reports. Persistence and the
-//! reconnect bench clear are callbacks — this module never writes SQL.
+//! `4003 token_expired` close, and a failed models-report write closes `4008`
+//! retryably so the reconnect re-reports. Persistence and the reconnect bench
+//! clear are callbacks — this module never writes SQL.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -26,10 +25,9 @@ use crate::upstream::transport::{ByteStream, TransportError, UpstreamRequest, Up
 use crate::upstream::UpstreamResponse;
 
 /// Request headers forwarded down the tunnel — same reduction discipline as the codex relay.
-pub const FORWARDED_REQUEST_HEADERS: [&str; 4] = ["content-type", "accept", "anthropic-version", "anthropic-beta"];
+const FORWARDED_REQUEST_HEADERS: [&str; 4] = ["content-type", "accept", "anthropic-version", "anthropic-beta"];
 
-/// What the route verified before the upgrade: the DO trusted the internal
-/// `x-kano-*` headers, the registry trusts these fields.
+/// What the route verified before the upgrade; the registry trusts these fields.
 #[derive(Debug, Clone)]
 pub struct ConnectParams {
     pub user_id: String,
@@ -49,28 +47,10 @@ pub trait ModelsSink: Send + Sync + 'static {
 
 /// Reconnect clears the bench on the provider's internal account row
 /// (docs/cli.md § Failover semantics). The db layer implements it; failures are
-/// best-effort, exactly as the DO's try/catch was.
+/// best-effort.
 #[async_trait]
 pub trait ConnectObserver: Send + Sync + 'static {
     async fn on_connect(&self, user_id: &str, slug: &str, provider_id: &str);
-}
-
-/// `/status`-style introspection (the DO's `/status` fetch and the provider
-/// list's `connected` read-through).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TunnelStatus {
-    pub connected: bool,
-    pub proto: u32,
-    pub slug: Option<String>,
-    pub format: Option<CliProviderFormat>,
-    pub inflight: usize,
-    pub connected_at_ms: Option<i64>,
-}
-
-impl TunnelStatus {
-    fn offline() -> Self {
-        Self { connected: false, proto: TUNNEL_PROTO, slug: None, format: None, inflight: 0, connected_at_ms: None }
-    }
 }
 
 /// One frame (or a close) for the socket writer task in `ws.rs`.
@@ -99,14 +79,10 @@ pub struct Connection {
     params: ConnectParams,
     mux: TunnelMux,
     tx: CommandSender,
-    connected_at_ms: i64,
     expiry_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Connection {
-    pub fn params(&self) -> &ConnectParams {
-        &self.params
-    }
     pub fn provider_id(&self) -> &str {
         &self.params.provider_id
     }
@@ -133,8 +109,7 @@ struct RegistryInner {
     first_res_timeout: Duration,
 }
 
-/// The Durable Object namespace's replacement: one live connection per
-/// `cli_providers.id`. Clone freely — every clone shares the same state.
+/// One live connection per `cli_providers.id`. Clone freely — every clone shares the same state.
 #[derive(Clone)]
 pub struct TunnelRegistry {
     inner: Arc<RegistryInner>,
@@ -171,6 +146,7 @@ impl TunnelRegistry {
     }
 
     /// Shorter first-`res` deadline for tests; production keeps the documented 120 s.
+    #[cfg(test)]
     pub fn with_first_res_timeout(mut self, timeout: Duration) -> Self {
         Arc::get_mut(&mut self.inner).expect("registry not shared yet").first_res_timeout = timeout;
         self
@@ -190,7 +166,6 @@ impl TunnelRegistry {
             self.inner.first_res_timeout,
         );
         let connection = Arc::new(Connection {
-            connected_at_ms: crate::app::now_ms(),
             params: params.clone(),
             mux,
             tx,
@@ -210,7 +185,7 @@ impl TunnelRegistry {
         }
 
         // The only scheduled work: revocation reaches a live socket at
-        // access-token expiry (the DO's alarm).
+        // access-token expiry.
         let delay = Duration::from_millis(params.token_exp_ms.saturating_sub(crate::app::now_ms()).max(0) as u64);
         let registry = self.clone();
         let expiring = connection.clone();
@@ -250,16 +225,11 @@ impl TunnelRegistry {
         self.close_connection(connection, CLOSE_RETRY, "models_persist_failed");
     }
 
-    /// Closes the live socket for a provider, if any (provider deletion: the
-    /// DO's `/close`).
-    pub fn close(&self, provider_id: &str) -> bool {
+    /// Closes the live socket for a provider, if any (provider deletion).
+    pub fn close(&self, provider_id: &str) {
         let connection = { self.inner.connections.lock().expect("tunnel lock").get(provider_id).cloned() };
-        match connection {
-            Some(connection) => {
-                self.close_connection(&connection, 1000, "closed");
-                true
-            }
-            None => false,
+        if let Some(connection) = connection {
+            self.close_connection(&connection, 1000, "closed");
         }
     }
 
@@ -287,28 +257,6 @@ impl TunnelRegistry {
 
     pub fn is_connected(&self, provider_id: &str) -> bool {
         self.inner.connections.lock().expect("tunnel lock").contains_key(provider_id)
-    }
-
-    pub fn status(&self, provider_id: &str) -> TunnelStatus {
-        let connection = { self.inner.connections.lock().expect("tunnel lock").get(provider_id).cloned() };
-        match connection {
-            None => TunnelStatus::offline(),
-            Some(connection) => TunnelStatus {
-                connected: true,
-                proto: TUNNEL_PROTO,
-                slug: Some(connection.params.slug.clone()),
-                format: Some(connection.params.format),
-                inflight: connection.mux.inflight_count(),
-                connected_at_ms: Some(connection.connected_at_ms),
-            },
-        }
-    }
-
-    /// Every live connection, newest state first read — admin introspection.
-    pub fn connected_provider_ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.inner.connections.lock().expect("tunnel lock").keys().cloned().collect();
-        ids.sort();
-        ids
     }
 
     /// Proxies one client request down the provider's tunnel. `Ok` is the local
@@ -341,11 +289,10 @@ impl TunnelRegistry {
             .await
     }
 
-    /// The transport the CLI provider adapter injects in place of the network
-    ///: the custom adapters
-    /// build `${base_url}<suffix>` over an empty base, so the request URL is
-    /// already the bare allowlisted suffix. Faults come back as the 502 marker
-    /// response, never as a transport error, exactly as the injected `fetch` did.
+    /// The transport the CLI provider adapter injects in place of the network:
+    /// the custom adapters build `${base_url}<suffix>` over an empty base, so the
+    /// request URL is already the bare allowlisted suffix. Faults come back as the
+    /// 502 marker response, never as a transport error.
     pub fn transport(&self, provider_id: &str) -> Arc<dyn UpstreamTransport> {
         Arc::new(AgentTransport { registry: self.clone(), provider_id: provider_id.to_string() })
     }
@@ -386,7 +333,7 @@ impl UpstreamTransport for AgentTransport {
     async fn send(&self, req: UpstreamRequest) -> Result<UpstreamResponse, TransportError> {
         // Auth headers are stripped: the placeholder credential means nothing,
         // and the CLI injects the local server's own key on its side.
-        let mut headers = req.headers.clone();
+        let mut headers = req.headers;
         headers.remove(http::header::AUTHORIZATION);
         headers.remove("x-api-key");
         let body: Option<ByteStream> = req
@@ -414,15 +361,11 @@ mod tests {
 
     struct Sink {
         reports: Mutex<Vec<(String, Vec<String>)>>,
-        fail: bool,
     }
 
     #[async_trait]
     impl ModelsSink for Sink {
         async fn persist_models(&self, provider_id: &str, models: Vec<String>) -> anyhow::Result<()> {
-            if self.fail {
-                anyhow::bail!("d1 write failed");
-            }
             self.reports.lock().unwrap().push((provider_id.to_string(), models));
             Ok(())
         }
@@ -479,20 +422,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_connect_sends_hello_and_reports_status() {
+    async fn connect_registers_the_socket_and_disconnect_removes_it() {
         let registry = TunnelRegistry::new();
-        assert_eq!(registry.status("p1"), TunnelStatus::offline());
-        let (conn, mut rx) = registry.connect(params("p1", 60_000));
-        let hello = controls(&drain(&mut rx), "hello");
-        assert_eq!(hello, vec![json!({"t":"hello","proto":1,"slug":"my-mac"})]);
-        let status = registry.status("p1");
-        assert!(status.connected);
-        assert_eq!(status.proto, TUNNEL_PROTO);
-        assert_eq!(status.slug.as_deref(), Some("my-mac"));
-        assert_eq!(registry.connected_provider_ids(), vec!["p1".to_string()]);
+        assert!(!registry.is_connected("p1"));
+        let (conn, _rx) = registry.connect(params("p1", 60_000));
+        assert!(registry.is_connected("p1"));
         registry.disconnect(&conn);
         assert!(!registry.is_connected("p1"));
-        assert_eq!(registry.status("p1"), TunnelStatus::offline());
     }
 
     #[tokio::test]
@@ -526,29 +462,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_token_expiry_closes_with_4003() {
-        let registry = TunnelRegistry::new();
-        let (_conn, mut rx) = registry.connect(params("p1", 30));
-        tokio::time::sleep(Duration::from_millis(120)).await;
-        assert_eq!(closes(&drain(&mut rx)), vec![(CLOSE_TOKEN_EXPIRED, "token_expired")]);
-        assert!(!registry.is_connected("p1"));
-    }
-
-    #[tokio::test]
-    async fn a_failed_models_write_closes_4008_retryably() {
-        let sink = Arc::new(Sink { reports: Mutex::new(Vec::new()), fail: true });
-        let registry = TunnelRegistry::new().with_models_sink(sink);
-        let (conn, mut rx) = registry.connect(params("p1", 60_000));
-        let outcome = conn.mux().handle_message(MuxMessage::Text(json!({"t":"models","models":["llama3"]}).to_string())).await;
-        assert_eq!(outcome, crate::tunnel::mux::MessageOutcome::ModelsPersistFailed);
-        registry.close_retryable(&conn);
-        assert_eq!(closes(&drain(&mut rx)), vec![(CLOSE_RETRY, "models_persist_failed")]);
-        assert!(!registry.is_connected("p1"));
-    }
-
-    #[tokio::test]
     async fn a_models_report_reaches_the_sink_with_its_provider_id() {
-        let sink = Arc::new(Sink { reports: Mutex::new(Vec::new()), fail: false });
+        let sink = Arc::new(Sink { reports: Mutex::new(Vec::new()) });
         let registry = TunnelRegistry::new().with_models_sink(sink.clone());
         let (conn, _rx) = registry.connect(params("p1", 60_000));
         conn.mux().handle_message(MuxMessage::Text(json!({"t":"models","models":["llama3"]}).to_string())).await;
@@ -565,17 +480,6 @@ mod tests {
             observer.seen.lock().unwrap().clone(),
             vec![("user_1".to_string(), "my-mac".to_string(), "p1".to_string())]
         );
-    }
-
-    #[tokio::test]
-    async fn proxy_faults_offline_without_a_connection() {
-        let registry = TunnelRegistry::new();
-        let fault = registry
-            .proxy("p1", &Method::POST, "/chat/completions", &HeaderMap::new(), None)
-            .await
-            .err()
-            .map(|f| f.reason);
-        assert_eq!(fault, Some(TunnelFaultReason::Offline));
     }
 
     #[tokio::test]
@@ -682,43 +586,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_faults_open_requests_offline() {
-        let registry = TunnelRegistry::new();
-        let (conn, _rx) = registry.connect(params("p1", 60_000));
-        let proxying = {
-            let registry = registry.clone();
-            tokio::spawn(async move {
-                registry
-                    .proxy("p1", &Method::POST, "/chat/completions", &HeaderMap::new(), None)
-                    .await
-                    .err()
-                    .map(|f| f.reason)
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        registry.disconnect(&conn);
-        assert_eq!(proxying.await.unwrap(), Some(TunnelFaultReason::Offline));
-    }
-
-    #[tokio::test]
     async fn close_ends_the_socket_for_a_deleted_provider() {
         let registry = TunnelRegistry::new();
         let (_conn, mut rx) = registry.connect(params("p1", 60_000));
-        assert!(registry.close("p1"));
+        registry.close("p1");
         assert_eq!(closes(&drain(&mut rx)), vec![(1000, "closed")]);
-        assert!(!registry.close("p1"));
-    }
-
-    #[tokio::test]
-    async fn a_first_res_timeout_faults_the_request() {
-        let registry = TunnelRegistry::new().with_first_res_timeout(Duration::from_millis(50));
-        let (_conn, _rx) = registry.connect(params("p1", 60_000));
-        let fault = registry
-            .proxy("p1", &Method::POST, "/chat/completions", &HeaderMap::new(), None)
-            .await
-            .err()
-            .map(|f| f.reason);
-        assert_eq!(fault, Some(TunnelFaultReason::Timeout));
+        assert!(!registry.is_connected("p1"));
     }
 
     #[test]
@@ -727,38 +600,5 @@ mod tests {
         assert_eq!(wire_path("/models?limit=1"), "/models");
         assert_eq!(wire_path("https://agent-tunnel/v1/messages"), "/v1/messages");
         assert_eq!(wire_path("https://agent-tunnel"), "/");
-    }
-
-    /// A body stream that the registry proxies whole, in 1 MiB frames.
-    #[tokio::test]
-    async fn proxy_streams_a_request_body_in_bounded_frames() {
-        let registry = TunnelRegistry::new();
-        let (conn, mut rx) = registry.connect(params("p1", 60_000));
-        let body: ByteStream = Box::pin(futures::stream::iter(vec![
-            Ok(Bytes::from(vec![1u8; 1_500_000])),
-            Ok(Bytes::from_static(b"tail")),
-        ]));
-        let proxying = {
-            let registry = registry.clone();
-            tokio::spawn(async move {
-                registry
-                    .proxy("p1", &Method::POST, "/audio/transcriptions", &HeaderMap::new(), Some(body))
-                    .await
-                    .err()
-                    .map(|f| f.reason)
-            })
-        };
-        tokio::time::sleep(Duration::from_millis(30)).await;
-        let sent = drain(&mut rx);
-        let sizes: Vec<usize> = sent
-            .iter()
-            .filter_map(|c| match c {
-                SocketCommand::Frame(OutFrame::Binary(data)) => Some(data.len() - 5),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(sizes, vec![1024 * 1024, 1_500_000 - 1024 * 1024, 4]);
-        conn.mux().handle_message(MuxMessage::Text(json!({"t":"res_err","id":1,"reason":"timeout"}).to_string())).await;
-        assert_eq!(proxying.await.unwrap(), Some(TunnelFaultReason::Timeout));
     }
 }

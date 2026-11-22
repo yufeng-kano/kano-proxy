@@ -4,7 +4,7 @@
 //! plaintext is never compared or logged.
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
@@ -33,7 +33,7 @@ fn spend_limit_reached(surface: Surface, message: &str) -> Response {
         Surface::OpenAI => ApiError::openai(StatusCode::TOO_MANY_REQUESTS, message, "rate_limit_error", "spend_limit_exceeded"),
         Surface::Anthropic => ApiError::anthropic(StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", message),
     };
-    error.header(axum::http::header::HeaderName::from_static("x-should-retry"), HeaderValue::from_static("false")).into_response()
+    error.should_retry(false).into_response()
 }
 
 /// Resolves the `sk-kano-proxy-` key, gates it on its spend limit, then hands the request to

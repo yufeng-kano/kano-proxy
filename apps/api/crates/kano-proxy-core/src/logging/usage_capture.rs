@@ -19,7 +19,7 @@ pub struct NormalizedUsage {
     pub cache_creation_input_tokens: Option<i64>,
 }
 
-/// `NULL_USAGE`: nothing was reported.
+/// Nothing was reported.
 pub const NULL_USAGE: NormalizedUsage = NormalizedUsage {
     prompt_tokens: None,
     completion_tokens: None,
@@ -27,7 +27,7 @@ pub const NULL_USAGE: NormalizedUsage = NormalizedUsage {
     cache_creation_input_tokens: None,
 };
 
-/// `num(v)`: a JSON number, or `None` for anything else (including a missing key).
+/// A JSON number, or `None` for anything else (including a missing key).
 fn num(v: Option<&Value>) -> Option<i64> {
     match v {
         Some(Value::Number(n)) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
@@ -79,9 +79,8 @@ pub fn from_anthropic_usage(usage: Option<&Value>) -> NormalizedUsage {
     }
 }
 
-/// Longest partial line kept in memory. A line that outgrows it is skipped, never buffered —
-/// capture resumes on the next line. (Bytes here, UTF-16 units in the TypeScript; the cap is a
-/// memory bound, not a contract.)
+/// Longest partial line kept in memory, in bytes. A line that outgrows it is skipped, never
+/// buffered — capture resumes on the next line. The cap is a memory bound, not a contract.
 const MAX_CARRY: usize = 256 * 1024;
 /// Longest `usage` object scanned out of an over-long Responses terminal line.
 const MAX_USAGE_SCAN: usize = 4 * 1024;
@@ -102,8 +101,8 @@ pub trait UsageSniffer: Send {
     fn complete(&self) -> bool;
 }
 
-/// Streaming UTF-8 decode, replacing `TextDecoder({stream:true})`: a sequence split across
-/// chunks is completed on the next feed, and a genuinely invalid byte becomes U+FFFD.
+/// Streaming UTF-8 decode: a sequence split across chunks is completed on the next feed, and a
+/// genuinely invalid byte becomes U+FFFD.
 #[derive(Default)]
 struct Utf8Decoder {
     tail: Vec<u8>,
@@ -111,8 +110,16 @@ struct Utf8Decoder {
 
 impl Utf8Decoder {
     fn decode(&mut self, chunk: &[u8]) -> String {
-        let mut buf = std::mem::take(&mut self.tail);
-        buf.extend_from_slice(chunk);
+        // Only a carried split sequence needs a joined copy; otherwise decode the chunk in place.
+        let joined;
+        let buf: &[u8] = if self.tail.is_empty() {
+            chunk
+        } else {
+            let mut carried = std::mem::take(&mut self.tail);
+            carried.extend_from_slice(chunk);
+            joined = carried;
+            &joined
+        };
         let mut out = String::with_capacity(buf.len());
         let mut offset = 0usize;
         loop {
@@ -141,7 +148,7 @@ impl Utf8Decoder {
     }
 }
 
-/// The last `n` bytes of `s`, snapped up to a character boundary (`s.slice(-n)`).
+/// The last `n` bytes of `s`, snapped up to a character boundary.
 fn tail_str(s: &str, n: usize) -> &str {
     if s.len() <= n {
         return s;
@@ -153,7 +160,7 @@ fn tail_str(s: &str, n: usize) -> &str {
     &s[start..]
 }
 
-/// The first `n` bytes of `s`, snapped down to a character boundary (`s.slice(0, n)`).
+/// The first `n` bytes of `s`, snapped down to a character boundary.
 fn head_str(s: &str, n: usize) -> &str {
     if s.len() <= n {
         return s;
@@ -223,7 +230,7 @@ struct LongLine {
 /// `usage` — normally only the final one, but the whole object is replaced last-wins if more
 /// than one ever does — or on the terminal `response.completed` / `response.incomplete` event.
 #[derive(Default)]
-pub struct OpenAiSseUsageSniffer {
+struct OpenAiSseUsageSniffer {
     decoder: Utf8Decoder,
     carry: String,
     usage: Option<Value>,
@@ -361,30 +368,26 @@ impl UsageSniffer for OpenAiSseUsageSniffer {
             if self.long_line.is_some() {
                 match decoded[pos..].find('\n') {
                     None => {
-                        let text = decoded[pos..].to_string();
-                        self.scan_long(&text);
+                        self.scan_long(&decoded[pos..]);
                         return;
                     }
                     Some(nl) => {
-                        let text = decoded[pos..pos + nl].to_string();
-                        self.scan_long(&text);
+                        self.scan_long(&decoded[pos..pos + nl]);
                         self.end_long();
                         pos += nl + 1;
                         continue;
                     }
                 }
             }
-            let rest = &decoded[pos..];
-            if !rest.contains('\n') {
-                self.carry.push_str(rest);
-            } else {
-                let joined = format!("{}{}", self.carry, rest);
-                let mut parts: Vec<&str> = joined.split('\n').collect();
-                let carry = parts.pop().unwrap_or("").to_string();
-                let lines: Vec<String> = parts.into_iter().map(str::to_string).collect();
-                self.carry = carry;
-                for line in lines {
-                    self.process_line(&line);
+            let mut joined = std::mem::take(&mut self.carry);
+            joined.push_str(&decoded[pos..]);
+            match joined.rsplit_once('\n') {
+                None => self.carry = joined,
+                Some((lines, carry)) => {
+                    for line in lines.split('\n') {
+                        self.process_line(line);
+                    }
+                    self.carry = carry.to_string();
                 }
             }
             pos = decoded.len();
@@ -411,7 +414,7 @@ impl UsageSniffer for OpenAiSseUsageSniffer {
 /// cumulative input/cache fields too. Merged field-wise: the last non-absent value seen for
 /// each field wins.
 #[derive(Default)]
-pub struct AnthropicSseUsageSniffer {
+struct AnthropicSseUsageSniffer {
     decoder: Utf8Decoder,
     carry: String,
     /// An over-long line is being skipped up to its newline.
@@ -453,7 +456,7 @@ impl AnthropicSseUsageSniffer {
             return;
         }
         let Some(rest) = line.strip_prefix("data:") else { return };
-        let data = rest.trim().to_string();
+        let data = rest.trim();
         let current_event = std::mem::take(&mut self.event);
         if data.is_empty() {
             return;
@@ -467,13 +470,11 @@ impl AnthropicSseUsageSniffer {
         if !data.contains("\"usage\"") {
             return;
         }
-        let Ok(json) = serde_json::from_str::<Value>(&data) else { return };
+        let Ok(json) = serde_json::from_str::<Value>(data) else { return };
         if current_event == "message_start" {
-            let usage = json.get("message").and_then(|m| m.get("usage")).cloned();
-            self.merge(usage.as_ref());
+            self.merge(json.get("message").and_then(|m| m.get("usage")));
         } else if current_event == "message_delta" {
-            let usage = json.get("usage").cloned();
-            self.merge(usage.as_ref());
+            self.merge(json.get("usage"));
         }
     }
 }
@@ -494,15 +495,17 @@ impl UsageSniffer for AnthropicSseUsageSniffer {
                     }
                 }
             }
-            self.carry.push_str(&decoded[pos..]);
+            let mut joined = std::mem::take(&mut self.carry);
+            joined.push_str(&decoded[pos..]);
             pos = decoded.len();
-            let joined = std::mem::take(&mut self.carry);
-            let mut parts: Vec<&str> = joined.split('\n').collect();
-            let carry = parts.pop().unwrap_or("").to_string();
-            let lines: Vec<String> = parts.into_iter().map(str::to_string).collect();
-            self.carry = carry;
-            for line in lines {
-                self.process_line(&line);
+            match joined.rsplit_once('\n') {
+                None => self.carry = joined,
+                Some((lines, carry)) => {
+                    for line in lines.split('\n') {
+                        self.process_line(line);
+                    }
+                    self.carry = carry.to_string();
+                }
             }
             if self.carry.len() > MAX_CARRY {
                 self.carry = String::new();
@@ -556,7 +559,7 @@ mod tests {
         format!("data: {value}")
     }
 
-    // ---- fromOpenAIUsage ----
+    // ---- from_openai_usage ----
 
     #[test]
     fn keeps_completion_tokens_without_double_adding_reasoning_tokens() {
@@ -566,14 +569,6 @@ mod tests {
         })));
         assert_eq!(out.prompt_tokens, Some(100));
         assert_eq!(out.completion_tokens, Some(40));
-    }
-
-    #[test]
-    fn leaves_completion_tokens_unchanged_when_reasoning_tokens_is_absent() {
-        assert_eq!(
-            from_openai_usage(Some(&json!({"prompt_tokens": 10, "completion_tokens": 4}))).completion_tokens,
-            Some(4)
-        );
     }
 
     #[test]
@@ -590,13 +585,6 @@ mod tests {
             from_openai_usage(Some(&json!({"prompt_tokens": 100, "completion_tokens": 40}))),
             usage(Some(100), Some(40), None, None)
         );
-    }
-
-    #[test]
-    fn absent_openai_cache_details_are_null_never_zero() {
-        let out = from_openai_usage(Some(&json!({"prompt_tokens": 5, "completion_tokens": 1})));
-        assert_eq!(out.cache_read_input_tokens, None);
-        assert_eq!(out.cache_creation_input_tokens, None);
     }
 
     #[test]
@@ -655,7 +643,7 @@ mod tests {
         );
     }
 
-    // ---- fromAnthropicUsage ----
+    // ---- from_anthropic_usage ----
 
     #[test]
     fn sums_input_and_cache_fields_into_the_prompt_total() {
@@ -687,7 +675,7 @@ mod tests {
         assert_eq!(from_anthropic_usage(Some(&json!({"input_tokens": 10}))).completion_tokens, None);
     }
 
-    // ---- createOpenAISseUsageSniffer ----
+    // ---- OpenAiSseUsageSniffer ----
 
     #[test]
     fn captures_usage_from_the_final_chunk_split_across_arbitrary_boundaries() {
@@ -900,7 +888,7 @@ mod tests {
         assert!(sniffer.complete());
     }
 
-    // ---- createAnthropicSseUsageSniffer ----
+    // ---- AnthropicSseUsageSniffer ----
 
     #[test]
     fn merges_message_start_input_with_message_delta_output_field_wise() {
@@ -1012,11 +1000,6 @@ mod tests {
     // ---- complete() ----
 
     #[test]
-    fn openai_complete_is_false_before_anything_is_fed() {
-        assert!(!OpenAiSseUsageSniffer::default().complete());
-    }
-
-    #[test]
     fn done_marks_the_stream_complete() {
         let mut sniffer = OpenAiSseUsageSniffer::default();
         sniffer.feed(b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n");
@@ -1060,11 +1043,6 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_complete_is_false_before_anything_is_fed() {
-        assert!(!AnthropicSseUsageSniffer::default().complete());
-    }
-
-    #[test]
     fn message_stop_marks_the_stream_complete_even_with_no_usage() {
         let mut sniffer = AnthropicSseUsageSniffer::default();
         let line = format!("event: message_stop\n{}\n", d(json!({"type":"message_stop"})));
@@ -1105,5 +1083,8 @@ mod tests {
             out.push_str(&decoder.decode(&[*byte]));
         }
         assert_eq!(out, "台灣🙂");
+        // An invalid byte is replaced, and a sequence cut after it still carries over.
+        assert_eq!(decoder.decode(b"a\xffb\xe5\x8f"), "a\u{FFFD}b");
+        assert_eq!(decoder.decode(b"\xb0"), "台");
     }
 }

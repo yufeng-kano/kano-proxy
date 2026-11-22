@@ -19,10 +19,6 @@
 //! tagged with a scope, and a bench on a scope, apply only when the candidate's model draws on
 //! that scope. A caller with no model to scope by (`scope: None`, the Providers dot) sees only
 //! the account-wide ones.
-//!
-//! Deviation from the TypeScript: these functions are synchronous and take no `Env`/`userId`.
-//! The originals were `async` and ignored both (`void env; void userId`), and nothing in the
-//! Rust port needs an await here — every fact comes off the loaded row.
 
 use serde_json::{Map, Value};
 
@@ -63,35 +59,30 @@ pub fn credits_usable(meta: Option<&Map<String, Value>>) -> bool {
 
 /// Whether a stored window gates a candidate drawing on `scope`: an untagged window gates
 /// everything, a tagged one only its own scope.
-pub fn window_applies(window: &Value, scope: Option<&str>) -> bool {
+fn window_applies(window: &Value, scope: Option<&str>) -> bool {
     match window.get("scope").and_then(Value::as_str) {
         None => true,
         Some(tag) => scope == Some(tag),
     }
 }
 
+/// The `resets_at` of every window that gates `scope` and is exhausted right now:
+/// `utilization >= 100` with a parseable `resets_at` still in the future.
+pub fn exhausted_window_resets<'a>(windows: &'a [Value], scope: Option<&'a str>, now_ms: i64) -> impl Iterator<Item = i64> + 'a {
+    windows.iter().filter(move |w| window_applies(w, scope)).filter_map(move |window| {
+        if window.get("utilization").and_then(Value::as_f64)? < 100.0 {
+            return None;
+        }
+        let at = parse_iso_ms(window.get("resets_at").and_then(Value::as_str).filter(|s| !s.is_empty())?)?;
+        (at > now_ms).then_some(at)
+    })
+}
+
 /// Same rule against a windows array the caller already holds — the admin accounts route
 /// derives its status dot from the snapshot it is about to return, which on a refresh is newer
 /// than the one on the loaded row (docs/admin-ui.md § Providers page).
 pub fn windows_unusable_until(windows: &[Value], scope: Option<&str>, now_ms: i64) -> Option<i64> {
-    let mut latest: Option<i64> = None;
-    for window in windows.iter().filter(|w| window_applies(w, scope)) {
-        let Some(utilization) = window.get("utilization").and_then(Value::as_f64) else { continue };
-        if utilization < 100.0 {
-            continue;
-        }
-        let Some(resets_at) = window.get("resets_at").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        let Some(at) = parse_iso_ms(resets_at) else { continue };
-        if at <= now_ms {
-            continue;
-        }
-        if latest.is_none_or(|l| at > l) {
-            latest = Some(at);
-        }
-    }
-    latest
+    exhausted_window_resets(windows, scope, now_ms).max()
 }
 
 /// Bench-until and usage-window facts for one candidate.
@@ -129,68 +120,11 @@ pub fn earliest_unusable_until(facts: &[CandidateFacts]) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::db::accounts::iso_from_ms;
+    use crate::routing::candidates::tests_support::{account_row, candidate_with};
     use serde_json::json;
 
-    /// A bare `upstream_accounts` row; tests set only the fields they assert on.
-    pub(crate) fn account_row(id: &str, provider: &str) -> AccountRow {
-        AccountRow {
-            id: id.into(),
-            user_id: "user_1".into(),
-            provider: provider.into(),
-            external_account_id: None,
-            label: None,
-            custom_label: None,
-            priority: 1,
-            encrypted_payload: "encrypted".into(),
-            account_meta_json: None,
-            usage_snapshot_json: None,
-            usage_fetched_at: None,
-            usage_fetching_at: None,
-            bench_until: None,
-            bench_reason: None,
-            bench_scopes_json: None,
-            refreshing_at: None, refresh_failure_json: None, sign_in_rejected_at: None,
-            edge_strikes: 0,
-            edge_strike_at: None,
-            allow_credits: false,
-            strip_fast_mode: false,
-            strip_claude_code_line: false,
-            force_cache_ttl_1h: false,
-            created_at: "2026-01-01T00:00:00.000Z".into(),
-            updated_at: "2026-01-01T00:00:00.000Z".into(),
-        }
-    }
-
-    struct NoopAdapter(String);
-
-    #[async_trait::async_trait]
-    impl crate::providers::ProviderAdapter for NoopAdapter {
-        fn id(&self) -> &str {
-            &self.0
-        }
-        async fn chat_completions(
-            &self,
-            _: &crate::AppState,
-            _: &crate::pool::AcquiredAccount,
-            _: &crate::providers::ChatCompletionRequest,
-            _: &crate::providers::CallExtras,
-        ) -> Result<axum::response::Response, crate::providers::AdapterError> {
-            Err(crate::providers::AdapterError::Unsupported("chat_completions"))
-        }
-    }
-
     fn test_candidate(account: AccountRow) -> RoutingCandidate {
-        RoutingCandidate {
-            target_index: 0,
-            pinned: false,
-            provider: account.provider.clone(),
-            upstream_model: "claude-opus-5".into(),
-            is_builtin: true,
-            custom_provider: None,
-            adapter: std::sync::Arc::new(NoopAdapter(account.provider.clone())),
-            account,
-            share: None,
-        }
+        RoutingCandidate { account, ..candidate_with("acc_1", "claude-code") }
     }
 
     fn snapshot_json(windows: Value) -> String {

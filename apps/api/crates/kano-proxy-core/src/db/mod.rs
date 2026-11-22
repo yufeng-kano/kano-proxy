@@ -1,6 +1,6 @@
-//! Postgres pool, migration runner and per-table query modules. Histories
-//! stay separate per edition, as with D1: the core records in `core_migrations`, an edition
-//! in its own table, and the core always applies first (docs/rust-server.md § Storage).
+//! Postgres pool, migration runner and per-table query modules. Histories stay separate per
+//! edition: the core records in `core_migrations`, an edition in its own table, and the core
+//! always applies first (docs/rust-server.md § Storage).
 
 pub mod accounts;
 pub mod cli;
@@ -100,22 +100,6 @@ pub async fn migrate(
     Ok(done)
 }
 
-/// Names still pending for `table`; empty means the schema is current.
-pub async fn pending(pool: &PgPool, table: &str, migrations: &[Migration]) -> anyhow::Result<Vec<&'static str>> {
-    anyhow::ensure!(valid_table_name(table), "invalid migration table name {table:?}");
-    let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-        .bind(table)
-        .fetch_one(pool)
-        .await?;
-    if !exists {
-        return Ok(migrations.iter().map(|m| m.name).collect());
-    }
-    let applied: Vec<String> = sqlx::query_scalar(&format!("SELECT name FROM {table}"))
-        .fetch_all(pool)
-        .await?;
-    Ok(migrations.iter().filter(|m| !applied.iter().any(|a| a == m.name)).map(|m| m.name).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +155,7 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_devices").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 
     /// Upgrading a deployed 0002 schema: existing keys keep every column and read as
@@ -226,7 +210,7 @@ mod tests {
         sqlx::query("DELETE FROM cli_devices WHERE id = 'clidev_a'").execute(&pool).await.unwrap();
         let left: Vec<String> = sqlx::query_scalar("SELECT id FROM api_keys WHERE user_id = $1").bind(&user.id).fetch_all(&pool).await.unwrap();
         assert_eq!(left, ["key_old"], "only the minted key followed its device");
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 
     /// Upgrading a deployed 0003 schema: an account that is benched and carries a usage
@@ -271,7 +255,7 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 
     /// Upgrading a deployed 0004 schema: an existing codex account with a label, stored facts,
@@ -312,7 +296,7 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 
     /// Upgrading a deployed 0005 schema: an existing user and their session keep every column
@@ -337,7 +321,7 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notice_acceptances").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 
     /// Upgrading a deployed 0006 schema: an existing settings row keeps its strategy and gains
@@ -374,7 +358,7 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM provider_settings").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0);
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 
     /// Upgrading a deployed 0007 schema: each user's per-provider switches land on every account
@@ -446,7 +430,7 @@ mod tests {
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 1, "only the other user's account is left");
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty());
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 
     /// Upgrading a deployed 0008 schema: every existing account keeps its row, its bench and its
@@ -482,7 +466,7 @@ mod tests {
         crate::pool::sign_in::mark_sign_in_rejected(&pool, &user.id, "codex", "acc_plain", 1_800_000_000_000).await.unwrap();
         let plain = crate::db::accounts::get_account(&pool, &user.id, "acc_plain").await.unwrap().unwrap();
         assert!(plain.sign_in_rejected_at.is_some(), "the new column takes a write");
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "nothing pending");
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
         sqlx::query("DELETE FROM users WHERE id = $1").bind(&user.id).execute(&pool).await.unwrap();
         let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM upstream_accounts").fetch_one(&pool).await.unwrap();
         assert_eq!(left, 0, "the user cascade still reaches the rows");
@@ -523,6 +507,6 @@ mod tests {
             .unwrap()
             .expect("own row");
         assert!(stored.force_cache_ttl_1h && !stored.strip_fast_mode, "the new column takes a write and only that one");
-        assert!(pending(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "nothing pending");
+        assert!(migrate(&pool, CORE_MIGRATIONS_TABLE, CORE_MIGRATIONS).await.unwrap().is_empty(), "a restart applies nothing");
     }
 }

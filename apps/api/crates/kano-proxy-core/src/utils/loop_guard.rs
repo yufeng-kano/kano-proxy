@@ -1,5 +1,4 @@
-//! Degenerate tool-call loop detection — conversion
-//! ingress only (grok / codex / a custom openai-format provider: any provider whose adapter
+//! Degenerate tool-call loop detection — conversion ingress only (grok / codex / a custom openai-format provider: any provider whose adapter
 //! has no native Anthropic `messages()`). Never wired into native claude-code or custom
 //! anthropic-format passthrough — see docs/api.md § "Degenerate tool-call loop guard" for the
 //! full rationale and wire-up.
@@ -31,7 +30,7 @@ pub fn loop_detected_message(detection: &LoopDetection) -> String {
 }
 
 fn is_role(msg: &Value, role: &str) -> bool {
-    msg.is_object() && msg.get("role").and_then(Value::as_str) == Some(role)
+    msg.get("role").and_then(Value::as_str) == Some(role)
 }
 
 struct AnthropicToolUse<'a> {
@@ -47,7 +46,7 @@ fn single_anthropic_tool_use(content: Option<&Value>) -> Option<AnthropicToolUse
     let arr = content?.as_array()?;
     let mut tool_uses = arr
         .iter()
-        .filter(|b| b.is_object() && b.get("type").and_then(Value::as_str) == Some("tool_use"));
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"));
     let block = tool_uses.next()?;
     if tool_uses.next().is_some() {
         return None;
@@ -63,18 +62,35 @@ fn has_anthropic_tool_result_for(content: Option<&Value>, tool_use_id: &str) -> 
         return false;
     };
     arr.iter().any(|b| {
-        b.is_object()
-            && b.get("type").and_then(Value::as_str) == Some("tool_result")
+        b.get("type").and_then(Value::as_str) == Some("tool_result")
             && b.get("tool_use_id").and_then(Value::as_str) == Some(tool_use_id)
     })
 }
 
-/// `JSON.stringify(input ?? {})` — absent and `null` inputs both serialize as `{}`.
+/// Absent and `null` inputs both serialize as `{}`.
 fn input_identity(input: Option<&Value>) -> String {
     match input {
         None | Some(Value::Null) => "{}".to_string(),
         Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()),
     }
+}
+
+/// Length of the trailing run of identical loop units, walking back two messages at a time.
+/// `unit` reads one `(assistant, result)` pair as `(tool name, identity)`, or `None` when the
+/// pair is not a complete loop unit — which ends the run.
+fn trailing_run<'a>(messages: &'a [Value], unit: impl Fn(&'a Value, &'a Value) -> Option<(&'a str, String)>) -> LoopDetection {
+    let mut count = 0usize;
+    let mut reference: Option<(&str, String)> = None;
+    for pair in messages.rchunks_exact(2) {
+        let Some((name, identity)) = unit(&pair[0], &pair[1]) else { break };
+        match &reference {
+            None => reference = Some((name, identity)),
+            Some((_, first)) if *first == identity => {}
+            Some(_) => break,
+        }
+        count += 1;
+    }
+    LoopDetection { tripped: count >= LOOP_THRESHOLD, name: reference.map(|(name, _)| name.to_string()), count }
 }
 
 /// Anthropic Messages shape (`body.messages`, before conversion). A "loop unit" is an
@@ -83,35 +99,16 @@ fn input_identity(input: Option<&Value>) -> String {
 /// *contents* are never compared — only that a matching tool_result is present. Identity =
 /// tool name + serialized input.
 pub fn detect_anthropic_tool_loop(messages: &[Value]) -> LoopDetection {
-    let mut count = 0usize;
-    let mut ref_identity: Option<String> = None;
-    let mut ref_name: Option<String> = None;
-    let mut i = messages.len();
-    while i >= 2 {
-        let user_msg = &messages[i - 1];
-        let assistant_msg = &messages[i - 2];
-        if !is_role(user_msg, "user") || !is_role(assistant_msg, "assistant") {
-            break;
+    trailing_run(messages, |assistant, user| {
+        if !is_role(user, "user") || !is_role(assistant, "assistant") {
+            return None;
         }
-        let Some(tool_use) = single_anthropic_tool_use(assistant_msg.get("content")) else {
-            break;
-        };
-        if !has_anthropic_tool_result_for(user_msg.get("content"), tool_use.id) {
-            break;
+        let tool_use = single_anthropic_tool_use(assistant.get("content"))?;
+        if !has_anthropic_tool_result_for(user.get("content"), tool_use.id) {
+            return None;
         }
-        let identity = format!("{} {}", tool_use.name, input_identity(tool_use.input));
-        if count == 0 {
-            ref_name = Some(tool_use.name.to_string());
-            ref_identity = Some(identity);
-            count = 1;
-        } else if Some(&identity) == ref_identity.as_ref() {
-            count += 1;
-        } else {
-            break;
-        }
-        i -= 2;
-    }
-    LoopDetection { tripped: count >= LOOP_THRESHOLD, name: ref_name, count }
+        Some((tool_use.name, format!("{} {}", tool_use.name, input_identity(tool_use.input))))
+    })
 }
 
 struct OpenAiToolCall<'a> {
@@ -139,35 +136,16 @@ fn single_openai_tool_call(tool_calls: Option<&Value>) -> Option<OpenAiToolCall<
 /// that call's id. Identity = `function.name` + the raw `function.arguments` string (already
 /// JSON text on the wire — never re-parsed or re-serialized).
 pub fn detect_openai_tool_loop(messages: &[Value]) -> LoopDetection {
-    let mut count = 0usize;
-    let mut ref_identity: Option<String> = None;
-    let mut ref_name: Option<String> = None;
-    let mut i = messages.len();
-    while i >= 2 {
-        let tool_msg = &messages[i - 1];
-        let assistant_msg = &messages[i - 2];
-        if !is_role(tool_msg, "tool") || !is_role(assistant_msg, "assistant") {
-            break;
+    trailing_run(messages, |assistant, tool| {
+        if !is_role(tool, "tool") || !is_role(assistant, "assistant") {
+            return None;
         }
-        let Some(call) = single_openai_tool_call(assistant_msg.get("tool_calls")) else {
-            break;
-        };
-        if tool_msg.get("tool_call_id").and_then(Value::as_str) != Some(call.id) {
-            break;
+        let call = single_openai_tool_call(assistant.get("tool_calls"))?;
+        if tool.get("tool_call_id").and_then(Value::as_str) != Some(call.id) {
+            return None;
         }
-        let identity = format!("{} {}", call.name, call.args);
-        if count == 0 {
-            ref_name = Some(call.name.to_string());
-            ref_identity = Some(identity);
-            count = 1;
-        } else if Some(&identity) == ref_identity.as_ref() {
-            count += 1;
-        } else {
-            break;
-        }
-        i -= 2;
-    }
-    LoopDetection { tripped: count >= LOOP_THRESHOLD, name: ref_name, count }
+        Some((call.name, format!("{} {}", call.name, call.args)))
+    })
 }
 
 #[cfg(test)]
@@ -218,17 +196,13 @@ mod tests {
     }
 
     #[test]
-    fn threshold_is_8() {
-        assert_eq!(LOOP_THRESHOLD, 8);
-    }
-
-    #[test]
     fn anthropic_seven_identical_calls_does_not_trip() {
         let result = detect_anthropic_tool_loop(&default_run(7));
         assert!(!result.tripped);
         assert_eq!(result.count, 7);
     }
 
+    /// `anthropic_unit` gives each tool_result distinct content: results never enter identity.
     #[test]
     fn anthropic_eight_identical_calls_trips() {
         let result = detect_anthropic_tool_loop(&default_run(8));
@@ -281,12 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_tool_result_contents_do_not_affect_identity() {
-        // `anthropic_unit` already gives each tool_result distinct content.
-        assert!(detect_anthropic_tool_loop(&default_run(8)).tripped);
-    }
-
-    #[test]
     fn anthropic_accompanying_text_blocks_do_not_affect_identity() {
         let mut messages = Vec::new();
         for i in 0..8 {
@@ -331,6 +299,7 @@ mod tests {
         assert_eq!(result.count, 7);
     }
 
+    /// `openai_unit` gives each tool result distinct content: results never enter identity.
     #[test]
     fn openai_eight_identical_calls_trips() {
         let result = detect_openai_tool_loop(&default_openai_run(8));
@@ -374,11 +343,6 @@ mod tests {
         let result = detect_openai_tool_loop(&messages);
         assert!(!result.tripped);
         assert_eq!(result.count, 0);
-    }
-
-    #[test]
-    fn openai_tool_result_content_does_not_affect_identity() {
-        assert!(detect_openai_tool_loop(&default_openai_run(8)).tripped);
     }
 
     #[test]

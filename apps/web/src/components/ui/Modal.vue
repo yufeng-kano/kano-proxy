@@ -224,10 +224,12 @@ onBeforeUnmount(() => {
 }
 
 /*
- * Three-quarters of the viewport, for a dialog that is a workspace: several
- * columns side by side rather than one column of fields.
+ * ~7/8 of the viewport, for a dialog that is a workspace: several columns side
+ * by side rather than one column of fields. The Groups dialog (docs/admin-ui.md
+ * § Groups page) is the one, and its third column holds model names *and*
+ * their target lists.
  *
- * The floor matters as much as the ceiling. Below it, 75vw would hand a
+ * The floor matters as much as the ceiling. Below it, 88vw would hand a
  * multi-column layout less width than its columns need, so the panel instead
  * takes everything the overlay offers — `width: 100%` and the overlay's own
  * padding still cap it, which is what keeps the margins intact on a small
@@ -235,9 +237,6 @@ onBeforeUnmount(() => {
  * ultrawide display.
  */
 .panel.wide {
-  /* Widened for v4's Groups dialog (docs/admin-ui.md § Groups page): its
-     third column now holds model names *and* their target lists, so the
-     panel takes ~7/8 of the viewport instead of 3/4. */
   max-width: min(1600px, max(88vw, 980px));
   /* A workspace dialog uses the viewport's height too: the 760px cap that
      suits a form would strand a third of a desktop screen as empty overlay

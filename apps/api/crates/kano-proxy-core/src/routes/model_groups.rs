@@ -1,4 +1,5 @@
-//! `/api/model-groups` — the Groups page's CRUD (//! docs/api.md § Model groups, docs/providers.md § Model groups, docs/auth.md § Model groups).
+//! `/api/model-groups` — the Groups page's CRUD (docs/api.md § Model groups, docs/providers.md
+//! § Model groups, docs/auth.md § Model groups).
 //!
 //! A group is a slug-addressed endpoint (`/g/<slug>/…`) carrying 1..20 callable models, each
 //! with its own ordered target list. Targets are validated against the caller's own providers
@@ -21,10 +22,11 @@ use serde_json::{json, Map, Value};
 use crate::auth::session::SessionUser;
 use crate::db::accounts::get_account;
 use crate::db::model_groups::{
-    count_model_groups, delete_model_group, get_model_group_by_id, insert_model_group, list_model_groups,
+    delete_model_group, get_model_group_by_id, insert_model_group, list_model_groups,
     list_models_for_group, parse_group_targets, replace_group_models, update_model_group_fields, GroupModelInput,
     GroupTarget, ModelGroupRow,
 };
+use crate::http::errors::{admin_error as error, internal_error};
 use crate::providers::ProviderId;
 use crate::routing::candidates::{candidates_for_target, own_provider_slugs, pinned_account, resolve_target_prefix, SharedLookup};
 use crate::routing::facts::{candidate_facts_list, earliest_unusable_until};
@@ -38,18 +40,10 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/", get(list).post(create)).route("/{id}", put(update).delete(remove))
 }
 
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
-}
-
-fn internal_error() -> Response {
-    error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-}
-
-/// An absent or unparsable body is the TypeScript's `c.req.json()` throw: `400
-/// {"error":"invalid JSON"}`. A body that parses but is not an object reads as `{}`, so its
-/// missing fields fail the field validators instead. The bytes are parsed here rather than
-/// through the `Json` extractor so the envelope stays the route's, not the framework's.
+/// An absent or unparsable body is `400 {"error":"invalid JSON"}`. A body that parses but is
+/// not an object reads as `{}`, so its missing fields fail the field validators instead. The
+/// bytes are parsed here rather than through the `Json` extractor so the envelope stays the
+/// route's, not the framework's.
 fn object_body(body: &Bytes) -> Option<Map<String, Value>> {
     match serde_json::from_slice::<Value>(body) {
         Ok(Value::Object(map)) => Some(map),
@@ -84,10 +78,9 @@ async fn routing_for_target(
     state: &AppState,
     user_id: &str,
     lookup: &SharedLookup,
-    index: usize,
     target: &GroupTarget,
 ) -> anyhow::Result<Value> {
-    let Some(resolved) = resolve_target_prefix(state, user_id, lookup, index, target).await? else {
+    let Some(resolved) = resolve_target_prefix(state, user_id, lookup, target).await? else {
         return Ok(json!({ "usable": false, "reason": "unresolved", "unusable_until": Value::Null }));
     };
     let candidates = candidates_for_target(state, user_id, lookup, &resolved).await?;
@@ -124,8 +117,8 @@ async fn to_model_item(
         }));
     }
     let mut routing_targets = Vec::with_capacity(targets.len());
-    for (index, target) in targets.iter().enumerate() {
-        routing_targets.push(routing_for_target(state, user_id, lookup, index, target).await?);
+    for target in targets {
+        routing_targets.push(routing_for_target(state, user_id, lookup, target).await?);
     }
     let current_target_index = routing_targets.iter().position(|t| t["usable"] == Value::Bool(true));
     Ok(json!({
@@ -153,11 +146,7 @@ async fn to_list_item(state: &AppState, user_id: &str, lookup: &SharedLookup, ro
         "name": row.name,
         "slug": row.slug,
         "models": models,
-        // The raw column value, not run through the dispatch-time forward-compat degrade
-        // (`routing::strategy::normalize_strategy`) — today the two agree since `ordered` is the
-        // only writable value, but the read API surfaces exactly what is stored.
-        "strategy": if row.strategy.is_empty() { DEFAULT_STRATEGY.to_string() } else { row.strategy.clone() },
-        "created_at": row.created_at,
+        "strategy": row.strategy,
         "updated_at": row.updated_at,
     }))
 }
@@ -220,15 +209,7 @@ async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> any
             return Err(error);
         }
     }
-    Ok(validated.map(|models| {
-        models
-            .into_iter()
-            .map(|m| GroupModelInput {
-                name: m.name,
-                targets: m.targets.into_iter().map(|t| GroupTarget { model: t.model, account_id: t.account_id }).collect(),
-            })
-            .collect()
-    }))
+    Ok(validated)
 }
 
 async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
@@ -280,11 +261,10 @@ pub(crate) async fn create_for_user(state: &AppState, user_id: &str, body: &Byte
     }
     let strategy = strategy.as_str().unwrap_or(DEFAULT_STRATEGY).to_string();
 
-    let Ok(count) = count_model_groups(state.pool(), user_id).await else { return internal_error() };
-    if count as usize >= MAX_MODEL_GROUPS_PER_USER {
+    let Ok(existing) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
+    if existing.len() >= MAX_MODEL_GROUPS_PER_USER {
         return error(StatusCode::BAD_REQUEST, &format!("maximum of {MAX_MODEL_GROUPS_PER_USER} model groups reached"));
     }
-    let Ok(existing) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
     if existing.iter().any(|g| g.name == name) {
         return error(StatusCode::BAD_REQUEST, &format!("a model group named \"{name}\" already exists"));
     }
@@ -320,6 +300,13 @@ pub(crate) async fn update_for_user(state: &AppState, user_id: &str, id: &str, b
         Ok(Some(row)) => row,
     };
     let Some(body) = object_body(body) else { return error(StatusCode::BAD_REQUEST, "invalid JSON") };
+    // The caller's other groups, read once for both uniqueness checks.
+    let others: Vec<ModelGroupRow> = if body.contains_key("name") || body.contains_key("slug") {
+        let Ok(rows) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
+        rows.into_iter().filter(|g| g.id != id).collect()
+    } else {
+        Vec::new()
+    };
 
     let mut name: Option<String> = None;
     if let Some(raw) = body.get("name") {
@@ -327,8 +314,7 @@ pub(crate) async fn update_for_user(state: &AppState, user_id: &str, id: &str, b
         if let Some(message) = validate_display_name(&candidate) {
             return error(StatusCode::BAD_REQUEST, &message);
         }
-        let Ok(rows) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
-        if rows.iter().any(|g| g.id != id && g.name == candidate) {
+        if others.iter().any(|g| g.name == candidate) {
             return error(StatusCode::BAD_REQUEST, &format!("a model group named \"{candidate}\" already exists"));
         }
         name = Some(candidate);
@@ -340,8 +326,7 @@ pub(crate) async fn update_for_user(state: &AppState, user_id: &str, id: &str, b
         if let Some(message) = validate_group_slug(&candidate) {
             return error(StatusCode::BAD_REQUEST, &message);
         }
-        let Ok(rows) = list_model_groups(state.pool(), user_id).await else { return internal_error() };
-        if rows.iter().any(|g| g.id != id && g.slug == candidate) {
+        if others.iter().any(|g| g.slug == candidate) {
             return error(StatusCode::BAD_REQUEST, &format!("slug \"{candidate}\" is already used by another of your groups"));
         }
         slug = Some(candidate);

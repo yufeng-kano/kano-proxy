@@ -1,10 +1,10 @@
-//! `/api/usage` — the Overview dashboard's aggregate (//! docs/admin-ui.md § Overview page, docs/pricing.md).
+//! `/api/usage` — the Overview dashboard's aggregate (docs/admin-ui.md § Overview page,
+//! docs/pricing.md).
 //!
-//! `GET /summary` takes either an explicit `?from&to&grain&offset` range (what the range
-//! picker sends) or the legacy trailing `?days=` window. The SQL is a plain scoped read; all
-//! aggregation is the pure math below, so it is unit-testable without a database.
+//! `GET /summary` takes the range picker's `?from&to&grain&offset`. The SQL is a plain scoped
+//! read; all aggregation is the pure math below, so it is unit-testable without a database.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
@@ -17,36 +17,32 @@ use serde_json::{json, Value};
 use crate::auth::session::SessionUser;
 use crate::db::accounts::{iso_from_ms, parse_iso_ms};
 use crate::db::request_logs::{usage_rows_in_range, FacetLogRow, RequestLogPageRow, UsageLogRow};
+use crate::http::errors::admin_error as error;
 use crate::pool::extension::ListSharedOptions;
-use crate::routing::candidates::{own_provider_slugs, viewer_shared_custom};
 use crate::pricing::litellm::{
-    estimate_cost, get_price_table, has_source_tagged_price_tables, refresh_price_table, CostUsage, PriceTable,
+    estimate_cost, get_price_table, refresh_price_table, CostUsage, PriceTable,
 };
-use crate::providers::{ProviderId, PROVIDERS};
+use crate::providers::ProviderId;
+use crate::routing::candidates::{own_provider_slugs, viewer_shared_custom};
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/summary", get(summary))
 }
 
-const ALLOWED_DAYS: [i64; 3] = [1, 7, 30];
 const DAY_MS: i64 = 86_400_000;
 /// A range wider than a year is refused rather than scanned.
 pub(crate) const MAX_SPAN_MS: i64 = 366 * DAY_MS;
 
-fn error(status: StatusCode, code: &str) -> Response {
-    (status, Json(json!({ "error": code }))).into_response()
-}
-
 /// `hour` buckets by `YYYY-MM-DDTHH`, `day` by `YYYY-MM-DD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Grain {
+enum Grain {
     Hour,
     Day,
 }
 
 impl Grain {
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Grain::Hour => "hour",
             Grain::Day => "day",
@@ -55,39 +51,38 @@ impl Grain {
 }
 
 /// Totals over a row set.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct Totals {
-    pub requests: i64,
-    pub errors: i64,
-    pub avg_latency_ms: Option<i64>,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    pub cache_read_input_tokens: i64,
-    pub cache_creation_input_tokens: i64,
-    pub cache_rate: Option<f64>,
-    pub usage_known_requests: i64,
-    pub cache_known_requests: i64,
+#[derive(Default)]
+struct Totals {
+    requests: i64,
+    errors: i64,
+    avg_latency_ms: Option<i64>,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    cache_read_input_tokens: i64,
+    cache_creation_input_tokens: i64,
+    cache_rate: Option<f64>,
+    cache_known_requests: i64,
     /// Estimated USD over priced rows; `None` when none is priced (docs/pricing.md).
-    pub cost: Option<f64>,
+    cost: Option<f64>,
     /// Rows contributing to `cost` — lets the UI annotate partial coverage.
-    pub cost_known_requests: i64,
+    cost_known_requests: i64,
 }
 
 /// Shared totals math — used for the overall summary and for each (provider, model) group.
-pub fn accumulate(rows: &[UsageLogRow]) -> Totals {
-    let mut totals = Totals { requests: rows.len() as i64, ..Totals::default() };
+fn accumulate<'a>(rows: impl IntoIterator<Item = &'a UsageLogRow>) -> Totals {
+    let mut totals = Totals::default();
     let mut latency_sum: i64 = 0;
     let mut cache_rate_numerator: i64 = 0;
     let mut cache_rate_denominator: i64 = 0;
     let mut cache_rate_rows: i64 = 0;
     for row in rows {
+        totals.requests += 1;
         if row.status_code >= 400 {
             totals.errors += 1;
         }
         latency_sum += row.latency_ms;
         if let Some(prompt) = row.prompt_tokens {
             totals.prompt_tokens += prompt;
-            totals.usage_known_requests += 1;
         }
         if let Some(completion) = row.completion_tokens {
             totals.completion_tokens += completion;
@@ -109,70 +104,51 @@ pub fn accumulate(rows: &[UsageLogRow]) -> Totals {
             totals.cost_known_requests += 1;
         }
     }
-    totals.avg_latency_ms = if rows.is_empty() {
-        None
-    } else {
-        Some(js_round(latency_sum as f64 / rows.len() as f64))
-    };
-    totals.cache_rate = if cache_rate_rows > 0 {
-        Some(cache_rate_numerator as f64 / cache_rate_denominator as f64)
-    } else {
-        None
-    };
+    // Rounded half up, which for these non-negative averages is `f64::round`.
+    totals.avg_latency_ms = (totals.requests > 0).then(|| (latency_sum as f64 / totals.requests as f64).round() as i64);
+    totals.cache_rate = (cache_rate_rows > 0).then(|| cache_rate_numerator as f64 / cache_rate_denominator as f64);
     totals
 }
 
-/// `Math.round` — half up, which for these non-negative averages is `f64::round`.
-fn js_round(value: f64) -> i64 {
-    value.round() as i64
-}
-
+/// What the Overview header and the Spend card read off the whole range.
 fn totals_json(totals: &Totals) -> Value {
     json!({
         "requests": totals.requests,
         "errors": totals.errors,
         "avg_latency_ms": totals.avg_latency_ms,
-        "prompt_tokens": totals.prompt_tokens,
-        "completion_tokens": totals.completion_tokens,
-        "cache_read_input_tokens": totals.cache_read_input_tokens,
-        "cache_creation_input_tokens": totals.cache_creation_input_tokens,
-        "cache_rate": totals.cache_rate,
-        "usage_known_requests": totals.usage_known_requests,
-        "cache_known_requests": totals.cache_known_requests,
         "cost": totals.cost,
         "cost_known_requests": totals.cost_known_requests,
     })
 }
 
-/// Per (provider, model) breakdown, sorted by prompt+completion tokens descending. Carries
-/// every total except `avg_latency_ms`.
-pub fn model_breakdown(rows: &[UsageLogRow]) -> Vec<Value> {
-    // The key is only ever a grouping identity, never parsed back apart, so no separator can
-    // collide with an upstream model id.
-    let mut groups: IndexMap<String, (String, String, Vec<UsageLogRow>)> = IndexMap::new();
+/// Per (provider, model) breakdown — the By-model table's columns — sorted by prompt+completion
+/// tokens descending.
+fn model_breakdown(rows: &[UsageLogRow]) -> Vec<Value> {
+    let mut groups: IndexMap<(&str, &str), Vec<&UsageLogRow>> = IndexMap::new();
     for row in rows {
-        let key = format!("{}\u{0}{}", row.provider, row.model);
-        groups
-            .entry(key)
-            .or_insert_with(|| (row.provider.clone(), row.model.clone(), Vec::new()))
-            .2
-            .push(row.clone());
+        groups.entry((&row.provider, &row.model)).or_default().push(row);
     }
-    let mut out: Vec<(i64, Value)> = Vec::with_capacity(groups.len());
-    for (_, (provider, model, group_rows)) in groups {
-        let totals = accumulate(&group_rows);
-        let mut value = json!({ "provider": provider, "model": model });
-        let object = value.as_object_mut().expect("object");
-        let rest = totals_json(&totals);
-        for (k, v) in rest.as_object().expect("object") {
-            if k == "avg_latency_ms" {
-                continue;
-            }
-            object.insert(k.clone(), v.clone());
-        }
-        out.push((totals.prompt_tokens + totals.completion_tokens, value));
-    }
-    // A stable sort keeps insertion order among ties, as Array#sort does in V8.
+    let mut out: Vec<(i64, Value)> = groups
+        .into_iter()
+        .map(|((provider, model), group_rows)| {
+            let t = accumulate(group_rows);
+            let value = json!({
+                "provider": provider,
+                "model": model,
+                "requests": t.requests,
+                "errors": t.errors,
+                "prompt_tokens": t.prompt_tokens,
+                "completion_tokens": t.completion_tokens,
+                "cache_read_input_tokens": t.cache_read_input_tokens,
+                "cache_creation_input_tokens": t.cache_creation_input_tokens,
+                "cache_rate": t.cache_rate,
+                "cache_known_requests": t.cache_known_requests,
+                "cost": t.cost,
+            });
+            (t.prompt_tokens + t.completion_tokens, value)
+        })
+        .collect();
+    // A stable sort keeps first-seen order among ties.
     out.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     out.into_iter().map(|(_, v)| v).collect()
 }
@@ -184,8 +160,8 @@ pub fn model_breakdown(rows: &[UsageLogRow]) -> Vec<Value> {
 /// day / week / month, so its `from`..`to` lands on local midnights — which in UTC straddle a
 /// day boundary for every browser off UTC. Slicing the raw UTC string there spreads a 7-day
 /// week over eight keys, and the chart's fixed-width grid then silently drops one end while
-/// the totals still count it. 0 = UTC, which is what the legacy `days=` window uses.
-pub fn bucket_key(created_at: &str, grain: Grain, offset_minutes: i64) -> String {
+/// the totals still count it. 0 = UTC.
+fn bucket_key(created_at: &str, grain: Grain, offset_minutes: i64) -> String {
     let iso = if offset_minutes == 0 {
         created_at.to_string()
     } else {
@@ -201,60 +177,38 @@ pub fn bucket_key(created_at: &str, grain: Grain, offset_minutes: i64) -> String
 /// Sparse per-(bucket, provider, model) series — only groups that actually have a row,
 /// ascending by bucket, then provider, then model. A bucket's totals are the client-side sum
 /// over its model points (docs/admin-ui.md § Series shape).
-pub fn build_series(rows: &[UsageLogRow], grain: Grain, offset_minutes: i64) -> Vec<Value> {
+fn build_series(rows: &[UsageLogRow], grain: Grain, offset_minutes: i64) -> Vec<Value> {
     #[derive(Default)]
     struct Point {
-        bucket: String,
-        provider: String,
-        model: String,
         requests: i64,
         prompt_tokens: i64,
         completion_tokens: i64,
         cache_read_input_tokens: i64,
-        cache_known_requests: i64,
         cost: Option<f64>,
     }
-    let mut groups: IndexMap<String, Point> = IndexMap::new();
+    let mut points: BTreeMap<(String, &str, &str), Point> = BTreeMap::new();
     for row in rows {
-        let bucket = bucket_key(&row.created_at, grain, offset_minutes);
-        let key = format!("{bucket} {} {}", row.provider, row.model);
-        let point = groups.entry(key).or_insert_with(|| Point {
-            bucket,
-            provider: row.provider.clone(),
-            model: row.model.clone(),
-            ..Point::default()
-        });
+        let key = (bucket_key(&row.created_at, grain, offset_minutes), row.provider.as_str(), row.model.as_str());
+        let point = points.entry(key).or_default();
         point.requests += 1;
-        if let Some(prompt) = row.prompt_tokens {
-            point.prompt_tokens += prompt;
-        }
-        if let Some(completion) = row.completion_tokens {
-            point.completion_tokens += completion;
-        }
-        if let Some(cache_read) = row.cache_read_input_tokens {
-            point.cache_read_input_tokens += cache_read;
-            point.cache_known_requests += 1;
-        }
+        point.prompt_tokens += row.prompt_tokens.unwrap_or(0);
+        point.completion_tokens += row.completion_tokens.unwrap_or(0);
+        point.cache_read_input_tokens += row.cache_read_input_tokens.unwrap_or(0);
         if let Some(cost) = row.cost {
             point.cost = Some(point.cost.unwrap_or(0.0) + cost);
         }
     }
-    let mut points: Vec<Point> = groups.into_values().collect();
-    points.sort_by(|a, b| {
-        a.bucket.cmp(&b.bucket).then_with(|| a.provider.cmp(&b.provider)).then_with(|| a.model.cmp(&b.model))
-    });
     points
         .into_iter()
-        .map(|p| {
+        .map(|((bucket, provider, model), p)| {
             json!({
-                "bucket": p.bucket,
-                "provider": p.provider,
-                "model": p.model,
+                "bucket": bucket,
+                "provider": provider,
+                "model": model,
                 "requests": p.requests,
                 "prompt_tokens": p.prompt_tokens,
                 "completion_tokens": p.completion_tokens,
                 "cache_read_input_tokens": p.cache_read_input_tokens,
-                "cache_known_requests": p.cache_known_requests,
                 "cost": p.cost,
             })
         })
@@ -265,204 +219,114 @@ pub fn build_series(rows: &[UsageLogRow], grain: Grain, offset_minutes: i64) -> 
 /// and CLI slugs (docs/admin-ui.md § Overview page). Rows from a deleted endpoint, and junk
 /// prefixes recorded by invalid-model 400s ("unknown", a typo'd prefix), would otherwise haunt
 /// the dashboard forever.
-pub fn filter_to_live_providers(rows: Vec<UsageLogRow>, custom_slugs: &[String]) -> Vec<UsageLogRow> {
-    let builtins: Vec<&str> = PROVIDERS.iter().map(|p| p.as_str()).collect();
-    rows.into_iter()
-        .filter(|r| builtins.contains(&r.provider.as_str()) || custom_slugs.iter().any(|s| s == &r.provider))
-        .collect()
+fn filter_to_live_providers(rows: Vec<UsageLogRow>, custom_slugs: &[String]) -> Vec<UsageLogRow> {
+    rows.into_iter().filter(|r| ProviderId::parse(&r.provider).is_some() || custom_slugs.contains(&r.provider)).collect()
 }
 
-/// A log row that can be priced at read time — implemented for both the usage and the logs
-/// row shapes, so one `fill_estimated_costs` serves both surfaces as the TypeScript's shared
-/// `fillEstimatedCosts` did.
-pub trait CostRow {
-    fn model(&self) -> &str;
-    fn usage(&self) -> CostUsage;
-    fn cost(&self) -> Option<f64>;
-    fn set_cost(&mut self, cost: f64);
+/// A log row that can be priced at read time: the usage, facet and logs row shapes all carry
+/// the same `model`, token and `cost` columns, so one `fill_estimated_costs` serves every
+/// surface.
+pub(crate) trait CostRow {
+    /// The row's model, its token usage, and the cost read-time pricing may fill.
+    fn pricing_parts(&mut self) -> (&str, CostUsage, &mut Option<f64>);
 }
 
-impl CostRow for UsageLogRow {
-    fn model(&self) -> &str {
-        &self.model
-    }
-    fn usage(&self) -> CostUsage {
-        CostUsage {
-            prompt_tokens: self.prompt_tokens,
-            completion_tokens: self.completion_tokens,
-            cache_read_input_tokens: self.cache_read_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens,
+macro_rules! cost_row {
+    ($($row:ty),*) => {$(
+        impl CostRow for $row {
+            fn pricing_parts(&mut self) -> (&str, CostUsage, &mut Option<f64>) {
+                let usage = CostUsage {
+                    prompt_tokens: self.prompt_tokens,
+                    completion_tokens: self.completion_tokens,
+                    cache_read_input_tokens: self.cache_read_input_tokens,
+                    cache_creation_input_tokens: self.cache_creation_input_tokens,
+                };
+                (&self.model, usage, &mut self.cost)
+            }
         }
-    }
-    fn cost(&self) -> Option<f64> {
-        self.cost
-    }
-    fn set_cost(&mut self, cost: f64) {
-        self.cost = Some(cost);
-    }
+    )*};
 }
 
-impl CostRow for FacetLogRow {
-    fn model(&self) -> &str {
-        &self.model
-    }
-    fn usage(&self) -> CostUsage {
-        CostUsage {
-            prompt_tokens: self.prompt_tokens,
-            completion_tokens: self.completion_tokens,
-            cache_read_input_tokens: self.cache_read_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens,
-        }
-    }
-    fn cost(&self) -> Option<f64> {
-        self.cost
-    }
-    fn set_cost(&mut self, cost: f64) {
-        self.cost = Some(cost);
-    }
-}
-
-impl CostRow for RequestLogPageRow {
-    fn model(&self) -> &str {
-        &self.model
-    }
-    fn usage(&self) -> CostUsage {
-        CostUsage {
-            prompt_tokens: self.prompt_tokens,
-            completion_tokens: self.completion_tokens,
-            cache_read_input_tokens: self.cache_read_input_tokens,
-            cache_creation_input_tokens: self.cache_creation_input_tokens,
-        }
-    }
-    fn cost(&self) -> Option<f64> {
-        self.cost
-    }
-    fn set_cost(&mut self, cost: f64) {
-        self.cost = Some(cost);
-    }
-}
+cost_row!(UsageLogRow, FacetLogRow, RequestLogPageRow);
 
 /// Fill NULL costs at read time with the same resolver used at write time, so pre-migration
 /// history still prices (docs/pricing.md). A stored cost is never overwritten; a row that
 /// stays unpriced stays NULL.
-pub fn fill_estimated_costs<T: CostRow>(rows: &mut [T], table: Option<&PriceTable>) {
+pub(crate) fn fill_estimated_costs<T: CostRow>(rows: &mut [T], table: Option<&PriceTable>) {
     let Some(table) = table else { return };
-    for row in rows.iter_mut() {
-        if row.cost().is_some() {
-            continue;
-        }
-        if let Some(cost) = estimate_cost(table, row.model(), &row.usage()) {
-            row.set_cost(cost);
+    for row in rows {
+        let (model, usage, cost) = row.pricing_parts();
+        if cost.is_none() {
+            *cost = estimate_cost(table, model, &usage);
         }
     }
 }
 
-/// The admin surfaces may fetch the price table inline: a missing or legacy (untagged)
-/// snapshot is refreshed here, never on the proxy hot path.
+/// The admin surfaces may fetch the price table inline: a missing snapshot is refreshed here,
+/// never on the proxy hot path.
 pub(crate) async fn read_time_price_table(state: &AppState) -> Option<PriceTable> {
-    let table = get_price_table(state).await;
-    match table {
-        Some(table) if has_source_tagged_price_tables(state.cache()) => Some(table),
-        _ => refresh_price_table(state).await,
+    match get_price_table(state).await {
+        Some(table) => Some(table),
+        None => refresh_price_table(state).await,
     }
 }
 
-/// Pure aggregation, exported for direct unit testing. `rows` must already be scoped to one
-/// user and to `created_at >= from AND created_at <= to`.
-pub fn summarize_usage_rows(
-    rows: &[UsageLogRow],
-    days: i64,
-    from: &str,
-    to: Option<&str>,
-    grain: Option<Grain>,
-    offset_minutes: i64,
-) -> Value {
-    let actual_grain = grain.unwrap_or(if days == 1 { Grain::Hour } else { Grain::Day });
+/// The pure aggregation. `rows` must already be scoped to one user and to
+/// `created_at >= from AND created_at <= to`.
+fn summarize_usage_rows(rows: &[UsageLogRow], from: &str, to: &str, grain: Grain, offset_minutes: i64) -> Value {
     json!({
-        "days": days,
         "from": from,
-        "to": to.map(str::to_string).unwrap_or_else(|| iso_from_ms(crate::app::now_ms())),
-        "grain": actual_grain.as_str(),
+        "to": to,
+        "grain": grain.as_str(),
         // Echoed so the client zero-fills its grid in the same calendar the rows were
-        // bucketed in; a client that sent no offset reads back 0.
+        // bucketed in.
         "offset": offset_minutes,
         "totals": totals_json(&accumulate(rows)),
         "models": model_breakdown(rows),
-        "series": build_series(rows, actual_grain, offset_minutes),
+        "series": build_series(rows, grain, offset_minutes),
     })
 }
 
-/// `Number(value)` on a query parameter: JavaScript's numeric coercion, where an empty or
-/// blank string is 0 and anything non-numeric is NaN (`None` here).
-pub(crate) fn js_number(value: &str) -> Option<f64> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Some(0.0);
+/// `offset`, the caller's calendar in minutes east of UTC: 0 when absent, else a whole number
+/// within ±840 (UTC+14 is the widest real zone; half-hour and 45-minute zones are why this is
+/// minutes rather than hours). A blank value also reads as 0.
+pub(crate) fn parse_offset(params: &HashMap<String, String>) -> Option<i64> {
+    let Some(value) = params.get("offset") else { return Some(0) };
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(0);
     }
-    trimmed.parse::<f64>().ok().filter(|v| v.is_finite())
+    let minutes = value.parse::<f64>().ok().filter(|v| v.is_finite())?;
+    (minutes.fract() == 0.0 && minutes.abs() <= 840.0).then_some(minutes as i64)
 }
 
 struct Window {
-    days: i64,
     from: String,
     to: String,
     grain: Grain,
 }
 
-/// Both parameter forms (docs/admin-ui.md § Overview page): an explicit `from`/`to` range, or
-/// the legacy trailing `days=` window.
+/// `from` is required and `to` defaults to now; without an explicit `grain`, a span of up to
+/// 36 hours is hourly.
 fn resolve_window(params: &HashMap<String, String>, now_ms: i64) -> Result<Window, &'static str> {
-    match params.get("from") {
-        Some(from_param) => {
-            let from_ms = parse_iso_ms(from_param).ok_or("invalid_from")?;
-            let to_ms = match params.get("to") {
-                Some(to_param) => parse_iso_ms(to_param).ok_or("invalid_to")?,
-                None => now_ms,
-            };
-            if from_ms > to_ms {
-                return Err("invalid_range");
-            }
-            if to_ms - from_ms > MAX_SPAN_MS {
-                return Err("range_too_large");
-            }
-            let grain = match params.get("grain").map(String::as_str) {
-                None => {
-                    if to_ms - from_ms <= 36 * 3_600_000 {
-                        Grain::Hour
-                    } else {
-                        Grain::Day
-                    }
-                }
-                Some("hour") => Grain::Hour,
-                Some("day") => Grain::Day,
-                Some(_) => return Err("invalid_grain"),
-            };
-            Ok(Window {
-                days: js_round((to_ms - from_ms) as f64 / DAY_MS as f64).max(1),
-                from: iso_from_ms(from_ms),
-                to: iso_from_ms(to_ms),
-                grain,
-            })
-        }
-        None => {
-            let days = match params.get("days") {
-                None => 7,
-                Some(value) => match js_number(value) {
-                    Some(v) if v.fract() == 0.0 => v as i64,
-                    _ => return Err("invalid_days"),
-                },
-            };
-            if !ALLOWED_DAYS.contains(&days) {
-                return Err("invalid_days");
-            }
-            Ok(Window {
-                days,
-                from: iso_from_ms(now_ms - days * DAY_MS),
-                to: iso_from_ms(now_ms),
-                grain: if days == 1 { Grain::Hour } else { Grain::Day },
-            })
-        }
+    let from_ms = params.get("from").and_then(|v| parse_iso_ms(v)).ok_or("invalid_from")?;
+    let to_ms = match params.get("to") {
+        Some(to_param) => parse_iso_ms(to_param).ok_or("invalid_to")?,
+        None => now_ms,
+    };
+    if from_ms > to_ms {
+        return Err("invalid_range");
     }
+    if to_ms - from_ms > MAX_SPAN_MS {
+        return Err("range_too_large");
+    }
+    let grain = match params.get("grain").map(String::as_str) {
+        None if to_ms - from_ms <= 36 * 3_600_000 => Grain::Hour,
+        None | Some("day") => Grain::Day,
+        Some("hour") => Grain::Hour,
+        Some(_) => return Err("invalid_grain"),
+    };
+    Ok(Window { from: iso_from_ms(from_ms), to: iso_from_ms(to_ms), grain })
 }
 
 async fn summary(
@@ -470,14 +334,8 @@ async fn summary(
     session: SessionUser,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    // Bucket calendar, minutes east of UTC. The widest real zone is UTC+14, and
-    // half-hour/45-minute zones are why this is minutes rather than hours.
-    let offset_minutes = match params.get("offset") {
-        None => 0,
-        Some(value) => match js_number(value) {
-            Some(v) if v.fract() == 0.0 && v.abs() <= 840.0 => v as i64,
-            _ => return error(StatusCode::BAD_REQUEST, "invalid_offset"),
-        },
+    let Some(offset_minutes) = parse_offset(&params) else {
+        return error(StatusCode::BAD_REQUEST, "invalid_offset");
     };
 
     let window = match resolve_window(&params, state.now_ms()) {
@@ -507,14 +365,7 @@ async fn summary(
 
     let table = read_time_price_table(&state).await;
     fill_estimated_costs(&mut scoped, table.as_ref());
-    Json(summarize_usage_rows(&scoped, window.days, &window.from, Some(&window.to), Some(window.grain), offset_minutes))
-        .into_response()
-}
-
-/// A `ProviderId` check for the Logs page's `usage_type` — kept here beside the live-provider
-/// filter so both surfaces agree on what "builtin" means.
-pub(crate) fn is_builtin_provider(provider: &str) -> bool {
-    ProviderId::parse(provider).is_some()
+    Json(summarize_usage_rows(&scoped, &window.from, &window.to, window.grain, offset_minutes)).into_response()
 }
 
 #[cfg(test)]
@@ -548,14 +399,14 @@ mod tests {
         serde_json::from_value(base).expect("a usage row")
     }
 
-    fn summary_of(rows: &[UsageLogRow], days: i64) -> Value {
-        summarize_usage_rows(rows, days, "from", None, None, 0)
+    fn summary_of(rows: &[UsageLogRow], grain: Grain) -> Value {
+        summarize_usage_rows(rows, "from", "to", grain, 0)
     }
 
     #[test]
     fn counts_requests_and_errors_over_status_400_and_up() {
         let rows = [row(json!({ "status_code": 200 })), row(json!({ "status_code": 404 })), row(json!({ "status_code": 500 }))];
-        let out = summary_of(&rows, 7);
+        let out = summary_of(&rows, Grain::Day);
         assert_eq!(out["totals"]["requests"], 3);
         assert_eq!(out["totals"]["errors"], 2);
     }
@@ -564,8 +415,8 @@ mod tests {
     fn averages_latency_rounded_and_null_for_zero_rows() {
         let rows = [row(json!({ "latency_ms": 100 })), row(json!({ "latency_ms": 150 })), row(json!({ "latency_ms": 151 }))];
         // 401/3 = 133.67 -> 134
-        assert_eq!(summary_of(&rows, 7)["totals"]["avg_latency_ms"], 134);
-        let empty = summary_of(&[], 7);
+        assert_eq!(summary_of(&rows, Grain::Day)["totals"]["avg_latency_ms"], 134);
+        let empty = summary_of(&[], Grain::Day);
         assert_eq!(empty["totals"]["avg_latency_ms"], Value::Null);
         assert_eq!(empty["totals"]["requests"], 0);
     }
@@ -578,10 +429,10 @@ mod tests {
             // A count_tokens-shaped row: usage wholly unknown, excluded rather than zero-summed.
             row(json!({})),
         ];
-        let out = summary_of(&rows, 7);
-        assert_eq!(out["totals"]["prompt_tokens"], 300);
-        assert_eq!(out["totals"]["completion_tokens"], 50);
-        assert_eq!(out["totals"]["usage_known_requests"], 2);
+        let totals = accumulate(&rows);
+        assert_eq!(totals.requests, 3);
+        assert_eq!(totals.prompt_tokens, 300);
+        assert_eq!(totals.completion_tokens, 50);
     }
 
     #[test]
@@ -592,15 +443,13 @@ mod tests {
             row(json!({ "prompt_tokens": 50 })),
             row(json!({ "prompt_tokens": 0, "cache_read_input_tokens": 10 })),
         ];
-        let out = summary_of(&rows, 7);
+        let totals = accumulate(&rows);
         // The token total sums every non-null row unconditionally, the 0-prompt row included.
-        assert_eq!(out["totals"]["cache_read_input_tokens"], 80);
-        let rate = out["totals"]["cache_rate"].as_f64().unwrap();
-        assert!((rate - 70.0 / 300.0).abs() < 1e-12);
-        assert_eq!(out["totals"]["cache_known_requests"], 3);
+        assert_eq!(totals.cache_read_input_tokens, 80);
+        assert!((totals.cache_rate.unwrap() - 70.0 / 300.0).abs() < 1e-12);
+        assert_eq!(totals.cache_known_requests, 3);
 
-        let none = summary_of(&[row(json!({ "prompt_tokens": 100 }))], 7);
-        assert_eq!(none["totals"]["cache_rate"], Value::Null);
+        assert_eq!(accumulate(&[row(json!({ "prompt_tokens": 100 }))]).cache_rate, None);
     }
 
     #[test]
@@ -611,7 +460,7 @@ mod tests {
             row(json!({ "prompt_tokens": 20, "completion_tokens": 5 })),
             row(json!({ "prompt_tokens": 5, "completion_tokens": 5 })),
         ];
-        let out = summary_of(&rows, 7);
+        let out = summary_of(&rows, Grain::Day);
         let models = out["models"].as_array().unwrap();
         assert_eq!(models.len(), 2);
         assert_eq!(models[0]["provider"], "grok");
@@ -635,19 +484,19 @@ mod tests {
             row(json!({ "created_at": "2026-08-02T10:45:00.000Z", "prompt_tokens": 20, "completion_tokens": 2 })),
             row(json!({ "created_at": "2026-08-02T12:00:00.000Z", "prompt_tokens": 30, "completion_tokens": 3 })),
         ];
-        let hourly = summary_of(&rows, 1);
+        let hourly = summary_of(&rows, Grain::Hour);
         assert_eq!(
             hourly["series"],
             json!([
-                { "bucket": "2026-08-02T10", "provider": "claude-code", "model": "claude-code/claude-opus-5", "requests": 2, "prompt_tokens": 30, "completion_tokens": 3, "cache_read_input_tokens": 0, "cache_known_requests": 0, "cost": null },
-                { "bucket": "2026-08-02T12", "provider": "claude-code", "model": "claude-code/claude-opus-5", "requests": 1, "prompt_tokens": 30, "completion_tokens": 3, "cache_read_input_tokens": 0, "cache_known_requests": 0, "cost": null },
+                { "bucket": "2026-08-02T10", "provider": "claude-code", "model": "claude-code/claude-opus-5", "requests": 2, "prompt_tokens": 30, "completion_tokens": 3, "cache_read_input_tokens": 0, "cost": null },
+                { "bucket": "2026-08-02T12", "provider": "claude-code", "model": "claude-code/claude-opus-5", "requests": 1, "prompt_tokens": 30, "completion_tokens": 3, "cache_read_input_tokens": 0, "cost": null },
             ])
         );
-        let daily = summary_of(&rows, 7);
+        let daily = summary_of(&rows, Grain::Day);
         assert_eq!(
             daily["series"],
             json!([
-                { "bucket": "2026-08-02", "provider": "claude-code", "model": "claude-code/claude-opus-5", "requests": 3, "prompt_tokens": 60, "completion_tokens": 6, "cache_read_input_tokens": 0, "cache_known_requests": 0, "cost": null },
+                { "bucket": "2026-08-02", "provider": "claude-code", "model": "claude-code/claude-opus-5", "requests": 3, "prompt_tokens": 60, "completion_tokens": 6, "cache_read_input_tokens": 0, "cost": null },
             ])
         );
     }
@@ -656,7 +505,7 @@ mod tests {
     fn series_is_sparse_ascending_and_split_per_model() {
         let sparse = summary_of(
             &[row(json!({ "created_at": "2026-08-03T00:00:00.000Z" })), row(json!({ "created_at": "2026-08-01T00:00:00.000Z" }))],
-            7,
+            Grain::Day,
         );
         assert_eq!(
             sparse["series"].as_array().unwrap().iter().map(|p| p["bucket"].clone()).collect::<Vec<_>>(),
@@ -669,7 +518,7 @@ mod tests {
             row(json!({ "prompt_tokens": 30, "completion_tokens": 3 })),
             row(json!({ "provider": "grok", "model": "grok/grok-4.5", "prompt_tokens": 40, "completion_tokens": 4 })),
         ];
-        let out = summary_of(&rows, 7);
+        let out = summary_of(&rows, Grain::Day);
         let series = out["series"].as_array().unwrap();
         assert_eq!(
             series.iter().map(|p| (p["model"].clone(), p["requests"].clone(), p["prompt_tokens"].clone())).collect::<Vec<_>>(),
@@ -691,18 +540,10 @@ mod tests {
             row(json!({ "prompt_tokens": 100, "cache_read_input_tokens": 0 })),
             row(json!({ "prompt_tokens": 100 })),
         ];
-        let out = summary_of(&rows, 7);
-        assert_eq!(out["series"].as_array().unwrap().len(), 1);
-        assert_eq!(out["series"][0]["requests"], 3);
-        assert_eq!(out["series"][0]["cache_known_requests"], 2);
-        assert_eq!(out["series"][0]["cache_read_input_tokens"], 25);
-    }
-
-    #[test]
-    fn echoes_days_and_from_verbatim() {
-        let out = summarize_usage_rows(&[], 30, "2026-07-03T00:00:00.000Z", None, None, 0);
-        assert_eq!(out["days"], 30);
-        assert_eq!(out["from"], "2026-07-03T00:00:00.000Z");
+        let out = summary_of(&rows, Grain::Day);
+        assert_eq!(out["models"][0]["requests"], 3);
+        assert_eq!(out["models"][0]["cache_known_requests"], 2);
+        assert_eq!(out["models"][0]["cache_read_input_tokens"], 25);
     }
 
     #[test]
@@ -810,6 +651,16 @@ mod tests {
         .expect("slug is free");
     }
 
+    /// The summary over the trailing `days` days.
+    fn trailing(state: &AppState, days: i64) -> String {
+        let now = state.now_ms();
+        format!("/api/usage/summary?from={}&to={}", iso_from_ms(now - days * DAY_MS), iso_from_ms(now))
+    }
+
+    fn model_prompt_tokens(json: &Value) -> i64 {
+        json["models"].as_array().unwrap().iter().map(|m| m["prompt_tokens"].as_i64().unwrap()).sum()
+    }
+
     async fn get(state: &AppState, cookie: &str, uri: &str) -> Response {
         test_router(state.clone())
             .oneshot(Request::builder().uri(uri).header(header::COOKIE, cookie).body(Body::empty()).unwrap())
@@ -818,29 +669,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_summary_requires_a_session_and_validates_days() {
+    async fn the_summary_requires_a_session() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool, offline());
         let response = test_router(state.clone())
-            .oneshot(Request::builder().uri("/api/usage/summary").body(Body::empty()).unwrap())
+            .oneshot(Request::builder().uri(trailing(&state, 7)).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-        let (_, cookie) = signed_in(&state, "usage@example.com").await;
-        for bad in ["days=3", "days=abc"] {
-            let response = get(&state, &cookie, &format!("/api/usage/summary?{bad}")).await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
-            assert_eq!(body_json(response).await, json!({ "error": "invalid_days" }));
-        }
-        // No parameter at all is the 7-day window; 1 and 30 are the other allowed values.
-        let json = body_json(get(&state, &cookie, "/api/usage/summary").await).await;
-        assert_eq!(json["days"], 7);
-        assert_eq!(json["offset"], 0, "the legacy window keeps UTC keys");
-        for days in [1, 30] {
-            let json = body_json(get(&state, &cookie, &format!("/api/usage/summary?days={days}")).await).await;
-            assert_eq!(json["days"], days);
-        }
     }
 
     #[tokio::test]
@@ -854,9 +690,9 @@ mod tests {
         seed_log(&state, &user_id, json!({ "prompt_tokens": 999, "created_at": iso_from_ms(now - 8 * DAY_MS) })).await;
         seed_log(&state, &other.id, json!({ "prompt_tokens": 999, "created_at": iso_from_ms(now - DAY_MS) })).await;
 
-        let json = body_json(get(&state, &cookie, "/api/usage/summary?days=7").await).await;
+        let json = body_json(get(&state, &cookie, &trailing(&state, 7)).await).await;
         assert_eq!(json["totals"]["requests"], 1, "another user's rows and rows before `from` never count");
-        assert_eq!(json["totals"]["prompt_tokens"], 10);
+        assert_eq!(model_prompt_tokens(&json), 10);
     }
 
     #[tokio::test]
@@ -871,7 +707,7 @@ mod tests {
         seed_log(&state, &user_id, json!({ "provider": "team-gw", "model": "team-gw/gpt-4o", "created_at": iso_from_ms(now - DAY_MS) })).await;
         seed_log(&state, &user_id, json!({ "provider": "gone-gw", "model": "gone-gw/gpt-4o", "created_at": iso_from_ms(now - DAY_MS) })).await;
 
-        let json = body_json(get(&state, &cookie, "/api/usage/summary?days=7").await).await;
+        let json = body_json(get(&state, &cookie, &trailing(&state, 7)).await).await;
         assert_eq!(json["totals"]["requests"], 1, "the borrowed endpoint's row stays, a deleted provider's goes");
     }
 
@@ -898,17 +734,18 @@ mod tests {
         .await;
         seed_log(&state, &user_id, json!({ "latency_ms": 200, "created_at": iso_from_ms(day2) })).await;
 
-        let json = body_json(get(&state, &cookie, "/api/usage/summary?days=7").await).await;
-        assert_eq!(json["totals"]["requests"], 3);
-        assert_eq!(json["totals"]["errors"], 1);
-        assert_eq!(json["totals"]["avg_latency_ms"], 200);
-        assert_eq!(json["totals"]["prompt_tokens"], 100);
-        assert_eq!(json["totals"]["completion_tokens"], 40);
-        assert_eq!(json["totals"]["cache_read_input_tokens"], 20);
-        assert_eq!(json["totals"]["cache_rate"], 0.2);
-        assert_eq!(json["totals"]["usage_known_requests"], 1);
-        assert_eq!(json["totals"]["cache_known_requests"], 1);
-        assert_eq!(json["models"].as_array().unwrap().len(), 2);
+        let json = body_json(get(&state, &cookie, &trailing(&state, 7)).await).await;
+        assert_eq!(json["totals"], json!({ "requests": 3, "errors": 1, "avg_latency_ms": 200, "cost": null, "cost_known_requests": 0 }));
+        let models = json["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(
+            models[0],
+            json!({
+                "provider": "claude-code", "model": "claude-code/claude-opus-5", "requests": 2, "errors": 0,
+                "prompt_tokens": 100, "completion_tokens": 40, "cache_read_input_tokens": 20,
+                "cache_creation_input_tokens": 0, "cache_rate": 0.2, "cache_known_requests": 1, "cost": null,
+            })
+        );
         let series = json["series"].as_array().unwrap();
         // day1 holds two models -> two points, and day2 one.
         assert_eq!(series.len(), 3);
@@ -940,9 +777,9 @@ mod tests {
         seed_log(&state, &user_id, json!({ "provider": "deleted-endpoint", "model": "deleted-endpoint/x" })).await;
         seed_log(&state, &user_id, json!({ "provider": "unknown", "model": "gibberish" })).await;
 
-        let json = body_json(get(&state, &cookie, "/api/usage/summary?days=30").await).await;
+        let json = body_json(get(&state, &cookie, &trailing(&state, 30)).await).await;
         assert_eq!(json["totals"]["requests"], 3);
-        assert_eq!(json["totals"]["prompt_tokens"], 37);
+        assert_eq!(model_prompt_tokens(&json), 37);
         let mut providers: Vec<String> =
             json["models"].as_array().unwrap().iter().map(|m| m["provider"].as_str().unwrap().to_string()).collect();
         providers.sort();
@@ -958,13 +795,13 @@ mod tests {
         seed_log(&state, &user_id, json!({ "prompt_tokens": 100, "completion_tokens": 10, "cost": 0.5 })).await;
         seed_log(&state, &user_id, json!({ "prompt_tokens": 100, "completion_tokens": 10 })).await;
 
-        let json = body_json(get(&state, &cookie, "/api/usage/summary?days=30").await).await;
+        let json = body_json(get(&state, &cookie, &trailing(&state, 30)).await).await;
         assert!((json["totals"]["cost"].as_f64().unwrap() - 2.0).abs() < 1e-9);
         assert_eq!(json["totals"]["cost_known_requests"], 2, "an unpriced row contributes nothing");
     }
 
     #[tokio::test]
-    async fn a_legacy_untagged_snapshot_is_refreshed_from_the_admin_summary() {
+    async fn a_missing_price_table_is_refreshed_from_the_admin_summary() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let mock = MockTransport::new();
         // Both halves of the refresh: the OpenRouter catalog and the LiteLLM table.
@@ -984,7 +821,7 @@ mod tests {
             });
         }
         let state = test_state(pool, mock.clone());
-        let (user_id, cookie) = signed_in(&state, "legacy@example.com").await;
+        let (user_id, cookie) = signed_in(&state, "refresh@example.com").await;
         seed_custom_provider(&state, &user_id, "openrouter").await;
         seed_log(
             &state,
@@ -993,7 +830,7 @@ mod tests {
         )
         .await;
 
-        let json = body_json(get(&state, &cookie, "/api/usage/summary?days=30").await).await;
+        let json = body_json(get(&state, &cookie, &trailing(&state, 30)).await).await;
         let expected = 100.0 * 0.000001 + 10.0 * 0.000002;
         assert!((json["totals"]["cost"].as_f64().unwrap() - expected).abs() < 1e-12);
         assert_eq!(json["totals"]["cost_known_requests"], 1);
@@ -1019,7 +856,7 @@ mod tests {
         .await;
         assert_eq!(json["grain"], "hour");
         assert_eq!(json["totals"]["requests"], 2);
-        assert_eq!(json["totals"]["prompt_tokens"], 300);
+        assert_eq!(model_prompt_tokens(&json), 300);
         assert_eq!(
             json["series"].as_array().unwrap().iter().map(|p| p["bucket"].clone()).collect::<Vec<_>>(),
             vec![json!("2026-08-15T08"), json!("2026-08-15T14")]
@@ -1031,19 +868,17 @@ mod tests {
         .await;
         assert_eq!(json["grain"], "day");
         assert_eq!(json["totals"]["requests"], 3);
-        assert_eq!(json["totals"]["prompt_tokens"], 600);
+        assert_eq!(model_prompt_tokens(&json), 600);
         assert_eq!(
             json["series"].as_array().unwrap().iter().map(|p| p["bucket"].clone()).collect::<Vec<_>>(),
             vec![json!("2026-08-15"), json!("2026-08-16")]
         );
 
-        // An explicit grain wins over the span heuristic; `days` still reads 1 here, which is
-        // why the client must prefer `grain`.
+        // An explicit grain wins over the span heuristic.
         let json = body_json(
             get(&state, &cookie, "/api/usage/summary?from=2026-08-15T00:00:00.000Z&to=2026-08-15T23:59:59.999Z&grain=day").await,
         )
         .await;
-        assert_eq!(json["days"], 1);
         assert_eq!(json["grain"], "day");
         assert_eq!(json["series"].as_array().unwrap().len(), 1);
     }
@@ -1054,6 +889,7 @@ mod tests {
         let state = test_state(pool, offline());
         let (_, cookie) = signed_in(&state, "validate@example.com").await;
         for (uri, expected) in [
+            ("/api/usage/summary", "invalid_from"),
             ("/api/usage/summary?from=invalid-date", "invalid_from"),
             ("/api/usage/summary?from=2026-08-15T00:00:00Z&to=invalid-to", "invalid_to"),
             ("/api/usage/summary?from=2026-08-20T00:00:00Z&to=2026-08-15T00:00:00Z", "invalid_range"),

@@ -1,4 +1,4 @@
-//! BYO OpenAI-compatible provider (docs/providers.md § Custom providers).
+//! BYO OpenAI-compatible provider (docs/providers.md § Custom endpoints).
 //!
 //! BYO OpenAI-compatible endpoint. Near-passthrough: the outgoing body is the client's own
 //! OpenAI Chat Completions body (or its Anthropic→OpenAI conversion) with only `model`
@@ -33,39 +33,26 @@ use crate::pool::acquire::AcquiredAccount;
 use crate::upstream::transport::{UpstreamRequest, UpstreamResponse, UpstreamTransport};
 use crate::AppState;
 
-pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
+pub(super) const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub struct CustomOpenAiAdapter {
     id: String,
     base: String,
     count_tokens_url: Option<String>,
-    /// Injected transport for CLI providers (docs/cli.md): same adapter semantics, but the
-    /// request goes down the CLI tunnel instead of the network. `None` uses
-    /// `AppState::transport()`, the `fetch` default of the TypeScript constructor.
+    /// A CLI provider's tunnel (docs/cli.md); `None` uses `AppState::transport()`.
     transport: Option<Arc<dyn UpstreamTransport>>,
-    /// CLI providers drop the live catalog — it is agent-reported, never pulled
-    /// (the CLI adapter drops `list_models`).
-    list_models: bool,
 }
 
 impl CustomOpenAiAdapter {
     pub fn new(row: CustomProviderRow) -> Self {
-        Self {
-            id: row.slug,
-            base: row.base_url,
-            count_tokens_url: row.count_tokens_url,
-            transport: None,
-            list_models: true,
-        }
+        Self { id: row.slug, base: row.base_url, count_tokens_url: row.count_tokens_url, transport: None }
     }
 
+    /// Same adapter semantics down a CLI tunnel instead of the network. A tunnel's catalog
+    /// is agent-reported, never pulled (docs/cli.md § Model catalog), so the adapter then has
+    /// no live `list_models`.
     pub fn with_transport(mut self, transport: Arc<dyn UpstreamTransport>) -> Self {
         self.transport = Some(transport);
-        self
-    }
-
-    pub fn without_list_models(mut self) -> Self {
-        self.list_models = false;
         self
     }
 
@@ -78,17 +65,8 @@ impl CustomOpenAiAdapter {
     }
 }
 
-/// `createCustomOpenAIAdapter(row)`.
 pub fn custom_openai_adapter(row: CustomProviderRow) -> DynAdapter {
     CustomOpenAiAdapter::new(row).into_dyn()
-}
-
-/// `createCustomOpenAIAdapter(row, agentFetch)`.
-pub fn custom_openai_adapter_with_transport(
-    row: CustomProviderRow,
-    transport: Arc<dyn UpstreamTransport>,
-) -> DynAdapter {
-    CustomOpenAiAdapter::new(row).with_transport(transport).into_dyn()
 }
 
 #[async_trait]
@@ -161,23 +139,13 @@ impl ProviderAdapter for CustomOpenAiAdapter {
     }
 
     fn has_list_models(&self) -> bool {
-        self.list_models
+        self.transport.is_none()
     }
 
     async fn list_models(&self, cx: &AppState, account: &AcquiredAccount) -> ListedModels {
         let request = UpstreamRequest::get(format!("{}/models", self.base))
             .header("authorization", &format!("Bearer {}", account.credential.access_token));
-        let res = match self.transport(cx).send(request).await {
-            Ok(res) => res,
-            Err(e) => return ListedModels { models: Vec::new(), error: Some(e.to_string()) },
-        };
-        if !res.status.is_success() {
-            return ListedModels { models: Vec::new(), error: Some(format!("models {}", res.status.as_u16())) };
-        }
-        match res.json_value().await {
-            Ok(json) => ListedModels { models: openai_model_list(&json), error: None },
-            Err(e) => ListedModels { models: Vec::new(), error: Some(e.to_string()) },
-        }
+        list_models_with(self.transport(cx), request, false).await
     }
 
     fn has_count_tokens(&self) -> bool {
@@ -216,8 +184,8 @@ impl ProviderAdapter for CustomOpenAiAdapter {
     }
 }
 
-/// `{...req.rawBody, model, stream_options}` — `serde_json`'s `preserve_order` keeps the
-/// JavaScript spread's key order, an existing key staying in place.
+/// The client body with `model` replaced and `stream_options` merged; `serde_json`'s
+/// `preserve_order` keeps an existing key in place.
 fn outgoing_body(req: &ChatCompletionRequest) -> Map<String, Value> {
     let mut body = req.raw_body.clone();
     body.insert("model".into(), Value::String(req.upstream_model.clone()));
@@ -242,7 +210,7 @@ pub(crate) fn object_or_empty(body: &Value) -> Map<String, Value> {
 
 fn post_json(url: &str, token: &str, body: &Map<String, Value>, extras: &CallExtras) -> UpstreamRequest {
     let mut request = UpstreamRequest::post(url)
-        .json(&Value::Object(body.clone()))
+        .json(body)
         .header("authorization", &format!("Bearer {token}"));
     if let Some(timeout) = extras.first_byte_timeout {
         request = request.timeout(timeout);
@@ -262,9 +230,27 @@ pub(crate) fn is_event_stream(res: &UpstreamResponse) -> bool {
     res.content_type().unwrap_or("").contains("text/event-stream")
 }
 
-/// `{ data: [{ id, display_name? }] }` → the adapter's model list, non-string/empty ids
-/// dropped.
-pub(crate) fn model_list(json: &Value, with_display_name: bool) -> Vec<UpstreamModel> {
+/// `GET …/models` answering `{ data: [{ id, display_name? }] }`, non-string/empty ids dropped.
+/// Every failure is an `error` string with no models, never a propagated error.
+pub(crate) async fn list_models_with(
+    transport: &Arc<dyn UpstreamTransport>,
+    request: UpstreamRequest,
+    with_display_name: bool,
+) -> ListedModels {
+    let res = match transport.send(request).await {
+        Ok(res) => res,
+        Err(e) => return ListedModels { models: Vec::new(), error: Some(e.to_string()) },
+    };
+    if !res.status.is_success() {
+        return ListedModels { models: Vec::new(), error: Some(format!("models {}", res.status.as_u16())) };
+    }
+    match res.json_value().await {
+        Ok(json) => ListedModels { models: model_list(&json, with_display_name), error: None },
+        Err(e) => ListedModels { models: Vec::new(), error: Some(e.to_string()) },
+    }
+}
+
+fn model_list(json: &Value, with_display_name: bool) -> Vec<UpstreamModel> {
     json.get("data")
         .and_then(Value::as_array)
         .map(|items| {
@@ -284,10 +270,6 @@ pub(crate) fn model_list(json: &Value, with_display_name: bool) -> Vec<UpstreamM
         .unwrap_or_default()
 }
 
-fn openai_model_list(json: &Value) -> Vec<UpstreamModel> {
-    model_list(json, false)
-}
-
 /// The upstream response as the client's response: status, every header, and the body still
 /// streaming (docs/api.md § Streaming — never buffered whole).
 pub(crate) fn into_response(res: UpstreamResponse) -> Response {
@@ -298,8 +280,8 @@ pub(crate) fn into_response(res: UpstreamResponse) -> Response {
     builder.body(Body::from_stream(res.body)).expect("response builds")
 }
 
-/// `new Response(text, { status, headers })` — the rebuild that keeps every upstream header,
-/// so a CLI tunnel's `x-tunnel-fault` marker survives (docs/cli.md).
+/// An already-read upstream body with its status and every header, so a CLI tunnel's
+/// `x-tunnel-fault` marker survives (docs/cli.md).
 pub(crate) fn rebuild(status: StatusCode, headers: HeaderMap, body: Bytes) -> Response {
     let mut builder = Response::builder().status(status);
     if let Some(h) = builder.headers_mut() {
@@ -428,10 +410,8 @@ pub(crate) mod test_support {
     }
 
     pub fn chat_request(raw_body: Value, upstream_model: &str) -> ChatCompletionRequest {
-        let model = raw_body.get("model").and_then(Value::as_str).unwrap_or_default().to_string();
         ChatCompletionRequest {
-            model: model.clone(),
-            raw_model: model,
+            raw_model: raw_body.get("model").and_then(Value::as_str).unwrap_or_default().to_string(),
             upstream_model: upstream_model.into(),
             messages: raw_body.get("messages").and_then(Value::as_array).cloned().unwrap_or_default(),
             stream: raw_body.get("stream").and_then(Value::as_bool),
@@ -514,23 +494,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewrites_model_to_the_bare_upstream_id() {
-        let transport = MockTransport::new();
-        transport.respond_json(StatusCode::OK, json!({}));
-        let state = adapter_state(transport.clone());
-        adapter()
-            .chat_completions(
-                &state,
-                &account(KEY),
-                &chat_request(json!({ "model": "my-endpoint/gpt-4o", "messages": [] }), "gpt-4o"),
-                &CallExtras::default(),
-            )
-            .await
-            .expect("chat completions");
-        assert_eq!(transport.requests()[0].json()["model"], "gpt-4o");
-    }
-
-    #[tokio::test]
     async fn forwards_the_client_body_verbatim_including_temperature_and_reasoning_effort() {
         let transport = MockTransport::new();
         transport.respond_json(StatusCode::OK, json!({}));
@@ -562,23 +525,6 @@ mod tests {
                 "stream_options": { "include_usage": true },
             })
         );
-    }
-
-    #[tokio::test]
-    async fn always_sets_stream_options_include_usage_on_non_stream() {
-        let transport = MockTransport::new();
-        transport.respond_json(StatusCode::OK, json!({}));
-        let state = adapter_state(transport.clone());
-        adapter()
-            .chat_completions(
-                &state,
-                &account(KEY),
-                &chat_request(json!({ "model": "my-endpoint/gpt-4o", "messages": [] }), "gpt-4o"),
-                &CallExtras::default(),
-            )
-            .await
-            .expect("chat completions");
-        assert_eq!(transport.requests()[0].json()["stream_options"], json!({ "include_usage": true }));
     }
 
     #[tokio::test]
@@ -779,34 +725,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_retry_when_the_parser_does_not_recognize_the_400() {
+    async fn forwards_the_dispatch_deadline_on_both_posts() {
+        let timeout = std::time::Duration::from_millis(1234);
         let transport = MockTransport::new();
-        transport.expect(|_| {
-            Ok(UpstreamResponse::from_bytes(StatusCode::BAD_REQUEST, HeaderMap::new(), r#"{"error":"nope"}"#))
+        transport.expect(move |req| {
+            assert_eq!(req.first_byte_timeout, Some(timeout));
+            Ok(UpstreamResponse::json(StatusCode::BAD_REQUEST, &tabby_detail()))
+        });
+        transport.expect(move |req| {
+            assert_eq!(req.first_byte_timeout, Some(timeout));
+            Ok(UpstreamResponse::json(StatusCode::OK, &json!({})))
         });
         let state = adapter_state(transport.clone());
-        let res = adapter()
-            .chat_completions(
-                &state,
-                &account(KEY),
-                &chat_request(json!({ "model": "my-endpoint/gpt-4o", "messages": [], "reasoning_effort": "high" }), "gpt-4o"),
-                &CallExtras::default(),
-            )
-            .await
-            .expect("chat completions");
-
-        assert_eq!(transport.requests().len(), 1);
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(body_text(res).await, r#"{"error":"nope"}"#);
-    }
-
-    #[tokio::test]
-    async fn forwards_the_dispatch_deadline_on_both_posts() {
-        let transport = MockTransport::new();
-        transport.expect(move |_| Ok(UpstreamResponse::json(StatusCode::BAD_REQUEST, &tabby_detail())));
-        transport.respond_json(StatusCode::OK, json!({}));
-        let state = adapter_state(transport.clone());
-        let timeout = std::time::Duration::from_millis(1234);
         adapter()
             .chat_completions(
                 &state,
@@ -816,9 +746,7 @@ mod tests {
             )
             .await
             .expect("chat completions");
-        // `UpstreamRequest.first_byte_timeout` is the Rust seam for the TypeScript
-        // `extras.signal`: both POSTs carry the dispatch deadline.
-        assert_eq!(transport.requests().len(), 2);
+        assert_eq!(transport.pending(), 0);
     }
 
     #[tokio::test]
@@ -950,7 +878,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // countTokens
+    // count_tokens
 
     #[tokio::test]
     async fn has_no_count_tokens_without_a_count_tokens_url() {

@@ -1,5 +1,5 @@
-//! the OpenAI-shaped surface (docs/api.md § OpenAI
-//! surface): `POST /openai/v1/chat/completions`, `POST /openai/v1/responses`,
+//! The OpenAI-shaped surface (docs/api.md § OpenAI surface): `POST /openai/v1/chat/completions`,
+//! `POST /openai/v1/responses`,
 //! `POST /openai/v1/audio/transcriptions` and `GET /openai/v1/models`.
 //!
 //! The POST handlers are shared with the group mounts (`/g/{slug}/openai/v1/…`): resolution
@@ -30,7 +30,7 @@ use crate::utils::reasoning::parse_reasoning_effort;
 use crate::AppState;
 
 use super::anthropic::is_native_anthropic_passthrough;
-use super::resolve_request::{resolve_request_model, RequestModelResolution};
+use super::resolve_request::{resolve_request_model, ResolutionFailure};
 use super::responses::handle_responses;
 
 pub fn routes() -> Router<AppState> {
@@ -42,16 +42,35 @@ pub fn routes() -> Router<AppState> {
 }
 
 // ---------------------------------------------------------------------------------------
-// Shared helpers for the OpenAI-shaped surface (also used by responses.rs)
+// Shared helpers for the OpenAI-shaped surface (also used by responses.rs and anthropic.rs)
 // ---------------------------------------------------------------------------------------
 
-/// `c.executionCtx.waitUntil(logRequest(...))`: the row outlives the response.
+/// Writes the `request_logs` row off the response path; the row outlives the response.
 pub(crate) fn spawn_log(cx: &AppState, entry: LogEntry) {
     let cx = cx.clone();
     tokio::spawn(async move { log_request(&cx, entry).await });
 }
 
-/// `String(body.model ?? "")`.
+/// The OpenAI-shaped 400 for a body that is not a JSON object.
+pub(crate) fn invalid_json() -> Response {
+    ApiError::openai(StatusCode::BAD_REQUEST, "Invalid JSON", "invalid_request_error", "invalid_request").into_response()
+}
+
+/// The row for a request the route refused before any upstream attempt: no account, no
+/// tokens, no cost. The caller fills in what it had resolved by then.
+pub(crate) fn refusal(id: &ApiKeyIdentity, started: i64, status_code: i32, error_code: &str) -> LogEntry {
+    LogEntry {
+        user_id: id.user_id.clone(),
+        api_key_id: Some(id.api_key_id.clone()),
+        status_code,
+        latency_ms: now_ms() - started,
+        error_code: Some(error_code.to_string()),
+        ..Default::default()
+    }
+}
+
+/// The body's `model` as a string: absent or `null` is empty, any other non-string is its JSON
+/// text.
 pub(crate) fn model_string(body: &Map<String, Value>) -> String {
     match body.get("model") {
         Some(Value::String(s)) => s.clone(),
@@ -60,7 +79,7 @@ pub(crate) fn model_string(body: &Map<String, Value>) -> String {
     }
 }
 
-/// `model.slice(0, 200)` — `request_logs.model` is a display column, never a key.
+/// The first 200 characters — `request_logs.model` is a display column, never a key.
 pub(crate) fn log_model(model_raw: &str) -> String {
     model_raw.chars().take(200).collect()
 }
@@ -71,51 +90,48 @@ pub(crate) fn no_retry(error: ApiError) -> Response {
     error.should_retry(false).into_response()
 }
 
-/// The OpenAI-surface answer for a non-`ok` resolution, logged with the outcome's own status
-/// and error code. Shared by chat completions, responses and audio transcriptions; `example`
-/// is the shared base's `provider/model` hint for the `invalid_model` message.
-pub(crate) fn openai_resolution_failure(
+/// The OpenAI-surface answer for a failed resolution, logged with the failure's own status and
+/// error code. Shared by chat completions and audio transcriptions; `shared_base_example` is
+/// the shared base's `provider/model` hint for the `invalid_model` message.
+fn openai_resolution_failure(
     cx: &AppState,
     id: &ApiKeyIdentity,
-    outcome: &RequestModelResolution,
+    failure: ResolutionFailure,
     model_raw: &str,
     started: i64,
     shared_base_example: &str,
 ) -> Response {
-    let group_not_found = matches!(outcome, RequestModelResolution::GroupNotFound { .. });
+    let (status, code) = match failure {
+        ResolutionFailure::GroupNotFound { .. } => (404, "group_not_found"),
+        ResolutionFailure::InvalidModel { .. } => (400, "invalid_model"),
+    };
     spawn_log(
         cx,
         LogEntry {
-            user_id: id.user_id.clone(),
-            api_key_id: Some(id.api_key_id.clone()),
             provider: logging_provider_from_raw_model(model_raw),
             model: log_model(model_raw),
-            status_code: if group_not_found { 404 } else { 400 },
-            latency_ms: now_ms() - started,
-            error_code: Some(if group_not_found { "group_not_found".into() } else { "invalid_model".into() }),
-            ..Default::default()
+            ..refusal(id, started, status, code)
         },
     );
-    match outcome {
-        RequestModelResolution::GroupNotFound { slug } => no_retry(ApiError::openai(
+    match failure {
+        ResolutionFailure::GroupNotFound { slug } => no_retry(ApiError::openai(
             StatusCode::NOT_FOUND,
             &format!("unknown group endpoint \"{slug}\""),
             "invalid_request_error",
             "not_found",
         )),
-        RequestModelResolution::InvalidModel { group_slug } => no_retry(ApiError::openai(
+        ResolutionFailure::InvalidModel { group_slug } => no_retry(ApiError::openai(
             StatusCode::BAD_REQUEST,
             &invalid_model_message(group_slug.as_deref(), shared_base_example),
             "invalid_request_error",
             "invalid_model",
         )),
-        RequestModelResolution::Ok(_) => unreachable!("resolution succeeded"),
     }
 }
 
 /// The shared bases' `invalid_model` hints, per endpoint.
 pub(crate) const CHAT_MODEL_EXAMPLE: &str = "model must be provider/model (e.g. claude-code/claude-opus-5)";
-pub(crate) const AUDIO_MODEL_EXAMPLE: &str =
+const AUDIO_MODEL_EXAMPLE: &str =
     "model must be provider/model (e.g. openrouter/openai/whisper-large-v3-turbo)";
 
 pub(crate) fn invalid_model_message(group_slug: Option<&str>, shared_base: &str) -> String {
@@ -133,7 +149,8 @@ pub(crate) fn affinity_from(headers: &HeaderMap) -> AffinityIds {
     AffinityIds { conv_id: read("x-grok-conv-id"), session_id: read("x-grok-session-id"), turn_idx: read("x-grok-turn-idx") }
 }
 
-fn number_as_u64(value: Option<&Value>) -> Option<u64> {
+/// A finite, non-negative JSON number as a whole count (fractions truncate).
+pub(crate) fn number_as_u64(value: Option<&Value>) -> Option<u64> {
     let n = value?.as_f64()?;
     if n.is_finite() && n >= 0.0 {
         Some(n as u64)
@@ -149,7 +166,7 @@ fn number_as_u64(value: Option<&Value>) -> Option<u64> {
 async fn models(State(state): State<AppState>, Extension(id): Extension<ApiKeyIdentity>) -> Response {
     // Live upstream models for providers the key owner has accounts for; never fabricated —
     // a provider with nothing usable simply contributes nothing (docs/api.md § GET /models).
-    let listed = list_models_for_user(&state, &id.user_id, ListModelsOptions { available_only: true, force: false }).await;
+    let listed = list_models_for_user(&state, &id.user_id, ListModelsOptions::default()).await;
     let data: Vec<Value> = listed
         .models
         .iter()
@@ -189,14 +206,11 @@ pub async fn handle_chat_completions(
     raw_body: Bytes,
 ) -> Response {
     let started = now_ms();
-    let Ok(body) = read_proxy_json(&raw_body) else {
-        return ApiError::openai(StatusCode::BAD_REQUEST, "Invalid JSON", "invalid_request_error", "invalid_request")
-            .into_response();
-    };
+    let Some(body) = read_proxy_json(&raw_body) else { return invalid_json() };
     let model_raw = model_string(&body);
     let resolved = match resolve_request_model(cx, &id.user_id, slug, &model_raw).await {
-        Ok(RequestModelResolution::Ok(resolution)) => resolution,
-        Ok(other) => return openai_resolution_failure(cx, id, &other, &model_raw, started, CHAT_MODEL_EXAMPLE),
+        Ok(Ok(resolution)) => resolution,
+        Ok(Err(failure)) => return openai_resolution_failure(cx, id, failure, &model_raw, started, CHAT_MODEL_EXAMPLE),
         Err(err) => return ApiError::from(err).into_response(),
     };
 
@@ -223,15 +237,10 @@ pub async fn handle_chat_completions(
             spawn_log(
                 cx,
                 LogEntry {
-                    user_id: id.user_id.clone(),
-                    api_key_id: Some(id.api_key_id.clone()),
                     provider: resolved.primary.provider.clone(),
                     model: target_model.clone(),
-                    status_code: 400,
-                    latency_ms: now_ms() - started,
-                    error_code: Some("loop_detected".into()),
                     group_name: resolved.group_name.clone(),
-                    ..Default::default()
+                    ..refusal(id, started, 400, "loop_detected")
                 },
             );
             return no_retry(ApiError::openai(
@@ -268,15 +277,10 @@ pub async fn handle_chat_completions(
             spawn_log(
                 cx,
                 LogEntry {
-                    user_id: id.user_id.clone(),
-                    api_key_id: Some(id.api_key_id.clone()),
                     provider: resolved.primary.provider.clone(),
                     model: target_model.clone(),
-                    status_code: 400,
-                    latency_ms: now_ms() - started,
-                    error_code: Some(code.into()),
                     group_name: resolved.group_name.clone(),
-                    ..Default::default()
+                    ..refusal(id, started, 400, code)
                 },
             );
             return no_retry(ApiError::openai(StatusCode::BAD_REQUEST, &message, "invalid_request_error", code));
@@ -295,7 +299,6 @@ pub async fn handle_chat_completions(
     let max_tokens = number_as_u64(body.get("max_tokens")).or_else(|| number_as_u64(body.get("max_completion_tokens")));
 
     let req = ChatCompletionRequest {
-        model: model_raw.clone(),
         raw_model: model_raw,
         upstream_model: resolved.primary.upstream_model.clone(),
         messages,
@@ -322,13 +325,9 @@ pub async fn handle_chat_completions(
             user_id: id.user_id.clone(),
             api_key_id: Some(id.api_key_id.clone()),
             provider: resolved.primary.provider.clone(),
-            adapter: Some(resolved.primary.adapter.clone()),
             req,
             group_name: resolved.group_name.clone(),
-            candidates: Some(resolved.candidates.clone()),
-            strategy: Some(resolved.strategy.clone()),
-            is_builtin: Some(resolved.primary.is_builtin),
-            custom_provider: resolved.primary.custom_provider.clone(),
+            candidates: resolved.candidates,
             // OpenRouter-style `usage.cost` (docs/api.md § Cost in usage) — this route only.
             attach_cost: true,
             ..Default::default()
@@ -356,7 +355,13 @@ pub async fn handle_audio_transcriptions(
     multipart: Result<Multipart, axum::extract::multipart::MultipartRejection>,
 ) -> Response {
     let started = now_ms();
-    let Ok(multipart) = multipart else {
+    // A body that is not multipart, or does not parse as one, is `invalid_request`; a parsed
+    // form without its `file` part is reported below with its own message.
+    let parts = match multipart {
+        Ok(multipart) => read_audio_form_parts(multipart).await,
+        Err(_) => Err(()),
+    };
+    let Ok((fields, file)) = parts else {
         return ApiError::openai(
             StatusCode::BAD_REQUEST,
             "Invalid multipart/form-data request",
@@ -365,37 +370,10 @@ pub async fn handle_audio_transcriptions(
         )
         .into_response();
     };
-    // `file` is the only required part the reader can fail on; a missing one is reported below
-    // with the TypeScript's own message, so the parse failure and the missing part stay apart.
-    let mut fields: Vec<(String, String)> = Vec::new();
-    let form = match read_audio_form_parts(multipart, &mut fields).await {
-        Ok(form) => form,
-        Err(()) => {
-            return ApiError::openai(
-                StatusCode::BAD_REQUEST,
-                "Invalid multipart/form-data request",
-                "invalid_request_error",
-                "invalid_request",
-            )
-            .into_response()
-        }
-    };
 
     let model_raw = fields.iter().find(|(k, _)| k == "model").map(|(_, v)| v.trim().to_string()).unwrap_or_default();
     if model_raw.is_empty() {
-        spawn_log(
-            cx,
-            LogEntry {
-                user_id: id.user_id.clone(),
-                api_key_id: Some(id.api_key_id.clone()),
-                provider: "unknown".into(),
-                model: String::new(),
-                status_code: 400,
-                latency_ms: now_ms() - started,
-                error_code: Some("invalid_model".into()),
-                ..Default::default()
-            },
-        );
+        spawn_log(cx, LogEntry { provider: "unknown".into(), ..refusal(id, started, 400, "invalid_model") });
         return no_retry(ApiError::openai(
             StatusCode::BAD_REQUEST,
             "Missing required parameter: 'model'",
@@ -404,18 +382,13 @@ pub async fn handle_audio_transcriptions(
         ));
     }
 
-    let Some(form) = form else {
+    let Some((file_name, file_content_type, file)) = file else {
         spawn_log(
             cx,
             LogEntry {
-                user_id: id.user_id.clone(),
-                api_key_id: Some(id.api_key_id.clone()),
                 provider: logging_provider_from_raw_model(&model_raw),
                 model: log_model(&model_raw),
-                status_code: 400,
-                latency_ms: now_ms() - started,
-                error_code: Some("invalid_request".into()),
-                ..Default::default()
+                ..refusal(id, started, 400, "invalid_request")
             },
         );
         return no_retry(ApiError::openai(
@@ -427,9 +400,9 @@ pub async fn handle_audio_transcriptions(
     };
 
     let resolved = match resolve_request_model(cx, &id.user_id, slug, &model_raw).await {
-        Ok(RequestModelResolution::Ok(resolution)) => resolution,
+        Ok(Ok(resolution)) => resolution,
         // Same envelopes as chat completions, with this endpoint's own `provider/model` example.
-        Ok(other) => return openai_resolution_failure(cx, id, &other, &model_raw, started, AUDIO_MODEL_EXAMPLE),
+        Ok(Err(failure)) => return openai_resolution_failure(cx, id, failure, &model_raw, started, AUDIO_MODEL_EXAMPLE),
         Err(err) => return ApiError::from(err).into_response(),
     };
 
@@ -437,15 +410,10 @@ pub async fn handle_audio_transcriptions(
         spawn_log(
             cx,
             LogEntry {
-                user_id: id.user_id.clone(),
-                api_key_id: Some(id.api_key_id.clone()),
                 provider: resolved.primary.provider.clone(),
                 model: canonical_model_id(&resolved.primary.provider, &resolved.primary.upstream_model),
-                status_code: 400,
-                latency_ms: now_ms() - started,
-                error_code: Some("unsupported_modality".into()),
                 group_name: resolved.group_name.clone(),
-                ..Default::default()
+                ..refusal(id, started, 400, "unsupported_modality")
             },
         );
         return no_retry(ApiError::openai(
@@ -465,28 +433,25 @@ pub async fn handle_audio_transcriptions(
             user_id: id.user_id.clone(),
             api_key_id: Some(id.api_key_id.clone()),
             provider: resolved.primary.provider.clone(),
-            adapter: Some(resolved.primary.adapter.clone()),
-            form,
+            form: AudioForm { fields, file_name, file_content_type, file },
             raw_model: model_raw,
             upstream_model: resolved.primary.upstream_model.clone(),
             group_name: resolved.group_name.clone(),
-            candidates: Some(resolved.candidates.clone()),
-            strategy: Some(resolved.strategy.clone()),
-            is_builtin: Some(resolved.primary.is_builtin),
-            custom_provider: resolved.primary.custom_provider.clone(),
+            candidates: resolved.candidates,
             ..Default::default()
         },
     )
     .await
 }
 
-/// Drains the multipart body, collecting text fields into `fields` and returning the `file`
-/// part when the client sent one. `Err(())` is a malformed body.
-async fn read_audio_form_parts(
-    mut multipart: Multipart,
-    fields: &mut Vec<(String, String)>,
-) -> Result<Option<AudioForm>, ()> {
-    let mut file: Option<(String, String, Bytes)> = None;
+/// A drained audio form part: the `file` part's name, content type and bytes.
+type AudioFile = (String, String, Bytes);
+
+/// Drains the multipart body into its text fields and, when the client sent one, the `file`
+/// part. `Err(())` is a malformed body.
+async fn read_audio_form_parts(mut multipart: Multipart) -> Result<(Vec<(String, String)>, Option<AudioFile>), ()> {
+    let mut fields: Vec<(String, String)> = Vec::new();
+    let mut file: Option<AudioFile> = None;
     loop {
         let field = match multipart.next_field().await {
             Ok(Some(field)) => field,
@@ -504,12 +469,7 @@ async fn read_audio_form_parts(
             fields.push((name, value));
         }
     }
-    Ok(file.map(|(file_name, file_content_type, bytes)| AudioForm {
-        fields: fields.clone(),
-        file_name,
-        file_content_type,
-        file: bytes,
-    }))
+    Ok((fields, file))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -545,22 +505,21 @@ pub(crate) async fn group_audio_transcriptions(
     handle_audio_transcriptions(&state, &id, Some(&slug), multipart).await
 }
 
-/// Permissive CORS for the LLM surfaces (`application.ts`: `app.use("/openai/*", cors())`).
-/// Never credentialed — these clients authenticate with a project API key, never the session
-/// cookie, so a wildcard origin can never expose an admin response.
-pub fn llm_cors() -> tower_http::cors::CorsLayer {
+/// Permissive CORS for the LLM surfaces. Never credentialed — these clients authenticate with a
+/// project API key, never the session cookie, so a wildcard origin can never expose an admin
+/// response.
+fn llm_cors() -> tower_http::cors::CorsLayer {
     tower_http::cors::CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
 }
 
-/// The whole LLM surface: the two shared bases and the group mounts, behind the API-key
-/// middleware (which also runs the edition's request policy) and permissive CORS — the order
-/// `application.ts` composes.
 /// Largest request body the LLM surfaces buffer (docs/api.md § Errors, "Request body limit").
 pub const LLM_REQUEST_BODY_LIMIT: usize = 512 * 1024 * 1024;
 
+/// The whole LLM surface: the two shared bases and the group mounts, behind the API-key
+/// middleware (which also runs the edition's request policy) and permissive CORS.
 pub fn llm_routes(state: &AppState) -> Router<AppState> {
     Router::new()
         .nest("/openai/v1", routes())
@@ -1191,8 +1150,7 @@ mod tests {
     }
 
     /// Records the calls it saw and answers 429 without running the route, so the test can
-    /// prove the middleware order the TypeScript relied on: authenticate, then policy, then
-    /// handler.
+    /// prove the middleware order: authenticate, then policy, then handler.
     struct RecordingPolicy {
         seen: std::sync::Mutex<Vec<(String, Option<crate::extensions::ApiKeyIdentity>)>>,
     }
@@ -1275,7 +1233,7 @@ mod tests {
     // usage.cost (docs/api.md § Cost in usage, docs/pricing.md § Cost in the response)
     // ---------------------------------------------------------------------------------------
 
-    use crate::pricing::litellm::{compute_cost, CostUsage, ModelPrice, PriceSource, PriceTable, CACHE_KEY};
+    use crate::pricing::litellm::{compute_cost, CostUsage, ModelPrice, PriceTable, CACHE_KEY};
 
     fn local_model_price() -> ModelPrice {
         ModelPrice {
@@ -1283,7 +1241,7 @@ mod tests {
             output: 0.000_015,
             cache_read: Some(0.000_000_3),
             cache_creation: Some(0.000_003_75),
-            source: Some(PriceSource::Litellm),
+            source: None,
         }
     }
 

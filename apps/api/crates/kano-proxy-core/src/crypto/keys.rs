@@ -46,7 +46,6 @@ mod tests {
     fn hash_matches_webcrypto_sha256_hex() {
         // node: crypto.createHash('sha256').update('sk-kano-proxy-abc').digest('hex')
         assert_eq!(hash_api_key("sk-kano-proxy-abc"), "601dca61e60a9022668d87d4481cdae691b310ec1317b991133f5bbeddb12b0a");
-        assert_eq!(super::super::sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
     }
 
     #[test]

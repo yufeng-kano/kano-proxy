@@ -11,13 +11,13 @@ cp .env.example .env     # fill it in — see Configuration
 docker compose up -d --build
 ```
 
-Point `DOMAIN`'s DNS at the machine and open port 80 and 443 to it. Caddy gets a certificate on first request. The server applies its migrations at start, so an empty database is ready by the time it listens.
+Point `DOMAIN`'s DNS at the machine and open port 80 and 443 to it. Caddy obtains the certificate itself once the name resolves to the machine. The server applies its migrations at start, so an empty database is ready by the time it listens.
 
-If you already run a reverse proxy, delete the `caddy` service and send `/api/*`, `/openai/*`, `/anthropic/*`, `/g/*`, `/cli/v1/*`, `/agent/*` and `/health` to the server on `:8787` and everything else to the web app on `:80` (`/agent/*` only answers the CLI-upgrade `410` and can be dropped with the next major release — [cli.md](./cli.md) § Server routes; `/cli/authorize` is a page of the web app and must stay with it, which the `/cli/v1/` prefix leaves alone). Do not buffer responses and allow long idle gaps: model streams and the CLI tunnel are long-lived connections.
+If you already run a reverse proxy, delete the `caddy` service and send `/api/*`, `/openai/*`, `/anthropic/*`, `/g/*`, `/cli/v1/*` and `/health` to the server on `:8787` and everything else to the web app on `:80` (`/cli/authorize` is a page of the web app and must stay with it, which the `/cli/v1/` prefix leaves alone). Do not buffer responses and allow long idle gaps: model streams and the CLI tunnel are long-lived connections.
 
 ## Domains
 
-One hostname serves both the UI and the API; that is the arrangement the app assumes. Public LLM bases and the admin "copy base URL" button use the request origin, so no domain is hard-coded anywhere in the source.
+One hostname serves both the UI and the API; that is the arrangement the app assumes. Public LLM bases and the admin "copy base URL" button use the page's origin, so neither the server nor the web app hard-codes a domain.
 
 ```text
 APP_URL=https://<your-domain>
@@ -37,7 +37,7 @@ cp -R .local.example .local
 
 ## Configuration
 
-Everything is environment variables, read once at start. `.env.example` is the complete list; these are the ones you must set.
+Everything is environment variables, read once at start. `.env.example` lists every variable a compose deployment sets. The rest are not yours to set there: compose builds `DATABASE_URL` from the `POSTGRES_*` values, the API image sets `LISTEN_ADDR`, and `WEB_DIST_DIR` only matters for a single-process run (§ Local development). These are the ones you must set:
 
 | Variable | Meaning |
 |---|---|
@@ -49,7 +49,7 @@ Everything is environment variables, read once at start. `.env.example` is the c
 | `TOKEN_ENCRYPTION_KEY` | Encrypts stored upstream credentials. **Changing it makes every bound account permanently unreadable** |
 | `CLI_TOKEN_SECRET` | Signs CLI access tokens ([cli.md](./cli.md)) |
 
-Optional: provider OAuth client ids (unset uses the pinned defaults), `GITHUB_REPO` and `GITHUB_TOKEN` for the in-app changelog, `REQUEST_LOG_RETENTION_DAYS`, `UPSTREAM_FIRST_BYTE_TIMEOUT_MS`, `RUST_LOG`.
+Optional: provider OAuth client ids (unset uses the pinned defaults), the Antigravity client version pins `ANTIGRAVITY_CLIENT_VERSION`, `ANTIGRAVITY_CLIENT_BUILD` and `ANTIGRAVITY_HUB_VERSION` ([providers.md](./providers.md) § Antigravity), `GITHUB_REPO` and `GITHUB_TOKEN` for the in-app changelog ([changelog.md](./changelog.md)), `REQUEST_LOG_RETENTION_DAYS`, `UPSTREAM_FIRST_BYTE_TIMEOUT_MS`, `RUST_LOG`.
 
 Generate the three secrets once and keep them somewhere you will not lose them:
 
@@ -60,9 +60,7 @@ openssl rand -base64 32  # TOKEN_ENCRYPTION_KEY
 
 ## Database and migrations
 
-The server applies the migrations in `apps/api/crates/kano-proxy-core/migrations/` in order at start and records what it applied in `core_migrations`. Restarting the same build applies nothing. Applied migrations are immutable: a schema change is a new file, never an edit to an old one ([database.md](./database.md)).
-
-An edition built on this core keeps its own migration table and applies after the core.
+The server applies its migrations at start, so an update needs no separate migration step ([database.md](./database.md) § Migrations).
 
 The database lives in `./data/postgres` and the certificates in `./data/caddy`, both gitignored. Back those up; everything else is rebuildable from the repository.
 
@@ -73,7 +71,7 @@ The database lives in `./data/postgres` and the certificates in `./data/caddy`, 
 cd apps/api
 DATABASE_URL=postgres://… GOOGLE_CLIENT_ID=… cargo run -p kano-proxy-api
 
-# the web app, in another terminal — it proxies /api to 127.0.0.1:8787
+# the web app, in another terminal — it calls the API on 127.0.0.1:8787 (apps/web/.env.development)
 cd apps/web && pnpm install && pnpm dev
 
 # the documentation site
@@ -86,14 +84,7 @@ The server serves the built SPA itself when `WEB_DIST_DIR` points at it, which i
 
 ## Verify before deploying
 
-```sh
-cd apps/api && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
-cd apps/web    && pnpm test && pnpm typecheck && pnpm build
-cd apps/docs   && pnpm build
-cd apps/cli    && cargo test
-```
-
-Database-backed tests need `KANO_TEST_DATABASE_URL` pointing at a throwaway PostgreSQL and skip themselves without it. No test sends real upstream traffic ([testing.md](./testing.md)).
+Run the full check in [testing.md](./testing.md) § Commands, with the throwaway test database that section describes; no test sends real upstream traffic.
 
 ## Updating
 
@@ -114,7 +105,7 @@ Release notes are hand-written and passed inline with `--notes`; never publish w
 
 ### CLI release (`cli-vX.Y.Z`, workflow `cli-release.yml`)
 
-The `kano-proxy` CLI ([cli.md](./cli.md) § Distribution) ships to end users' machines and has nothing to do with which server build is live, so it carries **its own SemVer line** — reset to `1.0.0` when it was decoupled from the product's 4.x — and its own tag prefix. Wire compatibility is the protocol's `proto` number, never a version comparison, so the two lines drift freely.
+The `kano-proxy` CLI ([cli.md](./cli.md) § Distribution) ships to end users' machines and has nothing to do with which server build is live, so it carries **its own SemVer line** and its own tag prefix. Wire compatibility is the protocol's `proto` number, never a version comparison, so the two lines drift freely.
 
 | Policy | Rule |
 |--------|------|

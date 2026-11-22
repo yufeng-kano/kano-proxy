@@ -12,9 +12,8 @@ import { useRoute } from "vue-router"
 import { useAuth } from "@/composables/useAuth"
 import SignInLayout from "@/components/SignInLayout.vue"
 import Banner from "@/components/ui/Banner.vue"
-import { useI18n } from "@/i18n"
-import type { MessageKey } from "@/i18n"
-import { PROVIDERS, type ProviderId } from "@/types"
+import { PROVIDER_BLURB_KEY, PROVIDER_NAME_KEY, useI18n } from "@/i18n"
+import { PROVIDERS } from "@/types"
 
 const { t } = useI18n()
 const { goLogin, error } = useAuth()
@@ -25,26 +24,6 @@ function signIn() {
   const redirect = typeof route.query.redirect === "string" ? route.query.redirect : null
   goLogin(redirect)
 }
-
-/**
- * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
- * ids. An explicit map rather than a template literal: `` `provider.${id}.name` ``
- * widens to `string` and would not typecheck against `MessageKey`, so a
- * renamed key has to fail the build here.
- */
-const NAME_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.name",
-  codex: "provider.codex.name",
-  grok: "provider.grok.name",
-  antigravity: "provider.antigravity.name",
-}
-
-const BLURB_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.blurb",
-  codex: "provider.codex.blurb",
-  grok: "provider.grok.blurb",
-  antigravity: "provider.antigravity.blurb",
-}
 </script>
 
 <template>
@@ -52,8 +31,8 @@ const BLURB_KEY: Record<ProviderId, MessageKey> = {
     <template #brand>
       <ul class="login-providers">
         <li v-for="p in PROVIDERS" :key="p.id">
-          <span class="login-provider-name">{{ t(NAME_KEY[p.id]) }}</span>
-          <span class="login-provider-blurb">{{ t(BLURB_KEY[p.id]) }}</span>
+          <span class="login-provider-name">{{ t(PROVIDER_NAME_KEY[p.id]) }}</span>
+          <span class="login-provider-blurb">{{ t(PROVIDER_BLURB_KEY[p.id]) }}</span>
         </li>
       </ul>
     </template>

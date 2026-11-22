@@ -1,7 +1,6 @@
 import { computed, reactive, ref } from "vue"
 import { getChangelog } from "@/services/api"
 import {
-  CHANGELOG_CACHE_TTL_MS,
   isChangelogCacheFresh,
   readChangelogCache,
   writeChangelogCache,
@@ -13,7 +12,6 @@ type ChangelogState = {
   loading: boolean
   refreshing: boolean
   error: string | null
-  fromCache: boolean
 }
 
 function emptyState(): ChangelogState {
@@ -22,20 +20,19 @@ function emptyState(): ChangelogState {
     loading: false,
     refreshing: false,
     error: null,
-    fromCache: false,
   }
 }
 
 // Module-level singleton, same pattern as useUsage.ts / useCustomProviders.ts:
-// the topbar badge and the Changelog page read the same state, so opening the
-// page from the badge repaints what is already loaded.
+// the version badge in AppShell and the Changelog page read the same state, so
+// opening the page from the badge repaints what is already loaded.
 const state = reactive<ChangelogState>(emptyState())
 
 /**
  * The one request currently on the wire, shared by every caller.
  *
  * Unlike the other composables this one has two mounted consumers at once:
- * the topbar badge lives in App.vue on every signed-in page, and the page
+ * the version badge lives in AppShell on every signed-in page, and the page
  * loads too. Without this they would fire two identical requests on the same
  * tick — a wasted round trip against a 60/hr upstream budget.
  */
@@ -47,7 +44,6 @@ async function fetchInto(force: boolean): Promise<void> {
   try {
     const data = await getChangelog({ refresh: force })
     state.data = data
-    state.fromCache = false
     writeChangelogCache(data)
   } catch (e) {
     state.error = e instanceof Error ? e.message : "Failed to load changelog"
@@ -82,7 +78,6 @@ export function useChangelog() {
     const cached = readChangelogCache()
     if (cached) {
       state.data = cached
-      state.fromCache = true
       state.loading = false
     } else if (!state.data) {
       state.loading = true
@@ -97,7 +92,7 @@ export function useChangelog() {
 
     // Within TTL: keep cache, skip network unless forced. An hour here, not
     // the 2 min the other domains use — release notes change on deploy.
-    if (!force && isChangelogCacheFresh(CHANGELOG_CACHE_TTL_MS)) {
+    if (!force && isChangelogCacheFresh()) {
       state.loading = false
       state.refreshing = false
       return
@@ -126,17 +121,14 @@ export function useChangelog() {
   const loading = computed(() => state.loading)
   const refreshing = computed(() => state.refreshing)
   const error = computed(() => state.error)
-  const fromCache = computed(() => state.fromCache)
 
   return {
     data,
     loading,
     refreshing,
     error,
-    fromCache,
     setUserId,
     load,
     refresh,
-    CHANGELOG_CACHE_TTL_MS,
   }
 }

@@ -2,7 +2,6 @@
 //! shared with `cli_providers` (docs/cli.md § Data model), so the cross-table guard and the
 //! per-user cap ride inside the INSERT rather than a check-then-insert pair.
 
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::ids::{new_id, now_iso};
@@ -10,7 +9,7 @@ use crate::ids::{new_id, now_iso};
 /// Combined cap across custom and CLI providers.
 pub const MAX_CUSTOM_PROVIDERS_PER_USER: i64 = 20;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct CustomProviderRow {
     pub id: String,
     pub user_id: String,
@@ -147,7 +146,7 @@ pub async fn insert_custom_provider(
     }))
 }
 
-/// Renumbers a user's whole custom-provider list in one transaction (the D1 batch).
+/// Renumbers a user's whole custom-provider list in one transaction.
 pub async fn reorder_custom_providers(db: &PgPool, user_id: &str, ordered_ids: &[String]) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     for (sort_order, id) in ordered_ids.iter().enumerate() {
@@ -229,7 +228,7 @@ pub enum SlugRename {
 
 /// Renames a custom provider's model prefix and everything keyed by it in one transaction:
 /// `upstream_accounts.provider`, `provider_settings.provider` (an orphaned row already under the
-/// new slug is dropped first, as `0013` did) and every `<old>/<model>` target in the user's model
+/// new slug is dropped first) and every `<old>/<model>` target in the user's model
 /// groups, pins kept. `request_logs.provider` is history and stays. The cross-table uniqueness
 /// guard rides in the UPDATE and the `(user_id, slug)` unique index backs it under a race, so a
 /// concurrent create for the same slug surfaces as `Taken`, never as a half-applied rename
@@ -425,7 +424,7 @@ mod tests {
         )
         .bind(&user.id)
         .bind(&group.id)
-        .bind(r#"["mine/gpt-4o",{"model":"mine/gpt-4o","account_id":"acc_x"},"grok/grok-4","minex/other"]"#)
+        .bind(r#"[{"model":"mine/gpt-4o"},{"model":"mine/gpt-4o","account_id":"acc_x"},{"model":"grok/grok-4"},{"model":"minex/other"}]"#)
         .execute(&pool)
         .await
         .unwrap();

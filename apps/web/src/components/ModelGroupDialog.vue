@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * Create / edit a model group — since v4 a virtual endpoint: a `/g/<slug>/…`
+ * Create / edit a model group — a virtual endpoint: a `/g/<slug>/…`
  * base URL plus the models callable on it, each with its own ordered target
  * list (docs/admin-ui.md § Groups page).
  *
@@ -8,8 +8,8 @@
  * preview, strategy), ② the picker, ③ the group's models. Column ③ is a stack
  * of model sections; exactly one is **active**, and the picker feeds it —
  * clicking a catalog model adds it as a target of the active model, pinned to
- * the selected account. The picker itself is unchanged from v3: an inverted L
- * of provider tabs, account rail, and the model list between them.
+ * the selected account. The picker is an inverted L of provider tabs, account
+ * rail, and the model list between them.
  *
  * A builtin tab's rail starts with **"Any account"**, which adds an unpinned
  * target (the provider's whole pool in pool order, shared rows included); the
@@ -26,7 +26,7 @@ import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { reachableShared, useCustomProviders } from "@/composables/useCustomProviders"
 import { useConfirm } from "@/composables/useConfirm"
-import { useI18n } from "@/i18n"
+import { PROVIDER_NAME_KEY, useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import {
   ApiError,
@@ -80,22 +80,9 @@ const customProviders = useCustomProviders()
 const cli = useCli()
 
 /**
- * Provider display copy lives in the catalog and `PROVIDERS` carries only wire
- * ids, so an explicit map — a template literal widens to `string` and would not
- * typecheck against `MessageKey`, which is what makes a renamed key fail the
- * build here rather than render blank (same call as the Models page).
- */
-const NAME_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.name",
-  codex: "provider.codex.name",
-  grok: "provider.grok.name",
-  antigravity: "provider.antigravity.name",
-}
-
-/**
  * Each strategy's name and the line saying what it does to this group's
- * targets. Explicit maps for the same typing reason as above, and the seam a
- * second strategy lands in: an entry in each, an entry in `ROUTING_STRATEGIES`.
+ * targets. Explicit maps, like `PROVIDER_NAME_KEY`, and the seam a second
+ * strategy lands in: an entry in each, an entry in `ROUTING_STRATEGIES`.
  */
 const STRATEGY_KEY: Record<RoutingStrategy, MessageKey> = {
   ordered: "strategy.ordered",
@@ -141,10 +128,7 @@ const models = ref<ModelRow[]>((props.group?.models ?? []).map(toModelRow))
 /** The model the picker feeds. Defaults to the first, so edit mode starts live. */
 const activeModelUid = ref<number | null>(models.value[0]?.uid ?? null)
 const modelDraft = ref("")
-/**
- * How the group orders its targets. A group saved before the field existed
- * (or read from a cache entry that predates it) means the server's default.
- */
+/** How the group orders its targets. A new group starts on the server's default. */
 const strategy = ref<RoutingStrategy>(props.group?.strategy ?? DEFAULT_ROUTING_STRATEGY)
 
 /** Picker state: which provider tab, which account in its rail, what is typed. */
@@ -171,7 +155,7 @@ const announcement = ref("")
 const MODEL_ID_FORM = "provider/model"
 
 /**
- * A target's shape, mirroring the server's `splitModelId`: a prefix and an
+ * A target's shape, mirroring the server's `split_model_id`: a prefix and an
  * upstream id either side of the first "/", both non-empty. The upstream half
  * may itself contain further slashes.
  */
@@ -217,7 +201,7 @@ const sharedTargets = computed(() => reachableShared(customProviders.state.share
 
 /** The tab strip: builtins in declared order, then custom endpoints, then CLI providers, then shared endpoints — every prefix a target may carry gets a tab (docs/cli.md). */
 const tabs = computed<SectionItem[]>(() => [
-  ...PROVIDERS.map((p) => ({ id: p.id, label: t(NAME_KEY[p.id]) })),
+  ...PROVIDERS.map((p) => ({ id: p.id, label: t(PROVIDER_NAME_KEY[p.id]) })),
   ...(customProviders.state.data ?? []).map((cp) => ({ id: cp.slug, label: cp.name })),
   ...(cli.state.providers ?? []).map((cp) => ({ id: cp.slug, label: cp.name })),
   ...sharedTargets.value.map((sp) => ({ id: sp.slug, label: sp.name })),
@@ -1095,8 +1079,7 @@ async function remove() {
                   </AppButton>
                 </div>
 
-                <!-- Per-target facts sit in their own line under the id: the
-                     account today, weight and live usage when balancing lands. -->
+                <!-- Per-target facts sit in their own line under the id. -->
                 <div class="target-facts">
                   <template v-if="isMissingAccount(target)">
                     <Badge tone="warn">{{ t("groups.account.missing") }}</Badge>
@@ -1124,8 +1107,7 @@ async function remove() {
                   <Badge v-else-if="target.account_id" tone="neutral">
                     {{ pinnedLabel(target) }}
                   </Badge>
-                  <!-- Made before this design, or by the API directly: the
-                       whole pool, still valid, still shown for what it is. -->
+                  <!-- Unpinned: the provider's whole pool. -->
                   <Badge v-else tone="neutral">{{ t("groups.account.any") }}</Badge>
                 </div>
               </li>
@@ -1184,8 +1166,8 @@ async function remove() {
  * rather than stopping wherever the shortest column ends.
  *
  * Tracks: identity is a form and needs the least; the picker holds a rail *and*
- * a list; the models column now holds names + targets + controls, so it takes
- * the widest track (the v4 reweighting behind the wider `wide` panel).
+ * a list; the models column holds names + targets + controls, so it takes the
+ * widest track.
  */
 .board {
   display: grid;
@@ -1400,7 +1382,7 @@ async function remove() {
 }
 
 /* The one region that grows with its data, so it is the one that scrolls —
-   vertically, and only vertically. See the v3 notes: the 0-min declared track
+   vertically, and only vertically. The 0-min declared track
    plus `min-width: 0` on items is what stops the sideways scroll. */
 .models-list {
   display: grid;

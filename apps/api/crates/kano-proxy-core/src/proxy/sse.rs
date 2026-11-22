@@ -10,10 +10,9 @@
 //!   starts: keepalives fire from t=0 while `run` acquires an account and reaches upstream,
 //!   then `pipe_upstream` relays the body under the same rules.
 //!
-//! The TypeScript demand gate (`controller.desiredSize <= 0` → park) is
-//! [`crate::proxy::backpressure`]'s bounded channel here: `Emitter::enqueue` parks while the
-//! client is not consuming, so timers pause with the pump exactly as they did — a client stall
-//! is not an upstream silence gap.
+//! Backpressure is [`crate::proxy::backpressure`]'s bounded channel: `Emitter::enqueue` parks
+//! while the client is not consuming, so timers pause with the pump — a client stall is not an
+//! upstream silence gap.
 //!
 //! `on_close` fires exactly once, whatever ends the stream, including a client that simply
 //! dropped the response: the pump holds a close guard whose `Drop` reports `Cancel` unless the
@@ -33,10 +32,7 @@ use tokio::time::Instant;
 use crate::proxy::backpressure::{backpressured_byte_stream, Emitter};
 use crate::upstream::transport::ByteStream;
 
-/// `sseKeepaliveComment()`.
-pub fn sse_keepalive_comment() -> Bytes {
-    Bytes::from_static(b": keepalive\n\n")
-}
+const KEEPALIVE_COMMENT: Bytes = Bytes::from_static(b": keepalive\n\n");
 
 /// The documented keepalive cadence: every 10s from t=0 (docs/api.md).
 pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
@@ -67,21 +63,6 @@ pub struct StreamKeepaliveOpts {
     pub idle_timeout: Option<Duration>,
     /// Emitted once, immediately before close, when `idle_timeout` fires.
     pub stall_frame: Option<Bytes>,
-    /// Terminal frame for errors before any real upstream byte was emitted.
-    pub error_frame: Option<Bytes>,
-}
-
-impl StreamKeepaliveOpts {
-    fn split(self) -> (Option<Tap>, CloseGuard, PipeOpts) {
-        let guard = CloseGuard::new(self.on_close);
-        let pipe = PipeOpts {
-            tap: None,
-            idle_timeout: self.idle_timeout,
-            stall_frame: self.stall_frame,
-            error_frame: self.error_frame,
-        };
-        (self.tap, guard, pipe)
-    }
 }
 
 /// The subset of the options that applies to one piped upstream body.
@@ -90,6 +71,9 @@ pub struct PipeOpts {
     pub tap: Option<Tap>,
     pub idle_timeout: Option<Duration>,
     pub stall_frame: Option<Bytes>,
+    /// Emitted when the upstream body fails before its first byte, so the stream ends with a
+    /// structured frame rather than none (docs/api.md § In-stream errors). After real bytes
+    /// the failure may be mid-frame, and the stream just ends.
     pub error_frame: Option<Bytes>,
 }
 
@@ -107,7 +91,7 @@ impl CloseGuard {
     fn new(on_close: Option<OnClose>) -> Self {
         Self { reason: Mutex::new(None), on_close: Mutex::new(on_close) }
     }
-    /// The first reason recorded wins, exactly like the TypeScript `closeFired` latch.
+    /// The first reason recorded wins.
     fn fire(&self, reason: StreamCloseReason) {
         let mut slot = self.reason.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
@@ -125,42 +109,30 @@ impl Drop for CloseGuard {
     }
 }
 
-fn tap(tap: &Option<Tap>, chunk: &Bytes) {
-    if let Some(f) = tap {
-        f(chunk);
-    }
-}
-
 /// Relay an upstream body, injecting SSE comment keepalives across every silence gap — not just
 /// before the first byte — for the whole stream lifetime. `opts.tap`/`opts.on_close` observe
 /// the passthrough without altering it: emitted upstream bytes and their relative order are
 /// byte-identical to calling this with no opts. Keepalive comments and an optional idle
 /// `stall_frame` are the only bytes this function itself ever adds.
 pub fn stream_with_keepalive(upstream: ByteStream, interval: Duration, opts: StreamKeepaliveOpts) -> ByteStream {
-    let (outer_tap, guard, pipe) = opts.split();
-    let pipe = PipeOpts { tap: outer_tap, ..pipe };
+    let StreamKeepaliveOpts { tap, on_close, idle_timeout, stall_frame } = opts;
+    let guard = CloseGuard::new(on_close);
+    let pipe = PipeOpts { tap, idle_timeout, stall_frame, error_frame: None };
     backpressured_byte_stream(move |emitter| async move {
         let guard = guard;
-        let reason = pipe_body(&emitter, upstream, interval, &pipe, None).await;
+        let reason = pipe_body(&emitter, upstream, interval, &pipe).await;
         guard.fire(reason);
         Ok(())
     })
 }
 
-/// One piped upstream body, under the keepalive + idle-timeout rules. `outer_tap` is the
-/// producer-level tap that also sees every chunk (the eager transport's `opts.tap`).
-async fn pipe_body(
-    emitter: &Emitter,
-    mut upstream: ByteStream,
-    interval: Duration,
-    opts: &PipeOpts,
-    outer_tap: Option<&Tap>,
-) -> StreamCloseReason {
-    let mut emitted_upstream_bytes = false;
+/// One piped upstream body, under the keepalive + idle-timeout rules.
+async fn pipe_body(emitter: &Emitter, mut upstream: ByteStream, interval: Duration, opts: &PipeOpts) -> StreamCloseReason {
     // Both deadlines cover the whole stream lifetime: `keepalive_at` restarts after every byte
     // this function emits, `idle_at` only after a real upstream chunk.
     let mut keepalive_at = Instant::now() + interval;
     let mut idle_at = opts.idle_timeout.map(|d| Instant::now() + d);
+    let mut piped_any = false;
     loop {
         let next = upstream.next();
         tokio::pin!(next);
@@ -175,7 +147,7 @@ async fn pipe_body(
                 biased;
                 item = &mut next => break item,
                 _ = tokio::time::sleep_until(keepalive_at) => {
-                    if emitter.enqueue(sse_keepalive_comment()).await.is_err() {
+                    if emitter.enqueue(KEEPALIVE_COMMENT).await.is_err() {
                         return StreamCloseReason::Cancel;
                     }
                     keepalive_at = Instant::now() + interval;
@@ -192,26 +164,19 @@ async fn pipe_body(
         match chunk {
             None => return StreamCloseReason::Done,
             Some(Err(error)) => {
-                // Once a real byte has flowed the stream may be mid-frame and a raw abort is
-                // the only honest option. Before output, preserve the client protocol with the
-                // dispatch-provided terminal frame.
-                if !emitted_upstream_bytes {
-                    if let Some(frame) = opts.error_frame.clone() {
-                        let _ = emitter.enqueue(frame).await;
-                        return StreamCloseReason::Done;
-                    }
-                }
                 tracing::debug!(%error, "upstream stream failed mid-flight");
+                if let Some(frame) = opts.error_frame.clone().filter(|_| !piped_any) {
+                    let _ = emitter.enqueue(frame).await;
+                }
                 return StreamCloseReason::Error;
             }
             Some(Ok(bytes)) => {
                 if emitter.enqueue(bytes.clone()).await.is_err() {
                     return StreamCloseReason::Cancel;
                 }
-                emitted_upstream_bytes = true;
-                tap(&opts.tap, &bytes);
-                if let Some(outer) = outer_tap {
-                    outer(&bytes);
+                piped_any |= !bytes.is_empty();
+                if let Some(tap) = &opts.tap {
+                    tap(&bytes);
                 }
                 // Re-arm for the next gap.
                 keepalive_at = Instant::now() + interval;
@@ -227,7 +192,6 @@ async fn pipe_body(
 pub struct EagerStreamController {
     emitter: Emitter,
     interval: Duration,
-    outer_tap: Option<Tap>,
     guard: Arc<CloseGuard>,
     closed: Arc<AtomicBool>,
     /// While a body is piping, `pipe_body` owns the keepalive cadence — the producer-level
@@ -261,7 +225,7 @@ impl EagerStreamController {
             return;
         }
         self.piping.store(true, Ordering::SeqCst);
-        let reason = pipe_body(&self.emitter, upstream, self.interval, &opts, self.outer_tap.as_ref()).await;
+        let reason = pipe_body(&self.emitter, upstream, self.interval, &opts).await;
         self.piping.store(false, Ordering::SeqCst);
         self.closed.store(true, Ordering::SeqCst);
         self.guard.fire(reason);
@@ -291,13 +255,14 @@ impl EagerStreamController {
 
 /// SSE stream that commits immediately: keepalives from second 0, while `run` performs
 /// acquire / failover / upstream fetch and either pipes a body or emits a terminal error frame.
-/// Used for client `stream: true` (docs/api.md § Eager streaming commit).
-pub fn stream_with_eager_producer<F, Fut>(run: F, interval: Duration, opts: StreamKeepaliveOpts) -> ByteStream
+/// Used for client `stream: true` (docs/api.md § Eager streaming commit). The per-body options
+/// go to [`EagerStreamController::pipe_upstream`]; `on_close` fires once for the whole stream.
+pub fn stream_with_eager_producer<F, Fut>(run: F, interval: Duration, on_close: Option<OnClose>) -> ByteStream
 where
     F: FnOnce(EagerStreamController) -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
-    let (outer_tap, guard, _) = opts.split();
+    let guard = CloseGuard::new(on_close);
     backpressured_byte_stream(move |emitter| async move {
         let guard = Arc::new(guard);
         let closed = Arc::new(AtomicBool::new(false));
@@ -305,7 +270,6 @@ where
         let ctl = EagerStreamController {
             emitter: emitter.clone(),
             interval,
-            outer_tap,
             guard: guard.clone(),
             closed: closed.clone(),
             piping: piping.clone(),
@@ -325,7 +289,7 @@ where
                         // the cadence for now; let it return.
                         continue;
                     }
-                    if emitter.enqueue(sse_keepalive_comment()).await.is_err() {
+                    if emitter.enqueue(KEEPALIVE_COMMENT).await.is_err() {
                         break;
                     }
                 }
@@ -526,23 +490,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_upstream_error_before_any_byte_emits_the_terminal_frame() {
-        let (seen, on_close) = reasons();
-        let source = futures::stream::iter(vec![Err(io::Error::other("boom"))]);
-        let out = stream_with_keepalive(
-            Box::pin(source),
-            DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts {
-                on_close: Some(on_close),
-                error_frame: Some(Bytes::from_static(b"ERR\n")),
-                ..Default::default()
-            },
-        );
-        assert_eq!(collect(out).await, "ERR\n");
-        assert_eq!(*seen.lock().unwrap(), vec![StreamCloseReason::Done]);
-    }
-
-    #[tokio::test]
     async fn the_tap_sees_every_real_chunk_and_never_a_keepalive() {
         let (seen, tap) = taps();
         let (stream, tx) = controllable();
@@ -588,7 +535,7 @@ mod tests {
                 ctl.close();
             },
             Duration::from_millis(15),
-            StreamKeepaliveOpts { on_close: Some(on_close), ..Default::default() },
+            Some(on_close),
         );
         let collected = tokio::spawn(collect(out));
         tokio::time::sleep(Duration::from_millis(60)).await;
@@ -609,7 +556,7 @@ mod tests {
                 ctl.pipe_upstream(stream, PipeOpts::default()).await;
             },
             DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts::default(),
+            None,
         );
         assert_eq!(collect(out).await, "hello world");
     }
@@ -622,7 +569,7 @@ mod tests {
                 ctl.fail(Bytes::from_static(b"ERR\n")).await;
             },
             DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts { on_close: Some(on_close), ..Default::default() },
+            Some(on_close),
         );
         assert_eq!(collect(out).await, "ERR\n");
         // A terminal in-stream error is a clean end from the pipe's view.
@@ -637,7 +584,7 @@ mod tests {
                 std::future::pending::<()>().await;
             },
             DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts { on_close: Some(on_close), ..Default::default() },
+            Some(on_close),
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
         drop(out);
@@ -664,7 +611,7 @@ mod tests {
                 .await;
             },
             DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts { on_close: Some(on_close), ..Default::default() },
+            Some(on_close),
         );
         let collected = tokio::spawn(collect(out));
         tokio::time::sleep(Duration::from_millis(80)).await;
@@ -688,7 +635,7 @@ mod tests {
                 ctl.pipe_upstream(Box::pin(source), PipeOpts::default()).await;
             },
             DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts::default(),
+            None,
         );
         out.next().await.unwrap().unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -705,7 +652,7 @@ mod tests {
                 observed.store(ctl.cancelled(), Ordering::SeqCst);
             },
             DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts::default(),
+            None,
         );
         drop(out);
         tokio::time::sleep(Duration::from_millis(80)).await;

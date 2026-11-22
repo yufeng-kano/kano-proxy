@@ -4,8 +4,9 @@
  *
  * A 16px stroked set on a 16px grid, drawn to one spec (1.4 stroke, round
  * caps and joins) so they read as one family. Inline rather than an icon
- * dependency: eight glyphs do not justify a package, and a remote sprite would
- * be a render-blocking request for chrome that must paint immediately.
+ * dependency: a handful of glyphs does not justify a package, and a remote
+ * sprite would be a render-blocking request for chrome that must paint
+ * immediately.
  *
  * Always decorative — every nav item ships a text label beside it.
  */

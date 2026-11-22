@@ -31,12 +31,10 @@ defineProps<{
   x: number
   title: string
   rows: TooltipRow[]
-  /** Bucket total — tokens view only. */
-  total?: { label: string; value: string } | null
-  /** Secondary lines under the total (cached / output / requests). */
-  footer?: string[]
+  /** Bucket total; null hides the row. */
+  total: { label: string; value: string } | null
   /** Shown instead of the rows when the bucket has nothing to report. */
-  empty?: string | null
+  empty: string
 }>()
 
 /**
@@ -55,7 +53,7 @@ defineExpose({ rootEl })
   <div ref="rootEl" class="tooltip" :style="{ '--tip-x': `${x}px` }">
     <p class="tooltip-title">{{ title }}</p>
 
-    <p v-if="!rows.length && empty" class="tooltip-empty">{{ empty }}</p>
+    <p v-if="!rows.length" class="tooltip-empty">{{ empty }}</p>
 
     <div v-for="row in rows" :key="row.key" class="tooltip-row">
       <span class="swatch" :style="{ '--swatch': row.color }" />
@@ -66,10 +64,6 @@ defineExpose({ rootEl })
     <div v-if="total" class="tooltip-row tooltip-total">
       <span class="tooltip-label">{{ total.label }}</span>
       <span class="tooltip-value tabular">{{ total.value }}</span>
-    </div>
-
-    <div v-if="footer?.length" class="tooltip-footer">
-      <span v-for="line in footer" :key="line">{{ line }}</span>
     </div>
   </div>
 </template>
@@ -147,13 +141,5 @@ defineExpose({ rootEl })
 
 .tooltip-total .tooltip-label {
   color: var(--text);
-}
-
-.tooltip-footer {
-  display: flex;
-  flex-direction: column;
-  margin-top: var(--space-1);
-  color: var(--faint);
-  font-size: var(--text-2xs);
 }
 </style>

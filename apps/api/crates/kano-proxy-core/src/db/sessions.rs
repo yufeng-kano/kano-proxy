@@ -1,13 +1,14 @@
 //! `sessions` rows — the storage half of [`crate::auth::session`]. The row carries the
 //! 14-day expiry; the cookie carries the signature (`crypto::session`).
 
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::db::accounts::iso_from_ms;
+use crate::db::users::UserRow;
 use crate::ids::{new_id, now_iso};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct SessionRow {
     pub id: String,
     pub user_id: String,
@@ -28,7 +29,28 @@ pub async fn insert_session(db: &PgPool, user_id: &str, expires_at: &str) -> Res
     Ok(id)
 }
 
-/// The `(user_id, expires_at)` pair the session loader checks; `None` when no such row.
+#[derive(sqlx::FromRow)]
+struct SessionUserRow {
+    #[sqlx(flatten)]
+    user: UserRow,
+    session_expires_at: String,
+}
+
+/// The session's user and its `expires_at` in one read — what the session loader checks on
+/// every admin request. `None` when no such session.
+pub async fn get_session_user(db: &PgPool, session_id: &str) -> Result<Option<(UserRow, String)>, sqlx::Error> {
+    let row = sqlx::query_as::<_, SessionUserRow>(
+        "SELECT u.*, s.expires_at AS session_expires_at
+         FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.id = $1",
+    )
+    .bind(session_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|r| (r.user, r.session_expires_at)))
+}
+
+#[cfg(test)]
 pub async fn get_session(db: &PgPool, session_id: &str) -> Result<Option<SessionRow>, sqlx::Error> {
     sqlx::query_as::<_, SessionRow>("SELECT id, user_id, expires_at, created_at FROM sessions WHERE id = $1")
         .bind(session_id)

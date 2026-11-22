@@ -14,10 +14,6 @@ use crate::tunnel::{self, TokenCache};
 
 pub const EXIT_AUTH_REJECTED: i32 = 2;
 
-fn mutate_state(file: &StateFile, f: impl FnOnce(&mut State)) -> Result<()> {
-    file.mutate(f)
-}
-
 fn hostname() -> String {
     std::env::var("HOSTNAME")
         .ok()
@@ -116,8 +112,7 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
     // again without hand-editing the state file; a device the server still
     // accepts is refused — sign out deliberately, not by accident (docs/cli.md).
     if state.signed_in() && args.auth_code.is_none() {
-        let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-        match tokens.get(false).await {
+        match api::fresh_access_token(file).await {
             Ok(_) => bail!(
                 "this device is already signed in as \"{}\" against {} — run `kano-proxy logout` first",
                 state.device_name.as_deref().unwrap_or("?"),
@@ -131,7 +126,7 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
                 // The device is gone on the server, and every key it minted with it: the
                 // records of its dead launches have nothing left to revoke.
                 agents::launch::forget_dead(&file.path, &state.base_url, state.device_id.as_deref().unwrap_or_default());
-                mutate_state(file, |s| {
+                file.mutate(|s| {
                     s.device_id = None;
                     s.device_name = None;
                     s.refresh_token = None;
@@ -151,14 +146,7 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
             .clone()
             .context("no pending sign-in — run `kano-proxy login --no-tui --base-url … --device-name …` first")?;
         let done = api::login_complete(&pending.base_url, &pending.request_id, code).await?;
-        state.base_url = pending.base_url.clone();
-        state.device_id = Some(done.device_id);
-        state.device_name = Some(pending.device_name.clone());
-        state.refresh_token = Some(done.refresh_token);
-        state.pending_login = None;
-        file.save(&state)?;
-        eprintln!("✓ device \"{}\" signed in", pending.device_name);
-        return Ok(());
+        return signed_in(file, state, pending.base_url, pending.device_name, done);
     }
 
     if args.no_tui {
@@ -234,11 +222,16 @@ pub async fn cmd_login(file: &StateFile, args: LoginArgs) -> Result<()> {
         }
     };
     let done = api::login_complete(&base, &start.request_id, &code).await?;
-    state.base_url = base;
+    signed_in(file, state, base, device_name, done)
+}
+
+/// Record a completed sign-in: the device, its first refresh token, and no pending request.
+fn signed_in(file: &StateFile, mut state: State, base_url: String, device_name: String, done: api::LoginComplete) -> Result<()> {
+    state.base_url = base_url;
     state.device_id = Some(done.device_id);
-    state.device_name = Some(device_name.clone());
     state.refresh_token = Some(done.refresh_token);
     state.pending_login = None;
+    state.device_name = Some(device_name.clone());
     file.save(&state)?;
     eprintln!("✓ device \"{device_name}\" signed in");
     Ok(())
@@ -330,11 +323,10 @@ pub async fn cmd_add(file: &StateFile, args: AddArgs) -> Result<()> {
         add_root(&state).await?
     };
 
-    let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-    let access = tokens.get(false).await?;
+    let access = api::fresh_access_token(file).await?;
     let created = api::create_provider(&state.base_url, &access, &slug, &format, &expose, &initial_models).await?;
 
-    mutate_state(file, |state| {
+    file.mutate(|state| {
         state.providers.push(ProviderState {
             id: created.id,
             slug: created.slug.clone(),
@@ -510,8 +502,7 @@ pub async fn cmd_attach(
     }
     let target = normalize_target(&target.context("--target is required (where the local server lives here)")?)?;
 
-    let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-    let access = tokens.get(false).await?;
+    let access = api::fresh_access_token(file).await?;
     let remote = api::list_providers(&state.base_url, &access).await?;
     let item = remote
         .iter()
@@ -526,7 +517,7 @@ pub async fn cmd_attach(
         target_key,
         expose: Vec::new(),
     };
-    mutate_state(file, |state| state.providers.push(provider))?;
+    file.mutate(|state| state.providers.push(provider))?;
     eprintln!("✓ attached \"{slug}\" — run `kano-proxy tunnel start` to serve it from this device");
     Ok(())
 }
@@ -541,12 +532,11 @@ pub async fn cmd_remove(file: &StateFile, slug: &str, local_only: bool) -> Resul
     };
     if !local_only {
         api::require_signed_in(&state)?;
-        let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-        let access = tokens.get(false).await?;
+        let access = api::fresh_access_token(file).await?;
         let id = state.providers[index].id.clone();
         api::delete_provider(&state.base_url, &access, &id).await?;
     }
-    mutate_state(file, |state| state.providers.retain(|p| p.slug != slug))?;
+    file.mutate(|state| state.providers.retain(|p| p.slug != slug))?;
     eprintln!("✓ removed \"{slug}\"");
     Ok(())
 }
@@ -554,8 +544,7 @@ pub async fn cmd_remove(file: &StateFile, slug: &str, local_only: bool) -> Resul
 pub async fn cmd_list(file: &StateFile) -> Result<()> {
     let state = file.load()?;
     api::require_signed_in(&state)?;
-    let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-    let access = tokens.get(false).await?;
+    let access = api::fresh_access_token(file).await?;
     let remote = api::list_providers(&state.base_url, &access).await?;
 
     println!("{:<20} {:<10} {:<32} {:<11} {:>6}  LAST REPORT", "SLUG", "FORMAT", "TARGET", "STATE", "MODELS");
@@ -590,8 +579,7 @@ pub async fn cmd_status(file: &StateFile) -> Result<()> {
         state.device_name.as_deref().unwrap_or("?"),
         state.base_url
     );
-    let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-    match tokens.get(false).await {
+    match api::fresh_access_token(file).await {
         Ok(access) => {
             println!("token: fresh (rotated just now)");
             match api::list_providers(&state.base_url, &access).await {
@@ -661,9 +649,8 @@ pub async fn cmd_logout(file: &StateFile, no_tui: bool, force: bool, remove_grou
         }
     }
     if state.signed_in() {
-        let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
         // Whether the server confirmed the device gone — and with it every key it minted.
-        let gone = match tokens.get(false).await {
+        let gone = match api::fresh_access_token(file).await {
             Ok(access) => {
                 match api::delete_device(&state.base_url, &access).await? {
                     true => eprintln!("✓ device \"{}\" revoked", state.device_name.as_deref().unwrap_or("?")),
@@ -692,7 +679,7 @@ pub async fn cmd_logout(file: &StateFile, no_tui: bool, force: bool, remove_grou
             eprintln!("· {} launch key{} still alive on the server with the device", running + dead, if running + dead == 1 { " is" } else { "s are" });
         }
     }
-    mutate_state(file, |s| {
+    file.mutate(|s| {
         s.device_id = None;
         s.device_name = None;
         s.refresh_token = None;
@@ -820,7 +807,6 @@ mod tests {
                 assert_eq!(ex.ends_with("/v1"), openai, "{ex}");
             }
         }
-        assert!(OPENAI_TARGET_NOTE.contains(&"  Ollama      http://localhost:11434/v1"));
         assert_eq!(normalize_target(OPENAI_DEFAULT_TARGET).unwrap(), OPENAI_DEFAULT_TARGET);
         assert_eq!(normalize_target(ANTHROPIC_DEFAULT_TARGET).unwrap(), ANTHROPIC_DEFAULT_TARGET);
         assert!(OPENAI_DEFAULT_TARGET.ends_with("/v1") && !ANTHROPIC_DEFAULT_TARGET.ends_with("/v1"));

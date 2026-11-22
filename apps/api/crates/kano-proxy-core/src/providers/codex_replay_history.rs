@@ -7,12 +7,13 @@
 
 use serde_json::{Map, Value};
 
+use super::codex::shorten_codex_call_id;
 use super::codex_reasoning_cache::{
     hash_assistant_text, CodexReasoningReplayEntry, CodexReasoningReplayItem, CodexReasoningReplayTurn,
 };
 
-/// `JSON.stringify`-with-sorted-keys: the exact string the TypeScript `canonical` builds, so
-/// the prefix hashes are stable across both editions.
+/// Compact JSON with object keys sorted, so a prefix hash never depends on the key order a
+/// client happened to send.
 fn canonical(value: &Value) -> String {
     match value {
         Value::Array(items) => {
@@ -90,7 +91,6 @@ pub fn codex_replay_turn(
     start_hash: &str,
     items: &[CodexReasoningReplayItem],
     assistant_text: &str,
-    shorten_call_id: &dyn Fn(&Value) -> Value,
 ) -> Option<CodexReasoningReplayTurn> {
     if !items.iter().any(|item| item_type(item) == Some("reasoning")) {
         return None;
@@ -104,7 +104,7 @@ pub fn codex_replay_turn(
         let mut call = Map::new();
         call.insert("type".into(), Value::String("function_call".into()));
         if let Some(id) = item.get("call_id") {
-            call.insert("call_id".into(), shorten_call_id(id));
+            call.insert("call_id".into(), shorten_codex_call_id(id));
         }
         if let Some(name) = item.get("name") {
             call.insert("name".into(), name.clone());
@@ -164,7 +164,7 @@ pub fn replay_codex_history(
     let mut retained: Vec<CodexReasoningReplayTurn> = Vec::new();
     let mut index = 0usize;
     while index < input.len() {
-        // Later records win at the same boundary, as the TypeScript `Map.set` does.
+        // A later record wins at the same boundary.
         let Some((_, turn)) = matches.iter().rev().find(|(start, _)| *start == index) else {
             output.push(input[index].clone());
             index += 1;
@@ -195,10 +195,6 @@ mod tests {
     use crate::providers::codex_reasoning_cache::append_codex_replay_turn;
     use serde_json::json;
 
-    fn identity(id: &Value) -> Value {
-        id.clone()
-    }
-
     fn reasoning() -> Value {
         json!({ "type": "reasoning", "encrypted_content": "opaque-test" })
     }
@@ -228,7 +224,7 @@ mod tests {
     #[test]
     fn rejects_tool_instruction_and_effort_changes_even_when_visible_history_matches() {
         let hashes = codex_input_hashes(&body());
-        let turn = codex_replay_turn(hashes.last().unwrap(), &[reasoning()], "answer", &identity).unwrap();
+        let turn = codex_replay_turn(hashes.last().unwrap(), &[reasoning()], "answer").unwrap();
         let mut input = input_of(&body());
         input.push(json!({ "role": "assistant", "content": [{ "type": "output_text", "text": "answer" }] }));
         let history = CodexReasoningReplayEntry { turns: vec![turn] };
@@ -249,7 +245,7 @@ mod tests {
         let hashes = codex_input_hashes(&body());
         let call = json!({ "type": "function_call", "call_id": "one", "name": "read", "arguments": "{\"a\":1}" });
         let turn =
-            codex_replay_turn(hashes.last().unwrap(), &[reasoning(), call.clone()], "", &identity).unwrap();
+            codex_replay_turn(hashes.last().unwrap(), &[reasoning(), call.clone()], "").unwrap();
         let history = CodexReasoningReplayEntry { turns: vec![turn] };
         for changed in [json!({ "call_id": "two" }), json!({ "arguments": "{\"a\":2}" }), json!({ "name": "write" })] {
             let mut edited = call.as_object().unwrap().clone();
@@ -266,7 +262,7 @@ mod tests {
     #[test]
     fn replays_a_matching_turn_at_its_boundary() {
         let hashes = codex_input_hashes(&body());
-        let turn = codex_replay_turn(hashes.last().unwrap(), &[reasoning()], "answer", &identity).unwrap();
+        let turn = codex_replay_turn(hashes.last().unwrap(), &[reasoning()], "answer").unwrap();
         let mut input = input_of(&body());
         input.push(json!({ "role": "assistant", "content": [{ "type": "output_text", "text": "answer" }] }));
         let hashes = codex_input_hashes(&body_with(json!({}), &input));
@@ -281,7 +277,7 @@ mod tests {
     #[test]
     fn keeps_an_older_prefix_rather_than_evicting_it_for_an_oversized_new_turn() {
         let hashes = codex_input_hashes(&body());
-        let turn = codex_replay_turn(hashes.last().unwrap(), &[reasoning()], "answer", &identity).unwrap();
+        let turn = codex_replay_turn(hashes.last().unwrap(), &[reasoning()], "answer").unwrap();
         let history = CodexReasoningReplayEntry { turns: vec![turn.clone()] };
         let large = CodexReasoningReplayTurn {
             start_hash: "new-start".into(),
@@ -297,16 +293,15 @@ mod tests {
     fn a_turn_without_reasoning_or_with_a_custom_tool_call_is_not_recorded() {
         let hashes = codex_input_hashes(&body());
         let start = hashes.last().unwrap();
-        assert!(codex_replay_turn(start, &[json!({ "type": "message" })], "answer", &identity).is_none());
+        assert!(codex_replay_turn(start, &[json!({ "type": "message" })], "answer").is_none());
         assert!(codex_replay_turn(
             start,
             &[reasoning(), json!({ "type": "custom_tool_call", "call_id": "c" })],
             "answer",
-            &identity
         )
         .is_none());
         // Reasoning with neither assistant text nor calls has nothing visible to anchor to.
-        assert!(codex_replay_turn(start, &[reasoning()], "", &identity).is_none());
+        assert!(codex_replay_turn(start, &[reasoning()], "").is_none());
     }
 
     #[test]

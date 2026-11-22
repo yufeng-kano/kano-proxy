@@ -1,4 +1,4 @@
-//! The `fetch` seam. Bodies stream in both directions: [`UpstreamRequest`] carries bytes
+//! The upstream HTTP seam. Bodies stream in both directions: [`UpstreamRequest`] carries bytes
 //! (upstream bodies are built by adapters and are bounded), [`UpstreamResponse`] exposes a
 //! byte stream so SSE is piped without buffering (docs/api.md § Streaming).
 
@@ -25,7 +25,7 @@ pub struct UpstreamRequest {
 }
 
 impl UpstreamRequest {
-    pub fn new(method: Method, url: impl Into<String>) -> Self {
+    fn new(method: Method, url: impl Into<String>) -> Self {
         Self { method, url: url.into(), headers: HeaderMap::new(), body: None, first_byte_timeout: None }
     }
     pub fn get(url: impl Into<String>) -> Self {
@@ -40,7 +40,7 @@ impl UpstreamRequest {
         }
         self
     }
-    pub fn json(mut self, value: &serde_json::Value) -> Self {
+    pub fn json<T: serde::Serialize + ?Sized>(mut self, value: &T) -> Self {
         self.headers.insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
         self.body = Some(Bytes::from(serde_json::to_vec(value).expect("json value serializes")));
         self
@@ -118,7 +118,7 @@ pub trait UpstreamTransport: Send + Sync {
 }
 
 /// Production transport: rustls, HTTP/2 where offered, no automatic redirects (adapters
-/// must see upstream 3xx as errors, as `fetch` with `redirect: "manual"` would).
+/// must see upstream 3xx as errors).
 pub struct ReqwestTransport {
     client: reqwest::Client,
     default_first_byte_timeout: Duration,

@@ -126,7 +126,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "axum-macros",
  "base64",
  "bytes",
  "form_urlencoded",
@@ -174,17 +173,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "axum-macros"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7aa268c23bfbbd2c4363b9cd302a4f504fb2a9dfe7e3451d66f35dd392e20aca"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -411,20 +399,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
 dependencies = [
  "cipher",
-]
-
-[[package]]
-name = "dashmap"
-version = "6.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
-dependencies = [
- "cfg-if",
- "crossbeam-utils",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
 ]
 
 [[package]]
@@ -766,12 +740,6 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-
-[[package]]
-name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
@@ -1102,7 +1070,6 @@ dependencies = [
  "anyhow",
  "kano-proxy-core",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -1116,19 +1083,15 @@ dependencies = [
  "axum",
  "base64",
  "bytes",
- "dashmap",
  "futures",
  "hex",
  "hmac",
  "http",
- "http-body",
  "http-body-util",
  "indexmap",
- "mime",
  "moka",
  "once_cell",
  "percent-encoding",
- "pin-project-lite",
  "rand 0.8.8",
  "regex",
  "reqwest",
@@ -1143,7 +1106,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",
- "tokio-util",
  "tower",
  "tower-http",
  "tracing",
@@ -1695,7 +1657,6 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
- "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -2282,7 +2243,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -2352,7 +2312,6 @@ dependencies = [
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
  "url",
 ]
 

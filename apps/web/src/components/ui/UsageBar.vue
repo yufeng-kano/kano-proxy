@@ -6,10 +6,9 @@
  * normalize upstream values to that scale, so this renders it directly with no
  * rescaling heuristic.
  *
- * Unlike the dashboard's cache meter, the fill here escalates through amber to
- * red: on a quota, a higher number genuinely is worse. The percentage is
- * always printed beside the bar, so the escalation is emphasis, not the only
- * signal.
+ * The fill escalates through amber to red: on a quota, a higher number
+ * genuinely is worse. The percentage is always printed beside the bar, so the
+ * escalation is emphasis, not the only signal.
  *
  * The columns belong to the parent list (AccountCard's `.windows`), which this
  * joins as a subgrid: every bar in a list ends at the same x however wide one

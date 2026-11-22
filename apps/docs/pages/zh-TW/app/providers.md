@@ -43,7 +43,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 | **Needs attention** | 伺服器回報了這個版本的頁面還不認得的狀態。 |
 
 - **On credits**：狀態旁的標記。Codex 帳號只靠付費點數才接得了請求時，就會顯示它。
-- **Sign-in ends in …**：你自己的帳號狀態旁的標記，旁邊附 **Sign in again**。帳號在標記顯示的時間之前還能用；滑鼠移到標記上可以看到確切時間。在那之前重新登入，請求就不會中斷。Claude Code 的帳號會在登入到期前七天出現這個標記，因為 Claude 在你登入時就會告知到期日。另外，不管哪個供應商，只要供應商拒絕更新一個目前還能用的登入，也會出現：Claude Code 最多提早四小時，Grok 一小時，其他最多五分鐘。在這個版本之前連接的帳號，要重新登入一次之後才會有七天的提示。
+- **Sign-in ends in …**：你自己的帳號狀態旁的標記，旁邊附 **Sign in again**。帳號在標記顯示的時間之前還能用；滑鼠移到標記上可以看到確切時間。在那之前重新登入，請求就不會中斷。Claude Code 的帳號會在登入到期前七天出現這個標記，因為 Claude 在你登入時就會告知到期日。另外，不管哪個供應商，只要供應商拒絕更新一個目前還能用的登入，也會出現：Claude Code 最多提早四小時，Grok 一小時，其他最多五分鐘。在 Kano Proxy 開始記錄這個日期之前登入的 Claude Code 帳號，要重新登入一次之後才會有七天的提示。
 - **Couldn't read usage**：上一次讀取用量失敗時，狀態旁會出現這段簡短提示。滑鼠移到上面可以看到供應商回傳的錯誤。用量條保留最後一次讀到的數值。分享給你的帳號、**Sign-in expired** 的帳號，以及不影響請求的讀取錯誤（例如讀取用量本身被限流），都不會顯示這段提示。
 - **用量條**：供應商回報幾個用量區間就有幾條，例如 **5h** 和 **Week**，各自顯示已用百分比和重置時間。通過驗證的 Claude Ultra 帳號沒有 5 小時限制，所以只有週額度的用量條。Antigravity 依序是 **Gemini 5h**、**Gemini Week**，Google AI Pro 方案接著是 Gemini 4 Argon 專屬的週額度 **Argon Week**，最後是 **Other 5h**、**Other Week**。這幾條各對應一組模型。某一條滿了，只會擋下那一組的模型，帳號狀態不會改變。沒有組名的用量條（例如 **Week**）涵蓋所有模型，滿了會讓這一列變成 **Limit reached**。剛加入的帳號會顯示 **Usage will appear once this account is used**。**Sign-in expired** 的帳號，用量條會變淡，顯示的是最後一次讀到的用量。
 - **Credits**：Codex 或 Antigravity 回報點數餘額時，用量條下方會多一列，例如 `1,500 left` 或 `Unlimited`。Codex 帳號有點數但沒有回報餘額時，顯示 `Available`。餘額沒有總量，所以不畫成用量條。
@@ -68,7 +68,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 
 **Remove fast mode** 讓請求以標準速度送出。Claude 的 fast mode 一律以額外用量點數（usage credits）計費，方案額度還有剩也一樣。Codex 的 fast mode 會更快耗掉方案額度。
 
-**Hide Claude Code identity** 會從 system prompt 拿掉 Claude Code 的身分宣告 `You are Claude Code, Anthropic's official CLI for Claude.`。Claude Agent SDK 用的兩種寫法也會一起拿掉：`You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` 和 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`。Claude Code 每個請求都會帶這一行。它透過 Kano Proxy 呼叫其他供應商的模型時，這一行也會送到那個供應商，所以每個帳號都有這個勾選項。如果是 Claude Code 帳號，Kano Proxy 也不會再自己補上這一行。少了它，Claude 可能拒絕請求，或改用額外用量點數計費。這個勾選項也會拿掉告訴上游「請求來自 Claude Code」的兩個標記：Claude Code 2.1.319 放在 system prompt 最前面的 `x-anthropic-billing-header` 區塊，以及自訂 Anthropic 端點上的 `claude-code-20250219` beta。Anthropic 依這些標記認定 Claude Code 用量：在只有免費 Console 點數的自訂 Anthropic 端點上，勾了才能讓 Claude Code 花那些點數。
+**Hide Claude Code identity** 會從 system prompt 拿掉 Claude Code 的身分宣告 `You are Claude Code, Anthropic's official CLI for Claude.`。Claude Agent SDK 用的兩種寫法也會一起拿掉：`You are Claude Code, Anthropic's official CLI for Claude, running within the Claude Agent SDK.` 和 `You are a Claude agent, built on Anthropic's Claude Agent SDK.`。Claude Code 每個請求都會帶這一行。它透過 Kano Proxy 呼叫其他供應商的模型時，這一行也會送到那個供應商，所以每個帳號都有這個勾選項。如果是 Claude Code 帳號，Kano Proxy 也不會再自己補上這一行。少了它，Claude 可能拒絕請求，或改用額外用量點數計費。這個勾選項也會拿掉告訴上游「請求來自 Claude Code」的兩個標記：Claude Code 2.1.319 放在 system prompt 最前面的 `x-anthropic-billing-header` 區塊，以及自訂 Anthropic 端點上的 `claude-code-20250219` beta。Anthropic 依這些標記認定 Claude Code 用量：在只有免費 Console 點數的自訂 Anthropic 端點上，勾了才能讓 Claude Code 花那些點數。在 Antigravity 帳號上，這個勾選項還會改寫 system prompt 裡會讓 Google 誤回 `429` 的幾個句子，意思不變。
 
 **Keep prompt cache for 1 hour** 讓請求裡每個 prompt cache 都保留一小時。Claude Code 每個請求自己決定 cache 留多久，常常只用預設的 5 分鐘。對話停超過 5 分鐘，整段歷史就得重新付費寫進 cache。勾選後，client 標記的每個 cache 都改成保留 1 小時送出，client 沒標記的地方，Kano Proxy 不會自己加。用 OpenAI 格式送進來的請求本身沒有 cache 標記，由 Kano Proxy 代為放置，勾選後這些也會保留 1 小時。自訂端點如果不支援 1 小時的 cache，勾選後可能會拒絕請求。寫入 1 小時的 cache 是一般輸入價格的 2 倍，5 分鐘的是 1.25 倍，讀取價格一樣。常停超過 5 分鐘就划算，一次性的請求反而會比較貴。Codex 沒有這個勾選項：用 ChatGPT 登入時，Codex 的 cache 本來就不會過期。
 
@@ -108,7 +108,7 @@ Providers 是連接帳號和端點的地方，負責回應你的請求。你能�
 
 帳號在順序中的位置、名稱和群組設定都會保留。新舊登入都帶有 email 或帳號 id 時，Kano Proxy 才能比對。比對出是別的帳號就會失敗，對話框會列出兩個帳號。比對不了時，新的登入會直接取代舊的，所以請確認用的是同一個帳號。
 
-還能用的帳號也可以重新登入：按該供應商卡片上的鉛筆打開編輯模式，你自己的每個帳號都會出現 **Sign in again**。想在登入到期前先更新，或想讓這個版本之前連接的帳號顯示登入到期時間，就這樣做。
+還能用的帳號也可以重新登入：按該供應商卡片上的鉛筆打開編輯模式，你自己的每個帳號都會出現 **Sign in again**。想在登入到期前先更新，或想讓較早登入的 Claude Code 帳號顯示登入到期時間，就這樣做。
 
 ### 調整帳號池順序
 

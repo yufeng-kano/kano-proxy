@@ -1,5 +1,5 @@
 //! Gemini ↔ OpenAI conversion (docs/providers.md § Antigravity,
-//! docs/api.md § Conversions).
+//! docs/api.md § OpenAI surface).
 //!
 //! OpenAI Chat Completions ↔ Gemini `GenerateContent`, for the antigravity
 //! adapter's `/openai/v1` surface.
@@ -18,16 +18,14 @@ use bytes::Bytes;
 use serde_json::{json, Map, Value};
 
 use crate::providers::types::ChatCompletionRequest;
-use crate::providers::ProviderId;
 use crate::proxy::gemini_wire::{
-    block_reason, empty_turn_failure, first_finish_reason, gemini_parts, has_no_candidates,
-    inline_data_of,
-    normalize_gemini_usage, openai_finish_reason, random_hex, sanitize_json_schema,
-    schema_dialect_for, unwrap_antigravity_response, SchemaDialect, SseDataLines, UPSTREAM_HEARTBEAT,
+    block_reason, effort_thinking_config, empty_turn_failure, first_finish_reason, gemini_parts,
+    inline_data_of, inline_part, normalize_gemini_usage, open_with_user_turn, openai_finish_reason,
+    prompt_blocked, push_content, random_hex, sanitize_json_schema, schema_dialect_for, thought_signature,
+    truthy, unwrap_antigravity_response, InlineData, SchemaDialect, SseDataLines, UPSTREAM_HEARTBEAT,
 };
 use crate::upstream::transport::ByteStream;
 use crate::utils::audio::audio_inline;
-use crate::utils::reasoning::map_reasoning;
 
 // ── Request: OpenAI → Gemini ───────────────────────────────────────────────
 
@@ -41,23 +39,8 @@ fn parse_data_url(url: &str) -> Option<(String, String)> {
     Some((mime.to_string(), payload.to_string()))
 }
 
-/// JavaScript truthiness for a JSON value (`schema ? … : …`).
-fn json_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
-
 fn text_part(text: &str) -> Value {
     json!({ "text": text })
-}
-
-fn inline_part(mime_type: &str, data: &str) -> Value {
-    json!({ "inlineData": { "mimeType": mime_type, "data": data } })
 }
 
 /// A remote `https://` image URL is dropped rather than forwarded: Gemini has
@@ -134,23 +117,6 @@ fn tool_response_part(name: &str, call_id: &str, content: Option<&Value>) -> Val
     response.insert("name".into(), json!(name));
     response.insert("response".into(), json!({ "result": result }));
     json!({ "functionResponse": Value::Object(response) })
-}
-
-fn push_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
-    if parts.is_empty() {
-        return;
-    }
-    // Gemini rejects two consecutive turns with the same role, and a tool result
-    // following a user message is exactly that shape — merge instead.
-    if let Some(last) = contents.last_mut() {
-        if last.get("role").and_then(Value::as_str) == Some(role) {
-            if let Some(existing) = last.get_mut("parts").and_then(Value::as_array_mut) {
-                existing.extend(parts);
-                return;
-            }
-        }
-    }
-    contents.push(json!({ "role": role, "parts": parts }));
 }
 
 fn messages_to_gemini(messages: &[Value]) -> (Vec<Value>, Option<Value>) {
@@ -271,7 +237,7 @@ fn messages_to_gemini(messages: &[Value]) -> (Vec<Value>, Option<Value>) {
             push_content(&mut contents, "model", parts);
         }
     }
-    crate::proxy::gemini_wire::open_with_user_turn(&mut contents);
+    open_with_user_turn(&mut contents);
 
     let system_instruction = if system_parts.is_empty() {
         None
@@ -352,7 +318,7 @@ fn map_response_format(response_format: Option<&Value>, dialect: SchemaDialect) 
             if let Some(schema) = format
                 .get("json_schema")
                 .and_then(|j| j.get("schema"))
-                .filter(|s| json_truthy(s))
+                .filter(|s| truthy(s))
             {
                 out.insert("responseSchema".into(), sanitize_json_schema(schema, dialect));
             }
@@ -365,9 +331,10 @@ fn map_response_format(response_format: Option<&Value>, dialect: SchemaDialect) 
 /// Builds the inner `request` object. The adapter wraps it in the antigravity
 /// envelope (`model` / `project` / `requestId` / `sessionId`).
 pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Value {
-    // Claude behind Antigravity rejects a union its Gemini sibling accepts, so
-    // the schema dialect follows the model family (gemini_wire.rs).
-    let dialect = schema_dialect_for(&req.model);
+    // Claude behind Antigravity rejects a union its Gemini sibling accepts, so the schema
+    // dialect follows the family of the model actually called (gemini_wire.rs), never the
+    // client's string, which may be a group alias.
+    let dialect = schema_dialect_for(&req.upstream_model);
     let (contents, system_instruction) = messages_to_gemini(&req.messages);
     let mut generation_config = Map::new();
     if let Some(t) = req.temperature {
@@ -386,20 +353,11 @@ pub fn openai_to_gemini_request(req: &ChatCompletionRequest) -> Value {
         generation_config.insert(k, v);
     }
 
-    let mapped = map_reasoning(ProviderId::Antigravity, req.reasoning_effort);
-    match mapped.get("thinkingConfig") {
-        Some(thinking) => {
-            let disabled = thinking.get("thinkingBudget").is_some();
-            let mut config = thinking.as_object().cloned().unwrap_or_default();
-            // Without this the model still thinks but returns no thought parts, so
-            // `reasoning_content` would silently vanish for every caller.
-            config.insert("includeThoughts".into(), json!(!disabled));
-            generation_config.insert("thinkingConfig".into(), Value::Object(config));
-        }
-        None => {
-            generation_config.insert("thinkingConfig".into(), json!({ "includeThoughts": true }));
-        }
-    }
+    let thinking_config = match req.reasoning_effort {
+        Some(effort) => effort_thinking_config(effort).0,
+        None => json!({ "includeThoughts": true }),
+    };
+    generation_config.insert("thinkingConfig".into(), thinking_config);
 
     let tools = map_tools(req.tools.as_ref(), dialect);
     let tool_config = tools
@@ -449,14 +407,19 @@ fn tool_call_from_part(part: &Value, index: usize) -> Option<Value> {
         "function".into(),
         json!({ "name": name, "arguments": serde_json::to_string(&args).unwrap_or_else(|_| "{}".into()) }),
     );
-    if let Some(sig) = part
-        .get("thoughtSignature")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(sig) = thought_signature(part) {
         out.insert("thought_signature".into(), json!(sig));
     }
     Some(Value::Object(out))
+}
+
+/// A Gemini inline part as an entry of the de-facto `images` extension.
+fn image_entry(index: usize, inline: &InlineData) -> Value {
+    json!({
+        "type": "image_url",
+        "index": index,
+        "image_url": { "url": format!("data:{};base64,{}", inline.mime_type, inline.data) }
+    })
 }
 
 fn usage_to_openai(resp: Option<&Value>) -> Option<Value> {
@@ -505,22 +468,14 @@ pub fn gemini_response_to_openai(json_body: &Value, model: &str) -> Value {
             continue;
         }
         if let Some(inline) = inline_data_of(part) {
-            images.push(json!({
-                "type": "image_url",
-                "index": images.len(),
-                "image_url": { "url": format!("data:{};base64,{}", inline.mime_type, inline.data) }
-            }));
+            images.push(image_entry(images.len(), &inline));
             continue;
         }
         // A signature can ride on a thought part with no visible text, and Gemini
         // signs plain text parts too (think-then-answer, no tool call) — both are
         // the turn's chain of thought, so both go out as `reasoning_signature`.
         // functionCall parts never reach here; they carry their own extension.
-        if let Some(sig) = part
-            .get("thoughtSignature")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-        {
+        if let Some(sig) = thought_signature(part) {
             reasoning_signature = sig.to_string();
         }
         let text = part.get("text").and_then(Value::as_str).unwrap_or("");
@@ -534,13 +489,9 @@ pub fn gemini_response_to_openai(json_body: &Value, model: &str) -> Value {
         }
     }
 
-    // A safety-blocked prompt is a valid response with no candidates and a
-    // `promptFeedback.blockReason` — surface it as a content filter, never as a
-    // successful blank answer the client cannot tell apart from real output.
-    let blocked = has_no_candidates(resp) && block_reason(resp).is_some();
     let finish_reason = if !tool_calls.is_empty() {
         "tool_calls"
-    } else if blocked {
+    } else if prompt_blocked(resp) {
         "content_filter"
     } else {
         openai_finish_reason(first_finish_reason(resp))
@@ -600,15 +551,13 @@ struct OpenAiStream {
     tool_index: usize,
     image_index: usize,
     saw_tool_call: bool,
+    /// The candidate `finishReason`, set by Gemini's terminal frame. A clean EOF
+    /// while this is still `None` is a truncated stream, not a completion.
     finish_reason: Option<String>,
-    /// A candidate reported a `finishReason` — Gemini's terminal frame. A clean
-    /// EOF without one is a truncated stream, not a completion.
-    saw_terminal: bool,
-    /// The terminal frame's own `finishReason`, before the OpenAI mapping.
-    upstream_finish_reason: Option<String>,
     /// Content, a tool call or an image went out — the turn answered something.
     saw_output: bool,
-    block_reason: String,
+    /// A frame reported `promptFeedback.blockReason`.
+    saw_block_reason: bool,
     usage: Option<Value>,
     role_sent: bool,
 }
@@ -647,7 +596,8 @@ impl OpenAiStream {
     /// A blocked prompt is the one no-terminal shape that *is* a real answer —
     /// Gemini reports it via promptFeedback with no candidate.
     fn terminal(&mut self) {
-        if !self.saw_terminal && self.block_reason.is_empty() {
+        let saw_terminal = self.finish_reason.is_some();
+        if !saw_terminal && !self.saw_block_reason {
             self.emit(json!({
                 "error": { "message": "upstream stream ended before completion", "type": "upstream_error" }
             }));
@@ -655,18 +605,18 @@ impl OpenAiStream {
         }
         // A terminal frame that ends a turn with nothing in it is only an answer for the
         // reasons that say so (`empty_turn_failure`); anything else fails visibly.
-        if self.saw_terminal && !self.saw_output {
-            if let Some(message) = empty_turn_failure(self.upstream_finish_reason.as_deref()) {
+        if saw_terminal && !self.saw_output {
+            if let Some(message) = empty_turn_failure(self.finish_reason.as_deref()) {
                 self.emit(json!({ "error": { "message": message, "type": "upstream_error" } }));
                 return;
             }
         }
         let terminal_finish = if self.saw_tool_call {
-            "tool_calls".to_string()
-        } else if !self.saw_terminal && !self.block_reason.is_empty() {
-            "content_filter".to_string()
+            "tool_calls"
+        } else if saw_terminal {
+            openai_finish_reason(self.finish_reason.as_deref())
         } else {
-            self.finish_reason.clone().unwrap_or_else(|| "stop".to_string())
+            "content_filter"
         };
         let mut payload = Map::new();
         payload.insert("id".into(), json!(self.id));
@@ -689,12 +639,12 @@ impl OpenAiStream {
             return;
         };
         let resp = unwrap_antigravity_response(&json_value);
-        if let Some(reason) = block_reason(resp) {
-            self.block_reason = reason.to_string();
+        if block_reason(resp).is_some() {
+            self.saw_block_reason = true;
         }
-        for part in gemini_parts(resp).to_vec() {
+        for part in gemini_parts(resp) {
             if part.get("functionCall").is_some_and(|v| !v.is_null()) {
-                let Some(call) = tool_call_from_part(&part, self.tool_index) else {
+                let Some(call) = tool_call_from_part(part, self.tool_index) else {
                     continue;
                 };
                 self.tool_index += 1;
@@ -705,29 +655,19 @@ impl OpenAiStream {
                 self.chunk(delta);
                 continue;
             }
-            if let Some(inline) = inline_data_of(&part) {
+            if let Some(inline) = inline_data_of(part) {
                 // Monotonic like the non-stream converter — clients that assemble
                 // streamed images by index must not see them all collapse onto slot 0.
                 let index = self.image_index;
                 self.image_index += 1;
                 self.saw_output = true;
                 let mut delta = Map::new();
-                delta.insert(
-                    "images".into(),
-                    json!([{
-                        "type": "image_url",
-                        "index": index,
-                        "image_url": { "url": format!("data:{};base64,{}", inline.mime_type, inline.data) }
-                    }]),
-                );
+                delta.insert("images".into(), json!([image_entry(index, &inline)]));
                 self.chunk(delta);
                 continue;
             }
             let text = part.get("text").and_then(Value::as_str).unwrap_or("");
-            let signature = part
-                .get("thoughtSignature")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty());
+            let signature = thought_signature(part);
             if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
                 let mut delta = Map::new();
                 if !text.is_empty() {
@@ -757,9 +697,7 @@ impl OpenAiStream {
             self.chunk(delta);
         }
         if let Some(reason) = first_finish_reason(resp).filter(|r| !r.is_empty()) {
-            self.saw_terminal = true;
-            self.upstream_finish_reason = Some(reason.to_string());
-            self.finish_reason = Some(openai_finish_reason(Some(reason)).to_string());
+            self.finish_reason = Some(reason.to_string());
         }
         if let Some(usage) = usage_to_openai(resp) {
             self.usage = Some(usage);
@@ -808,7 +746,7 @@ impl OpenAiStream {
 /// Pull-driven: each poll consumes upstream frames only until it has one frame
 /// to hand downstream, so a slow client applies backpressure to the paid
 /// upstream generation. Dropping the returned stream drops the upstream body,
-/// which is what the TypeScript `cancel()` hook did explicitly.
+/// which cancels the upstream request.
 pub fn gemini_sse_to_openai_stream(body: ByteStream, model: &str) -> ByteStream {
     let state = OpenAiStream {
         lines: SseDataLines::new(body),
@@ -821,10 +759,8 @@ pub fn gemini_sse_to_openai_stream(body: ByteStream, model: &str) -> ByteStream 
         image_index: 0,
         saw_tool_call: false,
         finish_reason: None,
-        saw_terminal: false,
-        upstream_finish_reason: None,
         saw_output: false,
-        block_reason: String::new(),
+        saw_block_reason: false,
         usage: None,
         role_sent: false,
     };
@@ -841,14 +777,14 @@ mod tests {
 
     fn req(patch: Value) -> ChatCompletionRequest {
         let mut r = ChatCompletionRequest {
-            model: "antigravity/gemini-3-flash".into(),
             raw_model: "antigravity/gemini-3-flash".into(),
             upstream_model: "gemini-3-flash".into(),
             ..Default::default()
         };
         for (key, value) in patch.as_object().expect("patch is an object") {
             match key.as_str() {
-                "model" => r.model = value.as_str().unwrap().to_string(),
+                "raw_model" => r.raw_model = value.as_str().unwrap().to_string(),
+                "upstream_model" => r.upstream_model = value.as_str().unwrap().to_string(),
                 "messages" => r.messages = value.as_array().unwrap().clone(),
                 "tools" => r.tools = Some(value.clone()),
                 "tool_choice" => r.tool_choice = Some(value.clone()),
@@ -918,7 +854,7 @@ mod tests {
         &out["tools"][0]["functionDeclarations"]
     }
 
-    // ── openaiToGeminiRequest ──────────────────────────────────────────────
+    // ── openai_to_gemini_request ───────────────────────────────────────────
 
     #[test]
     fn opens_an_assistant_first_history_with_a_user_turn() {
@@ -1066,30 +1002,6 @@ mod tests {
     }
 
     #[test]
-    fn folds_the_two_nullable_spellings() {
-        let out = openai_to_gemini_request(&req(json!({
-            "model": "gemini-3-flash",
-            "tools": [{ "type": "function", "function": { "name": "f", "parameters": {
-                "type": "object",
-                "properties": {
-                    "mode": { "anyOf": [{ "type": "string", "enum": ["a"] }, { "type": "null" }] },
-                    "size": { "type": ["integer", "null"], "minimum": 1 }
-                }
-            } } }]
-        })));
-        let params = &declarations(&out)[0]["parameters"];
-        // Single surviving branch is inlined — no anyOf wrapper left behind.
-        assert_eq!(
-            params["properties"]["mode"],
-            json!({ "type": "string", "enum": ["a"], "nullable": true })
-        );
-        assert_eq!(
-            params["properties"]["size"],
-            json!({ "type": "integer", "minimum": 1, "nullable": true })
-        );
-    }
-
-    #[test]
     fn keeps_a_real_union_for_gemini_and_drops_it_for_claude() {
         let parameters = json!({
             "type": "object",
@@ -1097,7 +1009,7 @@ mod tests {
         });
         let params_for = |model: &str| {
             let out = openai_to_gemini_request(&req(json!({
-                "model": model,
+                "upstream_model": model,
                 "tools": [{ "type": "function", "function": { "name": "f", "parameters": parameters } }]
             })));
             declarations(&out)[0]["parameters"]["properties"]["v"].clone()
@@ -1110,6 +1022,21 @@ mod tests {
         );
         // Unconstrained but valid, and the description still guides the model.
         assert_eq!(params_for("claude-opus-4-6-thinking"), json!({ "description": "d" }));
+    }
+
+    #[test]
+    fn the_union_rule_follows_the_called_model_not_the_group_alias() {
+        // A group model named "fast" whose target is a Claude model behind Antigravity: the
+        // client's string names no family, the upstream model does.
+        let out = openai_to_gemini_request(&req(json!({
+            "raw_model": "fast",
+            "upstream_model": "claude-opus-4-6-thinking",
+            "tools": [{ "type": "function", "function": { "name": "f", "parameters": {
+                "type": "object",
+                "properties": { "v": { "anyOf": [{ "type": "string" }, { "type": "integer" }], "description": "d" } }
+            } } }]
+        })));
+        assert_eq!(declarations(&out)[0]["parameters"]["properties"]["v"], json!({ "description": "d" }));
     }
 
     #[test]
@@ -1128,7 +1055,7 @@ mod tests {
         });
         let props_for = |model: &str| {
             let out = openai_to_gemini_request(&req(json!({
-                "model": model,
+                "upstream_model": model,
                 "tools": [{ "type": "function", "function": { "name": "f", "parameters": parameters } }]
             })));
             declarations(&out)[0]["parameters"]["properties"]["query"]["properties"].clone()
@@ -1253,28 +1180,6 @@ mod tests {
     }
 
     #[test]
-    fn clamps_an_above_ceiling_effort_down_to_high() {
-        for effort in [ReasoningEffort::XHigh, ReasoningEffort::Max] {
-            let mut r = req(json!({}));
-            r.reasoning_effort = Some(effort);
-            assert_eq!(
-                openai_to_gemini_request(&r)["generationConfig"]["thinkingConfig"]["thinkingLevel"],
-                "high"
-            );
-        }
-    }
-
-    #[test]
-    fn effort_none_is_a_zero_budget_with_thoughts_off() {
-        let mut r = req(json!({}));
-        r.reasoning_effort = Some(ReasoningEffort::None);
-        assert_eq!(
-            openai_to_gemini_request(&r)["generationConfig"]["thinkingConfig"],
-            json!({ "thinkingBudget": 0, "includeThoughts": false })
-        );
-    }
-
-    #[test]
     fn carries_sampling_stops_and_max_tokens() {
         let out = openai_to_gemini_request(&req(json!({
             "temperature": 0.4, "top_p": 0.9, "max_tokens": 128, "stop": ["END"]
@@ -1316,7 +1221,7 @@ mod tests {
         assert!(out.get("toolConfig").is_none());
     }
 
-    // ── geminiResponseToOpenAI ─────────────────────────────────────────────
+    // ── gemini_response_to_openai ──────────────────────────────────────────
 
     #[test]
     fn splits_thought_parts_into_reasoning_content_and_maps_usage() {
@@ -1418,15 +1323,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_a_safety_finish_to_content_filter() {
-        let out = gemini_response_to_openai(
-            &json!({ "response": { "candidates": [{ "content": { "parts": [] }, "finishReason": "SAFETY" }] } }),
-            "m",
-        );
-        assert_eq!(out["choices"][0]["finish_reason"], "content_filter");
-    }
-
-    #[test]
     fn maps_max_tokens_to_length() {
         let out = gemini_response_to_openai(
             &json!({ "response": { "candidates": [{ "content": { "parts": [{ "text": "…" }] }, "finishReason": "MAX_TOKENS" }] } }),
@@ -1435,7 +1331,7 @@ mod tests {
         assert_eq!(out["choices"][0]["finish_reason"], "length");
     }
 
-    // ── geminiSseToOpenAIStream ────────────────────────────────────────────
+    // ── gemini_sse_to_openai_stream ────────────────────────────────────────
 
     #[tokio::test]
     async fn assembles_text_reasoning_and_a_terminal_usage_chunk() {

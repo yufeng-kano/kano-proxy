@@ -16,22 +16,19 @@ use bytes::Bytes;
 use futures::StreamExt;
 use http::header;
 
-use crate::db::custom_providers::CustomProviderRow;
-use crate::logging::request_log::{log_request, LogEntry};
 use crate::logging::usage_capture::{from_openai_usage, NormalizedUsage, UsageSniffer};
-use crate::pool::extension::{settle_lease, HeaderAudience, LeaseOutcome};
-use crate::providers::types::{AdapterError, AudioForm, CallExtras, DynAdapter};
+use crate::pool::extension::HeaderAudience;
+use crate::providers::types::{AdapterError, AudioForm, CallExtras};
 use crate::proxy::backpressure::backpressured_byte_stream;
 use crate::proxy::dispatch::{
-    body_stream, canonical_model_id, dispatch_non_stream_with, is_event_stream, lease_outcome,
-    passthrough_stream_headers, stream_close_error_code, Delivery, NonStreamDelivery, TransportOpts,
-    DEFAULT_IDLE_TIMEOUT,
+    apply_usage, body_stream, canonical_model_id, dispatch_non_stream_with, is_event_stream,
+    passthrough_stream_headers, settle_and_log, stream_close_error_code, Delivery, NonStreamDelivery,
+    TransportOpts,
 };
-use crate::proxy::dispatch_walk::{CandidateCaller, CandidateSource};
+use crate::proxy::dispatch_walk::CandidateCaller;
 use crate::proxy::sse::{
     stream_with_keepalive, StreamCloseReason, StreamKeepaliveOpts, DEFAULT_KEEPALIVE_INTERVAL,
 };
-use crate::proxy::wire::Wire;
 use crate::proxy::wire_openai::OpenAiWire;
 use crate::routing::types::RoutingCandidate;
 use crate::upstream::transport::ByteStream;
@@ -69,18 +66,15 @@ impl CandidateCaller for AudioCaller {
 pub struct AudioDispatchOptions {
     pub user_id: String,
     pub api_key_id: Option<String>,
+    /// The primary target's custom provider slug.
     pub provider: String,
-    pub adapter: Option<DynAdapter>,
     pub form: AudioForm,
     pub raw_model: String,
     pub upstream_model: String,
     pub idle_timeout: Option<Duration>,
     pub group_name: Option<String>,
-    pub pinned_account_id: Option<String>,
-    pub candidates: Option<Vec<RoutingCandidate>>,
-    pub strategy: Option<String>,
-    pub is_builtin: Option<bool>,
-    pub custom_provider: Option<CustomProviderRow>,
+    /// The route's resolved candidates, possibly cross-target for a group.
+    pub candidates: Vec<RoutingCandidate>,
 }
 
 impl Default for AudioDispatchOptions {
@@ -89,7 +83,6 @@ impl Default for AudioDispatchOptions {
             user_id: String::new(),
             api_key_id: None,
             provider: String::new(),
-            adapter: None,
             form: AudioForm {
                 fields: Vec::new(),
                 file_name: String::new(),
@@ -100,47 +93,39 @@ impl Default for AudioDispatchOptions {
             upstream_model: String::new(),
             idle_timeout: None,
             group_name: None,
-            pinned_account_id: None,
-            candidates: None,
-            strategy: None,
-            is_builtin: None,
-            custom_provider: None,
+            candidates: Vec::new(),
         }
     }
 }
 
 pub async fn dispatch_audio_transcriptions(cx: &AppState, opts: AudioDispatchOptions) -> Response {
-    let idle_timeout = opts.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT);
+    let AudioDispatchOptions {
+        user_id,
+        api_key_id,
+        provider,
+        form,
+        raw_model,
+        upstream_model,
+        idle_timeout,
+        group_name,
+        candidates,
+    } = opts;
     let transport = Arc::new(TransportOpts {
-        user_id: opts.user_id.clone(),
-        api_key_id: opts.api_key_id.clone(),
-        group_name: opts.group_name.clone(),
-        idle_timeout: Some(idle_timeout),
-        requested_provider: opts.provider.clone(),
-        requested_model: canonical_model_id(&opts.provider, &opts.upstream_model),
-        source: CandidateSource {
-            user_id: opts.user_id.clone(),
-            api_key_id: opts.api_key_id.clone(),
-            provider: opts.provider.clone(),
-            adapter: opts.adapter.clone(),
-            pinned_account_id: opts.pinned_account_id.clone(),
-            candidates: opts.candidates.clone(),
-            strategy: opts.strategy.clone(),
-            is_builtin: opts.is_builtin,
-            custom_provider: opts.custom_provider.clone(),
-        },
-        upstream_model: opts.upstream_model.clone(),
-        caller: Arc::new(AudioCaller { form: opts.form.clone(), raw_model: opts.raw_model.clone() }),
+        user_id,
+        api_key_id,
+        group_name,
+        idle_timeout,
+        requested_model: canonical_model_id(&provider, &upstream_model),
+        requested_provider: provider,
+        caller: Arc::new(AudioCaller { form, raw_model }),
         wire: Arc::new(OpenAiWire),
         capture_usage: true,
         attach_cost: false,
     });
-    dispatch_non_stream_with(cx, transport, &AudioDelivery { idle_timeout }).await
+    dispatch_non_stream_with(cx, transport, candidates, &AudioDelivery).await
 }
 
-struct AudioDelivery {
-    idle_timeout: Duration,
-}
+struct AudioDelivery;
 
 #[async_trait]
 impl NonStreamDelivery for AudioDelivery {
@@ -157,61 +142,37 @@ impl NonStreamDelivery for AudioDelivery {
             .is_some_and(|ct| ct.contains("application/json"));
         let audience = HeaderAudience::of(&candidate);
 
-        let entry = LogEntry {
-            started_at_ms: Some(started_at_ms),
-            user_id: t.user_id.clone(),
-            api_key_id: t.api_key_id.clone(),
-            group_name: t.group_name.clone(),
-            provider: candidate.provider.clone(),
-            model: canonical_model_id(&candidate.provider, &candidate.upstream_model),
-            account_id: Some(candidate.account.id.clone()),
-            status_code: status.as_u16() as i32,
-            latency_ms,
-            upstream_status: Some(status.as_u16() as i32),
-            ..Default::default()
-        };
+        let mut entry = t.candidate_entry(started_at_ms, &candidate);
+        entry.status_code = status.as_u16() as i32;
+        entry.latency_ms = latency_ms;
+        entry.upstream_status = Some(status.as_u16() as i32);
 
         // Whether any response byte reached the client — the same rule the other transports use.
         let saw_output = Arc::new(AtomicBool::new(false));
         let (parts, body) = response.into_parts();
 
-        // An upstream error status passed through carries no useful output whatever its body
-        // says; otherwise transcription text that already reached the client is consumed, even
-        // if the connection then broke. The settlement and the row must outlive the client
-        // connection, exactly as `waitUntil` kept them alive.
+        // Transcription text that already reached the client is consumed, even if the
+        // connection then broke (`settle_and_log`). The settlement and the row must outlive the
+        // client connection.
         let log = {
             let cx = cx.clone();
             let saw_output = saw_output.clone();
-            let lease = Arc::new(Mutex::new(lease));
             let upstream_status = status.as_u16();
-            Arc::new(move |usage: Option<NormalizedUsage>, code: Option<String>| {
-                let usage = usage.unwrap_or_default();
-                let mut entry = entry.clone();
+            move |usage: Option<NormalizedUsage>, code: Option<String>| {
+                let mut entry = entry;
                 entry.error_code = code;
-                entry.prompt_tokens = usage.prompt_tokens;
-                entry.completion_tokens = usage.completion_tokens;
-                entry.cache_read_input_tokens = usage.cache_read_input_tokens;
-                entry.cache_creation_input_tokens = usage.cache_creation_input_tokens;
-                let outcome = if upstream_status >= 400 {
-                    LeaseOutcome::Released
-                } else {
-                    lease_outcome(entry.error_code.as_deref(), saw_output.load(Ordering::SeqCst))
-                };
-                let lease = lease.lock().unwrap_or_else(|e| e.into_inner()).take();
-                let cx = cx.clone();
+                apply_usage(&mut entry, usage);
+                let saw_output = saw_output.load(Ordering::SeqCst);
                 tokio::spawn(async move {
-                    settle_lease(lease.as_deref(), outcome).await;
-                    log_request(&cx, entry).await;
+                    settle_and_log(&cx, entry, lease, upstream_status, saw_output).await;
                 });
-            })
+            }
         };
 
         if event_stream {
-            let sniffer: Arc<Mutex<Box<dyn UsageSniffer>>> = Arc::new(Mutex::new(OpenAiWire.create_usage_sniffer()));
+            let sniffer: Arc<Mutex<Box<dyn UsageSniffer>>> = Arc::new(Mutex::new(t.wire.create_usage_sniffer()));
             let tap_sniffer = sniffer.clone();
             let tap_saw_output = saw_output.clone();
-            let close_code = error_code.clone();
-            let close_log = log.clone();
             let stream = stream_with_keepalive(
                 Box::pin(body_stream(body)),
                 DEFAULT_KEEPALIVE_INTERVAL,
@@ -225,12 +186,11 @@ impl NonStreamDelivery for AudioDelivery {
                             let s = sniffer.lock().unwrap_or_else(|e| e.into_inner());
                             (s.finish(), s.complete())
                         };
-                        let code = close_code.clone().or_else(|| stream_close_error_code(reason, complete));
-                        close_log(usage, code);
+                        let code = error_code.or_else(|| stream_close_error_code(reason, complete));
+                        log(usage, code);
                     })),
-                    idle_timeout: Some(self.idle_timeout),
-                    stall_frame: Some(OpenAiWire.stall_frame()),
-                    error_frame: None,
+                    idle_timeout: Some(t.idle_timeout()),
+                    stall_frame: Some(t.wire.stall_frame()),
                 },
             );
             let mut res = Response::builder().status(parts.status).body(Body::from_stream(stream)).expect("builds");
@@ -249,7 +209,7 @@ impl NonStreamDelivery for AudioDelivery {
                 let code = match reason {
                     StreamCloseReason::Cancel => Some("client_abort".to_string()),
                     StreamCloseReason::Error => Some("upstream_error".to_string()),
-                    _ => error_code.clone(),
+                    _ => error_code,
                 };
                 log(usage, code);
             },
@@ -262,7 +222,7 @@ impl NonStreamDelivery for AudioDelivery {
 }
 
 /// Fires `on_finish` exactly once — including when the client drops the stream mid-body, which
-/// aborts the pump and drops this with it (`cancel` in the TypeScript reader).
+/// aborts the pump and drops this with it.
 struct FinishGuard<F: FnOnce(Option<NormalizedUsage>, StreamCloseReason) + Send + 'static> {
     on_finish: Option<F>,
     buffered: Vec<u8>,
@@ -323,10 +283,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::custom_providers::CustomProviderRow;
     use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_state};
     use crate::pool::AcquiredAccount;
-    use crate::providers::types::ProviderAdapter;
-    use crate::proxy::dispatch::tests::{body_text, logs, seed_accounts, wait_for_logs};
+    use crate::providers::types::{DynAdapter, ProviderAdapter};
+    use crate::proxy::dispatch::tests::{body_text, logs, own_pool, seed_accounts, wait_for_logs};
     use crate::upstream::MockTransport;
     use http::{HeaderValue, StatusCode};
     use serde_json::{json, Value};
@@ -405,8 +366,7 @@ mod tests {
             AudioDispatchOptions {
                 user_id: user.id.clone(),
                 provider: "custom-audio".into(),
-                adapter: Some(adapter),
-                is_builtin: Some(false),
+                candidates: own_pool(&state, &user.id, "custom-audio", "whisper-1", adapter).await,
                 form: form(),
                 raw_model: "custom-audio/whisper-1".into(),
                 upstream_model: "whisper-1".into(),
@@ -487,12 +447,7 @@ mod tests {
         let user = insert_user(state.pool(), "audio-noendpoint@example.com").await;
         seed_accounts(state.pool(), &user.id, "custom-audio", &["acc_audio"]).await;
         // The default adapter has no `audio_transcriptions`, so the walk finds no attempt at all.
-        let res = dispatch_audio_transcriptions(
-            &state,
-            AudioDispatchOptions {
-                user_id: user.id.clone(),
-                provider: "custom-audio".into(),
-                adapter: Some(crate::routing::candidates::custom_provider_adapter(&CustomProviderRow {
+        let adapter = crate::routing::candidates::custom_provider_adapter(&CustomProviderRow {
                     id: "cprov".into(),
                     user_id: user.id.clone(),
                     slug: "custom-audio".into(),
@@ -505,8 +460,13 @@ mod tests {
                     sort_order: 0,
                     created_at: "2026-01-01T00:00:00.000Z".into(),
                     updated_at: "2026-01-01T00:00:00.000Z".into(),
-                })),
-                is_builtin: Some(false),
+        });
+        let res = dispatch_audio_transcriptions(
+            &state,
+            AudioDispatchOptions {
+                user_id: user.id.clone(),
+                provider: "custom-audio".into(),
+                candidates: own_pool(&state, &user.id, "custom-audio", "whisper-1", adapter).await,
                 form: form(),
                 raw_model: "custom-audio/whisper-1".into(),
                 upstream_model: "whisper-1".into(),

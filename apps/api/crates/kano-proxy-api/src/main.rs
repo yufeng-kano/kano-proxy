@@ -13,12 +13,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&config.database_url).await?;
     db::migrate(&pool, db::CORE_MIGRATIONS_TABLE, db::CORE_MIGRATIONS).await?;
     let addr = config.listen_addr;
-    let extensions = Extensions::default();
-    let state = AppState::builder(config, pool.clone())
-        .tunnels(tunnel_registry_for(pool))
-        .service_name("kano-proxy")
-        .build();
-    // The Worker's cron: retention, then the price table refresh, daily at 03:17 UTC.
+    let state = AppState::builder(config, pool.clone()).tunnels(tunnel_registry_for(pool)).build();
+    // Daily at 03:17 UTC: retention, then the price table refresh.
     spawn_scheduler(state.clone(), None);
-    serve(addr, build_router(state, extensions)).await
+    serve(addr, build_router(state, Extensions::default())).await
 }

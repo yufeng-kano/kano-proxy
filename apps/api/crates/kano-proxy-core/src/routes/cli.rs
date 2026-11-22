@@ -13,11 +13,12 @@ use serde_json::{json, Value};
 use crate::auth::session::SessionUser;
 use crate::crypto::cli_tokens::{new_pairing_code, sha256_hex_str};
 use crate::db::accounts::{list_accounts, update_account_identity, AccountIdentity};
-use crate::db::keys::count_keys_for_device;
+use crate::db::keys::key_counts_by_device;
 use crate::db::cli::{
     approve_login_request, delete_login_request, get_cli_provider_by_id, get_login_request, list_cli_devices,
     rename_cli_device, rename_cli_provider, revoke_cli_device, CliLoginRequestRow,
 };
+use crate::http::errors::{admin_error as error, internal_error, not_found};
 use crate::utils::custom_provider::validate_name;
 use crate::AppState;
 
@@ -34,37 +35,28 @@ pub fn routes() -> Router<AppState> {
         .route("/login-requests/{id}/deny", post(deny))
 }
 
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
-}
-
-fn internal_error() -> Response {
-    error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-}
-
-fn not_found() -> Response {
-    error(StatusCode::NOT_FOUND, "not found")
-}
-
 async fn list_devices(State(state): State<AppState>, session: SessionUser) -> Response {
-    let Ok(rows) = list_cli_devices(state.pool(), &session.user.id).await else {
+    let (Ok(rows), Ok(key_counts)) =
+        (list_cli_devices(state.pool(), &session.user.id).await, key_counts_by_device(state.pool(), &session.user.id).await)
+    else {
         return internal_error();
     };
-    let mut devices: Vec<Value> = Vec::with_capacity(rows.len());
-    for row in rows {
-        // How many keys the device minted and still exist — the revoke confirmation names
-        // them, since revoking takes them along (docs/cli.md § Keys and groups).
-        let Ok(key_count) = count_keys_for_device(state.pool(), &row.id).await else {
-            return internal_error();
-        };
-        devices.push(json!({
-            "id": row.id,
-            "name": row.name,
-            "last_seen_at": row.last_seen_at,
-            "created_at": row.created_at,
-            "key_count": key_count,
-        }));
-    }
+    let devices: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            // How many keys the device minted and still exist — the revoke confirmation names
+            // them, since revoking takes them along (docs/cli.md § Keys and groups). A device's
+            // keys are always its user's, so the user's counts hold them all.
+            let key_count = key_counts.get(&row.id).copied().unwrap_or(0);
+            json!({
+                "id": row.id,
+                "name": row.name,
+                "last_seen_at": row.last_seen_at,
+                "created_at": row.created_at,
+                "key_count": key_count,
+            })
+        })
+        .collect();
     Json(json!({ "devices": devices })).into_response()
 }
 
@@ -83,7 +75,7 @@ async fn rename_device(
         return error(StatusCode::BAD_REQUEST, &message);
     }
     match rename_cli_device(state.pool(), &session.user.id, &id, name).await {
-        Ok(true) => Json(json!({ "ok": true, "name": name })).into_response(),
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
         Ok(false) => not_found(),
         Err(_) => internal_error(),
     }
@@ -144,7 +136,7 @@ async fn rename_provider(
             return internal_error();
         }
     }
-    Json(json!({ "ok": true, "name": name })).into_response()
+    Json(json!({ "ok": true })).into_response()
 }
 
 async fn delete_provider(State(state): State<AppState>, session: SessionUser, Path(id): Path<String>) -> Response {
@@ -174,14 +166,7 @@ async fn read_login_request(State(state): State<AppState>, _session: SessionUser
     let Some(row) = live_request(&state, row) else {
         return not_found();
     };
-    Json(json!({
-        "id": row.id,
-        "device_name": row.device_name,
-        "expires_at": row.expires_at,
-        "approved": row.approved_at.is_some(),
-        "used": row.used_at.is_some(),
-    }))
-    .into_response()
+    Json(json!({ "device_name": row.device_name, "approved": row.approved_at.is_some() })).into_response()
 }
 
 async fn approve(State(state): State<AppState>, session: SessionUser, Path(id): Path<String>) -> Response {
@@ -259,8 +244,7 @@ mod tests {
         test_router(state.clone()).oneshot(req).await.unwrap()
     }
 
-    /// The seed of cli_routes.test.ts: one device, one provider and its internal
-    /// pool-state account row.
+    /// One device, one provider and its internal pool-state account row.
     async fn seed_provider(state: &AppState, user: &UserRow) -> (String, String) {
         let device = insert_cli_device(state.pool(), &user.id, "my-mac", "hash").await.unwrap();
         let row = insert_cli_provider(
@@ -368,7 +352,6 @@ mod tests {
         assert_eq!(provider["device_name"], "my-mac");
         assert_eq!(provider["connected"], false);
         assert_eq!(provider["models"], serde_json::json!(["llama3"]));
-        assert_eq!(provider["models_reported"], 1);
     }
 
     #[tokio::test]
@@ -431,7 +414,6 @@ mod tests {
         let json = body_json(send(&state, request("GET", &uri, &cookie, None)).await).await;
         assert_eq!(json["device_name"], "new-box");
         assert_eq!(json["approved"], false);
-        assert_eq!(json["used"], false);
 
         sqlx::query("UPDATE cli_login_requests SET expires_at = $1 WHERE id = $2")
             .bind("2020-01-01T00:00:00.000Z")

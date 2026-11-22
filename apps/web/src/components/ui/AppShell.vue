@@ -8,7 +8,7 @@
  *
  * The scroll container being an element rather than the window is load-bearing
  * — it is published through services/scrollRegion.ts so scroll restore, the
- * reset-on-navigate, and the Providers section nav all move the right thing.
+ * reset-on-navigate, and the dialog scroll lock all move the right thing.
  *
  * Below 1080px the sidebar becomes a drawer behind a header menu button. No
  * icon rail: with six destinations the labels are doing the work, and no

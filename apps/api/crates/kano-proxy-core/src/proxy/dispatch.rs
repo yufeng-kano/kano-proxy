@@ -7,8 +7,8 @@
 //! per client request, at the point the outcome is decided: for a stream, when the stream
 //! closes; the attempt's pool-extension lease settles on that same decision.
 //!
-//! `waitUntil` becomes `tokio::spawn`: the settlement and the log write outlive the client
-//! connection, which is what makes a cancelled stream still produce its row.
+//! The settlement and the log write are spawned so they outlive the client connection, which
+//! is what makes a cancelled stream still produce its row.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,16 +22,14 @@ use http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use serde_json::{Map, Value};
 
 use crate::app::now_ms;
-use crate::db::custom_providers::CustomProviderRow;
 use crate::logging::request_log::{log_request, LogEntry};
 use crate::logging::usage_capture::{NormalizedUsage, UsageSniffer};
 use crate::pricing::litellm::{model_price, ModelPrice};
 use crate::pool::extension::{settle_lease, AttemptLease, HeaderAudience, LeaseOutcome};
-use crate::providers::types::{AdapterError, CallExtras, ChatCompletionRequest, DynAdapter};
+use crate::providers::types::{AdapterError, CallExtras, ChatCompletionRequest, RequestEdits};
 use crate::proxy::request_edits::{edit_anthropic_body, edit_chat_request};
-use crate::providers::ProviderId;
 use crate::proxy::dispatch_walk::{
-    recompute_unavailable_until, walk_candidates, CandidateCaller, CandidateSource, WalkOpts, WalkOutcome,
+    recompute_unavailable_until, walk_candidates, CandidateCaller, WalkOpts, WalkOutcome,
     WalkProgress,
 };
 use crate::proxy::echo_model::{echo_model_body, echo_model_stream};
@@ -44,17 +42,16 @@ use crate::proxy::wire::{NonStreamResponse, Wire};
 use crate::proxy::wire_anthropic::AnthropicWire;
 use crate::proxy::wire_openai::OpenAiWire;
 use crate::routing::types::RoutingCandidate;
-use crate::utils::model::split_model_id;
 use crate::AppState;
 
-/// `request_logs.model`/`provider` always store the expanded canonical target, never a
-/// model-group alias — reconstructed the same way `split_model_id` builds `raw`.
+/// `request_logs.model`/`provider` always store the expanded canonical `provider/upstream_model`
+/// target, never a model-group alias.
 pub fn canonical_model_id(provider: &str, upstream_model: &str) -> String {
     format!("{provider}/{upstream_model}")
 }
 
 /// No real upstream chunk for this long tears the stream down (docs/api.md § Streaming).
-pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_millis(120_000);
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_millis(120_000);
 
 /// `request_logs.error_code` for a streamed response, from how it closed and whether the
 /// sniffer ever saw the upstream's documented completion signal (docs/logging.md § Streaming
@@ -75,7 +72,7 @@ pub fn stream_close_error_code(reason: StreamCloseReason, complete: bool) -> Opt
 /// How one attempt's pool-extension lease settles, read off the very row the core is about to
 /// log: an error row that produced no output is `Released`; anything else — including a stream
 /// that produced output and then broke — is `Consumed`.
-pub fn lease_outcome(error_code: Option<&str>, saw_output: bool) -> LeaseOutcome {
+fn lease_outcome(error_code: Option<&str>, saw_output: bool) -> LeaseOutcome {
     if error_code.is_some() && !saw_output {
         LeaseOutcome::Released
     } else {
@@ -84,21 +81,12 @@ pub fn lease_outcome(error_code: Option<&str>, saw_output: bool) -> LeaseOutcome
 }
 
 fn retry_after_seconds(until_ms: i64) -> u64 {
-    let seconds = (until_ms - now_ms()).div_euclid(1000) + i64::from((until_ms - now_ms()).rem_euclid(1000) > 0);
+    let remaining_ms = until_ms - now_ms();
+    let seconds = remaining_ms.div_euclid(1000) + i64::from(remaining_ms.rem_euclid(1000) > 0);
     seconds.clamp(1, 60) as u64
 }
 
-/// `x-should-retry` on terminal errors (docs/api.md § Errors).
-fn retry_marker(status: u16, error_code: Option<&str>) -> Option<&'static str> {
-    match (status, error_code) {
-        (503, Some("upstream_unavailable")) => Some("true"),
-        (400, Some("no_upstream_account" | "invalid_model" | "loop_detected")) => Some("false"),
-        (429, Some("spend_limit_exceeded")) => Some("false"),
-        _ => None,
-    }
-}
-
-fn json_response(status: StatusCode, body: &Value) -> Response {
+pub(crate) fn json_response(status: StatusCode, body: &Value) -> Response {
     Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, "application/json")
@@ -117,10 +105,10 @@ fn with_header(mut res: Response, name: HeaderName, value: &str) -> Response {
 /// candidate's provider id or custom slug, and its bare upstream model id — the same pair the
 /// row's `provider`/`model` store, never the group alias the client addressed. A stream has
 /// already committed its headers before the walk runs, so it can never carry them.
-pub const UPSTREAM_PROVIDER_HEADER: &str = "x-kano-upstream-provider";
-pub const UPSTREAM_MODEL_HEADER: &str = "x-kano-upstream-model";
+const UPSTREAM_PROVIDER_HEADER: &str = "x-kano-upstream-provider";
+const UPSTREAM_MODEL_HEADER: &str = "x-kano-upstream-model";
 
-pub fn with_upstream_headers(res: Response, candidate: &RoutingCandidate) -> Response {
+fn with_upstream_headers(res: Response, candidate: &RoutingCandidate) -> Response {
     let res = with_header(res, HeaderName::from_static(UPSTREAM_PROVIDER_HEADER), &candidate.provider);
     with_header(res, HeaderName::from_static(UPSTREAM_MODEL_HEADER), &candidate.upstream_model)
 }
@@ -198,10 +186,10 @@ pub fn passthrough_stream_headers(headers: &HeaderMap, audience: HeaderAudience)
     let mut out = HeaderMap::new();
     let content_type = src
         .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-        .unwrap_or("text/event-stream; charset=utf-8");
-    out.insert(header::CONTENT_TYPE, HeaderValue::from_str(content_type).expect("content type"));
+        .filter(|v| v.to_str().is_ok_and(|v| !v.is_empty()))
+        .cloned()
+        .unwrap_or(HeaderValue::from_static("text/event-stream; charset=utf-8"));
+    out.insert(header::CONTENT_TYPE, content_type);
     out.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     for (name, value) in &src {
         if name.as_str().starts_with("anthropic-ratelimit-") {
@@ -211,9 +199,8 @@ pub fn passthrough_stream_headers(headers: &HeaderMap, audience: HeaderAudience)
     out
 }
 
-/// Reads a whole response body; a body that fails mid-read reads as empty, exactly as the
-/// TypeScript `safeResponseText`.
-async fn safe_response_text(body: Body) -> String {
+/// Reads a whole response body; a body that fails mid-read reads as empty.
+pub(crate) async fn safe_response_text(body: Body) -> String {
     match axum::body::to_bytes(body, usize::MAX).await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(_) => String::new(),
@@ -226,13 +213,8 @@ pub(crate) fn body_stream(body: Body) -> impl futures::Stream<Item = Result<Byte
     body.into_data_stream().map(|r| r.map_err(std::io::Error::other))
 }
 
-fn is_relay_request_too_large(res: &Response) -> bool {
-    res.status() == StatusCode::PAYLOAD_TOO_LARGE
-        && res.headers().get("x-kano-relay-error").and_then(|v| v.to_str().ok()) == Some("request_too_large")
-}
-
 /// `None` (nothing captured) flattens to all-NULL `request_logs` token fields.
-fn apply_usage(entry: &mut LogEntry, usage: Option<NormalizedUsage>) {
+pub(crate) fn apply_usage(entry: &mut LogEntry, usage: Option<NormalizedUsage>) {
     let usage = usage.unwrap_or_default();
     entry.prompt_tokens = usage.prompt_tokens;
     entry.completion_tokens = usage.completion_tokens;
@@ -240,8 +222,8 @@ fn apply_usage(entry: &mut LogEntry, usage: Option<NormalizedUsage>) {
     entry.cache_creation_input_tokens = usage.cache_creation_input_tokens;
 }
 
-/// What a transport needs beyond the walk itself: where to log, which protocol, and how to
-/// reach the upstream per candidate.
+/// What a transport needs beyond the candidates it walks: where to log, which protocol, and how
+/// to reach the upstream per candidate.
 pub struct TransportOpts {
     pub user_id: String,
     pub api_key_id: Option<String>,
@@ -253,8 +235,6 @@ pub struct TransportOpts {
     /// unavailable, attempt cap). `requested_model` is already canonical.
     pub requested_provider: String,
     pub requested_model: String,
-    pub source: CandidateSource,
-    pub upstream_model: String,
     pub caller: Arc<dyn CandidateCaller>,
     pub wire: Arc<dyn Wire>,
     /// `false` for `count_tokens`: an estimate never consumes tokens, so no usage is ever
@@ -266,7 +246,7 @@ pub struct TransportOpts {
 }
 
 impl TransportOpts {
-    fn idle_timeout(&self) -> Duration {
+    pub(crate) fn idle_timeout(&self) -> Duration {
         self.idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT)
     }
 
@@ -282,7 +262,7 @@ impl TransportOpts {
         }
     }
 
-    fn candidate_entry(&self, started_at_ms: i64, candidate: &RoutingCandidate) -> LogEntry {
+    pub(crate) fn candidate_entry(&self, started_at_ms: i64, candidate: &RoutingCandidate) -> LogEntry {
         LogEntry {
             provider: candidate.provider.clone(),
             model: canonical_model_id(&candidate.provider, &candidate.upstream_model),
@@ -313,7 +293,7 @@ fn settle_once(slot: &Arc<Mutex<LeaseSlot>>, outcome: LeaseOutcome) {
         slot.settled = true;
         slot.lease.take()
     };
-    // The settlement must outlive the client connection (`ctx.waitUntil`).
+    // The settlement must outlive the client connection.
     tokio::spawn(async move {
         settle_lease(lease.as_deref(), outcome).await;
     });
@@ -322,7 +302,7 @@ fn settle_once(slot: &Arc<Mutex<LeaseSlot>>, outcome: LeaseOutcome) {
 /// Eager streaming commit: return 200 + SSE immediately, run the candidate walk inside the
 /// stream (docs/api.md § Eager streaming commit). Every failure after commit is a terminal
 /// frame; one log row on close.
-async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
+async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>, candidates: Vec<RoutingCandidate>) -> Response {
     let started = now_ms();
     let idle_timeout = t.idle_timeout();
     let sniffer: Arc<Mutex<Box<dyn UsageSniffer>>> = Arc::new(Mutex::new(t.wire.create_usage_sniffer()));
@@ -358,30 +338,36 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
                 .clone()
                 .or_else(|| stream_close_error_code(reason, complete));
             let outcome = lease_outcome(error_code.as_deref(), saw_output.load(Ordering::SeqCst));
-            let ready = slot.lock().unwrap_or_else(|e| e.into_inner()).ready;
+            let ready = {
+                let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+                if !slot.ready {
+                    slot.pending = Some(outcome);
+                }
+                slot.ready
+            };
             if ready {
                 settle_once(&slot, outcome);
-            } else {
-                slot.lock().unwrap_or_else(|e| e.into_inner()).pending = Some(outcome);
             }
 
-            let progress = progress.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let mut entry = match progress.candidate.as_ref() {
-                Some(candidate) => t.candidate_entry(started, candidate),
-                None => t.base_entry(started),
+            let mut entry = {
+                let progress = progress.lock().unwrap_or_else(|e| e.into_inner());
+                let mut entry = match progress.candidate.as_ref() {
+                    Some(candidate) => t.candidate_entry(started, candidate),
+                    None => t.base_entry(started),
+                };
+                entry.upstream_status = progress.upstream_status;
+                entry
             };
             entry.status_code = 200;
             entry.latency_ms = headers_latency.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or(now_ms() - started);
             entry.error_code = error_code;
-            entry.upstream_status = progress.upstream_status;
             apply_usage(&mut entry, usage);
             entry.resolved_price = resolved_price.lock().unwrap_or_else(|e| e.into_inner()).take();
-            // The row must outlive the client connection, exactly as `waitUntil` kept it alive.
+            // The row must outlive the client connection.
             tokio::spawn(async move { log_request(&cx, entry).await });
         })
     };
 
-    let error_frame = t.wire.upstream_error_frame();
     let body = {
         let cx = cx.clone();
         let t = t.clone();
@@ -395,8 +381,9 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
                 let outcome = walk_candidates(
                     &cx,
                     WalkOpts {
-                        source: &t.source,
-                        upstream_model: &t.upstream_model,
+                        user_id: &t.user_id,
+                        api_key_id: t.api_key_id.as_deref(),
+                        candidates,
                         caller: t.caller.as_ref(),
                         cancelled: Some(ctl.cancel_signal()),
                         progress: progress.clone(),
@@ -439,7 +426,6 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
 
                 let ok = response.status().is_success();
                 let event_stream = is_event_stream(&response);
-                let relay_too_large = is_relay_request_too_large(&response);
                 let (parts, body) = response.into_parts();
                 if ok && event_stream {
                     *headers_latency.lock().unwrap_or_else(|e| e.into_inner()) = Some(now_ms() - started);
@@ -462,7 +448,7 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
                             })),
                             idle_timeout: Some(idle_timeout),
                             stall_frame: Some(t.wire.stall_frame()),
-                            ..Default::default()
+                            error_frame: Some(t.wire.upstream_error_frame()),
                         },
                     )
                     .await;
@@ -471,21 +457,10 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
 
                 let text = safe_response_text(body).await;
                 if !parts.status.is_success() {
-                    let frame = if relay_too_large {
-                        fail(
-                            "request_too_large",
-                            t.wire
-                                .request_too_large_frame(&message_from_upstream_error_body(&text, "request body too large")),
-                        )
-                    } else {
-                        fail(
-                            "upstream_error",
-                            t.wire.upstream_error_frame_from_body(
-                                &message_from_upstream_error_body(&text, "upstream error"),
-                                &text,
-                            ),
-                        )
-                    };
+                    let frame = fail(
+                        "upstream_error",
+                        t.wire.upstream_error_frame_from_body(&message_from_upstream_error_body(&text, "upstream error"), &text),
+                    );
                     ctl.fail(frame).await;
                     return;
                 }
@@ -494,11 +469,7 @@ async fn dispatch_eager(cx: &AppState, t: Arc<TransportOpts>) -> Response {
                 ctl.close();
             },
             DEFAULT_KEEPALIVE_INTERVAL,
-            StreamKeepaliveOpts {
-                error_frame: Some(error_frame),
-                on_close: Some(on_close),
-                ..Default::default()
-            },
+            Some(on_close),
         )
     };
 
@@ -525,13 +496,14 @@ pub struct Delivery {
 /// Non-stream transport: run the walk first, then mirror the outcome as a real HTTP status —
 /// `400` / `503` (+ `Retry-After`) / `502` for pool and fetch failures, upstream status passed
 /// through otherwise (docs/api.md § Errors).
-pub async fn dispatch_non_stream(cx: &AppState, t: Arc<TransportOpts>) -> Response {
-    dispatch_non_stream_with(cx, t, &DefaultNonStreamDelivery).await
+pub async fn dispatch_non_stream(cx: &AppState, t: Arc<TransportOpts>, candidates: Vec<RoutingCandidate>) -> Response {
+    dispatch_non_stream_with(cx, t, candidates, &DefaultNonStreamDelivery).await
 }
 
 pub async fn dispatch_non_stream_with(
     cx: &AppState,
     t: Arc<TransportOpts>,
+    candidates: Vec<RoutingCandidate>,
     delivery: &dyn NonStreamDelivery,
 ) -> Response {
     let started = now_ms();
@@ -539,8 +511,9 @@ pub async fn dispatch_non_stream_with(
     let outcome = walk_candidates(
         cx,
         WalkOpts {
-            source: &t.source,
-            upstream_model: &t.upstream_model,
+            user_id: &t.user_id,
+            api_key_id: t.api_key_id.as_deref(),
+            candidates,
             caller: t.caller.as_ref(),
             cancelled: None,
             progress: progress.clone(),
@@ -561,10 +534,7 @@ pub async fn dispatch_non_stream_with(
             entry.error_code = Some("no_upstream_account".into());
             log_request(cx, entry).await;
             let res = json_response(StatusCode::BAD_REQUEST, &t.wire.no_account_body(&t.requested_provider));
-            match retry_marker(400, Some("no_upstream_account")) {
-                Some(v) => with_header(res, HeaderName::from_static("x-should-retry"), v),
-                None => res,
-            }
+            with_header(res, HeaderName::from_static("x-should-retry"), "false")
         }
         WalkOutcome::Unavailable { until_ms } => {
             let mut entry = t.base_entry(started);
@@ -614,7 +584,7 @@ pub struct DefaultNonStreamDelivery;
 /// One non-stream attempt's settle-then-log, in that order: the lease settles on the very
 /// decision that writes the row. An upstream error status passed through unchanged carries no
 /// useful output either, whatever the row's `error_code` says.
-async fn settle_and_log(
+pub(crate) async fn settle_and_log(
     cx: &AppState,
     entry: LogEntry,
     lease: Option<Box<dyn AttemptLease>>,
@@ -635,7 +605,6 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
     async fn deliver(&self, cx: &AppState, t: &Arc<TransportOpts>, delivery: Delivery) -> Response {
         let Delivery { candidate, response, latency_ms, lease, started_at_ms } = delivery;
         let status = response.status();
-        let relay_too_large = is_relay_request_too_large(&response);
         let event_stream = is_event_stream(&response);
         let audience = HeaderAudience::of(&candidate);
         let mut entry = t.candidate_entry(started_at_ms, &candidate);
@@ -644,17 +613,6 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
         entry.upstream_status = Some(status.as_u16() as i32);
 
         let (parts, body) = response.into_parts();
-
-        if relay_too_large {
-            let text = safe_response_text(body).await;
-            let message = message_from_upstream_error_body(&text, "request body too large");
-            let mut entry = entry;
-            entry.status_code = 413;
-            entry.error_code = Some("request_too_large".into());
-            settle_and_log(cx, entry, lease, status.as_u16(), false).await;
-            let res = json_response(StatusCode::PAYLOAD_TOO_LARGE, &t.wire.request_too_large_body(&message));
-            return with_header(res, HeaderName::from_static("x-should-retry"), "false");
-        }
 
         if event_stream {
             // "Legacy attach": an event-stream body under a non-stream request. The log row —
@@ -672,7 +630,6 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
             let tap_saw_output = saw_output.clone();
             let capture_usage = t.capture_usage;
             let cx_close = cx.clone();
-            let lease = Arc::new(Mutex::new(lease));
             let on_close = Box::new(move |reason: StreamCloseReason| {
                 let (usage, complete) = {
                     let sniffer = sniffer.lock().unwrap_or_else(|e| e.into_inner());
@@ -682,7 +639,6 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
                 entry.error_code =
                     if capture_usage { stream_close_error_code(reason, complete) } else { None };
                 apply_usage(&mut entry, if capture_usage { usage } else { None });
-                let lease = lease.lock().unwrap_or_else(|e| e.into_inner()).take();
                 let saw_output = saw_output.load(Ordering::SeqCst);
                 let upstream_status = status.as_u16();
                 tokio::spawn(async move {
@@ -700,7 +656,6 @@ impl NonStreamDelivery for DefaultNonStreamDelivery {
                     on_close: Some(on_close),
                     idle_timeout: Some(t.idle_timeout()),
                     stall_frame: Some(t.wire.stall_frame()),
-                    error_frame: None,
                 },
             );
             let mut res = Response::builder().status(parts.status).body(Body::from_stream(stream)).expect("builds");
@@ -770,6 +725,11 @@ impl CandidateCaller for ChatCaller {
         acquired: &crate::pool::AcquiredAccount,
         extras: &CallExtras,
     ) -> Result<Response, AdapterError> {
+        // The request is copied only for a candidate that needs another model id or has request
+        // edits switched on; otherwise every attempt sends the one the route built.
+        if candidate.upstream_model == self.req.upstream_model && extras.edits == RequestEdits::default() {
+            return candidate.adapter.chat_completions(cx, acquired, &self.req, extras).await;
+        }
         let mut req = ChatCompletionRequest { upstream_model: candidate.upstream_model.clone(), ..self.req.clone() };
         edit_chat_request(&mut req, extras.edits);
         candidate.adapter.chat_completions(cx, acquired, &req, extras).await
@@ -781,63 +741,40 @@ impl CandidateCaller for ChatCaller {
 pub struct ChatDispatchOptions {
     pub user_id: String,
     pub api_key_id: Option<String>,
-    /// Builtin `ProviderId` or a custom provider's slug.
+    /// The primary target's builtin `ProviderId` or custom provider slug.
     pub provider: String,
-    /// Pre-resolved adapter for custom providers; defaults to the builtin registry.
-    pub adapter: Option<DynAdapter>,
     pub req: ChatCompletionRequest,
     /// Testability hook for the streaming idle timeout; defaults to 120s.
     pub idle_timeout: Option<Duration>,
     /// The model-group alias this request was addressed to, if any.
     pub group_name: Option<String>,
-    /// Model-group account pinning. Ignored when `candidates` is given (already scoped).
-    pub pinned_account_id: Option<String>,
-    /// Pre-built cross-target candidate list — group dispatch.
-    pub candidates: Option<Vec<RoutingCandidate>>,
-    pub strategy: Option<String>,
-    pub is_builtin: Option<bool>,
-    pub custom_provider: Option<CustomProviderRow>,
+    /// The route's resolved candidates, possibly cross-target for a group.
+    pub candidates: Vec<RoutingCandidate>,
     /// `usage.cost` on the response — set by the Chat Completions route only; the Responses
     /// and Anthropic conversion paths that reuse this dispatch leave it off.
     pub attach_cost: bool,
 }
 
-impl ChatDispatchOptions {
-    fn source(&self) -> CandidateSource {
-        CandidateSource {
-            user_id: self.user_id.clone(),
-            api_key_id: self.api_key_id.clone(),
-            provider: self.provider.clone(),
-            adapter: self.adapter.clone(),
-            pinned_account_id: self.pinned_account_id.clone(),
-            candidates: self.candidates.clone(),
-            strategy: self.strategy.clone(),
-            is_builtin: self.is_builtin,
-            custom_provider: self.custom_provider.clone(),
-        }
-    }
-}
-
 pub async fn dispatch_chat_completions(cx: &AppState, opts: ChatDispatchOptions) -> Response {
-    let stream = opts.req.stream.unwrap_or(false);
+    let ChatDispatchOptions { user_id, api_key_id, provider, req, idle_timeout, group_name, candidates, attach_cost } =
+        opts;
+    let stream = req.stream.unwrap_or(false);
     let transport = Arc::new(TransportOpts {
-        user_id: opts.user_id.clone(),
-        api_key_id: opts.api_key_id.clone(),
-        group_name: opts.group_name.clone(),
-        idle_timeout: opts.idle_timeout,
-        requested_provider: opts.provider.clone(),
-        requested_model: canonical_model_id(&opts.provider, &opts.req.upstream_model),
-        source: opts.source(),
-        upstream_model: opts.req.upstream_model.clone(),
-        caller: Arc::new(ChatCaller { req: opts.req.clone() }),
+        user_id,
+        api_key_id,
+        group_name,
+        idle_timeout,
+        requested_model: canonical_model_id(&provider, &req.upstream_model),
+        requested_provider: provider,
+        caller: Arc::new(ChatCaller { req }),
         wire: Arc::new(OpenAiWire),
         capture_usage: true,
-        attach_cost: opts.attach_cost,
+        attach_cost,
     });
     if stream {
-        dispatch_eager(cx, transport).await
+        dispatch_eager(cx, transport, candidates).await
     } else {
-        dispatch_non_stream(cx, transport).await
+        dispatch_non_stream(cx, transport, candidates).await
     }
 }
 
@@ -853,7 +790,8 @@ pub enum AnthropicEndpoint {
 }
 
 struct MessagesCaller {
-    body: Map<String, Value>,
+    /// The client's body object, its `model` already set to the first candidate's upstream id.
+    body: Value,
     headers: HeaderMap,
     endpoint: AnthropicEndpoint,
     echo_model: Option<String>,
@@ -874,18 +812,29 @@ impl CandidateCaller for MessagesCaller {
         acquired: &crate::pool::AcquiredAccount,
         extras: &CallExtras,
     ) -> Result<Response, AdapterError> {
-        // `body` with `.model` rewritten to the candidate's own upstream id and this candidate's
-        // request edits applied — cache_control and everything else pass through untouched.
-        let mut body = self.body.clone();
-        body.insert("model".into(), Value::String(candidate.upstream_model.clone()));
-        edit_anthropic_body(&mut body, extras.edits);
-        let body = Value::Object(body);
+        // `body` with `.model` set to the candidate's own upstream id and this candidate's request
+        // edits applied — cache_control and everything else pass through untouched. Copied only
+        // when one of those changes something.
+        let edited;
+        let body = if self.body.get("model").and_then(Value::as_str) == Some(candidate.upstream_model.as_str())
+            && extras.edits == RequestEdits::default()
+        {
+            &self.body
+        } else {
+            let mut body = self.body.clone();
+            if let Value::Object(map) = &mut body {
+                map.insert("model".into(), Value::String(candidate.upstream_model.clone()));
+                edit_anthropic_body(map, extras.edits);
+            }
+            edited = body;
+            &edited
+        };
         let response = match self.endpoint {
             AnthropicEndpoint::Messages => {
-                candidate.adapter.messages(cx, acquired, &body, &self.headers, extras).await?
+                candidate.adapter.messages(cx, acquired, body, &self.headers, extras).await?
             }
             AnthropicEndpoint::CountTokens => {
-                return candidate.adapter.count_tokens(cx, acquired, &body, &self.headers, extras).await;
+                return candidate.adapter.count_tokens(cx, acquired, body, &self.headers, extras).await;
             }
         };
         let Some(model) = self.echo_model.clone() else { return Ok(response) };
@@ -918,17 +867,13 @@ pub struct AnthropicDispatchOptions {
     pub headers: HeaderMap,
     /// Canonical `provider/upstream_model` for `request_logs.model` — never a group alias.
     pub model: String,
-    /// Builtin `ProviderId` or a custom provider's slug. Defaults to claude-code.
-    pub provider: Option<String>,
-    pub adapter: Option<DynAdapter>,
+    /// The primary target's builtin `ProviderId` or custom provider slug.
+    pub provider: String,
     pub endpoint: AnthropicEndpoint,
     pub idle_timeout: Option<Duration>,
     pub group_name: Option<String>,
-    pub pinned_account_id: Option<String>,
-    pub candidates: Option<Vec<RoutingCandidate>>,
-    pub strategy: Option<String>,
-    pub is_builtin: Option<bool>,
-    pub custom_provider: Option<CustomProviderRow>,
+    /// The route's resolved candidates, possibly cross-target for a group.
+    pub candidates: Vec<RoutingCandidate>,
     /// The group model name the client sent, answered back in place of the upstream's own id —
     /// group endpoints' native passthrough only (docs/api.md § Group endpoints).
     pub echo_model: Option<String>,
@@ -938,79 +883,44 @@ fn body_wants_stream(body: &Map<String, Value>) -> bool {
     body.get("stream") == Some(&Value::Bool(true))
 }
 
-/// Native Anthropic Messages (or count_tokens) passthrough — claude-code by default, or a
-/// custom anthropic-format provider when `provider`/`adapter` are given. cache_control is never
-/// rewritten; the body goes through the adapter method as-is aside from the `model` rewrite to
-/// the acquired candidate's own upstream id. `endpoint` selects which adapter method carries
-/// the request; both share the same candidate walk.
+/// Native Anthropic Messages (or count_tokens) passthrough. cache_control is never rewritten;
+/// the body goes through the adapter method as-is aside from the `model` rewrite to the
+/// acquired candidate's own upstream id and that account's request edits. `endpoint` selects
+/// which adapter method carries the request; a candidate whose adapter lacks it is skipped.
 pub async fn dispatch_anthropic_messages(cx: &AppState, opts: AnthropicDispatchOptions) -> Response {
-    let provider = opts.provider.clone().unwrap_or_else(|| "claude-code".to_string());
-    let endpoint = opts.endpoint;
-
-    // Fixed adapter (no candidates): keep the immediate rejection for an adapter that never
-    // supports this endpoint at all, before ever touching the pool — 500, not a synthesized
-    // pool-exhaustion error.
-    if opts.candidates.is_none() {
-        let fixed = opts
-            .adapter
-            .clone()
-            .or_else(|| ProviderId::parse(&provider).map(crate::providers::registry::get_adapter));
-        let supported = match (&fixed, endpoint) {
-            (Some(adapter), AnthropicEndpoint::Messages) => adapter.has_messages(),
-            (Some(adapter), AnthropicEndpoint::CountTokens) => adapter.has_count_tokens(),
-            (None, _) => false,
-        };
-        if !supported {
-            let name = match endpoint {
-                AnthropicEndpoint::Messages => "messages",
-                AnthropicEndpoint::CountTokens => "count_tokens",
-            };
-            return json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &serde_json::json!({
-                    "type": "error",
-                    "error": { "type": "api_error", "message": format!("{name} not supported") }
-                }),
-            );
-        }
+    let AnthropicDispatchOptions {
+        user_id,
+        api_key_id,
+        mut body,
+        headers,
+        model,
+        provider,
+        endpoint,
+        idle_timeout,
+        group_name,
+        candidates,
+        echo_model,
+    } = opts;
+    let stream = endpoint == AnthropicEndpoint::Messages && body_wants_stream(&body);
+    if let Some(first) = candidates.first() {
+        body.insert("model".into(), Value::String(first.upstream_model.clone()));
     }
-
-    let stream = endpoint == AnthropicEndpoint::Messages && body_wants_stream(&opts.body);
     let transport = Arc::new(TransportOpts {
-        user_id: opts.user_id.clone(),
-        api_key_id: opts.api_key_id.clone(),
-        group_name: opts.group_name.clone(),
-        idle_timeout: opts.idle_timeout,
-        requested_provider: provider.clone(),
-        requested_model: opts.model.clone(),
-        source: CandidateSource {
-            user_id: opts.user_id.clone(),
-            api_key_id: opts.api_key_id.clone(),
-            provider: provider.clone(),
-            adapter: opts.adapter.clone(),
-            pinned_account_id: opts.pinned_account_id.clone(),
-            candidates: opts.candidates.clone(),
-            strategy: opts.strategy.clone(),
-            is_builtin: opts.is_builtin,
-            custom_provider: opts.custom_provider.clone(),
-        },
-        // Bare upstream id from the canonical `provider/upstream_model` string — builds the
-        // single-pool candidate when no pre-built list was handed in.
-        upstream_model: split_model_id(&opts.model).map(|s| s.upstream_model).unwrap_or(opts.model.clone()),
-        caller: Arc::new(MessagesCaller {
-            body: opts.body.clone(),
-            headers: opts.headers.clone(),
-            endpoint,
-            echo_model: opts.echo_model.clone(),
-        }),
+        user_id,
+        api_key_id,
+        group_name,
+        idle_timeout,
+        requested_provider: provider,
+        requested_model: model,
+        caller: Arc::new(MessagesCaller { body: Value::Object(body), headers, endpoint, echo_model }),
         wire: Arc::new(AnthropicWire),
         capture_usage: endpoint != AnthropicEndpoint::CountTokens,
         attach_cost: false,
     });
     if stream {
-        dispatch_eager(cx, transport).await
+        dispatch_eager(cx, transport, candidates).await
     } else {
-        dispatch_non_stream(cx, transport).await
+        dispatch_non_stream(cx, transport, candidates).await
     }
 }
 
@@ -1021,8 +931,9 @@ pub(crate) mod tests {
     use crate::db::test_support::{insert_account, insert_user, skip_without_db, test_pool, test_state};
     use crate::pool::bench::is_benched;
     use crate::pool::StoredCredential;
-    use crate::providers::types::ProviderAdapter;
+    use crate::providers::types::{DynAdapter, ProviderAdapter};
     use crate::proxy::dispatch_walk::MAX_ATTEMPTS;
+    use crate::routing::candidates::{pool_candidates, PoolTarget};
     use crate::upstream::MockTransport;
     use futures::StreamExt;
     use serde_json::json;
@@ -1036,10 +947,10 @@ pub(crate) mod tests {
         Sse(StatusCode, String),
         /// An event-stream body that sends one chunk and then goes silent forever.
         SilentSse(String),
+        /// An event-stream body that fails before its first byte.
+        BrokenSse,
         /// The adapter itself fails.
         Error,
-        /// A response with extra headers (relay 413, agent faults, rate-limit resets).
-        WithHeaders(StatusCode, Value, Vec<(&'static str, String)>),
     }
 
     /// A scripted adapter: one reply per call, recording which account each call used.
@@ -1123,17 +1034,12 @@ pub(crate) mod tests {
                         .body(Body::from_stream(stream))
                         .unwrap()
                 }
+                Reply::BrokenSse => Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, "text/event-stream")
+                    .body(Body::from_stream(futures::stream::iter([Err::<Bytes, _>(std::io::Error::other("reset"))])))
+                    .unwrap(),
                 Reply::Error => return Err(AdapterError::Other(anyhow::anyhow!("adapter failed"))),
-                Reply::WithHeaders(status, value, headers) => {
-                    let mut res = json_response(status, &value);
-                    for (name, v) in headers {
-                        res.headers_mut().insert(
-                            HeaderName::from_static(name),
-                            HeaderValue::from_str(&v).expect("header"),
-                        );
-                    }
-                    res
-                }
             })
         }
     }
@@ -1219,7 +1125,6 @@ pub(crate) mod tests {
 
     fn chat_req(model: &str, upstream: &str, stream: bool) -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: model.into(),
             raw_model: model.into(),
             upstream_model: upstream.into(),
             messages: vec![json!({ "role": "user", "content": "hi" })],
@@ -1228,26 +1133,55 @@ pub(crate) mod tests {
         }
     }
 
-    fn chat_opts(adapter: Arc<dyn ProviderAdapter>, provider: &str, stream: bool) -> ChatDispatchOptions {
-        ChatDispatchOptions {
-            user_id: String::new(),
-            api_key_id: None,
+    /// The candidates a route resolves for `provider`'s own pool, read from the database now.
+    pub(crate) async fn own_pool(
+        state: &AppState,
+        user_id: &str,
+        provider: &str,
+        upstream_model: &str,
+        adapter: DynAdapter,
+    ) -> Vec<RoutingCandidate> {
+        let target = PoolTarget {
             provider: provider.into(),
-            adapter: Some(adapter),
-            req: chat_req(&format!("{provider}/some-model"), "some-model", stream),
+            upstream_model: upstream_model.into(),
+            is_builtin: crate::providers::ProviderId::parse(provider).is_some(),
+            custom_provider: None,
+            adapter,
+            account_id: None,
+        };
+        pool_candidates(state, user_id, &target).await.expect("pool candidates")
+    }
+
+    async fn chat_opts_for(
+        state: &AppState,
+        user_id: &str,
+        adapter: Arc<dyn ProviderAdapter>,
+        provider: &str,
+        upstream_model: &str,
+        stream: bool,
+    ) -> ChatDispatchOptions {
+        ChatDispatchOptions {
+            user_id: user_id.into(),
+            provider: provider.into(),
+            candidates: own_pool(state, user_id, provider, upstream_model, adapter).await,
+            req: chat_req(&format!("{provider}/{upstream_model}"), upstream_model, stream),
             ..Default::default()
         }
+    }
+
+    async fn chat_opts(
+        state: &AppState,
+        user_id: &str,
+        adapter: Arc<dyn ProviderAdapter>,
+        provider: &str,
+        stream: bool,
+    ) -> ChatDispatchOptions {
+        chat_opts_for(state, user_id, adapter, provider, "some-model", stream).await
     }
 
     // -------------------------------------------------------------------------------
     // Pure helpers
     // -------------------------------------------------------------------------------
-
-    #[test]
-    fn canonical_model_ids_are_prefix_plus_upstream() {
-        assert_eq!(canonical_model_id("grok", "grok-4.5"), "grok/grok-4.5");
-        assert_eq!(canonical_model_id("my-endpoint", "org/model"), "my-endpoint/org/model");
-    }
 
     #[test]
     fn stream_close_error_codes_follow_the_documented_table() {
@@ -1273,17 +1207,6 @@ pub(crate) mod tests {
         assert_eq!(retry_after_seconds(now_ms() - 10_000), 1);
         assert_eq!(retry_after_seconds(now_ms() + 45_000), 45);
         assert_eq!(retry_after_seconds(now_ms() + 3_600_000), 60);
-    }
-
-    #[test]
-    fn retry_markers_match_the_documented_vocabulary() {
-        assert_eq!(retry_marker(503, Some("upstream_unavailable")), Some("true"));
-        assert_eq!(retry_marker(400, Some("no_upstream_account")), Some("false"));
-        assert_eq!(retry_marker(400, Some("invalid_model")), Some("false"));
-        assert_eq!(retry_marker(400, Some("loop_detected")), Some("false"));
-        assert_eq!(retry_marker(429, Some("spend_limit_exceeded")), Some("false"));
-        assert_eq!(retry_marker(502, Some("upstream_error")), None);
-        assert_eq!(retry_marker(503, None), None);
     }
 
     #[test]
@@ -1337,12 +1260,7 @@ pub(crate) mod tests {
 
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions {
-                user_id: user.id.clone(),
-                api_key_id: None,
-                idle_timeout: Some(Duration::from_millis(20)),
-                ..chat_opts(adapter, "grok", true)
-            },
+            ChatDispatchOptions { idle_timeout: Some(Duration::from_millis(20)), ..chat_opts(&state, &user.id, adapter, "grok", true).await },
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -1361,6 +1279,24 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn an_upstream_body_that_fails_before_its_first_byte_ends_with_the_error_frame() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "broken@example.com").await;
+        seed_accounts(state.pool(), &user.id, "grok", &["acc_grok"]).await;
+        let adapter = ScriptedAdapter::new("grok", vec![Reply::BrokenSse]);
+        let res = dispatch_chat_completions(&state, chat_opts(&state, &user.id, adapter, "grok", true).await).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let text = body_text(res).await;
+        assert!(
+            text.ends_with("data: {\"error\":{\"message\":\"upstream error\",\"type\":\"api_error\",\"code\":\"upstream_error\"}}\n\n"),
+            "{text}"
+        );
+        let rows = wait_for_logs(&state, 1).await;
+        assert_eq!(rows[0].error_code.as_deref(), Some("incomplete_stream"));
+    }
+
+    #[tokio::test]
     async fn the_default_idle_timeout_never_fires_on_a_short_complete_stream() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool, MockTransport::new());
@@ -1375,7 +1311,7 @@ pub(crate) mod tests {
         );
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", true) },
+            chat_opts(&state, &user.id, adapter, "grok", true).await,
         )
         .await;
         assert!(body_text(res).await.contains("hi"));
@@ -1406,8 +1342,8 @@ pub(crate) mod tests {
                     .unwrap()
                     .clone(),
                 model: "claude-code/claude-opus-5".into(),
-                provider: Some("claude-code".into()),
-                adapter: Some(adapter),
+                provider: "claude-code".into(),
+                candidates: own_pool(&state, &user.id, "claude-code", "claude-opus-5", adapter).await,
                 idle_timeout: Some(Duration::from_millis(20)),
                 ..Default::default()
             },
@@ -1438,7 +1374,7 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::new("grok", vec![]);
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -1471,8 +1407,8 @@ pub(crate) mod tests {
                     .unwrap()
                     .clone(),
                 model: "claude-code/claude-opus-5".into(),
-                provider: Some("claude-code".into()),
-                adapter: Some(adapter),
+                provider: "claude-code".into(),
+                candidates: own_pool(&state, &user.id, "claude-code", "claude-opus-5", adapter).await,
                 ..Default::default()
             },
         )
@@ -1510,7 +1446,7 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::new("grok", vec![]);
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1537,7 +1473,7 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::new("grok", vec![]);
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1573,11 +1509,7 @@ pub(crate) mod tests {
         );
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions {
-                user_id: user.id.clone(),
-                is_builtin: Some(false),
-                ..chat_opts(adapter.clone(), "openrouter", false)
-            },
+            chat_opts(&state, &user.id, adapter.clone(), "openrouter", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -1608,8 +1540,8 @@ pub(crate) mod tests {
         };
 
         let adapter = ScriptedAdapter::new("claude-code", vec![unauthorized(), Reply::Json(StatusCode::OK, ok())]);
-        let opts = || ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "claude-code", false) };
-        assert_eq!(dispatch_chat_completions(&state, opts()).await.status(), StatusCode::OK);
+        let opts = || chat_opts(&state, &user.id, adapter.clone(), "claude-code", false);
+        assert_eq!(dispatch_chat_completions(&state, opts().await).await.status(), StatusCode::OK);
         assert_eq!(adapter.calls(), ["acc_1", "acc_2"]);
         assert!(rejected_at("acc_1").await.is_some());
         assert!(rejected_at("acc_2").await.is_none());
@@ -1631,7 +1563,7 @@ pub(crate) mod tests {
                 .execute(state.pool())
         };
         set_failure(600_000).await.unwrap();
-        assert_eq!(dispatch_chat_completions(&state, opts()).await.status(), StatusCode::OK);
+        assert_eq!(dispatch_chat_completions(&state, opts().await).await.status(), StatusCode::OK);
         assert_eq!(adapter.calls(), ["acc_1", "acc_2", "acc_1"]);
         assert!(rejected_at("acc_1").await.is_none());
         let row = get_account(state.pool(), &user.id, "acc_1").await.unwrap().unwrap();
@@ -1639,7 +1571,7 @@ pub(crate) mod tests {
 
         // A record that says the token had already run out is disproved by a request getting through.
         set_failure(-1_000).await.unwrap();
-        assert_eq!(dispatch_chat_completions(&state, opts()).await.status(), StatusCode::OK);
+        assert_eq!(dispatch_chat_completions(&state, opts().await).await.status(), StatusCode::OK);
         let row = get_account(state.pool(), &user.id, "acc_1").await.unwrap().unwrap();
         assert!(row.refresh_failure_json.is_none());
 
@@ -1647,11 +1579,7 @@ pub(crate) mod tests {
         let custom = ScriptedAdapter::new("my-endpoint", vec![unauthorized()]);
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions {
-                user_id: user.id.clone(),
-                is_builtin: Some(false),
-                ..chat_opts(custom.clone(), "my-endpoint", false)
-            },
+            chat_opts(&state, &user.id, custom.clone(), "my-endpoint", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1715,7 +1643,7 @@ pub(crate) mod tests {
 
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "claude-code", false) },
+            chat_opts(&state, &user.id, adapter, "claude-code", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -1754,9 +1682,7 @@ pub(crate) mod tests {
         let as_member = |account: AccountRow| ChatDispatchOptions {
             user_id: member.id.clone(),
             provider: "claude-code".into(),
-            candidates: Some(vec![RoutingCandidate {
-                target_index: 0,
-                pinned: false,
+            candidates: vec![RoutingCandidate {
                 provider: "claude-code".into(),
                 upstream_model: "claude-opus-5".into(),
                 is_builtin: true,
@@ -1768,7 +1694,7 @@ pub(crate) mod tests {
                     team_name: "Team".into(),
                     owner_label: "lender".into(),
                 }),
-            }]),
+            }],
             group_name: Some("opus".into()),
             req: chat_req("opus", "claude-opus-5", false),
             ..Default::default()
@@ -1794,13 +1720,8 @@ pub(crate) mod tests {
         let state = test_state(pool, MockTransport::new());
         let user = insert_user(state.pool(), "edge@example.com").await;
         seed_accounts(state.pool(), &user.id, "grok", &["acc_1", "acc_2"]).await;
-        // Mixed 522/524/520 statuses share one strike counter.
-        let statuses = Arc::new(Mutex::new(vec![520u16, 524, 522]));
-        let adapter = ScriptedAdapter::always("grok", move || {
-            Reply::Text(StatusCode::from_u16(statuses.lock().unwrap().pop().unwrap()).unwrap(), "edge failed")
-        });
-        // Only acc_1 fails: the scripted adapter answers per call, so acc_2 must succeed —
-        // wrap it with a second adapter that keys off the account id.
+        // Only acc_1 fails, with mixed 522/524/520 statuses that share one strike counter;
+        // acc_2 always answers.
         struct EdgeAdapter {
             statuses: Mutex<Vec<u16>>,
             calls: Arc<Mutex<Vec<String>>>,
@@ -1828,7 +1749,6 @@ pub(crate) mod tests {
                 Ok(json_response(StatusCode::OK, &json!({ "choices": [{ "message": { "content": "ok" } }] })))
             }
         }
-        drop(adapter);
         let calls = Arc::new(Mutex::new(Vec::new()));
         let edge: Arc<dyn ProviderAdapter> =
             Arc::new(EdgeAdapter { statuses: Mutex::new(vec![520, 524, 522]), calls: calls.clone() });
@@ -1836,7 +1756,7 @@ pub(crate) mod tests {
         for expected_strikes in [1i32, 2] {
             let res = dispatch_chat_completions(
                 &state,
-                ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(edge.clone(), "grok", false) },
+                chat_opts(&state, &user.id, edge.clone(), "grok", false).await,
             )
             .await;
             assert_eq!(res.status(), StatusCode::OK);
@@ -1847,7 +1767,7 @@ pub(crate) mod tests {
         }
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(edge.clone(), "grok", false) },
+            chat_opts(&state, &user.id, edge.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -1899,7 +1819,7 @@ pub(crate) mod tests {
 
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", false) },
+            chat_opts(&state, &user.id, adapter, "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -1922,7 +1842,7 @@ pub(crate) mod tests {
         });
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", false) },
+            chat_opts(&state, &user.id, adapter, "grok", false).await,
         )
         .await;
         assert_eq!(res.status().as_u16(), 529);
@@ -1950,7 +1870,7 @@ pub(crate) mod tests {
         );
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -1974,7 +1894,7 @@ pub(crate) mod tests {
         });
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1999,7 +1919,7 @@ pub(crate) mod tests {
         });
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", true) },
+            chat_opts(&state, &user.id, adapter, "grok", true).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2022,7 +1942,7 @@ pub(crate) mod tests {
         });
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -2045,7 +1965,7 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::always("grok", || Reply::Text(StatusCode::BAD_REQUEST, "upstream says no"));
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "grok", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
@@ -2062,7 +1982,7 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::always("grok", || Reply::Error);
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", true) },
+            chat_opts(&state, &user.id, adapter, "grok", true).await,
         )
         .await;
         let text = body_text(res).await;
@@ -2080,7 +2000,7 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::always("grok", || Reply::Error);
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", false) },
+            chat_opts(&state, &user.id, adapter, "grok", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
@@ -2088,83 +2008,6 @@ pub(crate) mod tests {
         assert_eq!(rows[0].status_code, 502);
         assert_eq!(rows[0].error_code.as_deref(), Some("upstream_error"));
     }
-
-    #[tokio::test]
-    async fn a_relay_413_becomes_a_non_retryable_request_too_large_stream_error() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, MockTransport::new());
-        let user = insert_user(state.pool(), "toolarge@example.com").await;
-        seed_accounts(state.pool(), &user.id, "grok", &["acc_grok"]).await;
-        let message = "Codex relay rejected the request body as too large; compact the conversation and retry";
-        let adapter = ScriptedAdapter::always("grok", move || {
-            Reply::WithHeaders(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                json!({ "error": { "message": message, "type": "invalid_request_error", "code": "request_too_large" } }),
-                vec![("x-kano-relay-error", "request_too_large".into())],
-            )
-        });
-        let res = dispatch_chat_completions(
-            &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", true) },
-        )
-        .await;
-        assert_eq!(res.status(), StatusCode::OK);
-        let text = body_text(res).await;
-        assert!(text.contains(r#""type":"invalid_request_error""#), "{text}");
-        assert!(text.contains(r#""code":"request_too_large""#), "{text}");
-        assert!(text.contains(message), "{text}");
-        let rows = wait_for_logs(&state, 1).await;
-        assert_eq!(rows[0].status_code, 200);
-        assert_eq!(rows[0].error_code.as_deref(), Some("request_too_large"));
-        assert_eq!(rows[0].upstream_status, Some(413));
-    }
-
-    #[tokio::test]
-    async fn a_relay_413_on_the_anthropic_surface_is_a_non_retryable_413() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, MockTransport::new());
-        let user = insert_user(state.pool(), "atoolarge@example.com").await;
-        seed_accounts(state.pool(), &user.id, "claude-code", &["acc_cc"]).await;
-        let message = "Codex relay rejected the request body as too large; compact the conversation and retry";
-        let adapter = ScriptedAdapter::always("claude-code", move || {
-            Reply::WithHeaders(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                json!({ "error": { "message": message, "type": "invalid_request_error", "code": "request_too_large" } }),
-                vec![("x-kano-relay-error", "request_too_large".into())],
-            )
-        })
-        .for_messages();
-        let res = dispatch_anthropic_messages(
-            &state,
-            AnthropicDispatchOptions {
-                user_id: user.id.clone(),
-                body: json!({ "model": "claude-opus-5", "max_tokens": 10, "messages": [] })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                model: "claude-code/claude-opus-5".into(),
-                provider: Some("claude-code".into()),
-                adapter: Some(adapter),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(res.headers().get("x-should-retry").unwrap(), "false");
-        let body: Value = serde_json::from_str(&body_text(res).await).unwrap();
-        assert_eq!(
-            body,
-            json!({ "type": "error", "error": { "type": "invalid_request_error", "message": message } })
-        );
-        let rows = logs(&state).await;
-        assert_eq!(rows[0].status_code, 413);
-        assert_eq!(rows[0].error_code.as_deref(), Some("request_too_large"));
-        assert_eq!(rows[0].upstream_status, Some(413));
-    }
-
-    // -------------------------------------------------------------------------------
-    // Eager streaming commit
-    // -------------------------------------------------------------------------------
 
     #[tokio::test]
     async fn stream_true_commits_200_and_sse_headers_before_a_slow_upstream_resolves() {
@@ -2201,7 +2044,7 @@ pub(crate) mod tests {
         let adapter: Arc<dyn ProviderAdapter> = Arc::new(Gated { gate: gate.clone() });
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", true) },
+            chat_opts(&state, &user.id, adapter, "grok", true).await,
         )
         .await;
         // Headers committed without waiting for the hung adapter.
@@ -2229,7 +2072,7 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::always("grok", || panic!("must not be called"));
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", true) },
+            chat_opts(&state, &user.id, adapter, "grok", true).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2258,8 +2101,8 @@ pub(crate) mod tests {
                     .unwrap()
                     .clone(),
                 model: "claude-code/claude-opus-5".into(),
-                provider: Some("claude-code".into()),
-                adapter: Some(adapter),
+                provider: "claude-code".into(),
+                candidates: own_pool(&state, &user.id, "claude-code", "claude-opus-5", adapter).await,
                 ..Default::default()
             },
         )
@@ -2287,7 +2130,7 @@ pub(crate) mod tests {
         );
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "grok", true) },
+            chat_opts(&state, &user.id, adapter, "grok", true).await,
         )
         .await;
         let mut body = res.into_body().into_data_stream();
@@ -2342,7 +2185,7 @@ pub(crate) mod tests {
         });
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "claude-code", false) },
+            chat_opts(&state, &user.id, adapter.clone(), "claude-code", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2375,9 +2218,9 @@ pub(crate) mod tests {
             vec![ok_chat(), Reply::Json(StatusCode::TOO_MANY_REQUESTS, json!({ "error": { "message": "limit" } })), ok_chat()],
         );
 
-        let first = dispatch_chat_completions(&state, ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "codex", false) }).await;
+        let first = dispatch_chat_completions(&state, chat_opts(&state, &user.id, adapter.clone(), "codex", false).await).await;
         assert_eq!(first.status(), StatusCode::OK);
-        let second = dispatch_chat_completions(&state, ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "codex", false) }).await;
+        let second = dispatch_chat_completions(&state, chat_opts(&state, &user.id, adapter.clone(), "codex", false).await).await;
         assert_eq!(second.status(), StatusCode::OK);
         assert_eq!(adapter.calls(), ["acc_credits", "acc_credits", "acc_ok"]);
         assert!(is_benched(state.pool(), &user.id, "acc_credits", now_ms()).await.unwrap(), "the refusal benches as before");
@@ -2390,12 +2233,8 @@ pub(crate) mod tests {
         )
     }
 
-    fn scoped_opts(adapter: Arc<ScriptedAdapter>, user_id: &str, model: &str) -> ChatDispatchOptions {
-        ChatDispatchOptions {
-            user_id: user_id.into(),
-            req: chat_req(&format!("antigravity/{model}"), model, false),
-            ..chat_opts(adapter, "antigravity", false)
-        }
+    async fn scoped_opts(state: &AppState, adapter: Arc<ScriptedAdapter>, user_id: &str, model: &str) -> ChatDispatchOptions {
+        chat_opts_for(state, user_id, adapter, "antigravity", model, false).await
     }
 
     /// docs/providers.md § Routing module "Quota scopes": a 429 on one quota scope parks that
@@ -2412,13 +2251,13 @@ pub(crate) mod tests {
         )
         .with_scopes();
 
-        let argon = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-4-argon-high")).await;
+        let argon = dispatch_chat_completions(&state, scoped_opts(&state, adapter.clone(), &user.id, "gemini-4-argon-high").await).await;
         assert_eq!(argon.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!is_benched(state.pool(), &user.id, "acc_1", now_ms()).await.unwrap(), "the account itself is not benched");
 
-        let again = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-4-argon-low")).await;
+        let again = dispatch_chat_completions(&state, scoped_opts(&state, adapter.clone(), &user.id, "gemini-4-argon-low").await).await;
         assert_eq!(again.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let flash = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-3.8-flash-high")).await;
+        let flash = dispatch_chat_completions(&state, scoped_opts(&state, adapter.clone(), &user.id, "gemini-3.8-flash-high").await).await;
         assert_eq!(flash.status(), StatusCode::OK);
         assert_eq!(adapter.calls(), ["acc_1", "acc_1"], "the second Argon request never reached upstream; Flash did");
     }
@@ -2437,9 +2276,9 @@ pub(crate) mod tests {
         set_snapshot(&state, "acc_1", Some(&snapshot)).await;
         let adapter = ScriptedAdapter::always("antigravity", ok_chat).with_scopes();
 
-        let argon = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-4-argon-high")).await;
+        let argon = dispatch_chat_completions(&state, scoped_opts(&state, adapter.clone(), &user.id, "gemini-4-argon-high").await).await;
         assert_eq!(argon.status(), StatusCode::SERVICE_UNAVAILABLE);
-        let flash = dispatch_chat_completions(&state, scoped_opts(adapter.clone(), &user.id, "gemini-3.8-flash-high")).await;
+        let flash = dispatch_chat_completions(&state, scoped_opts(&state, adapter.clone(), &user.id, "gemini-3.8-flash-high").await).await;
         assert_eq!(flash.status(), StatusCode::OK);
         assert_eq!(adapter.calls(), ["acc_1"], "only the Flash request was sent");
     }
@@ -2457,7 +2296,7 @@ pub(crate) mod tests {
             });
             let res = dispatch_chat_completions(
                 &state,
-                ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter.clone(), "claude-code", false) },
+                chat_opts(&state, &user.id, adapter.clone(), "claude-code", false).await,
             )
             .await;
             assert_eq!(res.status(), StatusCode::OK, "{snapshot}");
@@ -2475,11 +2314,100 @@ pub(crate) mod tests {
         let adapter = ScriptedAdapter::always("claude-code", || panic!("a known-unusable candidate is never called"));
         let res = dispatch_chat_completions(
             &state,
-            ChatDispatchOptions { user_id: user.id.clone(), ..chat_opts(adapter, "claude-code", false) },
+            chat_opts(&state, &user.id, adapter, "claude-code", false).await,
         )
         .await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(res.headers().get(header::RETRY_AFTER).unwrap(), "60");
+    }
+
+    /// Each attempt sends its own candidate's model id and its own account's request edits,
+    /// whether or not the body had to be copied for it.
+    #[tokio::test]
+    async fn every_attempt_sends_its_candidates_model_and_edits() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool, MockTransport::new());
+        let user = insert_user(state.pool(), "per-attempt@example.com").await;
+        let rows = seed_accounts(state.pool(), &user.id, "claude-code", &["acc_plain", "acc_edited"]).await;
+        sqlx::query("UPDATE upstream_accounts SET strip_fast_mode = TRUE WHERE id = 'acc_edited'")
+            .execute(state.pool())
+            .await
+            .unwrap();
+        let edited = get_account(state.pool(), &user.id, "acc_edited").await.unwrap().unwrap();
+
+        struct Seen {
+            bodies: Arc<Mutex<Vec<Value>>>,
+        }
+        #[async_trait]
+        impl ProviderAdapter for Seen {
+            fn id(&self) -> &str {
+                "claude-code"
+            }
+            async fn chat_completions(
+                &self,
+                _: &AppState,
+                _: &crate::pool::AcquiredAccount,
+                _: &ChatCompletionRequest,
+                _: &CallExtras,
+            ) -> Result<Response, AdapterError> {
+                Err(AdapterError::Unsupported("chat_completions"))
+            }
+            fn has_messages(&self) -> bool {
+                true
+            }
+            async fn messages(
+                &self,
+                _: &AppState,
+                _: &crate::pool::AcquiredAccount,
+                body: &Value,
+                _: &HeaderMap,
+                _: &CallExtras,
+            ) -> Result<Response, AdapterError> {
+                let first = {
+                    let mut bodies = self.bodies.lock().unwrap();
+                    bodies.push(body.clone());
+                    bodies.len() == 1
+                };
+                let status = if first { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::OK };
+                Ok(json_response(status, &json!({ "type": "message", "content": [] })))
+            }
+        }
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let adapter: DynAdapter = Arc::new(Seen { bodies: bodies.clone() });
+        let candidate = |upstream_model: &str, account: AccountRow| RoutingCandidate {
+            provider: "claude-code".into(),
+            upstream_model: upstream_model.into(),
+            is_builtin: true,
+            custom_provider: None,
+            adapter: adapter.clone(),
+            account,
+            share: None,
+        };
+        let res = dispatch_anthropic_messages(
+            &state,
+            AnthropicDispatchOptions {
+                user_id: user.id.clone(),
+                body: json!({ "model": "opus", "speed": "fast", "max_tokens": 10, "messages": [] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                model: "claude-code/claude-opus-5".into(),
+                provider: "claude-code".into(),
+                candidates: vec![
+                    candidate("claude-opus-5", rows[0].clone()),
+                    candidate("claude-sonnet-5", edited),
+                ],
+                group_name: Some("opus".into()),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies[0]["model"], "claude-opus-5");
+        assert_eq!(bodies[0]["speed"], "fast", "no edits on the first account");
+        assert_eq!(bodies[1]["model"], "claude-sonnet-5");
+        assert!(bodies[1].get("speed").is_none(), "the second account removes fast mode");
     }
 
     #[tokio::test]
@@ -2519,8 +2447,6 @@ pub(crate) mod tests {
 
         let candidates = vec![
             RoutingCandidate {
-                target_index: 0,
-                pinned: false,
                 provider: "claude-code".into(),
                 upstream_model: "claude-opus-5".into(),
                 is_builtin: true,
@@ -2530,8 +2456,6 @@ pub(crate) mod tests {
                 share: None,
             },
             RoutingCandidate {
-                target_index: 1,
-                pinned: false,
                 provider: "grok".into(),
                 upstream_model: "grok-4.5".into(),
                 is_builtin: true,
@@ -2547,7 +2471,7 @@ pub(crate) mod tests {
             ChatDispatchOptions {
                 user_id: user.id.clone(),
                 provider: "claude-code".into(),
-                candidates: Some(candidates),
+                candidates,
                 group_name: Some("opus".into()),
                 req: chat_req("opus", "claude-opus-5", false),
                 ..Default::default()
@@ -2560,59 +2484,5 @@ pub(crate) mod tests {
         let rows = logs(&state).await;
         assert_eq!(rows[0].group_name.as_deref(), Some("opus"));
         assert_eq!(rows[0].model, "grok/grok-4.5", "the row stores the expanded canonical target");
-    }
-
-    #[tokio::test]
-    async fn omitting_the_strategy_behaves_exactly_like_passing_ordered() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, MockTransport::new());
-        let user = insert_user(state.pool(), "strategy@example.com").await;
-        seed_accounts(state.pool(), &user.id, "grok", &["acc_1", "acc_2"]).await;
-        let mut seen = Vec::new();
-        for strategy in [None, Some("ordered".to_string())] {
-            let adapter = ScriptedAdapter::always("grok", || {
-                Reply::Json(StatusCode::OK, json!({ "choices": [{ "message": { "content": "ok" } }] }))
-            });
-            let res = dispatch_chat_completions(
-                &state,
-                ChatDispatchOptions {
-                    user_id: user.id.clone(),
-                    strategy,
-                    ..chat_opts(adapter.clone(), "grok", false)
-                },
-            )
-            .await;
-            seen.push((adapter.calls(), body_text(res).await));
-        }
-        assert_eq!(seen[0], seen[1]);
-    }
-
-    #[tokio::test]
-    async fn an_adapter_without_the_endpoint_is_rejected_before_the_pool_is_touched() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, MockTransport::new());
-        let user = insert_user(state.pool(), "noendpoint@example.com").await;
-        seed_accounts(state.pool(), &user.id, "claude-code", &["acc_cc"]).await;
-        // A chat-only adapter has no `messages`.
-        let adapter = ScriptedAdapter::always("claude-code", || panic!("must not be called"));
-        let res = dispatch_anthropic_messages(
-            &state,
-            AnthropicDispatchOptions {
-                user_id: user.id.clone(),
-                body: json!({ "model": "claude-opus-5", "max_tokens": 10, "messages": [] })
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-                model: "claude-code/claude-opus-5".into(),
-                provider: Some("claude-code".into()),
-                adapter: Some(adapter),
-                ..Default::default()
-            },
-        )
-        .await;
-        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body: Value = serde_json::from_str(&body_text(res).await).unwrap();
-        assert_eq!(body["error"]["message"], "messages not supported");
-        assert!(logs(&state).await.is_empty(), "the pool was never touched, so no row is written");
     }
 }

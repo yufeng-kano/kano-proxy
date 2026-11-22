@@ -6,10 +6,9 @@
 //! exist on both surfaces.
 //!
 //! This module also carries the database implementations of the two tunnel
-//! callbacks the Durable Object used to perform inline
-//!: persisting an agent-reported catalog and
-//! clearing the provider's bench on connect. [`tunnel_registry_for`] wires both
-//! into a [`TunnelRegistry`] for `AppState::builder().tunnels(...)`.
+//! callbacks: persisting an agent-reported catalog and clearing the provider's
+//! bench on connect. [`tunnel_registry_for`] wires both into a [`TunnelRegistry`]
+//! for `AppState::builder().tunnels(...)`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,10 +17,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use sqlx::PgPool;
 
-use crate::db::accounts::{delete_accounts_for_provider, list_accounts};
+use crate::db::accounts::{delete_accounts_for_provider, list_accounts, list_accounts_by_provider, AccountRow};
 use crate::db::cli::{
-    delete_cli_provider, exposed_cli_models, list_cli_devices, list_cli_providers, parse_cli_models,
-    write_cli_provider_models, CliProviderRow,
+    delete_cli_provider, exposed_cli_models, list_cli_devices, list_cli_providers, write_cli_provider_models,
+    CliProviderRow,
 };
 use crate::pool::bench::clear_bench;
 use crate::tunnel::registry::{ConnectObserver, ModelsSink, TunnelRegistry};
@@ -44,7 +43,8 @@ impl ModelsSink for DbModelsSink {
 
 /// Reconnect clears the bench on the provider's internal account rows: opening the
 /// laptop restores service on the next request, no operator action
-/// (docs/cli.md § Failover semantics). Best-effort, exactly as the DO's try/catch.
+/// (docs/cli.md § Failover semantics). Best-effort: a failed clear is logged, never
+/// a refused connection.
 struct BenchClearObserver {
     pool: PgPool,
 }
@@ -65,9 +65,8 @@ async fn clear_provider_bench(pool: &PgPool, user_id: &str, slug: &str) -> Resul
     Ok(())
 }
 
-/// The tunnel registry an edition passes to `AppState::builder().tunnels(...)`:
-/// the in-process replacement for the AgentTunnel Durable Object, with its two
-/// database callbacks attached.
+/// The tunnel registry an edition passes to `AppState::builder().tunnels(...)`,
+/// with its two database callbacks attached.
 pub fn tunnel_registry_for(pool: PgPool) -> TunnelRegistry {
     TunnelRegistry::new()
         .with_models_sink(Arc::new(DbModelsSink { pool: pool.clone() }))
@@ -79,14 +78,14 @@ pub fn tunnel_registry_for(pool: PgPool) -> TunnelRegistry {
 /// `account_id` is the internal pool-state row's id — the handle the Groups picker
 /// pins a target to, exactly like a custom endpoint's key row (docs/admin-ui.md
 /// § Groups page). Not a user-facing account; it carries no credential.
-pub async fn cli_provider_list_item(
+fn cli_provider_list_item(
     state: &AppState,
     row: &CliProviderRow,
+    accounts: &[AccountRow],
     device_names: &HashMap<String, String>,
-) -> Result<Value, sqlx::Error> {
-    let accounts = list_accounts(state.pool(), &row.user_id, &row.slug).await?;
+) -> Value {
     let account = accounts.first();
-    Ok(json!({
+    json!({
         "id": row.id,
         "slug": row.slug,
         "name": row.name,
@@ -94,22 +93,17 @@ pub async fn cli_provider_list_item(
         "connected": state.tunnels().is_connected(&row.id),
         "account_id": account.map(|a| a.id.clone()),
         "models": exposed_cli_models(row.models_json.as_deref(), row.model_filter_json.as_deref()),
-        "models_reported": parse_cli_models(row.models_json.as_deref()).len(),
-        "model_filter": parse_cli_models(row.model_filter_json.as_deref()),
         "models_updated_at": row.models_updated_at,
-        "device_id": row.device_id,
         "device_name": row.device_id.as_ref().and_then(|id| device_names.get(id).cloned()),
         // The request-edit switches on that account row (docs/providers.md § Request edits),
         // written through `PATCH /api/providers/:slug/accounts/:account_id`.
         "strip_fast_mode": account.is_some_and(|a| a.strip_fast_mode),
         "strip_claude_code_line": account.is_some_and(|a| a.strip_claude_code_line),
         "force_cache_ttl_1h": account.is_some_and(|a| a.force_cache_ttl_1h),
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-    }))
+    })
 }
 
-pub async fn list_cli_provider_items(state: &AppState, user_id: &str) -> Result<Vec<Value>, sqlx::Error> {
+pub(crate) async fn list_cli_provider_items(state: &AppState, user_id: &str) -> Result<Vec<Value>, sqlx::Error> {
     let rows = list_cli_providers(state.pool(), user_id).await?;
     if rows.is_empty() {
         return Ok(Vec::new());
@@ -122,20 +116,17 @@ pub async fn list_cli_provider_items(state: &AppState, user_id: &str) -> Result<
         .into_iter()
         .map(|device| (device.id, device.name))
         .collect();
-    let mut items = Vec::with_capacity(rows.len());
-    for row in &rows {
-        items.push(cli_provider_list_item(state, row, &device_names).await?);
-    }
-    Ok(items)
+    let slugs: Vec<&str> = rows.iter().map(|row| row.slug.as_str()).collect();
+    let accounts = list_accounts_by_provider(state.pool(), user_id, &slugs).await?;
+    Ok(rows
+        .iter()
+        .map(|row| cli_provider_list_item(state, row, accounts.get(&row.slug).map_or(&[], Vec::as_slice), &device_names))
+        .collect())
 }
 
-/// Provider + internal account rows + live socket, in that order.
-///
-/// The TypeScript also cleared each removed account's bench key, because a bench
-/// was a KV entry that outlived its row. Here the bench is two columns on the
-/// account row itself, so deleting the row is the clear — there is nothing left to
-/// sweep (docs/providers.md).
-pub async fn remove_cli_provider(
+/// Provider + internal account rows + live socket, in that order. The bench is two
+/// columns on the account row, so deleting the row clears it (docs/providers.md).
+pub(crate) async fn remove_cli_provider(
     state: &AppState,
     user_id: &str,
     row: &CliProviderRow,
@@ -151,13 +142,13 @@ pub async fn remove_cli_provider(
 mod tests {
     use super::*;
     use crate::db::accounts::{insert_account, NewAccount};
-    use crate::db::cli::{get_cli_provider_by_id, insert_cli_device, insert_cli_provider, NewCliProvider};
+    use crate::db::cli::{get_cli_provider_by_id, insert_cli_device, insert_cli_provider, parse_cli_models, NewCliProvider};
     use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_state};
     use crate::pool::bench::{is_benched, mark_benched};
     use crate::upstream::MockTransport;
 
     /// The db-backed `ModelsSink`: an agent report lands in `models_json` and stamps
-    /// `models_updated_at` (the DO's `onModelsReport`).
+    /// `models_updated_at`.
     #[tokio::test]
     async fn the_models_sink_persists_an_agent_report() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -202,7 +193,7 @@ mod tests {
         .await
         .unwrap();
         let now = crate::app::now_ms();
-        mark_benched(&pool, &user.id, "my-mac", &account.id, Some(60_000), Some("offline"), now).await.unwrap();
+        mark_benched(&pool, &user.id, "my-mac", &account.id, 60_000, "offline", now).await.unwrap();
         assert!(is_benched(&pool, &user.id, &account.id, now).await.unwrap());
 
         BenchClearObserver { pool: pool.clone() }.on_connect(&user.id, "my-mac", "cliprov_1").await;
@@ -246,7 +237,6 @@ mod tests {
         assert_eq!(items[0]["device_name"], "my-mac");
         assert_eq!(items[0]["account_id"], account.id);
         assert_eq!(items[0]["models"], json!(["a", "b"]), "the expose filter applies at read time");
-        assert_eq!(items[0]["models_reported"], 3);
         assert_eq!(items[0]["connected"], false, "no socket is a disconnected provider");
 
         remove_cli_provider(&state, &user.id, &row).await.unwrap();

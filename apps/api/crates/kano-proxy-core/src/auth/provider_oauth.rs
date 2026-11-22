@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::upstream::UpstreamRequest;
 use crate::AppState;
 
+use super::google::form;
 use super::pkce::{build_pkce_pair, build_state_token};
 
 pub struct ClaudeOAuth;
@@ -80,14 +81,6 @@ pub struct OAuthTokens {
     pub refresh_token_expires_in: Option<i64>,
 }
 
-fn query(pairs: &[(&str, &str)]) -> String {
-    let mut ser = url::form_urlencoded::Serializer::new(String::new());
-    for (k, v) in pairs {
-        ser.append_pair(k, v);
-    }
-    ser.finish()
-}
-
 pub struct BeginAuthorization<P> {
     pub authorization_url: String,
     pub pending: P,
@@ -97,7 +90,7 @@ pub fn begin_claude_authorization(client_id: Option<&str>) -> BeginAuthorization
     let pkce = build_pkce_pair();
     let oauth_state = build_state_token();
     let cid = client_id.filter(|c| !c.is_empty()).unwrap_or(ClaudeOAuth::CLIENT_ID).to_string();
-    let q = query(&[
+    let q = form(&[
         ("code", "true"),
         ("client_id", &cid),
         ("response_type", "code"),
@@ -157,7 +150,7 @@ pub fn antigravity_oauth_client(state: &AppState) -> Option<(String, String)> {
 
 pub fn begin_antigravity_authorization(client_id: &str) -> BeginAuthorization<PendingAntigravityOAuth> {
     let oauth_state = build_state_token();
-    let q = query(&[
+    let q = form(&[
         ("access_type", "offline"),
         ("client_id", client_id),
         ("prompt", "consent"),
@@ -216,7 +209,7 @@ pub async fn exchange_antigravity_code(
     if returned_state.is_some_and(|s| s != pending.oauth_state) {
         anyhow::bail!("Authorization state mismatch. Restart the login flow.");
     }
-    let body = query(&[
+    let body = form(&[
         ("grant_type", "authorization_code"),
         ("code", code),
         ("client_id", &pending.client_id),

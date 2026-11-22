@@ -1,5 +1,5 @@
-//! Pool extension (docs/cloud-edition.md § "Pool
-//! extension") — the only sanctioned cross-user path. Standalone installs pass none.
+//! Pool extension (docs/cloud-edition.md § "Pool extension") — the only sanctioned cross-user
+//! path. Standalone installs pass none.
 
 use std::collections::HashMap;
 
@@ -69,7 +69,6 @@ pub enum ReserveOutcome {
 
 pub struct ReserveContext<'a> {
     pub user_id: &'a str,
-    pub api_key_id: Option<&'a str>,
     pub upstream_model: &'a str,
 }
 
@@ -92,7 +91,7 @@ pub trait PoolExtension: Send + Sync {
     }
     /// Every candidate attempt, own or shared.
     async fn reserve_attempt(&self, cx: &AppState, ctx: ReserveContext<'_>, candidate: &RoutingCandidate) -> anyhow::Result<ReserveOutcome>;
-    /// Reorder a shared row inside the viewer's merged pool; `false` when the viewer may not (404 to the caller).
+    /// Reorder a shared row inside the viewer's merged pool; `false` when the viewer may not (the order route answers 409, the pool changed).
     async fn set_shared_priority(&self, cx: &AppState, viewer_user_id: &str, account_id: &str, priority: i32) -> anyhow::Result<bool>;
     /// Extra bars for the viewer's own rows of one provider (Providers page only).
     async fn own_bars(&self, _cx: &AppState, _viewer_user_id: &str, _provider: ProviderId, _account_ids: &[String]) -> anyhow::Result<HashMap<String, Vec<UsageWindow>>> {
@@ -121,7 +120,7 @@ pub async fn shared_custom_providers(cx: &AppState, viewer_user_id: &str, option
     match ext.list_shared_custom(cx, viewer_user_id, options).await {
         Ok(shared) => shared,
         Err(error) => {
-            tracing::error!(%error, "pool extension listSharedCustom failed");
+            tracing::error!(%error, "pool extension list_shared_custom failed");
             Vec::new()
         }
     }
@@ -170,7 +169,7 @@ impl HeaderAudience {
 
 /// A borrowed row's upstream response headers minus everything that describes the owner's
 /// account: rate-limit budgets and reset times, `retry-after`, organization/account ids.
-pub fn borrower_safe_headers(headers: &HeaderMap) -> HeaderMap {
+fn borrower_safe_headers(headers: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in headers {
         let key = name.as_str().to_ascii_lowercase();

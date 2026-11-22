@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /**
  * A small anchored menu of actions behind one trigger (docs/admin-ui.md §
- * Components; Logs' title menu). It owes what the account menu owes
- * (docs/admin-ui.md § Keyboard): not modal, so no scrim and no focus trap;
+ * Component primitives; every page's title menu, through PageHeader). It owes
+ * what the account menu owes (docs/admin-ui.md § Accessibility floor): not
+ * modal, so no scrim and no focus trap;
  * Escape closes it, a press outside closes it, focus returns to the trigger,
  * and the arrow keys walk its items.
  *
@@ -107,26 +108,22 @@ function onMoved() {
   close(false)
 }
 
+function listen(on: boolean) {
+  const method = on ? "addEventListener" : "removeEventListener"
+  document[method]("pointerdown", onPointerDown as EventListener)
+  window[method]("scroll", onMoved, true)
+  window[method]("resize", onMoved)
+}
+
 watch(open, async isOpen => {
-  if (isOpen) {
-    place()
-    document.addEventListener("pointerdown", onPointerDown)
-    window.addEventListener("scroll", onMoved, true)
-    window.addEventListener("resize", onMoved)
-    await nextTick()
-    panel.value?.querySelector<HTMLElement>(ITEM)?.focus()
-  } else {
-    document.removeEventListener("pointerdown", onPointerDown)
-    window.removeEventListener("scroll", onMoved, true)
-    window.removeEventListener("resize", onMoved)
-  }
+  listen(isOpen)
+  if (!isOpen) return
+  place()
+  await nextTick()
+  panel.value?.querySelector<HTMLElement>(ITEM)?.focus()
 })
 
-onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", onPointerDown)
-  window.removeEventListener("scroll", onMoved, true)
-  window.removeEventListener("resize", onMoved)
-})
+onBeforeUnmount(() => listen(false))
 </script>
 
 <template>
@@ -231,7 +228,7 @@ onBeforeUnmount(() => {
 
 .item.danger:hover,
 .item.danger:focus-visible {
-  background: var(--danger-bg, var(--hover));
+  background: var(--danger-bg);
   color: var(--danger);
 }
 

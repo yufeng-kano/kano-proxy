@@ -1,7 +1,6 @@
 import { reactive, ref } from "vue"
 import { listModelGroups } from "@/services/api"
 import {
-  CACHE_TTL_MS,
   isModelGroupsCacheFresh,
   readModelGroupsCache,
   writeModelGroupsCache,
@@ -11,18 +10,14 @@ import type { ModelGroup } from "@/types"
 type ModelGroupsState = {
   data: ModelGroup[] | null
   loading: boolean
-  refreshing: boolean
   error: string | null
-  fromCache: boolean
 }
 
 function emptyState(): ModelGroupsState {
   return {
     data: null,
     loading: false,
-    refreshing: false,
     error: null,
-    fromCache: false,
   }
 }
 
@@ -53,32 +48,27 @@ export function useModelGroups() {
     const cached = readModelGroupsCache(userId.value)
     if (cached) {
       state.data = cached
-      state.fromCache = true
       state.loading = false
     } else if (!state.data) {
       state.loading = true
     }
 
     // Within TTL: keep the cache, skip the network unless forced.
-    if (!force && isModelGroupsCacheFresh(userId.value, CACHE_TTL_MS)) {
+    if (!force && isModelGroupsCacheFresh(userId.value)) {
       state.loading = false
-      state.refreshing = false
       return
     }
 
-    state.refreshing = true
     state.error = null
     try {
       const data = await listModelGroups()
       state.data = data
-      state.fromCache = false
       writeModelGroupsCache(userId.value, data)
     } catch (e) {
       state.error = e instanceof Error ? e.message : "Failed to load model groups"
       // keep cache on failure
     } finally {
       state.loading = false
-      state.refreshing = false
     }
   }
 
@@ -86,6 +76,5 @@ export function useModelGroups() {
     state,
     setUserId,
     load,
-    CACHE_TTL_MS,
   }
 }

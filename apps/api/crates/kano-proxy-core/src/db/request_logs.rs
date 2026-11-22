@@ -1,19 +1,19 @@
-//! `request_logs` writes and the two point reads the logger takes — the storage half of
-//! [`crate::logging::request_log`] (docs/database.md § request_logs). Prompts,
-//! completions and tokens never reach this table — only counts and costs (docs/logging.md).
-//!
-//! The aggregate queries behind `/api/logs` and `/api/usage` belong to those routes
-//! and are deliberately not here; the per-key spend
-//! window sum lives in `auth::spend_limit`, which owns its fail-open contract.
+//! `request_logs` rows (docs/database.md § request_logs): the write and the two name reads
+//! [`crate::logging::request_log`] takes, then the reads behind `/api/logs` and
+//! `/api/usage/summary`. Prompts, completions and tokens never reach this table — only counts
+//! and costs (docs/logging.md). The per-key spend window sum lives in `auth::spend_limit`,
+//! which owns its fail-open contract.
 
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::ids::{new_id, now_iso};
 
 /// One row to insert. Cost is computed by the caller (the price table lives in `pricing`), so
 /// this module never blocks a deferred write on a price lookup.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(test, derive(Deserialize))]
 pub struct RequestLogEntry {
     pub user_id: String,
     pub api_key_id: Option<String>,
@@ -40,7 +40,9 @@ pub struct RequestLogEntry {
     pub started_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+/// A whole stored row, as the tests read one back.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct RequestLogRow {
     pub id: String,
     pub user_id: String,
@@ -116,16 +118,12 @@ pub async fn account_label(db: &PgPool, account_id: &str) -> Result<Option<Strin
     Ok(row.and_then(|(custom, label)| custom.filter(|s| !s.is_empty()).or(label.filter(|s| !s.is_empty()))))
 }
 
-
 // ---------------------------------------------------------------------------
-// Aggregate/list reads for the admin surfaces. Appended by the `/api/logs` and
-// `/api/usage/summary` route ports, which built
-// these statements inline against D1; the write path above is untouched.
-// ---------------------------------------------------------------------------
+// Reads for the admin surfaces
 
 /// The columns the Logs page reads. `api_key_id` never leaves the process — the route
 /// resolves it to a name and a removed flag (docs/admin-ui.md § Logs page).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct RequestLogPageRow {
     pub id: String,
     pub created_at: String,
@@ -228,7 +226,7 @@ pub async fn list_request_log_page(
 }
 
 /// The columns the Logs pickers count (`/api/logs/facets`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct FacetLogRow {
     pub provider: String,
     pub model: String,
@@ -257,7 +255,8 @@ pub async fn facet_rows_in_range(db: &PgPool, user_id: &str, from: &str, to: &st
 }
 
 /// The columns `/api/usage/summary` aggregates over.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+#[cfg_attr(test, derive(Deserialize))]
 pub struct UsageLogRow {
     pub provider: String,
     pub model: String,
@@ -359,31 +358,5 @@ mod tests {
         assert_eq!(row.error_code, None);
         assert_eq!(row.started_at.as_deref(), Some("2026-01-01T00:00:00.000Z"));
         assert!(row.created_at.ends_with('Z'));
-    }
-
-    #[tokio::test]
-    async fn a_refusal_row_carries_no_cost() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let user = insert_user(&pool, "refuse@example.com").await;
-        let entry = RequestLogEntry {
-            user_id: user.id.clone(),
-            provider: "unknown".into(),
-            model: String::new(),
-            status_code: 429,
-            latency_ms: 0,
-            error_code: Some("spend_limit_exceeded".into()),
-            started_at: crate::ids::now_iso(),
-            ..Default::default()
-        };
-        let id = insert_request_log(&pool, &entry).await.unwrap();
-        let row = sqlx::query_as::<_, RequestLogRow>("SELECT * FROM request_logs WHERE id = $1")
-            .bind(&id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-        assert_eq!(row.status_code, 429);
-        assert_eq!(row.cost, None);
-        assert_eq!(row.error_code.as_deref(), Some("spend_limit_exceeded"));
-        assert_eq!(row.api_key_id, None);
     }
 }

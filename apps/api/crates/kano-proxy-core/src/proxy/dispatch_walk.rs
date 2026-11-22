@@ -18,20 +18,18 @@ use rand::Rng;
 
 use crate::app::now_ms;
 use crate::db::accounts::record_edge_timeout_strike;
-use crate::db::custom_providers::CustomProviderRow;
 use crate::pool::acquire::{acquire, AcquiredAccount};
 use crate::pool::bench::{mark_benched, mark_scope_benched};
 use crate::pool::extension::{settle_lease, AttemptLease, LeaseOutcome, ReserveContext, ReserveOutcome};
 use crate::pool::sign_in::{clear_sign_in_failure, mark_sign_in_rejected, read_refresh_failure};
 use crate::providers::types::{AdapterError, CallExtras, RequestEdits};
-use crate::providers::{DynAdapter, ProviderId};
-use crate::routing::candidates::{pool_candidates, PoolTarget};
+use crate::providers::ProviderId;
 use crate::routing::facts::{candidate_facts_list, earliest_unusable_until};
 use crate::routing::feedback::{
     agent_fault_verdict, is_edge_timeout_status, is_overloaded_status, penalty_for_outcome, EDGE_TIMEOUT_COOLDOWN_MS,
 };
-use crate::routing::strategy::{normalize_strategy, order_candidates};
-use crate::routing::types::{RoutingCandidate, StrategyContext};
+use crate::routing::strategy::order_candidates;
+use crate::routing::types::RoutingCandidate;
 use crate::AppState;
 
 /// The candidate walk never makes more than this many real upstream calls in one request.
@@ -40,86 +38,25 @@ pub const MAX_ATTEMPTS: usize = 8;
 /// `cancelled()` for the eager transport: the client already went away.
 pub type CancelSignal = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// The routing module's candidate list, ready for dispatch to walk. `candidates` and
-/// `strategy` let a caller (a group dispatch, via the cross-target flattened list) hand in an
-/// already-built, possibly cross-provider list; when absent, this builds the ordinary
-/// single-pool list dispatch has always used.
-///
-/// Deviation from the TypeScript: the pool extension is not a field here — it comes from
-/// `cx.pool_extension()`, the composition seam an edition already installed on the `AppState`.
-#[derive(Clone, Default)]
-pub struct CandidateSource {
-    pub user_id: String,
-    pub api_key_id: Option<String>,
-    pub provider: String,
-    /// Pre-resolved adapter for custom providers; defaults to the builtin registry.
-    pub adapter: Option<DynAdapter>,
-    /// Model-group account pinning: restrict acquire/failover to exactly this row.
-    pub pinned_account_id: Option<String>,
-    /// Pre-built cross-target candidate list (group dispatch) — bypasses the single-pool
-    /// builder entirely.
-    pub candidates: Option<Vec<RoutingCandidate>>,
-    /// `model_groups.strategy` (candidates given) or `provider_settings.strategy` (single
-    /// pool); defaults to `ordered`.
-    pub strategy: Option<String>,
-    pub is_builtin: Option<bool>,
-    pub custom_provider: Option<CustomProviderRow>,
-}
-
 enum Plan {
     NoAccount,
     Unavailable { until_ms: Option<i64> },
     Usable { ordered: Vec<RoutingCandidate> },
 }
 
-async fn plan_candidates(cx: &AppState, src: &CandidateSource, upstream_model: &str) -> Result<Plan, sqlx::Error> {
-    let candidates = match src.candidates.clone() {
-        Some(candidates) => candidates,
-        None => {
-            let is_builtin = src.is_builtin.unwrap_or(true);
-            let adapter = match src.adapter.clone() {
-                Some(adapter) => adapter,
-                None => match ProviderId::parse(&src.provider) {
-                    Some(id) => crate::providers::registry::get_adapter(id),
-                    // A non-builtin provider with no adapter cannot be called at all; an empty
-                    // pool is the honest answer (`no_upstream_account`).
-                    None => return Ok(Plan::NoAccount),
-                },
-            };
-            pool_candidates(
-                cx,
-                &src.user_id,
-                &PoolTarget {
-                    provider: src.provider.clone(),
-                    upstream_model: upstream_model.to_string(),
-                    is_builtin,
-                    custom_provider: src.custom_provider.clone(),
-                    adapter,
-                    account_id: src.pinned_account_id.clone(),
-                },
-            )
-            .await?
-        }
-    };
+fn plan_candidates(candidates: Vec<RoutingCandidate>) -> Plan {
     if candidates.is_empty() {
-        return Ok(Plan::NoAccount);
+        return Plan::NoAccount;
     }
     let now = now_ms();
     let facts = candidate_facts_list(&candidates, now);
-    let ordered = order_candidates(
-        candidates,
-        &facts,
-        &StrategyContext {
-            api_key_id: src.api_key_id.clone(),
-            strategy: normalize_strategy(src.strategy.as_deref()),
-        },
-    );
+    let ordered = order_candidates(candidates, &facts);
     let usable: Vec<RoutingCandidate> =
         ordered.into_iter().filter(|o| o.facts.usable).map(|o| o.candidate).collect();
     if usable.is_empty() {
-        return Ok(Plan::Unavailable { until_ms: earliest_unusable_until(&facts) });
+        return Plan::Unavailable { until_ms: earliest_unusable_until(&facts) };
     }
-    Ok(Plan::Usable { ordered: usable })
+    Plan::Usable { ordered: usable }
 }
 
 /// Decrypt + `refresh_if_needed` for one candidate — `None` on an unreadable credential
@@ -172,8 +109,7 @@ pub trait CandidateCaller: Send + Sync {
 
 /// Waits only for the adapter to produce response headers. The deadline also reaches the
 /// adapter through `CallExtras::first_byte_timeout`, so the transport aborts the request
-/// itself; the outer timeout covers an adapter that never returns at all — together they are
-/// the `AbortController` the TypeScript walk wrapped every attempt in.
+/// itself; the outer timeout covers an adapter that never returns at all.
 async fn fetch_upstream_response(
     cx: &AppState,
     caller: &dyn CandidateCaller,
@@ -300,8 +236,8 @@ async fn persist_bench(cx: &AppState, candidate: &RoutingCandidate, cooldown_ms:
         &candidate.account.user_id,
         &candidate.provider,
         &candidate.account.id,
-        Some(cooldown_ms),
-        Some(reason),
+        cooldown_ms,
+        reason,
         now_ms(),
     )
     .await
@@ -472,7 +408,7 @@ pub async fn recompute_unavailable_until(cx: &AppState, tried: &[RoutingCandidat
 }
 
 /// The attempt record: what the transports need to log, no matter how the walk ended.
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct WalkProgress {
     /// Last candidate a real upstream call was made for (`None` before the first attempt).
     pub candidate: Option<RoutingCandidate>,
@@ -481,10 +417,12 @@ pub struct WalkProgress {
 }
 
 pub struct WalkOpts<'a> {
-    pub source: &'a CandidateSource,
-    /// Bare upstream model id used to build the single-pool candidate list when
-    /// `source.candidates` is absent.
-    pub upstream_model: &'a str,
+    /// The requesting user and API key, for the pool extension's admission and `CallExtras`.
+    pub user_id: &'a str,
+    pub api_key_id: Option<&'a str>,
+    /// What dispatch walks: the candidate list the route resolved (docs/providers.md § Routing
+    /// module) — one provider's pool, or a group's cross-target list.
+    pub candidates: Vec<RoutingCandidate>,
     pub caller: &'a dyn CandidateCaller,
     /// Eager transport: the client already went away — stop before the next acquire/fetch.
     pub cancelled: Option<CancelSignal>,
@@ -519,13 +457,8 @@ pub enum WalkOutcome {
 
 pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
     let cancelled = || opts.cancelled.as_ref().is_some_and(|f| f());
-    let plan = match plan_candidates(cx, opts.source, opts.upstream_model).await {
-        Ok(plan) => plan,
-        Err(error) => {
-            tracing::error!(%error, "Failed to plan routing candidates");
-            return WalkOutcome::NoAccount;
-        }
-    };
+    let (user_id, api_key_id) = (opts.user_id, opts.api_key_id);
+    let plan = plan_candidates(opts.candidates);
     if cancelled() {
         return WalkOutcome::Cancelled;
     }
@@ -536,12 +469,12 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
     };
 
     let base_extras = CallExtras {
-        api_key_id: opts.source.api_key_id.clone(),
+        api_key_id: api_key_id.map(str::to_owned),
         first_byte_timeout: Some(first_byte_timeout(cx)),
         edits: Default::default(),
     };
-    let mut last_candidate: Option<RoutingCandidate> = None;
-    let mut saw_bench_response = false;
+    // The candidate whose bench-type response ended the list, if one did.
+    let mut last_benched: Option<RoutingCandidate> = None;
     let mut idx = 0usize;
     let mut attempts = 0usize;
     let mut ran_out_of_candidates = false;
@@ -575,11 +508,7 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
             let reserved = ext
                 .reserve_attempt(
                     cx,
-                    ReserveContext {
-                        user_id: &opts.source.user_id,
-                        api_key_id: opts.source.api_key_id.as_deref(),
-                        upstream_model: &candidate.upstream_model,
-                    },
+                    ReserveContext { user_id, upstream_model: &candidate.upstream_model },
                     &candidate,
                 )
                 .await;
@@ -642,13 +571,11 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
             drop(response);
             continue;
         }
-        let headers = response.headers().clone();
-        if should_fail_over_for_response(cx, &candidate, status, &headers).await {
+        if should_fail_over_for_response(cx, &candidate, status, response.headers()).await {
             // Benched / edge-timed-out / retried: this attempt produced nothing.
             settle_lease(lease.as_deref(), LeaseOutcome::Released).await;
             drop(response);
-            saw_bench_response = true;
-            last_candidate = Some(candidate);
+            last_benched = Some(candidate);
             continue;
         }
 
@@ -660,6 +587,6 @@ pub async fn walk_candidates(cx: &AppState, opts: WalkOpts<'_>) -> WalkOutcome {
 
     WalkOutcome::Exhausted {
         tried: ordered.into_iter().take(idx).collect(),
-        last_benched: if ran_out_of_candidates && saw_bench_response { last_candidate } else { None },
+        last_benched: if ran_out_of_candidates { last_benched } else { None },
     }
 }

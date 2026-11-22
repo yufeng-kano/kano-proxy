@@ -1,5 +1,5 @@
 //! HTTP composition: core routes plus edition extensions, then the built web app with an
-//! SPA fallback (the Pages role). Route groups are added phase by phase (docs/rust-server.md).
+//! SPA fallback (docs/rust-server.md).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,36 +21,35 @@ use crate::pool::PoolExtension;
 use crate::tunnel::registry::TunnelRegistry;
 use crate::upstream::{ReqwestTransport, UpstreamTransport};
 
-/// Everything a handler or adapter needs (the TypeScript `Env` plus per-app extension
-/// state). Cheap to clone; shared through `Arc`.
+/// Everything a handler or adapter needs: configuration, storage, the upstream transport and
+/// the edition's extensions. Cheap to clone; shared through `Arc`.
 #[derive(Clone)]
 pub struct AppState {
-    pub inner: Arc<Inner>,
+    inner: Arc<Inner>,
 }
 
-pub struct Inner {
-    pub config: CoreConfig,
-    pub pool: PgPool,
-    pub transport: Arc<dyn UpstreamTransport>,
-    pub cache: Cache,
-    pub request_policy: Option<Arc<dyn RequestPolicy>>,
-    pub pool_extension: Option<Arc<dyn PoolExtension>>,
-    pub tunnels: TunnelRegistry,
-    pub service_name: &'static str,
+struct Inner {
+    config: CoreConfig,
+    pool: PgPool,
+    transport: Arc<dyn UpstreamTransport>,
+    cache: Cache,
+    request_policy: Option<Arc<dyn RequestPolicy>>,
+    pool_extension: Option<Arc<dyn PoolExtension>>,
+    tunnels: TunnelRegistry,
+    service_name: &'static str,
     /// The usage notice signed-in users must have accepted (docs/auth.md § Usage notice).
-    pub notice: UsageNotice,
-    /// Whether request handling may spawn deferred work that reaches upstreams (the usage
-    /// refresh the Worker ran under `waitUntil`). Tests disable it so their mock transports
-    /// see exactly the requests the handler itself made.
-    pub background_work: bool,
+    notice: UsageNotice,
+    /// Whether request handling may spawn deferred work that reaches upstreams (the background
+    /// usage refresh). Tests disable it so their mock transports see exactly the requests the
+    /// handler itself made.
+    background_work: bool,
 }
 
-/// Builder for [`AppState`]; production uses [`AppState::new`], tests swap the transport.
+/// Builder for [`AppState`]; editions set their extensions on it, tests swap the transport.
 pub struct AppStateBuilder {
     config: CoreConfig,
     pool: PgPool,
     transport: Option<Arc<dyn UpstreamTransport>>,
-    cache: Option<Cache>,
     request_policy: Option<Arc<dyn RequestPolicy>>,
     pool_extension: Option<Arc<dyn PoolExtension>>,
     tunnels: Option<TunnelRegistry>,
@@ -61,14 +60,10 @@ pub struct AppStateBuilder {
 
 impl AppStateBuilder {
     pub fn new(config: CoreConfig, pool: PgPool) -> Self {
-        Self { config, pool, transport: None, cache: None, request_policy: None, pool_extension: None, tunnels: None, service_name: "kano-proxy", terms_date: None, background_work: true }
+        Self { config, pool, transport: None, request_policy: None, pool_extension: None, tunnels: None, service_name: "kano-proxy", terms_date: None, background_work: true }
     }
     pub fn transport(mut self, transport: Arc<dyn UpstreamTransport>) -> Self {
         self.transport = Some(transport);
-        self
-    }
-    pub fn cache(mut self, cache: Cache) -> Self {
-        self.cache = Some(cache);
         self
     }
     pub fn request_policy(mut self, policy: Option<Arc<dyn RequestPolicy>>) -> Self {
@@ -88,8 +83,7 @@ impl AppStateBuilder {
         self.service_name = name;
         self
     }
-    /// The edition's terms date, `YYYY-MM-DD` ([`Extensions::terms_date`]); `build` panics on
-    /// any other shape.
+    /// The edition's terms date, `YYYY-MM-DD`; `build` panics on any other shape.
     pub fn terms_date(mut self, date: Option<&'static str>) -> Self {
         self.terms_date = date;
         self
@@ -103,7 +97,7 @@ impl AppStateBuilder {
         AppState {
             inner: Arc::new(Inner {
                 transport: self.transport.unwrap_or_else(|| Arc::new(ReqwestTransport::new(timeout))),
-                cache: self.cache.unwrap_or_default(),
+                cache: Cache::new(),
                 config: self.config,
                 pool: self.pool,
                 request_policy: self.request_policy,
@@ -120,15 +114,6 @@ impl AppStateBuilder {
 impl AppState {
     pub fn builder(config: CoreConfig, pool: PgPool) -> AppStateBuilder {
         AppStateBuilder::new(config, pool)
-    }
-    /// Production state: real transport, fresh cache, extensions from `ext`.
-    pub fn new(config: CoreConfig, pool: PgPool, ext: &Extensions) -> Self {
-        AppStateBuilder::new(config, pool)
-            .request_policy(ext.request_policy.clone())
-            .pool_extension(ext.pool_extension.clone())
-            .service_name(ext.service_name.unwrap_or("kano-proxy"))
-            .terms_date(ext.terms_date)
-            .build()
     }
     pub fn notice(&self) -> &UsageNotice {
         &self.inner.notice
@@ -157,7 +142,7 @@ impl AppState {
     pub fn background_work(&self) -> bool {
         self.inner.background_work
     }
-    /// Epoch milliseconds now (`Date.now()`).
+    /// Epoch milliseconds now.
     pub fn now_ms(&self) -> i64 {
         now_ms()
     }
@@ -165,6 +150,11 @@ impl AppState {
 
 pub fn now_ms() -> i64 {
     (time::OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
+
+/// Epoch seconds now — the `created` / `created_at` of a converted response.
+pub fn now_seconds() -> i64 {
+    now_ms().div_euclid(1000)
 }
 
 async fn health(axum::extract::State(state): axum::extract::State<AppState>) -> impl IntoResponse {

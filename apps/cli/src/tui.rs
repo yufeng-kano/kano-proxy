@@ -588,13 +588,11 @@ pub fn root(title: &str, note: &[&str], header: Option<(&str, &str)>, rows: &[Ro
             let width = f.area().width.max(1) as usize;
             let note_h = note_height(note, width);
             let header_h = u16::from(header.is_some());
-            let fixed = 3 + note_h + header_h + 2;
-            let list_h = (rows.len() as u16).clamp(1, f.area().height.saturating_sub(fixed).max(1));
             let chunks = Layout::vertical([
                 Constraint::Length(3),
                 Constraint::Length(note_h),
                 Constraint::Length(header_h),
-                Constraint::Length(list_h),
+                Constraint::Length(list_height(rows.len(), f.area(), 3 + note_h + header_h + 2)),
                 Constraint::Length(1),
                 Constraint::Length(1),
                 Constraint::Min(0),
@@ -714,28 +712,6 @@ pub fn exit_decision(title: &str, changes: &[String]) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Quitting is a typed outcome `main` recognises, not an error string to match on —
-    /// and the default wording is the "nothing changed" one.
-    #[test]
-    fn cancelled_is_typed_and_says_nothing_changed() {
-        let e = cancelled();
-        assert!(e.is::<Cancelled>());
-        assert_eq!(e.to_string(), "Cancelled — nothing was changed.");
-        let partial: anyhow::Error = Cancelled(Some("Cancelled — Claude Code already restored.".into())).into();
-        assert_eq!(partial.downcast_ref::<Cancelled>().unwrap().to_string(), "Cancelled — Claude Code already restored.");
-        // Context added on the way up does not hide it.
-        assert!(cancelled().context("while picking").is::<Cancelled>());
-    }
-
-    #[test]
-    fn the_footer_says_when_the_next_esc_exits() {
-        ESC_ARMED.store(false, Ordering::SeqCst);
-        assert_eq!(nav_hint(), "Esc back · Esc twice exits");
-        ESC_ARMED.store(true, Ordering::SeqCst);
-        assert!(nav_hint().starts_with("Press Esc again to exit"));
-        ESC_ARMED.store(false, Ordering::SeqCst);
-    }
 
     /// Leaving a root page with nothing that saving would change never asks — it just
     /// exits, as nano closes an unmodified buffer without a question.

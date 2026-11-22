@@ -1,10 +1,8 @@
-//! The Codex model catalog (docs/providers.md § Codex § Models).
+//! The Codex model catalog (docs/providers.md § Codex "Models").
 //!
 //! The live catalog comes from `GET chatgpt.com/backend-api/codex/models?client_version=…`
 //! with the CLI identity headers; on any failure the public catalog mirrors are tried in
 //! order. If every source fails the list is empty — never a hard-coded or invented catalog.
-//! Egress is direct in the Rust edition (docs/rust-server.md § Storage): the Cloud Run relay
-//! is retired, so the primary request goes straight through `AppState::transport()`.
 
 use std::time::Duration;
 
@@ -15,17 +13,16 @@ use crate::AppState;
 
 use super::types::{ListedModels, UpstreamModel};
 
-pub const DIRECT_UPSTREAM_BASE: &str = "https://chatgpt.com/backend-api";
-pub const CODEX_MODELS_ENDPOINT: &str = concat!("https://chatgpt.com/backend-api", "/codex/models");
+const CODEX_MODELS_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/models";
 
 /// The one Codex CLI version every chatgpt.com call advertises. `/codex/models` filters its
 /// catalog by `client_version` — an old pin silently hides models the account can already
 /// use, so bump this when a new model fails to appear. Track npm `@openai/codex` latest.
 pub const CODEX_CLIENT_VERSION: &str = "0.165.0";
-pub const CODEX_USER_AGENT: &str = "codex_cli_rs/0.165.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9";
+const CODEX_USER_AGENT: &str = "codex_cli_rs/0.165.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9";
 
 /// Public catalog mirrors, tried in order when the live endpoint is bot-walled.
-pub const CODEX_MODEL_MIRROR_URLS: [&str; 2] = [
+const CODEX_MODEL_MIRROR_URLS: [&str; 2] = [
     "https://models.router-for.me/codex_client_models.json",
     "https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/codex_client_models.json",
 ];
@@ -76,8 +73,8 @@ fn map_models(payload: &Value) -> Option<Vec<UpstreamModel>> {
 }
 
 fn primary_request(access_token: &str, account_id: &str) -> UpstreamRequest {
-    // `encodeURIComponent(CODEX_CLIENT_VERSION)`: the identity for a dotted semver, kept
-    // explicit so a future pin carrying a reserved character still produces a valid URL.
+    // The identity for a dotted semver, kept so a future pin carrying a reserved character
+    // (semver build metadata's `+`) still produces a valid URL.
     let encoded: String = percent_encoding::utf8_percent_encode(CODEX_CLIENT_VERSION, URI_COMPONENT).to_string();
     let url = format!("{CODEX_MODELS_ENDPOINT}?client_version={encoded}");
     let mut req = UpstreamRequest::get(url)

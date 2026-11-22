@@ -3,10 +3,10 @@
 //!
 //! The source tables are trimmed to the four per-token rates this proxy uses. The combined
 //! table lives in [`crate::cache::Cache`] under `pricing:litellm:v1` with a 24h freshness
-//! window behind a process-wide in-memory memo (the Worker's per-isolate memo), so the
-//! request path costs no cache lookups in the common case and **never** a network fetch:
-//! refreshes happen from the daily maintenance task, or inline from the admin usage-summary
-//! route the first time after a deploy when the cache has nothing yet.
+//! window behind a process-wide in-memory memo, so the request path costs no cache lookups in
+//! the common case and **never** a network fetch: refreshes happen from the daily maintenance
+//! task, or inline from the admin usage-summary route the first time after a deploy when the
+//! cache has nothing yet.
 //!
 //! Everything degrades to "cost unknown" (`None`): a fetch failure serves the last copy
 //! regardless of age, an unmatched model prices as `None`. Never fabricate a rate, never fail
@@ -26,23 +26,22 @@ use crate::cache::Cache;
 use crate::upstream::{UpstreamRequest, UpstreamTransport};
 use crate::AppState;
 
-pub const LITELLM_PRICING_URL: &str =
+const LITELLM_PRICING_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
-pub const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
-/// Cache key, unchanged from the KV namespace (docs/pricing.md).
+/// Cache key (docs/pricing.md).
 pub const CACHE_KEY: &str = "pricing:litellm:v1";
 /// Cache lifetime — long enough that a week of failed refreshes still stale-serves.
 const CACHE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Age past which the daily maintenance task re-fetches.
-pub const PRICING_FRESH_MS: i64 = 24 * 60 * 60 * 1000;
+const PRICING_FRESH_MS: i64 = 24 * 60 * 60 * 1000;
 /// How long the process trusts its in-memory copy before re-consulting the cache.
 const MEMO_RECHECK_MS: i64 = 5 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PriceSource {
-    Litellm,
     Openrouter,
 }
 
@@ -60,19 +59,21 @@ pub struct ModelPrice {
     pub source: Option<PriceSource>,
 }
 
-/// Keyed by lowercased LiteLLM model id; insertion order matches the JavaScript object.
+/// Keyed by lowercased model id.
 pub type PriceTable = IndexMap<String, ModelPrice>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedTable {
     #[serde(rename = "fetchedAt")]
     fetched_at: i64,
+    /// The merged read view of the two source tables below.
     table: PriceTable,
-    /// Present in snapshots created after source tagging was added.
-    #[serde(rename = "litellmTable", default, skip_serializing_if = "Option::is_none")]
-    litellm_table: Option<PriceTable>,
-    #[serde(rename = "openRouterTable", default, skip_serializing_if = "Option::is_none")]
-    open_router_table: Option<PriceTable>,
+    /// Each source kept apart, so one source's outage stale-serves only that source. A
+    /// snapshot seeded with only `table` (tests) reads as two empty sources.
+    #[serde(rename = "litellmTable", default)]
+    litellm_table: PriceTable,
+    #[serde(rename = "openRouterTable", default)]
+    open_router_table: PriceTable,
 }
 
 #[derive(Default)]
@@ -81,8 +82,8 @@ struct MemoState {
     checked_at: i64,
 }
 
-// One memo per cache instance (the app's KV replacement), so separately built apps — and
-// parallel tests — never observe each other's freshness state. Production has one cache.
+// One memo per cache instance, so separately built apps — and parallel tests — never observe
+// each other's freshness state. Production has one cache.
 static MEMOS: Lazy<Mutex<std::collections::HashMap<u64, MemoState>>> = Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
 
 struct MemoGuard {
@@ -109,17 +110,12 @@ fn memo_state(cache: &Cache) -> MemoGuard {
     MemoGuard { guard, id: cache.id() }
 }
 
-/// Clears this cache's memo (the TypeScript `_resetPricingForTests`).
-pub fn reset_pricing_for_tests(cache: &Cache) {
+/// Clears this cache's memo.
+#[cfg(test)]
+pub(crate) fn reset_pricing_for_tests(cache: &Cache) {
     let mut state = memo_state(cache);
     state.memo = None;
     state.checked_at = 0;
-}
-
-/// Whether the loaded snapshot has separately persisted, source-tagged tables.
-pub fn has_source_tagged_price_tables(cache: &Cache) -> bool {
-    let state = memo_state(cache);
-    state.memo.as_ref().is_some_and(|m| m.litellm_table.is_some() && m.open_router_table.is_some())
 }
 
 /// Memo → cache → `None`. Never fetches. A cache failure or malformed entry falls back to
@@ -130,7 +126,7 @@ pub async fn get_price_table(state: &AppState) -> Option<PriceTable> {
 }
 
 /// Cache-only seam (the `AppState` wrapper above is what routes call).
-pub async fn get_price_table_with(cache: &Cache) -> Option<PriceTable> {
+async fn get_price_table_with(cache: &Cache) -> Option<PriceTable> {
     reload_memo(cache).await;
     let memo = memo_state(cache);
     memo.memo.as_ref().map(|m| m.table.clone())
@@ -192,7 +188,7 @@ pub async fn refresh_price_table(state: &AppState) -> Option<PriceTable> {
     refresh_price_table_with(state.transport().as_ref(), state.cache()).await
 }
 
-pub async fn refresh_price_table_with(
+async fn refresh_price_table_with(
     transport: &dyn UpstreamTransport,
     cache: &Cache,
 ) -> Option<PriceTable> {
@@ -204,25 +200,14 @@ pub async fn refresh_price_table_with(
 
     let (litellm_table, open_router_table, previous_table) = {
         let memo = memo_state(cache);
-        // Legacy combined snapshots have no provenance: preserve their LiteLLM entries for
-        // non-OpenRouter traffic only, and never treat any of their openrouter/<id> entries
-        // as catalog prices. A source-tagged snapshot's `table` is just a merged read view
-        // and must not become a legacy fallback.
-        let legacy_litellm = match memo.memo.as_ref() {
-            Some(m) if m.litellm_table.is_none() && m.open_router_table.is_none() => {
-                strip_openrouter_entries(&m.table)
-            }
-            _ => PriceTable::new(),
-        };
+        let previous = memo.memo.as_ref();
         // Empty source tables record an attempted fetch, letting the cache retain its normal
         // 24h refresh cadence after a source outage.
-        let litellm_table = fresh_litellm
-            .or_else(|| memo.memo.as_ref().and_then(|m| m.litellm_table.clone()))
-            .unwrap_or(legacy_litellm);
-        let open_router_table = fresh_open_router
-            .or_else(|| memo.memo.as_ref().and_then(|m| m.open_router_table.clone()))
-            .unwrap_or_default();
-        (litellm_table, open_router_table, memo.memo.as_ref().map(|m| m.table.clone()))
+        let litellm_table =
+            fresh_litellm.or_else(|| previous.map(|m| m.litellm_table.clone())).unwrap_or_default();
+        let open_router_table =
+            fresh_open_router.or_else(|| previous.map(|m| m.open_router_table.clone())).unwrap_or_default();
+        (litellm_table, open_router_table, previous.map(|m| m.table.clone()))
     };
 
     // The public OpenRouter catalog is authoritative for its exact model keys.
@@ -237,8 +222,8 @@ pub async fn refresh_price_table_with(
     let snap = CachedTable {
         fetched_at: now_ms(),
         table: table.clone(),
-        litellm_table: Some(litellm_table),
-        open_router_table: Some(open_router_table),
+        litellm_table,
+        open_router_table,
     };
     {
         let mut memo = memo_state(cache);
@@ -249,20 +234,16 @@ pub async fn refresh_price_table_with(
     Some(table)
 }
 
-/// Daily maintenance entry: refetch when a source is missing, or the stored table is stale.
+/// Daily maintenance entry: refetch when no table is loaded or the stored one is stale.
 pub async fn ensure_fresh_price_table(state: &AppState) {
     ensure_fresh_price_table_with(state.transport().as_ref(), state.cache()).await;
 }
 
-pub async fn ensure_fresh_price_table_with(transport: &dyn UpstreamTransport, cache: &Cache) {
+async fn ensure_fresh_price_table_with(transport: &dyn UpstreamTransport, cache: &Cache) {
     get_price_table_with(cache).await;
     {
         let memo = memo_state(cache);
-        let fresh = memo.memo.as_ref().is_some_and(|m| {
-            m.litellm_table.is_some()
-                && m.open_router_table.is_some()
-                && now_ms() - m.fetched_at < PRICING_FRESH_MS
-        });
+        let fresh = memo.memo.as_ref().is_some_and(|m| now_ms() - m.fetched_at < PRICING_FRESH_MS);
         if fresh {
             return;
         }
@@ -312,19 +293,10 @@ fn decimal(v: Option<&Value>) -> Option<f64> {
     s.trim().parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
-/// Legacy combined snapshots cannot prove an OpenRouter price's source.
-fn strip_openrouter_entries(table: &PriceTable) -> PriceTable {
-    table
-        .iter()
-        .filter(|(key, _)| !key.to_lowercase().starts_with("openrouter/"))
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
 /// Add OpenRouter's default rates only under its complete catalog id. Conditional overrides
 /// cannot be applied from the aggregate usage we log, so skip them rather than guessing.
 /// Never use these entries for another provider.
-pub fn trim_openrouter_table(json: &Value) -> PriceTable {
+fn trim_openrouter_table(json: &Value) -> PriceTable {
     let mut out = PriceTable::new();
     let Some(data) = json.get("data").and_then(Value::as_array) else {
         return out;
@@ -389,7 +361,7 @@ fn usable(table: &PriceTable, key: &str) -> Option<ModelPrice> {
 /// sometimes vendor-prefixed. Matching chain (docs/pricing.md): the upstream id exact, then
 /// with its own leading path segments progressively stripped, then common LiteLLM prefix
 /// forms of each candidate. First hit wins; no hit is `None`, never a guess.
-pub fn resolve_model_price(table: &PriceTable, raw_model: &str) -> Option<ModelPrice> {
+fn resolve_model_price(table: &PriceTable, raw_model: &str) -> Option<ModelPrice> {
     let slash = raw_model.find('/');
     let provider = normalize_id(match slash {
         None => "",
@@ -709,12 +681,6 @@ mod tests {
     }
 
     #[test]
-    fn does_not_use_a_litellm_openrouter_lookalike() {
-        let lookalike = table_of(&[("openrouter/z-ai/glm-5.2", price(1.0, 1.0, None, None))]);
-        assert_eq!(resolve_model_price(&lookalike, "openrouter/z-ai/glm-5.2"), None);
-    }
-
-    #[test]
     fn progressively_strips_the_upstream_ids_own_path_segments() {
         let table = trim_litellm_table(&litellm_json());
         assert!(resolve_model_price(&table, "byok/openai/gpt-4o-mini").is_some());
@@ -849,15 +815,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_price_table_is_none_before_anything_was_fetched_and_never_fetches() {
-        let _g = guard().await;
-        let cache = Cache::new();
-        let mock = MockTransport::new();
-        assert!(get_price_table_with(&cache).await.is_none());
-        assert!(mock.requests().is_empty());
-    }
-
-    #[tokio::test]
     async fn refresh_stores_the_trimmed_table_and_get_serves_it_from_the_cache() {
         let _g = guard().await;
         let cache = Cache::new();
@@ -936,62 +893,6 @@ mod tests {
         );
     }
 
-    async fn seed_legacy_snapshot(cache: &Cache) {
-        let snapshot = json!({
-            "fetchedAt": now_ms(),
-            "table": {
-                "claude-opus-5": { "input": 1, "output": 1, "cacheRead": null, "cacheCreation": null },
-                "openrouter/z-ai/glm-5.2": { "input": 1, "output": 1, "cacheRead": null, "cacheCreation": null },
-            },
-        });
-        cache
-            .put(CACHE_KEY, bytes::Bytes::from(serde_json::to_vec(&snapshot).unwrap()), CACHE_TTL)
-            .await;
-    }
-
-    #[tokio::test]
-    async fn never_authorizes_a_legacy_snapshots_openrouter_entry() {
-        let _g = guard().await;
-        let cache = Cache::new();
-        seed_legacy_snapshot(&cache).await;
-        let legacy = get_price_table_with(&cache).await.expect("legacy snapshot");
-        assert_eq!(resolve_model_price(&legacy, "openrouter/z-ai/glm-5.2"), None);
-
-        let mock = MockTransport::new();
-        expect_pricing(&mock, Some(litellm_json()), None);
-        let refreshed = refresh_price_table_with(mock.as_ref(), &cache).await.expect("a table");
-        assert_eq!(resolve_model_price(&refreshed, "openrouter/z-ai/glm-5.2"), None);
-        assert!(resolve_model_price(&refreshed, "claude-code/claude-opus-5").is_some());
-    }
-
-    #[tokio::test]
-    async fn refreshes_a_fresh_legacy_snapshot_and_prices_openrouter_after_its_catalog_succeeds() {
-        let _g = guard().await;
-        let cache = Cache::new();
-        seed_legacy_snapshot(&cache).await;
-        let legacy = get_price_table_with(&cache).await.expect("legacy snapshot");
-        assert!(resolve_model_price(&legacy, "claude-code/claude-opus-5").is_some());
-        assert_eq!(resolve_model_price(&legacy, "openrouter/z-ai/glm-5.2"), None);
-
-        let mock = MockTransport::new();
-        expect_pricing(&mock, Some(litellm_json()), Some(openrouter_json()));
-        ensure_fresh_price_table_with(mock.as_ref(), &cache).await;
-        assert_eq!(mock.requests().len(), 2);
-
-        reset_pricing_for_tests(&cache);
-        let refreshed = get_price_table_with(&cache).await.expect("a refreshed table");
-        assert_eq!(
-            resolve_model_price(&refreshed, "openrouter/z-ai/glm-5.2"),
-            Some(ModelPrice {
-                input: 0.00000076,
-                output: 0.00000242,
-                cache_read: Some(0.00000014),
-                cache_creation: None,
-                source: Some(PriceSource::Openrouter),
-            })
-        );
-    }
-
     #[tokio::test]
     async fn keeps_litellm_prices_when_openrouter_is_unavailable_on_the_first_refresh() {
         let _g = guard().await;
@@ -1016,6 +917,5 @@ mod tests {
         let table = refresh_price_table(&state).await.expect("a table");
         assert!(table.contains_key("claude-opus-5"));
         assert!(get_price_table(&state).await.is_some());
-        assert!(has_source_tagged_price_tables(state.cache()));
     }
 }

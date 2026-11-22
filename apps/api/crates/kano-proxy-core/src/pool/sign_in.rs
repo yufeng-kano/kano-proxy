@@ -10,7 +10,7 @@ use crate::db::accounts::{iso_from_ms, parse_iso_ms, AccountRow};
 use crate::pool::StoredCredential;
 
 /// A failed refresh is not retried sooner than this unless the stored access token is known to
-/// be past its expiry. Then every caller retries, as before: the bench that follows the
+/// be past its expiry. Then every caller retries: the bench that follows the
 /// upstream `401` is what paces those.
 pub const REFRESH_RETRY_MS: i64 = 300_000;
 
@@ -24,7 +24,6 @@ pub struct RefreshFailure {
     /// The token endpoint named the grant itself (`invalid_grant`): the refresh token is no
     /// longer accepted. A bare status does not say that. A `403` can be an edge refusing the
     /// call and a `400` a misconfigured client, and neither is fixed by signing in again.
-    #[serde(default)]
     pub refused: bool,
     /// The stored access token's expiry when the refresh failed. `None` when the credential
     /// carries none.
@@ -239,14 +238,6 @@ mod tests {
         assert_eq!(refused(&offset).expires_at.as_deref(), Some("2027-01-15T08:00:00.000Z"));
         let junk = StoredCredential { expires_at: Some("soon".into()), ..credential(None) };
         assert_eq!(refused(&junk).expires_at, None);
-    }
-
-    /// A record written before `refused` existed reads as not refused, never as an error.
-    #[test]
-    fn a_stored_failure_without_the_refused_flag_still_reads() {
-        let mut row = account_row("a", "claude-code");
-        row.refresh_failure_json = Some(r#"{"at":"2027-01-15T08:00:00.000Z","status":400,"expires_at":null}"#.into());
-        assert_eq!(read_refresh_failure(&row).map(|f| f.refused), Some(false));
     }
 
     #[test]

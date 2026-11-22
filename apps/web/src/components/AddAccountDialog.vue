@@ -131,7 +131,7 @@ async function beginOAuth() {
     // Antigravity with no OAuth client configured. That sentence tells the
     // operator what to set; "Couldn't start sign-in" tells them nothing and
     // will keep telling them nothing on every retry. Anything else (network,
-    // 5xx) stays generic, same as before.
+    // 5xx) stays generic.
     error.value =
       e instanceof ApiError && e.status === 400 && e.message
         ? e.message
@@ -146,12 +146,10 @@ async function submitPasteComplete() {
   busy.value = true
   error.value = null
   try {
-    const raw = pasteCode.value.trim()
     await completeLogin(props.provider, loginId.value, {
       // Claude: code#state from the Anthropic callback page.
       // Antigravity: the whole localhost callback URL, or just its code.
-      code: raw,
-      value: raw,
+      code: pasteCode.value.trim(),
     })
     emit("added")
     emit("close")

@@ -42,7 +42,7 @@ pub struct LogEntry {
 }
 
 /// Writes one row, cost included. Never returns an error: a logging failure is recorded and
-/// dropped, exactly as the TypeScript `try { … } catch {}` did.
+/// dropped.
 pub async fn log_request(cx: &AppState, entry: LogEntry) {
     if let Err(error) = write_request_log(cx, entry).await {
         tracing::error!(%error, "Failed to write request log");
@@ -121,7 +121,7 @@ mod tests {
     use super::*;
     use crate::db::test_support::{insert_account, insert_api_key, insert_user, skip_without_db, test_pool, test_state};
     use crate::pool::StoredCredential;
-    use crate::pricing::litellm::{estimate_cost, get_price_table, PriceSource, PriceTable};
+    use crate::pricing::litellm::{estimate_cost, get_price_table, PriceTable};
     use crate::upstream::MockTransport;
 
     async fn rows(state: &AppState) -> Vec<crate::db::request_logs::RequestLogRow> {
@@ -145,7 +145,7 @@ mod tests {
                 output: 0.000_02,
                 cache_read: Some(0.000_001),
                 cache_creation: Some(0.000_012_5),
-                source: Some(PriceSource::Litellm),
+                source: None,
             },
         );
         state

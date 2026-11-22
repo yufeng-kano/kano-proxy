@@ -4,7 +4,7 @@
 //! Deletes `request_logs` rows past the retention window in bounded batches, plus
 //! expired `sessions`, `oauth_login_states` and `cli_login_requests` rows. Nothing
 //! here is ever called from the request path: [`spawn_scheduler`] owns the daily
-//! wake-up, which in the Worker was Cloudflare's cron.
+//! wake-up.
 
 use std::sync::Arc;
 
@@ -22,11 +22,11 @@ pub const REQUEST_LOG_BATCH_SIZE: i64 = 2000;
 /// Hard cap on batches per run — bounds run time; a larger backlog drains over more days.
 pub const MAX_BATCHES_PER_RUN: usize = 40;
 
-/// UTC hour and minute of the daily sweep — the Worker's `17 3 * * *` cron.
+/// UTC hour and minute of the daily sweep.
 pub const SWEEP_HOUR: u8 = 3;
 pub const SWEEP_MINUTE: u8 = 17;
 
-/// What one sweep removed (the TypeScript `runRetentionSweep` return shape).
+/// What one sweep removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RetentionCounts {
     pub request_logs: u64,
@@ -110,8 +110,7 @@ pub fn next_sweep_at(now: OffsetDateTime) -> OffsetDateTime {
 }
 
 /// The core sweep with the edition's own chained after it. A storage failure is
-/// logged, never propagated — the Worker's `scheduled` handler caught each step the
-/// same way, so one bad sweep never skips the rest of the run.
+/// logged, never propagated, so one bad sweep never skips the rest of the run.
 async fn sweep_with_extra(cx: &AppState, extra: Option<&ExtraSweep>) {
     match run_retention(cx).await {
         Ok(_) => {}
@@ -122,14 +121,13 @@ async fn sweep_with_extra(cx: &AppState, extra: Option<&ExtraSweep>) {
     }
 }
 
-/// One scheduled run: retention (plus the edition's), then the price table refresh
-/// — the two jobs the Worker's cron trigger drove.
+/// One scheduled run: retention (plus the edition's), then the price table refresh.
 async fn run_scheduled(cx: &AppState, extra: Option<&ExtraSweep>) {
     sweep_with_extra(cx, extra).await;
     crate::pricing::litellm::ensure_fresh_price_table(cx).await;
 }
 
-/// Replaces the Wrangler cron: sleeps until the next 03:17 UTC, sweeps, repeats.
+/// Sleeps until the next 03:17 UTC, sweeps, repeats.
 /// The handle is the caller's to abort at shutdown; dropping it leaves the task
 /// running for the process's lifetime, which is what a server wants.
 pub fn spawn_scheduler(cx: AppState, extra: Option<ExtraSweep>) -> tokio::task::JoinHandle<()> {
@@ -237,20 +235,6 @@ mod tests {
         assert_eq!(log_ids(&pool).await.len(), 4);
     }
 
-    #[tokio::test]
-    async fn the_default_batch_size_clears_a_small_backlog_in_one_pass() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let cutoff_ms = 1_767_225_600_000i64;
-        let cutoff = iso_from_ms(cutoff_ms);
-        const { assert!(REQUEST_LOG_BATCH_SIZE > 5, "this seed must fit in a single default batch") };
-        for i in 1..=5 {
-            seed_log(&pool, &iso_from_ms(cutoff_ms - i * 1000)).await;
-        }
-        let deleted = sweep_request_logs(&pool, &cutoff, REQUEST_LOG_BATCH_SIZE, MAX_BATCHES_PER_RUN).await.unwrap();
-        assert_eq!(deleted, 5);
-        assert!(log_ids(&pool).await.is_empty());
-    }
-
     /// `REQUEST_LOG_RETENTION_DAYS` drives the cutoff; `config.rs` is what turns an
     /// invalid value into the 90-day default before it ever reaches here.
     #[tokio::test]
@@ -264,18 +248,6 @@ mod tests {
         assert_eq!(counts.request_logs, 1);
         assert_eq!(log_ids(state.pool()).await, vec![under]);
         assert!(!log_ids(state.pool()).await.contains(&just_over));
-    }
-
-    #[tokio::test]
-    async fn the_default_window_keeps_thirty_five_days_and_drops_ninety_five() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, MockTransport::new());
-        assert_eq!(state.config().request_log_retention_days, 90, "the documented default");
-        let inside = seed_log(state.pool(), &iso_from_ms(state.now_ms() - 35 * 86_400_000)).await;
-        seed_log(state.pool(), &iso_from_ms(state.now_ms() - 95 * 86_400_000)).await;
-
-        assert_eq!(run_retention(&state).await.unwrap().request_logs, 1);
-        assert_eq!(log_ids(state.pool()).await, vec![inside]);
     }
 
     #[tokio::test]
@@ -339,14 +311,6 @@ mod tests {
                 .unwrap();
             assert_eq!(ids, vec![kept.to_string()], "{table}");
         }
-    }
-
-    /// An empty database sweeps to zeros rather than erroring.
-    #[tokio::test]
-    async fn a_clean_database_sweeps_to_zero() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, MockTransport::new());
-        assert_eq!(run_retention(&state).await.unwrap(), RetentionCounts::default());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Bump the Homebrew tap and Scoop bucket after a CLI release
-(docs/cli.md § Distribution, docs/deployment.md § CLI release assets).
+(docs/cli.md § Distribution, docs/deployment.md § CLI release).
 
 Renders Formula/kano-proxy.rb (tap) and bucket/kano-proxy.json (scoop) from
 the release's SHA256SUMS and pushes each to its repo with TAP_PUSH_TOKEN.
@@ -172,7 +172,7 @@ def push(repo: str, rel_path: str, content: str, version: str, token: str) -> No
 
 def main() -> None:
     version = os.environ.get("VERSION", "").strip()
-    version = version.removeprefix("cli-v").removeprefix("v")
+    version = version.removeprefix("cli-v")
     sums_path = os.environ.get("SUMS_PATH", "").strip()
     token = os.environ.get("TAP_PUSH_TOKEN", "").strip()
     if not version or not sums_path:
@@ -194,7 +194,7 @@ def main() -> None:
             push(repo, rel_path, content, version, token)
         except subprocess.CalledProcessError as e:
             # Sanitized on purpose: never echo the failing command (argv is
-            # token-free now, but stay conservative) or captured output.
+            # token-free, but stay conservative) or captured output.
             print(
                 f"warning: could not bump {repo} (git exited {e.returncode}) — re-run this job after fixing the repo/secret",
                 file=sys.stderr,

@@ -2,7 +2,6 @@
 //! The rate budget, the slug namespace guard and refresh-token rotation all ride inside their
 //! statement's WHERE, so concurrent presentations cannot both win.
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::PgPool;
 
@@ -10,7 +9,7 @@ use crate::db::accounts::iso_from_ms;
 use crate::db::custom_providers::MAX_CUSTOM_PROVIDERS_PER_USER;
 use crate::ids::{new_id, now_iso};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct CliDeviceRow {
     pub id: String,
     pub user_id: String,
@@ -21,7 +20,7 @@ pub struct CliDeviceRow {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct CliLoginRequestRow {
     pub id: String,
     pub device_name: String,
@@ -34,7 +33,7 @@ pub struct CliLoginRequestRow {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct CliProviderRow {
     pub id: String,
     pub user_id: String,

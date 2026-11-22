@@ -1,5 +1,5 @@
 //! Anthropic-defined tools on a BYO Anthropic endpoint (docs/providers.md § Custom
-//! providers, "same-account retry without Anthropic-defined tools, not a first-send edit").
+//! endpoints, "same-account retry without Anthropic-defined tools, not a first-send edit").
 //!
 //! An ordered registry of recognizers for "tool N has no `input_schema`" in a 400 body, and
 //! the rewrite the retry sends. A new server's wording is a new recognizer, not a policy
@@ -14,7 +14,7 @@ use serde_json::{Map, Value};
 use crate::proxy::anthropic_client_tools;
 
 /// A body text recognizer: the index of the tool the endpoint refused.
-pub type MissingSchemaParser = fn(&str) -> Option<usize>;
+type MissingSchemaParser = fn(&str) -> Option<usize>;
 
 /// The error location, in the spellings a pydantic validator is reported in: a dotted path
 /// (`body.tools.53.input_schema`), a tuple (`('body', 'tools', 53, 'input_schema')`) or a
@@ -28,7 +28,7 @@ static PYDANTIC_MISSING_RE: Lazy<Regex> =
 
 /// A FastAPI / pydantic server validating every tool as a client tool:
 /// `1 validation error: {'type': 'missing', 'loc': 'body.tools.53.input_schema', 'msg': 'Field required', …}`.
-pub fn parse_pydantic_missing_input_schema(body_text: &str) -> Option<usize> {
+fn parse_pydantic_missing_input_schema(body_text: &str) -> Option<usize> {
     if !PYDANTIC_MISSING_RE.is_match(body_text) {
         return None;
     }
@@ -37,7 +37,7 @@ pub fn parse_pydantic_missing_input_schema(body_text: &str) -> Option<usize> {
 
 const PARSERS: &[MissingSchemaParser] = &[parse_pydantic_missing_input_schema];
 
-pub fn parse_missing_input_schema_rejection(body_text: &str) -> Option<usize> {
+fn parse_missing_input_schema_rejection(body_text: &str) -> Option<usize> {
     PARSERS.iter().find_map(|parse| parse(body_text))
 }
 

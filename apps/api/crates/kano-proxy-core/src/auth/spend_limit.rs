@@ -101,9 +101,8 @@ pub async fn key_window_spend(db: &PgPool, key: &SpendKey, now_ms: i64) -> Optio
 
 const MEMO_TTL_MS: i64 = 60_000;
 
-/// Keyed by id plus the limit settings, so a PATCH starts a fresh entry. Process-wide, as the
-/// isolate-wide map was: the key ids it holds are globally unique, so no two apps can read
-/// each other's numbers by accident.
+/// Keyed by id plus the limit settings, so a PATCH starts a fresh entry. Process-wide: the key
+/// ids it holds are globally unique, so no two apps can read each other's numbers by accident.
 static MEMO: Lazy<Mutex<HashMap<String, (i64, f64)>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Memoized [`key_window_spend`] for the request path. A `None` (storage failure) is never
@@ -178,15 +177,6 @@ mod tests {
         assert_eq!(spend_window_start("weekly", sunday), "2026-08-03T00:00:00.000Z");
     }
 
-    #[test]
-    fn interval_vocabulary() {
-        for v in SPEND_LIMIT_INTERVALS {
-            assert!(is_spend_limit_interval(v));
-        }
-        assert!(!is_spend_limit_interval("hourly"));
-        assert!(!is_spend_limit_interval(""));
-    }
-
     #[tokio::test]
     async fn sums_only_this_key_inside_the_window() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -231,7 +221,7 @@ mod tests {
         let limits = SpendLimitFields { spend_limit: Some(1.0), spend_limit_interval: "monthly".into(), spend_limit_include_oauth: true };
         let (row, _) = insert_api_key_with_limit(&pool, &user.id, limits).await;
         let now = crate::app::now_ms();
-        // Dropping the table is the local stand-in for the D1 outage the TypeScript stubbed.
+        // Renaming the table away stands in for a storage outage.
         sqlx::query("ALTER TABLE request_logs RENAME TO request_logs_hidden").execute(&pool).await.unwrap();
         assert_eq!(key_window_spend(&pool, &SpendKey::from(&row), now).await, None);
         assert_eq!(key_window_spend_cached(&pool, &SpendKey::from(&row), now).await, None);

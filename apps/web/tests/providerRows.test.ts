@@ -18,16 +18,19 @@ async function render(component: Component, props: Record<string, unknown>) {
 function account(overrides: Partial<ProviderAccount> = {}): ProviderAccount {
   return {
     id: "acct-1",
-    priority: 0,
     status: "active",
     label: "owner@example.com",
     custom_label: null,
     account: { email: "owner@example.com", plan_type: "claude_max" },
     usage: { windows: [{ label: "5h", utilization: 40, resets_at: null }] },
     error: null,
-    stale: false,
     allow_credits: false,
     on_credits: false,
+    strip_fast_mode: false,
+    strip_claude_code_line: false,
+    force_cache_ttl_1h: false,
+    benched: false,
+    sign_in_expires_at: null,
     ...overrides,
   }
 }
@@ -40,7 +43,7 @@ function codexAccount(credits: unknown, overrides: Partial<ProviderAccount> = {}
   })
 }
 
-const expired = account({ status: "reauth", error: "usage 401", stale: true })
+const expired = account({ status: "reauth", error: "usage 401" })
 
 it("offers Sign in again on an expired row while the section is not being edited", async () => {
   const html = await render(AccountCard, { account: expired, provider: "claude-code" })

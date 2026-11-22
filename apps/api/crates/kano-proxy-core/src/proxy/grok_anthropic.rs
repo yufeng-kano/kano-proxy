@@ -15,15 +15,18 @@ use serde_json::{json, Map, Value};
 use crate::providers::grok_encrypted_content::is_valid_grok_encrypted_content;
 use crate::providers::ProviderId;
 use crate::proxy::anthropic_client_tools;
+use crate::proxy::gemini_wire::{truthy, UPSTREAM_HEARTBEAT};
+use crate::proxy::openai_anthropic::{anthropic_output_format, strip_cache_control};
 use crate::proxy::sse_lines::read_sse_lines_default;
 use crate::utils::reasoning::{map_reasoning, parse_reasoning_effort, ReasoningEffort};
 
 // ── Request conversion ─────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GrokThinkingMode {
     Disabled,
     Enabled,
+    #[default]
     Default,
 }
 
@@ -31,8 +34,6 @@ pub enum GrokThinkingMode {
 pub struct GrokAnthropicConvertResult {
     pub body: Value,
     pub thinking_mode: GrokThinkingMode,
-    /// Last assistant plaintext in the converted input (for replay-cache match).
-    pub last_assistant_text: String,
 }
 
 /// The adapter turns this into a `400 invalid_request_error`, keeping convert pure.
@@ -41,15 +42,15 @@ pub struct GrokAnthropicConvertResult {
 pub struct InvalidGrokReasoningEffortError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GrokThinkingResolution {
-    pub thinking_mode: GrokThinkingMode,
-    pub effort: Option<ReasoningEffort>,
+struct GrokThinkingResolution {
+    thinking_mode: GrokThinkingMode,
+    effort: Option<ReasoningEffort>,
 }
 
 /// Resolve whether to expose encrypted reasoning and which effort to send.
 /// `thinking.type=disabled` is authoritative — effort fields are ignored.
 /// `budget_tokens` is intentionally ignored (effort-only).
-pub fn resolve_grok_thinking_effort(body: &Value) -> GrokThinkingResolution {
+fn resolve_grok_thinking_effort(body: &Value) -> GrokThinkingResolution {
     let thinking_type = body
         .get("thinking")
         .filter(|t| t.is_object())
@@ -105,7 +106,7 @@ pub fn anthropic_to_grok_responses(
 
     let mapped = map_reasoning(ProviderId::Grok, effort);
     let replay = if thinking_mode != GrokThinkingMode::Disabled { replay_encrypted_content } else { None };
-    let Converted { input, instructions, last_assistant_text } = anthropic_messages_to_grok_input(&cleaned, replay);
+    let Converted { input, instructions } = anthropic_messages_to_grok_input(&cleaned, replay);
 
     let mut out = Map::new();
     out.insert("model".into(), Value::String(upstream_model.to_string()));
@@ -139,8 +140,8 @@ pub fn anthropic_to_grok_responses(
 
     // stop_sequences: Responses has no Chat Completions `stop` equivalent — dropped
     // (same as codex). See docs/api.md grok Anthropic row.
-    if let Some(of) = anthropic_output_format(&cleaned) {
-        let schema = of.get("schema").filter(|s| is_truthy(s));
+    if let Some(of) = cleaned.as_object().and_then(anthropic_output_format) {
+        let schema = of.get("schema").filter(|s| truthy(s));
         if of.get("type").and_then(Value::as_str) == Some("json_schema") {
             if let Some(schema) = schema {
                 out.insert(
@@ -166,28 +167,25 @@ pub fn anthropic_to_grok_responses(
         }
     }
 
-    Ok(GrokAnthropicConvertResult { body: Value::Object(out), thinking_mode, last_assistant_text })
+    Ok(GrokAnthropicConvertResult { body: Value::Object(out), thinking_mode })
 }
 
 struct Converted {
     input: Vec<Value>,
     instructions: String,
-    last_assistant_text: String,
 }
 
 fn anthropic_messages_to_grok_input(body: &Value, replay_encrypted_content: Option<&str>) -> Converted {
     let instructions = system_to_instructions(body.get("system"));
     let mut input: Vec<Value> = Vec::new();
-    let last_assistant_text = last_assistant_text_from_anthropic_messages(body);
-    let mut injected_replay = false;
     let replay = replay_encrypted_content.filter(|r| is_valid_grok_encrypted_content(r));
 
     let empty: Vec<Value> = Vec::new();
     let messages = body.get("messages").and_then(Value::as_array).unwrap_or(&empty);
+    let last_assistant =
+        messages.iter().rposition(|m| m.get("role").and_then(Value::as_str) == Some("assistant"));
     for (mi, m) in messages.iter().enumerate() {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
-        let is_last_assistant = role == "assistant"
-            && !messages[mi + 1..].iter().any(|x| x.get("role").and_then(Value::as_str) == Some("assistant"));
 
         if role == "user" {
             let blocks = m.get("content").and_then(Value::as_array);
@@ -250,15 +248,9 @@ fn anthropic_messages_to_grok_input(body: &Value, replay_encrypted_content: Opti
                 None => text = content_to_text(m.get("content")),
             }
 
-            // Prefer a validated client signature; else inject session replay once for the
+            // Prefer a validated client signature; else inject the session replay for the
             // trailing assistant turn when the client stripped signatures.
-            let mut encrypted: Option<&str> = signature;
-            if encrypted.is_none() && is_last_assistant && !injected_replay {
-                if let Some(r) = replay {
-                    encrypted = Some(r);
-                    injected_replay = true;
-                }
-            }
+            let encrypted = signature.or(if last_assistant == Some(mi) { replay } else { None });
             if let Some(encrypted) = encrypted {
                 input.push(json!({
                     "type": "reasoning",
@@ -295,7 +287,7 @@ fn anthropic_messages_to_grok_input(body: &Value, replay_encrypted_content: Opti
         }));
     }
 
-    Converted { input, instructions, last_assistant_text }
+    Converted { input, instructions }
 }
 
 fn system_to_instructions(system: Option<&Value>) -> String {
@@ -408,7 +400,7 @@ fn map_anthropic_tools_to_responses(tools: &[Value]) -> Vec<Value> {
             Some(t) => t,
             None => continue,
         };
-        if let Some(fnc) = t.get("function").filter(|f| is_truthy(f)) {
+        if let Some(fnc) = t.get("function").filter(|f| truthy(f)) {
             let mut item = Map::new();
             item.insert("type".into(), Value::String("function".into()));
             insert_if_defined(&mut item, "name", fnc.get("name"));
@@ -427,7 +419,7 @@ fn map_anthropic_tools_to_responses(tools: &[Value]) -> Vec<Value> {
                 continue;
             }
         }
-        if t.get("name").is_some_and(is_truthy) {
+        if t.get("name").is_some_and(truthy) {
             let mut item = Map::new();
             item.insert("type".into(), Value::String("function".into()));
             insert_if_defined(&mut item, "name", t.get("name"));
@@ -478,7 +470,7 @@ fn content_to_text(content: Option<&Value>) -> String {
     }
 }
 
-/// Trailing assistant plaintext — shared by convert + replay-cache match.
+/// Trailing assistant plaintext — the replay cache's match key.
 pub fn last_assistant_text_from_anthropic_messages(body: &Value) -> String {
     let empty: Vec<Value> = Vec::new();
     let messages = body.get("messages").and_then(Value::as_array).unwrap_or(&empty);
@@ -500,48 +492,7 @@ pub fn last_assistant_text_from_anthropic_messages(body: &Value) -> String {
     String::new()
 }
 
-// ── Shared helpers (private copies of proxy::openai_anthropic, which another
-//    module port owns; see the report) ───────────────────────────────────────
-
-/// `stripCacheControl`: drop every `cache_control` key, at any depth.
-fn strip_cache_control(value: &Value) -> Value {
-    match value {
-        Value::Array(items) => Value::Array(items.iter().map(strip_cache_control).collect()),
-        Value::Object(obj) => {
-            let mut out = Map::new();
-            for (k, v) in obj {
-                if k == "cache_control" {
-                    continue;
-                }
-                out.insert(k.clone(), strip_cache_control(v));
-            }
-            Value::Object(out)
-        }
-        other => other.clone(),
-    }
-}
-
-/// `anthropicOutputFormat`: `output_config.format` (current) wins over the retired
-/// top-level `output_format`.
-fn anthropic_output_format(body: &Value) -> Option<&Value> {
-    if let Some(config) = body.get("output_config").filter(|c| c.is_object()) {
-        if let Some(format) = config.get("format").filter(|f| f.is_object() || f.is_array()) {
-            return Some(format);
-        }
-    }
-    body.get("output_format").filter(|f| f.is_object() || f.is_array())
-}
-
-/// JavaScript truthiness for a JSON value.
-fn is_truthy(v: &Value) -> bool {
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        _ => true,
-    }
-}
+// ── JSON coercions ─────────────────────────────────────────────────────────
 
 /// `String(v ?? "")` for a possibly-missing JSON value.
 fn js_string(v: Option<&Value>) -> String {
@@ -581,13 +532,13 @@ type TurnOutcomeSink = Box<dyn FnMut(GrokTurnOutcome) + Send>;
 
 #[derive(Default)]
 pub struct GrokStreamOptions {
-    pub thinking_mode: Option<GrokThinkingMode>,
-    pub on_turn_outcome: Option<TurnOutcomeSink>,
+    thinking_mode: GrokThinkingMode,
+    on_turn_outcome: Option<TurnOutcomeSink>,
 }
 
 impl GrokStreamOptions {
     pub fn thinking_mode(mut self, mode: GrokThinkingMode) -> Self {
-        self.thinking_mode = Some(mode);
+        self.thinking_mode = mode;
         self
     }
     pub fn on_turn_outcome(mut self, sink: impl FnMut(GrokTurnOutcome) + Send + 'static) -> Self {
@@ -623,6 +574,15 @@ where
                     if !out.is_empty() {
                         return Some((Ok(out), (lines, converter, false)));
                     }
+                    // An event held back behind open reasoning still re-arms the relay's idle
+                    // timer, so a long tool call generated before reasoning closes is not read
+                    // as silence (docs/api.md § Keepalive and idle timeout). Only after
+                    // `message_start`: a heartbeat before any real frame would count as client
+                    // output and cost a failed turn its pre-first-byte error frame and lease
+                    // release.
+                    if line.starts_with("data:") && converter.started && converter.reasoning_open && !converter.stopped {
+                        return Some((Ok(Bytes::from_static(UPSTREAM_HEARTBEAT)), (lines, converter, false)));
+                    }
                 }
                 Some(Err(e)) => return Some((Err(e), (lines, converter, true))),
                 None => {
@@ -635,8 +595,7 @@ where
     })
 }
 
-/// Deferred work: TypeScript queues closures, Rust queues the action so the converter
-/// state stays a single owner.
+/// Output held back while a reasoning item is open (see `Converter::reasoning_open`).
 enum Deferred {
     AppendText(String),
     ToolAdded { item_id: String, call_id: String, name: String },
@@ -652,12 +611,10 @@ struct LiveTool {
 
 struct Converter {
     model: String,
-    thinking_mode: GrokThinkingMode,
     emit_thinking: bool,
     msg_id: String,
     started: bool,
     stopped: bool,
-    saw_completed: bool,
     next_block_index: i64,
     text_block_open: bool,
     text_block_index: i64,
@@ -665,7 +622,6 @@ struct Converter {
     thinking_block_index: i64,
     pending_thinking: String,
     saw_tool_call: bool,
-    stop_reason: Option<String>,
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     cache_read_input_tokens: Option<i64>,
@@ -686,15 +642,12 @@ struct Converter {
 
 impl Converter {
     fn new(model: &str, opts: GrokStreamOptions) -> Self {
-        let thinking_mode = opts.thinking_mode.unwrap_or(GrokThinkingMode::Default);
         Self {
             model: model.to_string(),
-            thinking_mode,
-            emit_thinking: thinking_mode != GrokThinkingMode::Disabled,
+            emit_thinking: opts.thinking_mode != GrokThinkingMode::Disabled,
             msg_id: new_message_id(),
             started: false,
             stopped: false,
-            saw_completed: false,
             next_block_index: 0,
             text_block_open: false,
             text_block_index: -1,
@@ -702,7 +655,6 @@ impl Converter {
             thinking_block_index: -1,
             pending_thinking: String::new(),
             saw_tool_call: false,
-            stop_reason: None,
             prompt_tokens: None,
             completion_tokens: None,
             cache_read_input_tokens: None,
@@ -928,9 +880,6 @@ impl Converter {
             return;
         }
         self.open_thinking();
-        if !self.thinking_block_open {
-            return;
-        }
         let index = self.thinking_block_index;
         self.emit_event(
             "content_block_delta",
@@ -943,8 +892,7 @@ impl Converter {
     }
 
     fn flush_pending_thinking(&mut self) {
-        if self.pending_thinking.is_empty() || !self.emit_thinking {
-            self.pending_thinking.clear();
+        if self.pending_thinking.is_empty() {
             return;
         }
         let thinking = std::mem::take(&mut self.pending_thinking);
@@ -1099,10 +1047,8 @@ impl Converter {
         if self.on_turn_outcome.is_none() {
             return;
         }
-        let outcome = if self.thinking_mode != GrokThinkingMode::Disabled
-            && !self.encrypted_content.is_empty()
-            && is_valid_grok_encrypted_content(&self.encrypted_content)
-        {
+        // `encrypted_content` only ever holds a value that passed `valid_encrypted`.
+        let outcome = if self.emit_thinking && !self.encrypted_content.is_empty() {
             GrokTurnOutcome::Replayable {
                 encrypted_content: self.encrypted_content.clone(),
                 assistant_text: self.assistant_text.clone(),
@@ -1128,9 +1074,8 @@ impl Converter {
         if self.stopped {
             return;
         }
-        let ev: Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(_) => return, // ignore parse
+        let Ok(ev) = serde_json::from_str::<Value>(data) else {
+            return;
         };
         self.handle_event(&ev);
     }
@@ -1176,9 +1121,7 @@ impl Converter {
                     self.encrypted_content = enc;
                 }
             }
-            if self.emit_thinking {
-                self.open_thinking();
-            }
+            self.open_thinking();
         } else if ev_type == "response.output_item.done" && item_type == "reasoning" {
             if let Some(enc) = valid_encrypted(item) {
                 self.encrypted_content = enc.clone();
@@ -1191,12 +1134,7 @@ impl Converter {
             }
             // Signature-only reasoning (no summary text streamed): still open a thinking
             // block so signature_delta can be delivered.
-            if self.emit_thinking
-                && !self.thinking_block_open
-                && !self.text_block_open
-                && self.live_tool.is_none()
-                && !self.thinking_signature_pending.is_empty()
-            {
+            if !self.thinking_signature_pending.is_empty() {
                 self.open_thinking();
             }
             self.close_thinking();
@@ -1239,7 +1177,6 @@ impl Converter {
             let args = item.get("arguments").and_then(Value::as_str).map(str::to_string);
             self.after_reasoning(Deferred::ToolDone { item_id, call_id, name, args });
         } else if ev_type == "response.completed" || ev_type == "response.done" {
-            self.harvest_usage(ev.get("response").and_then(|r| r.get("usage")));
             // Also harvest encrypted_content from the completed output if stream events
             // omitted it.
             if self.encrypted_content.is_empty() {
@@ -1266,27 +1203,15 @@ impl Converter {
                     }
                 }
             }
-            self.saw_completed = true;
-            let reason = if self.saw_tool_call { "tool_use" } else { "end_turn" };
-            self.stop_reason = Some(reason.to_string());
-            self.finish(reason);
+            self.finish(if self.saw_tool_call { "tool_use" } else { "end_turn" });
         }
     }
 
+    /// `response.completed` and every upstream error stop the converter, so an EOF that
+    /// finds it still running is a truncated upstream: never fabricate a successful
+    /// message_stop.
     fn end_of_stream(&mut self) {
-        // Truncated upstream: never fabricate a successful message_stop.
-        if self.stopped {
-            return;
-        }
-        if self.saw_completed {
-            let reason = self
-                .stop_reason
-                .clone()
-                .unwrap_or_else(|| if self.saw_tool_call { "tool_use".into() } else { "end_turn".into() });
-            self.finish(&reason);
-        } else {
-            self.emit_upstream_error("upstream stalled: stream ended before response.completed");
-        }
+        self.emit_upstream_error("upstream stalled: stream ended before response.completed");
     }
 }
 
@@ -1367,6 +1292,7 @@ where
 
     let mut event = String::new();
     let mut error: Option<Value> = None;
+    let mut completed = false;
     let mut content: Vec<Value> = Vec::new();
     let mut stop_reason = "end_turn".to_string();
     let mut usage = json!({ "input_tokens": 0, "output_tokens": 0 });
@@ -1376,7 +1302,15 @@ where
     while let Some(line) = lines.next().await {
         let line = match line {
             Ok(line) => line,
-            Err(_) => break,
+            // A turn the transport cut short never completed: an error, never the partial
+            // content dressed as an `end_turn` message (docs/api.md "Grok reasoning"). A
+            // transport error after `message_stop` leaves the completed turn as it is.
+            Err(_) => {
+                if !completed {
+                    error.get_or_insert_with(|| json!({ "message": "upstream stream error", "type": "api_error" }));
+                }
+                break;
+            }
         };
         if let Some(rest) = line.strip_prefix("event:") {
             event = rest.trim().to_string();
@@ -1485,6 +1419,8 @@ where
                 if let Some(u) = json.get("usage").filter(|u| u.is_object()) {
                     usage = u.clone();
                 }
+            } else if event == "message_stop" {
+                completed = true;
             }
         }
         event.clear();
@@ -1525,46 +1461,35 @@ mod tests {
         String::from_utf8(out).expect("utf8")
     }
 
-    // ── resolveGrokThinkingEffort ──────────────────────────────────────────
+    // ── resolve_grok_thinking_effort ───────────────────────────────────────
 
     #[test]
-    fn disables_reasoning_when_thinking_type_disabled() {
-        let r = resolve_grok_thinking_effort(&json!({
-            "thinking": { "type": "disabled" },
-            "output_config": { "effort": "high" },
-            "reasoning_effort": "xhigh"
-        }));
-        assert_eq!(r, GrokThinkingResolution { thinking_mode: GrokThinkingMode::Disabled, effort: None });
+    fn resolves_thinking_mode_and_effort() {
+        let resolution = |thinking_mode, effort| GrokThinkingResolution { thinking_mode, effort };
+        for (body, expected) in [
+            // Disabled is authoritative: no effort field is honoured alongside it.
+            (
+                json!({ "thinking": { "type": "disabled" }, "output_config": { "effort": "high" }, "reasoning_effort": "xhigh" }),
+                resolution(GrokThinkingMode::Disabled, None),
+            ),
+            (
+                json!({ "thinking": { "type": "adaptive" }, "output_config": { "effort": "high" } }),
+                resolution(GrokThinkingMode::Enabled, Some(ReasoningEffort::High)),
+            ),
+            (json!({ "thinking": { "type": "adaptive" } }), resolution(GrokThinkingMode::Enabled, Some(ReasoningEffort::Medium))),
+            // Effort-only: budget_tokens is not mapped.
+            (
+                json!({ "thinking": { "type": "enabled", "budget_tokens": 4096 } }),
+                resolution(GrokThinkingMode::Enabled, Some(ReasoningEffort::Medium)),
+            ),
+            (json!({ "output_config": { "effort": "low" } }), resolution(GrokThinkingMode::Enabled, Some(ReasoningEffort::Low))),
+            (json!({}), resolution(GrokThinkingMode::Default, None)),
+        ] {
+            assert_eq!(resolve_grok_thinking_effort(&body), expected, "{body}");
+        }
     }
 
-    #[test]
-    fn maps_adaptive_plus_output_config_effort() {
-        let r = resolve_grok_thinking_effort(&json!({
-            "thinking": { "type": "adaptive" },
-            "output_config": { "effort": "high" }
-        }));
-        assert_eq!(r, GrokThinkingResolution { thinking_mode: GrokThinkingMode::Enabled, effort: Some(ReasoningEffort::High) });
-    }
-
-    #[test]
-    fn defaults_adaptive_without_effort_to_medium() {
-        let r = resolve_grok_thinking_effort(&json!({ "thinking": { "type": "adaptive" } }));
-        assert_eq!(r, GrokThinkingResolution { thinking_mode: GrokThinkingMode::Enabled, effort: Some(ReasoningEffort::Medium) });
-    }
-
-    #[test]
-    fn ignores_budget_tokens() {
-        let r = resolve_grok_thinking_effort(&json!({ "thinking": { "type": "enabled", "budget_tokens": 4096 } }));
-        assert_eq!(r, GrokThinkingResolution { thinking_mode: GrokThinkingMode::Enabled, effort: Some(ReasoningEffort::Medium) });
-    }
-
-    #[test]
-    fn treats_bare_effort_as_enabled() {
-        let r = resolve_grok_thinking_effort(&json!({ "output_config": { "effort": "low" } }));
-        assert_eq!(r, GrokThinkingResolution { thinking_mode: GrokThinkingMode::Enabled, effort: Some(ReasoningEffort::Low) });
-    }
-
-    // ── anthropicToGrokResponses ───────────────────────────────────────────
+    // ── anthropic_to_grok_responses ────────────────────────────────────────
 
     fn convert(body: Value, replay: Option<&str>) -> GrokAnthropicConvertResult {
         anthropic_to_grok_responses(&body, "grok-4.5", replay).expect("converts")
@@ -1588,19 +1513,6 @@ mod tests {
         assert_eq!(r.body["store"], json!(false));
         assert_eq!(r.body["stream"], json!(true));
         assert_eq!(r.body["temperature"], json!(1));
-    }
-
-    #[test]
-    fn clamps_max_effort_to_xhigh() {
-        let r = convert(
-            json!({
-                "thinking": { "type": "adaptive" },
-                "output_config": { "effort": "max" },
-                "messages": [{ "role": "user", "content": "hi" }]
-            }),
-            None,
-        );
-        assert_eq!(r.body["reasoning"], json!({ "effort": "xhigh" }));
     }
 
     #[test]
@@ -1645,46 +1557,26 @@ mod tests {
     }
 
     #[test]
-    fn drops_foreign_claude_or_gpt_thinking_signatures() {
-        let r = convert(
-            json!({
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            { "type": "thinking", "thinking": "claude", "signature": "gAAAAABopenai-encrypted-content-blob" },
-                            { "type": "text", "text": "hi" }
-                        ]
-                    },
-                    { "role": "user", "content": "next" }
-                ]
-            }),
-            None,
-        );
-        let input = r.body["input"].as_array().expect("input");
-        assert!(!input.iter().any(|i| i["type"] == "reasoning"));
-    }
-
-    #[test]
-    fn drops_provider_prefixed_signatures() {
-        let sig = fake_grok_encrypted_content(12);
-        let r = convert(
-            json!({
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            { "type": "thinking", "thinking": "x", "signature": format!("claude#{sig}") },
-                            { "type": "text", "text": "hi" }
-                        ]
-                    },
-                    { "role": "user", "content": "next" }
-                ]
-            }),
-            None,
-        );
-        let input = r.body["input"].as_array().expect("input");
-        assert!(!input.iter().any(|i| i["type"] == "reasoning"));
+    fn replays_no_reasoning_item_for_a_foreign_or_missing_signature() {
+        let provider_prefixed = format!("claude#{}", fake_grok_encrypted_content(12));
+        for thinking in [
+            json!({ "type": "thinking", "thinking": "gpt", "signature": "gAAAAABopenai-encrypted-content-blob" }),
+            json!({ "type": "thinking", "thinking": "x", "signature": provider_prefixed }),
+            // Unsigned plaintext never becomes an invented signature.
+            json!({ "type": "thinking", "thinking": "unsigned only" }),
+        ] {
+            let r = convert(
+                json!({
+                    "messages": [
+                        { "role": "assistant", "content": [thinking.clone(), { "type": "text", "text": "hi" }] },
+                        { "role": "user", "content": "next" }
+                    ]
+                }),
+                None,
+            );
+            let input = r.body["input"].as_array().expect("input");
+            assert!(!input.iter().any(|i| i["type"] == "reasoning"), "{thinking}");
+        }
     }
 
     #[test]
@@ -1694,35 +1586,35 @@ mod tests {
             json!({
                 "messages": [
                     { "role": "user", "content": "hi" },
-                    { "role": "assistant", "content": [{ "type": "text", "text": "hello" }] },
-                    { "role": "user", "content": "again" }
+                    { "role": "assistant", "content": [{ "type": "text", "text": "first" }] },
+                    { "role": "user", "content": "again" },
+                    { "role": "assistant", "content": [{ "type": "text", "text": "second" }] },
+                    { "role": "user", "content": "more" }
                 ]
             }),
             Some(&replay),
         );
-        let input = r.body["input"].as_array().expect("input");
-        assert!(input.iter().any(|i| i["encrypted_content"] == json!(replay)));
-    }
-
-    #[test]
-    fn does_not_invent_a_signature_from_unsigned_thinking_plaintext() {
-        let r = convert(
-            json!({
-                "messages": [
-                    {
-                        "role": "assistant",
-                        "content": [
-                            { "type": "thinking", "thinking": "unsigned only" },
-                            { "type": "text", "text": "hi" }
-                        ]
-                    },
-                    { "role": "user", "content": "next" }
-                ]
-            }),
-            None,
+        // The session ciphertext belongs to the trailing assistant turn only, never an earlier one.
+        let kinds: Vec<(&str, &str)> = r.body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .map(|i| {
+                let label = i["content"][0]["text"].as_str().or(i["encrypted_content"].as_str()).unwrap_or("");
+                (i["type"].as_str().unwrap_or(""), label)
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("message", "hi"),
+                ("message", "first"),
+                ("message", "again"),
+                ("reasoning", replay.as_str()),
+                ("message", "second"),
+                ("message", "more"),
+            ]
         );
-        let input = r.body["input"].as_array().expect("input");
-        assert!(!input.iter().any(|i| i["type"] == "reasoning"));
     }
 
     #[test]
@@ -1732,31 +1624,23 @@ mod tests {
     }
 
     #[test]
-    fn drops_stop_sequences_and_maps_output_format_json_schema() {
-        let r = convert(
-            json!({
-                "messages": [{ "role": "user", "content": "hi" }],
-                "stop_sequences": ["END"],
-                "output_format": {
-                    "type": "json_schema",
-                    "schema": { "type": "object", "properties": { "a": { "type": "string" } } }
-                }
-            }),
-            None,
-        );
-        assert!(r.body.get("stop").is_none());
-        assert!(r.body.get("stop_sequences").is_none());
-        assert_eq!(
-            r.body["text"],
-            json!({
-                "format": {
-                    "type": "json_schema",
-                    "name": "response",
-                    "schema": { "type": "object", "properties": { "a": { "type": "string" } } },
-                    "strict": false
-                }
-            })
-        );
+    fn drops_stop_sequences_and_maps_either_structured_output_spelling() {
+        let schema = json!({ "type": "object", "properties": { "a": { "type": "string" } } });
+        for spelling in [
+            json!({ "output_config": { "format": { "type": "json_schema", "schema": schema } } }),
+            json!({ "output_format": { "type": "json_schema", "schema": schema } }),
+        ] {
+            let mut body = json!({ "messages": [{ "role": "user", "content": "hi" }], "stop_sequences": ["END"] });
+            body.as_object_mut().unwrap().extend(spelling.as_object().unwrap().clone());
+            let r = convert(body, None);
+            assert!(r.body.get("stop").is_none());
+            assert!(r.body.get("stop_sequences").is_none());
+            assert_eq!(
+                r.body["text"],
+                json!({ "format": { "type": "json_schema", "name": "response", "schema": schema, "strict": false } }),
+                "{spelling}"
+            );
+        }
     }
 
     #[test]
@@ -1793,28 +1677,6 @@ mod tests {
     }
 
     #[test]
-    fn maps_the_current_structured_output_spelling_to_responses_text_format() {
-        let r = convert(
-            json!({
-                "messages": [{ "role": "user", "content": "hi" }],
-                "output_config": { "format": { "type": "json_schema", "schema": { "type": "object", "properties": { "b": {} } } } }
-            }),
-            None,
-        );
-        assert_eq!(
-            r.body["text"],
-            json!({
-                "format": {
-                    "type": "json_schema",
-                    "name": "response",
-                    "schema": { "type": "object", "properties": { "b": {} } },
-                    "strict": false
-                }
-            })
-        );
-    }
-
-    #[test]
     fn invalid_reasoning_effort_is_a_sentinel_error() {
         let err = anthropic_to_grok_responses(
             &json!({ "reasoning_effort": "turbo", "messages": [{ "role": "user", "content": "hi" }] }),
@@ -1830,7 +1692,7 @@ mod tests {
         assert_eq!(err, Err(InvalidGrokReasoningEffortError));
     }
 
-    // ── grokResponsesSseToAnthropicStream ──────────────────────────────────
+    // ── grok_responses_sse_to_anthropic_stream ─────────────────────────────
 
     #[tokio::test]
     async fn emits_signature_delta_from_reasoning_encrypted_content() {
@@ -1897,6 +1759,71 @@ mod tests {
         assert!(!out.contains(&enc_pre));
         assert!(out.contains(r#""name":"Agent""#));
         assert!(out.contains(r#""stop_reason":"tool_use""#));
+    }
+
+    #[tokio::test]
+    async fn a_frame_held_back_behind_open_reasoning_still_reaches_the_relay_as_a_heartbeat() {
+        let stream = grok_responses_sse_to_anthropic_stream(
+            sse(&[
+                json!({ "type": "response.output_item.added", "item": { "type": "reasoning" } }),
+                json!({
+                    "type": "response.output_item.added",
+                    "item": { "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Write" }
+                }),
+                json!({ "type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "{\"a\":" }),
+                json!({ "type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "1}" }),
+            ]),
+            "grok/grok-4.5",
+            GrokStreamOptions::default(),
+        );
+        futures::pin_mut!(stream);
+        let mut heartbeats = 0;
+        while let Some(chunk) = stream.next().await {
+            if chunk.expect("chunk").as_ref() == UPSTREAM_HEARTBEAT {
+                heartbeats += 1;
+            }
+        }
+        // The tool call and both argument deltas wait for reasoning to close; each still
+        // re-arms the idle timer.
+        assert_eq!(heartbeats, 3);
+    }
+
+    #[tokio::test]
+    async fn the_preamble_before_any_content_sends_no_heartbeat() {
+        // A heartbeat is client output: before `message_start` it would turn a turn that
+        // fails with nothing to show into one that delivered bytes (no error frame, lease
+        // consumed instead of released).
+        let created = json!({ "type": "response.created", "response": {} });
+        let in_progress = json!({ "type": "response.in_progress", "response": {} });
+        let body = futures::stream::iter(vec![
+            Ok(Bytes::from(format!("data: {created}\n\ndata: {in_progress}\n\n"))),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let stream = grok_responses_sse_to_anthropic_stream(body, "grok/grok-4.5", GrokStreamOptions::default());
+        let items: Vec<_> = stream.collect().await;
+        assert_eq!(items.len(), 1, "{items:?}");
+        assert!(items[0].is_err());
+    }
+
+    #[tokio::test]
+    async fn hidden_reasoning_sends_no_heartbeat_before_message_start() {
+        let stream = grok_responses_sse_to_anthropic_stream(
+            sse(&[
+                json!({ "type": "response.output_item.added", "item": { "type": "reasoning" } }),
+                json!({
+                    "type": "response.output_item.added",
+                    "item": { "type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "Write" }
+                }),
+                json!({ "type": "response.function_call_arguments.delta", "item_id": "fc_1", "delta": "{}" }),
+            ]),
+            "grok/grok-4.5",
+            GrokStreamOptions::default().thinking_mode(GrokThinkingMode::Disabled),
+        );
+        // Nothing reached the client before the cut, so it must still get the error event as
+        // its first bytes.
+        let chunks: Vec<Bytes> = stream.map(|c| c.expect("chunk")).collect().await;
+        assert!(chunks.iter().all(|c| c.as_ref() != UPSTREAM_HEARTBEAT), "{chunks:?}");
+        assert!(chunks[0].starts_with(b"event: error"), "{chunks:?}");
     }
 
     #[tokio::test]
@@ -1988,7 +1915,7 @@ mod tests {
         assert!(out.contains("event: message_stop"));
     }
 
-    // ── collectGrokResponsesSseToAnthropic ─────────────────────────────────
+    // ── collect_grok_responses_sse_to_anthropic ────────────────────────────
 
     #[tokio::test]
     async fn builds_a_signed_thinking_block_on_the_non_stream_message() {
@@ -2025,5 +1952,35 @@ mod tests {
         )
         .await;
         assert_eq!(msg["error"]["type"], "api_error");
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_mid_turn_is_an_error_not_a_partial_success() {
+        let delta = json!({ "type": "response.output_text.delta", "delta": "partial" });
+        let body = futures::stream::iter(vec![
+            Ok(Bytes::from(format!("data: {delta}\n\n"))),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let msg = collect_grok_responses_sse_to_anthropic(body, "grok/grok-4.5", GrokStreamOptions::default()).await;
+        assert_eq!(msg["error"]["type"], "api_error", "{msg}");
+        assert!(msg.get("content").is_none(), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_after_the_turn_completed_keeps_the_message() {
+        let delta = json!({ "type": "response.output_text.delta", "delta": "done" });
+        let completed = json!({
+            "type": "response.completed",
+            "response": { "usage": { "input_tokens": 3, "output_tokens": 1 } }
+        });
+        let body = futures::stream::iter(vec![
+            Ok(Bytes::from(format!("data: {delta}\n\n"))),
+            Ok(Bytes::from(format!("data: {completed}\n\n"))),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let msg = collect_grok_responses_sse_to_anthropic(body, "grok/grok-4.5", GrokStreamOptions::default()).await;
+        assert!(msg.get("error").is_none(), "{msg}");
+        assert_eq!(msg["stop_reason"], "end_turn");
+        assert_eq!(msg["content"], json!([{ "type": "text", "text": "done" }]));
     }
 }

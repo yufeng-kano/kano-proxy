@@ -217,8 +217,7 @@ const bindings = computed(() => {
   height: 14px;
 }
 
-/* Touch targets need the full 44px on a coarse pointer even where the visual
-   height stays 34px — the padding is invisible, the hit area is not. */
+/* Touch targets grow to 40px on a coarse pointer (docs/admin-ui.md § Responsive). */
 @media (pointer: coarse) {
   .btn-md {
     min-height: 40px;

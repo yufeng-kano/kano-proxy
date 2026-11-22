@@ -1,8 +1,8 @@
 //! kano-proxy server core (docs/rust-server.md).
 //!
-//! Editions compose the core through [`app::build_router`] with [`extensions::Extensions`]:
-//! a request policy, extra routes and a pool extension, passed at composition time so two
-//! routers never leak into each other. The documentation under `docs/` is the contract for
+//! Editions compose the core at start: a request policy and a pool extension through
+//! [`AppState::builder`], extra routes through [`app::build_router`] with
+//! [`extensions::Extensions`], so two routers never leak into each other. The documentation under `docs/` is the contract for
 //! every module here (docs/rust-server.md § Module map).
 
 pub mod app;

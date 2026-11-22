@@ -32,7 +32,7 @@ import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { customEndpointCount, useCustomProviders } from "@/composables/useCustomProviders"
 import { useConfirm } from "@/composables/useConfirm"
-import { useI18n } from "@/i18n"
+import { PROVIDER_NAME_KEY, useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import {
   deleteCustomProvider,
@@ -66,23 +66,9 @@ const customProviders = useCustomProviders()
 const cli = useCli()
 
 /**
- * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
- * ids. An explicit map rather than a template literal: `` `provider.${id}.name` ``
- * widens to `string` and would not typecheck against `MessageKey`, so a
- * renamed key has to fail the build here.
- */
-const NAME_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.name",
-  codex: "provider.codex.name",
-  grok: "provider.grok.name",
-  antigravity: "provider.antigravity.name",
-}
-
-/**
  * Each strategy's own name and the line that says what it does to a pool. A
- * map rather than a template literal for the same reason as above — and it is
- * the seam a second strategy lands in: an entry here, an entry in
- * `ROUTING_STRATEGIES`, and the select offers it.
+ * map, like `PROVIDER_NAME_KEY` — and it is the seam a second strategy lands
+ * in: an entry here, an entry in `ROUTING_STRATEGIES`, and the select offers it.
  */
 const STRATEGY_KEY: Record<RoutingStrategy, MessageKey> = {
   ordered: "strategy.ordered",
@@ -140,10 +126,10 @@ const selected = ref<string>(getProvidersPrefs().tab ?? ALL)
 
 let pollTimer: number | undefined
 
-const tabIds = computed<string[]>(() => [ALL, ...PROVIDERS.map((p) => p.id), CUSTOM, CLI])
+const tabIds: string[] = [ALL, ...PROVIDERS.map((p) => p.id), CUSTOM, CLI]
 
 /** A stored tab that no longer exists resolves to All rather than an empty page. */
-const activeTab = computed(() => (tabIds.value.includes(selected.value) ? selected.value : ALL))
+const activeTab = computed(() => (tabIds.includes(selected.value) ? selected.value : ALL))
 
 const navItems = computed<SectionItem[]>(() => [
   {
@@ -155,7 +141,7 @@ const navItems = computed<SectionItem[]>(() => [
   },
   ...PROVIDERS.map((p) => ({
     id: p.id,
-    label: t(NAME_KEY[p.id]),
+    label: t(PROVIDER_NAME_KEY[p.id]),
     count: byProvider[p.id].data?.accounts.length ?? null,
   })),
   {
@@ -206,9 +192,9 @@ function onSelectTab(id: string) {
   setProvidersPrefs({ tab: id === ALL ? null : id })
 }
 
-/** Cache-first: paint localStorage, network only when stale. */
-function loadEverything() {
-  return Promise.all([loadAll(), customProviders.load(), cli.load()])
+/** Cache-first: paint localStorage, network only when stale or `refresh` is asked for. */
+function loadEverything(opts?: { refresh?: boolean }) {
+  return Promise.all([loadAll(opts), customProviders.load(opts), cli.load(opts)])
 }
 
 /** Idempotent: a stray double-start would leak an interval nothing can clear. */
@@ -261,11 +247,7 @@ async function refreshAll() {
   actionError.value = null
   refreshing.value = true
   try {
-    await Promise.all([
-      loadAll({ refresh: true }),
-      customProviders.load({ refresh: true }),
-      cli.load({ refresh: true }),
-    ])
+    await loadEverything({ refresh: true })
   } finally {
     refreshing.value = false
   }
@@ -359,8 +341,8 @@ async function onRemove(provider: ProviderId, id: string) {
 }
 
 /**
- * The pool's current strategy. A response (or a cache entry) without the field
- * predates it and means the server's default — never a blank select.
+ * The pool's current strategy. Before the pool has loaded it is the server's
+ * default — never a blank select.
  */
 function strategyOf(provider: ProviderId): RoutingStrategy {
   return byProvider[provider].data?.strategy ?? DEFAULT_ROUTING_STRATEGY
@@ -626,8 +608,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
       <AppCard
         v-for="pid in visibleProviders"
         :key="pid"
-        :title="t(NAME_KEY[pid])"
-        toolbar-wash
+        :title="t(PROVIDER_NAME_KEY[pid])"
       >
         <template #actions>
           <!-- Icon-only ghost: this page is read far more often than it is
@@ -652,8 +633,8 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
             :variant="isEditing(pid) ? 'primary' : 'secondary'"
             :label="
               isEditing(pid)
-                ? t('providers.section.doneEditing', { section: t(NAME_KEY[pid]) })
-                : t('providers.section.edit', { section: t(NAME_KEY[pid]) })
+                ? t('providers.section.doneEditing', { section: t(PROVIDER_NAME_KEY[pid]) })
+                : t('providers.section.edit', { section: t(PROVIDER_NAME_KEY[pid]) })
             "
             :aria-pressed="isEditing(pid)"
             @click="toggleEditing(pid)"
@@ -692,7 +673,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
 
         <div class="section-body">
           <Banner v-if="byProvider[pid].error" tone="warn">
-            {{ t("providers.error.load", { provider: t(NAME_KEY[pid]) }) }}
+            {{ t("providers.error.load", { provider: t(PROVIDER_NAME_KEY[pid]) }) }}
           </Banner>
 
           <!-- Skeletons are decoration; the status beside them is what a
@@ -732,8 +713,8 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
           <EmptyState
             v-else
             compact
-            :title="t('providers.empty.title', { provider: t(NAME_KEY[pid]) })"
-            :body="t('providers.empty.body', { provider: t(NAME_KEY[pid]) })"
+            :title="t('providers.empty.title', { provider: t(PROVIDER_NAME_KEY[pid]) })"
+            :body="t('providers.empty.body', { provider: t(PROVIDER_NAME_KEY[pid]) })"
           />
         </div>
       </AppCard>
@@ -833,7 +814,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
     <AddAccountDialog
       v-if="addFor"
       :provider="addFor"
-      :provider-name="t(NAME_KEY[addFor])"
+      :provider-name="t(PROVIDER_NAME_KEY[addFor])"
       @close="addFor = null"
       @added="onAdded(addFor!)"
     />
@@ -841,7 +822,7 @@ async function onRemoveCustomProvider(provider: CustomProvider) {
     <AddAccountDialog
       v-if="reconnecting"
       :provider="reconnecting.provider"
-      :provider-name="t(NAME_KEY[reconnecting.provider])"
+      :provider-name="t(PROVIDER_NAME_KEY[reconnecting.provider])"
       :reconnect="reconnecting"
       @close="reconnecting = null"
       @added="onAdded(reconnecting!.provider)"

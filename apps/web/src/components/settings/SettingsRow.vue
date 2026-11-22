@@ -14,9 +14,7 @@ defineProps<{ label?: string; description?: string }>()
       <slot name="label">
         <div class="row-label">{{ label }}</div>
       </slot>
-      <div v-if="description || $slots.description" class="row-description">
-        <slot name="description">{{ description }}</slot>
-      </div>
+      <div v-if="description" class="row-description">{{ description }}</div>
     </div>
     <div v-if="$slots.default" class="row-control">
       <slot />

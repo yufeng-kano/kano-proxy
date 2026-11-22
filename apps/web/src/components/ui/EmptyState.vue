@@ -16,9 +16,6 @@ defineProps<{
 
 <template>
   <div class="empty" :class="{ compact }">
-    <div v-if="$slots.icon && !compact" class="empty-icon" aria-hidden="true">
-      <slot name="icon" />
-    </div>
     <p class="empty-title">{{ title }}</p>
     <p v-if="body" class="empty-body">{{ body }}</p>
     <div v-if="$slots.action" class="empty-action">
@@ -41,23 +38,6 @@ defineProps<{
 .empty.compact {
   padding: var(--space-6) var(--space-4);
   gap: var(--space-1);
-}
-
-.empty-icon {
-  display: grid;
-  place-items: center;
-  width: 44px;
-  height: 44px;
-  margin-bottom: var(--space-1);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--faint);
-}
-
-.empty-icon :deep(svg) {
-  width: 20px;
-  height: 20px;
 }
 
 .empty-title {

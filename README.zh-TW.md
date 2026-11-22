@@ -178,7 +178,7 @@ cp .env.example .env     # 填好網域、ACME email、Google OAuth client 與�
 docker compose up -d --build
 ```
 
-把網域的 DNS 指到這台機器，並開放 80 與 443 連接埠。Caddy 會在第一次請求時取得憑證，伺服器啟動時會套用資料庫遷移。如果你已經有自己的反向代理，拿掉 `caddy` 服務，依[部署文件](./docs/deployment.md)自行把 API 路徑轉到伺服器。
+把網域的 DNS 指到這台機器，並開放 80 與 443 連接埠。Caddy 會自動取得憑證，伺服器啟動時會套用資料庫遷移。如果你已經有自己的反向代理，拿掉 `caddy` 服務，依[部署文件](./docs/deployment.md)自行把 API 路徑轉到伺服器。
 
 要改程式的話，請看 [Testing](./docs/testing.md)。`apps/` 下的每個 app 各自建置與測試。
 

@@ -31,16 +31,6 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-it("ignores an anchor written before follow-today and lands on today", () => {
-  store.set(
-    "kano-proxy:prefs",
-    JSON.stringify({ overview: { rangeKind: "day", days: 1, anchor: "2026-11-14" } }),
-  )
-  const usage = useUsage()
-  expect(usage.range.value.anchor).toBe("2026-11-15")
-  expect(readPrefs().overview.pinnedAnchor).toBeNull()
-})
-
 it("a selection covering today follows it across midnight and a reload", async () => {
   const usage = useUsage()
   usage.setRangeKind("day")
@@ -117,7 +107,7 @@ it("a check within the same period leaves the selected date untouched", async ()
 it("a stored pin that covers today follows the clock", async () => {
   store.set(
     "kano-proxy:prefs",
-    JSON.stringify({ overview: { rangeKind: "day", days: 1, pinnedAnchor: "2026-11-15" } }),
+    JSON.stringify({ overview: { rangeKind: "day", pinnedAnchor: "2026-11-15" } }),
   )
   const usage = useUsage()
   vi.setSystemTime(new Date(2026, 10, 16, 0, 0, 5))

@@ -1,55 +1,22 @@
-//! Model id parsing (docs/api.md § Model ids): everything before
-//! the FIRST `/` is the provider (a builtin id or a custom slug), the rest is the upstream id
-//! verbatim.
-
-use crate::providers::ProviderId;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParsedModel {
-    pub provider: ProviderId,
-    pub upstream_model: String,
-    pub raw: String,
-}
+//! Model id parsing (docs/api.md § Model ids): everything before the FIRST `/` is the provider
+//! (a builtin id or a custom slug), the rest is the upstream id verbatim.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitModelId {
     /// Text before the first "/" — a builtin provider id or a candidate custom slug.
     pub prefix: String,
     pub upstream_model: String,
-    pub raw: String,
 }
 
 /// Split on the FIRST "/" only — upstream ids may legitimately contain further slashes (e.g.
 /// a custom slug fronting `org/model`), so the rest of the string after the first separator
 /// is the upstream id verbatim.
 pub fn split_model_id(model: &str) -> Option<SplitModelId> {
-    let raw = model.trim();
-    let slash = raw.find('/')?;
-    if slash == 0 || slash == raw.len() - 1 {
+    let (prefix, upstream_model) = model.trim().split_once('/')?;
+    if prefix.is_empty() || upstream_model.is_empty() {
         return None;
     }
-    let prefix = &raw[..slash];
-    let upstream_model = &raw[slash + 1..];
-    if upstream_model.is_empty() {
-        return None;
-    }
-    Some(SplitModelId {
-        prefix: prefix.to_string(),
-        upstream_model: upstream_model.to_string(),
-        raw: raw.to_string(),
-    })
-}
-
-pub fn parse_model_id(model: &str) -> Option<ParsedModel> {
-    let split = split_model_id(model)?;
-    let provider = ProviderId::parse(&split.prefix)?;
-    Some(ParsedModel { provider, upstream_model: split.upstream_model, raw: split.raw })
-}
-
-/// The Anthropic surface uses the same provider/model ids as OpenAI. Bare upstream ids (no
-/// provider prefix) are rejected.
-pub fn parse_anthropic_model(model: &str) -> Option<ParsedModel> {
-    parse_model_id(model)
+    Some(SplitModelId { prefix: prefix.to_string(), upstream_model: upstream_model.to_string() })
 }
 
 /// Best-effort provider extraction from a raw, possibly-malformed model string, for
@@ -70,56 +37,25 @@ pub fn logging_provider_from_raw_model(raw: &str) -> String {
 mod tests {
     use super::*;
 
-    fn split(prefix: &str, upstream: &str, raw: &str) -> Option<SplitModelId> {
-        Some(SplitModelId { prefix: prefix.into(), upstream_model: upstream.into(), raw: raw.into() })
-    }
-
-    #[test]
-    fn parses_provider_slash_model() {
-        assert_eq!(
-            parse_model_id("claude-code/claude-opus-5"),
-            Some(ParsedModel {
-                provider: ProviderId::ClaudeCode,
-                upstream_model: "claude-opus-5".into(),
-                raw: "claude-code/claude-opus-5".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn rejects_a_bare_model_and_an_unknown_provider() {
-        assert_eq!(parse_model_id("claude-opus-5"), None);
-        assert_eq!(parse_model_id("openai/gpt-4"), None);
-    }
-
-    #[test]
-    fn anthropic_surface_requires_provider_slash_model() {
-        assert_eq!(
-            parse_anthropic_model("grok/grok-4.5"),
-            Some(ParsedModel {
-                provider: ProviderId::Grok,
-                upstream_model: "grok-4.5".into(),
-                raw: "grok/grok-4.5".into(),
-            })
-        );
-        assert_eq!(parse_anthropic_model("claude-opus-5"), None);
+    fn split(prefix: &str, upstream: &str) -> Option<SplitModelId> {
+        Some(SplitModelId { prefix: prefix.into(), upstream_model: upstream.into() })
     }
 
     #[test]
     fn splits_on_the_first_slash_only() {
         assert_eq!(
             split_model_id("claude-code/claude-opus-5"),
-            split("claude-code", "claude-opus-5", "claude-code/claude-opus-5")
+            split("claude-code", "claude-opus-5")
         );
         assert_eq!(
             split_model_id("my-endpoint/org/model-name"),
-            split("my-endpoint", "org/model-name", "my-endpoint/org/model-name")
+            split("my-endpoint", "org/model-name")
         );
     }
 
     #[test]
     fn does_not_require_a_known_provider_prefix() {
-        assert_eq!(split_model_id("some-custom-slug/model"), split("some-custom-slug", "model", "some-custom-slug/model"));
+        assert_eq!(split_model_id("some-custom-slug/model"), split("some-custom-slug", "model"));
     }
 
     #[test]
@@ -131,7 +67,7 @@ mod tests {
 
     #[test]
     fn trims_surrounding_whitespace_before_splitting() {
-        assert_eq!(split_model_id("  slug/model  "), split("slug", "model", "slug/model"));
+        assert_eq!(split_model_id("  slug/model  "), split("slug", "model"));
     }
 
     #[test]

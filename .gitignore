@@ -7,10 +7,8 @@ dist/
 coverage/
 *.tsbuildinfo
 .DS_Store
-apps/web/dist/
 apps/docs/.vitepress/cache/
 *.log
-.turbo/
 
 # Local agent / operator private data (never open-source)
 # Template: .local.example/  — copy to .local/ and fill in.
@@ -22,7 +20,7 @@ apps/docs/.vitepress/cache/
 __pycache__/
 *.pyc
 
-# Rust workspace build output (docs/rust-server.md)
+# Rust build output
 apps/api/target/
 apps/cli/target/
 

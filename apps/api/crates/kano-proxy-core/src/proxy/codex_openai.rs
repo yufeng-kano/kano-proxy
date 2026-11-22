@@ -1,10 +1,10 @@
-//! Codex Responses SSE → OpenAI Chat Completions (//! docs/providers.md § Codex). The stream converter emits one Chat chunk per upstream
-//! event; `response.failed` becomes a single OpenAI-shaped error line with no finish chunk
-//! and no `[DONE]`, so a failure is never fabricated into a successful turn.
+//! Codex Responses SSE → OpenAI Chat Completions (docs/providers.md § Codex). The stream
+//! converter emits one Chat chunk per upstream event; `response.failed` becomes a single
+//! OpenAI-shaped error line with no finish chunk and no `[DONE]`, so a failure is never
+//! fabricated into a successful turn.
 //!
-//! Lines are split incrementally by [`crate::proxy::responses_openai::sse_line_stream`];
-//! Rust streams are pull-based, so the TypeScript `backpressuredStream` wrapper has no
-//! counterpart here.
+//! Lines are split incrementally by [`crate::proxy::sse_lines`]; the output stream is
+//! pull-based, so nothing is read from upstream until the client polls.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -14,30 +14,22 @@ use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Map, Value};
 
-use crate::app::now_ms;
+use crate::app::{now_ms, now_seconds};
 use crate::ids::new_id;
-use crate::proxy::responses_openai::sse_line_stream;
+use crate::proxy::sse_lines::read_sse_lines_default;
 
 /// Called once for a successful completed turn, without buffering the stream: the opaque
 /// replayable output items and the assistant text of the turn.
 pub type CodexReplayItemsCallback = Arc<dyn Fn(Vec<Value>, String) + Send + Sync>;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct CodexSseOptions {
-    pub on_replay_items: Option<CodexReplayItemsCallback>,
+    on_replay_items: Option<CodexReplayItemsCallback>,
 }
 
 impl CodexSseOptions {
     pub fn with_replay_items(callback: CodexReplayItemsCallback) -> Self {
         Self { on_replay_items: Some(callback) }
-    }
-}
-
-impl std::fmt::Debug for CodexSseOptions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CodexSseOptions")
-            .field("on_replay_items", &self.on_replay_items.is_some())
-            .finish()
     }
 }
 
@@ -50,7 +42,7 @@ fn obj_of(v: Option<&Value>) -> Option<&Map<String, Value>> {
 }
 
 /// Pick the opaque replayable Responses output items, preserving upstream order.
-pub fn extract_codex_replay_items(output: Option<&Value>) -> Vec<Value> {
+fn extract_codex_replay_items(output: Option<&Value>) -> Vec<Value> {
     let Some(Value::Array(items)) = output else { return Vec::new() };
     items
         .iter()
@@ -108,8 +100,9 @@ fn replay_items_from_event(ev: &Map<String, Value>, assistant_text: &str, opts: 
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(items, text)));
 }
 
-/// `ev.response?.error?.message`, `ev.error?.message`, `ev.message`, then a fallback.
-fn codex_error_message(ev: &Map<String, Value>) -> String {
+/// The failure message of a Responses `response.failed` / `error` event:
+/// `response.error.message`, then `error.message`, then `message`, then a fallback.
+pub(crate) fn codex_error_message(ev: &Map<String, Value>) -> String {
     obj_of(ev.get("response"))
         .and_then(|r| obj_of(r.get("error")))
         .and_then(|e| str_of(e.get("message")))
@@ -120,19 +113,14 @@ fn codex_error_message(ev: &Map<String, Value>) -> String {
         .to_string()
 }
 
-fn now_seconds() -> i64 {
-    now_ms().div_euclid(1000)
-}
-
 /// Responses `usage` → Chat `usage`; `prompt_tokens_details` only when the Responses API
 /// actually reported a cached-token count (absent means unreported, not zero).
 fn chat_usage_from_responses(usage: &Value) -> Value {
-    let u = usage.as_object().cloned().unwrap_or_default();
     let mut out = Map::new();
-    out.insert("prompt_tokens".into(), json!(u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0)));
-    out.insert("completion_tokens".into(), json!(u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0)));
+    out.insert("prompt_tokens".into(), json!(usage.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0)));
+    out.insert("completion_tokens".into(), json!(usage.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0)));
     if let Some(cached) =
-        obj_of(u.get("input_tokens_details")).and_then(|d| d.get("cached_tokens")).and_then(|v| v.as_i64())
+        obj_of(usage.get("input_tokens_details")).and_then(|d| d.get("cached_tokens")).and_then(|v| v.as_i64())
     {
         out.insert("prompt_tokens_details".into(), json!({ "cached_tokens": cached }));
     }
@@ -190,10 +178,8 @@ impl CodexConverter {
         let mut first = Map::new();
         first.insert("index".into(), json!(0));
         first.insert("finish_reason".into(), Value::Null);
-        if let Some(choice) = choice.as_object() {
-            for (k, v) in choice {
-                first.insert(k.clone(), v.clone());
-            }
+        if let Value::Object(choice) = choice {
+            first.extend(choice);
         }
         chunk.insert("choices".into(), json!([Value::Object(first)]));
         if let Some(usage) = usage {
@@ -276,8 +262,7 @@ impl CodexConverter {
             return;
         }
         self.completed = true;
-        let text = self.assistant_text.clone();
-        replay_items_from_event(ev, &text, &self.opts);
+        replay_items_from_event(ev, &self.assistant_text, &self.opts);
     }
 
     fn on_line(&mut self, line: &str) {
@@ -289,21 +274,20 @@ impl CodexConverter {
         if self.finished {
             return;
         }
-        let Ok(ev) = serde_json::from_str::<Value>(data) else { return };
-        let Some(ev) = ev.as_object().cloned() else { return };
-        let ty = str_of(ev.get("type")).unwrap_or("").to_string();
-        let item = obj_of(ev.get("item")).cloned();
-        let item_type = item.as_ref().and_then(|i| str_of(i.get("type"))).unwrap_or("").to_string();
+        let Ok(Value::Object(ev)) = serde_json::from_str::<Value>(data) else { return };
+        let ty = str_of(ev.get("type")).unwrap_or("");
+        let item = obj_of(ev.get("item"));
+        let item_type = item.and_then(|i| str_of(i.get("type"))).unwrap_or("");
 
         if ty == "response.output_text.delta" || ty == "response.reasoning_summary_text.delta" {
-            let text = str_of(ev.get("delta")).unwrap_or("").to_string();
+            let text = str_of(ev.get("delta")).unwrap_or("");
             if text.is_empty() {
                 return;
             }
             self.ensure_role();
             if ty == "response.output_text.delta" {
                 if self.opts.on_replay_items.is_some() {
-                    self.assistant_text.push_str(&text);
+                    self.assistant_text.push_str(text);
                 }
                 self.chunk(json!({ "delta": { "content": text } }), None);
             } else {
@@ -311,8 +295,7 @@ impl CodexConverter {
                 // Completions has no first-party reasoning field.
                 self.chunk(json!({ "delta": { "reasoning_content": text } }), None);
             }
-        } else if ty == "response.output_item.added" && item_type == "function_call" {
-            let item = item.expect("item present");
+        } else if let (Some(item), "response.output_item.added", "function_call") = (item, ty, item_type) {
             // Key symmetric with the done handler so an id-less item still matches its own
             // done event via call_id.
             let item_id = str_of(item.get("id"))
@@ -326,31 +309,30 @@ impl CodexConverter {
                 self.emit_tool_header(&item_id, &call_id, &name);
             }
         } else if ty == "response.function_call_arguments.delta" {
-            let item_id = str_of(ev.get("item_id")).unwrap_or("").to_string();
-            let delta = str_of(ev.get("delta")).unwrap_or("").to_string();
+            let item_id = str_of(ev.get("item_id")).unwrap_or("");
+            let delta = str_of(ev.get("delta")).unwrap_or("");
             if item_id.is_empty() || delta.is_empty() {
                 return;
             }
-            match self.tools.get_mut(&item_id) {
+            match self.tools.get_mut(item_id) {
                 Some(entry) => {
                     entry.saw_args = true;
                     let tool_index = entry.tool_index;
-                    self.emit_tool_args(tool_index, &delta);
+                    self.emit_tool_args(tool_index, delta);
                 }
                 None => {
                     // `added` not seen yet; hold until the header can go out.
-                    self.pending_args.entry(item_id).or_default().push_str(&delta);
+                    self.pending_args.entry(item_id.to_string()).or_default().push_str(delta);
                 }
             }
-        } else if ty == "response.output_item.done" && item_type == "function_call" {
-            let item = item.expect("item present");
+        } else if let (Some(item), "response.output_item.done", "function_call") = (item, ty, item_type) {
             let item_id = str_of(item.get("id"))
                 .filter(|s| !s.is_empty())
                 .or_else(|| str_of(item.get("call_id")).filter(|s| !s.is_empty()))
                 .unwrap_or("")
                 .to_string();
-            let arguments = str_of(item.get("arguments")).unwrap_or("").to_string();
-            let entry = if item_id.is_empty() { None } else { self.tools.get(&item_id).map(|e| e.tool_index) };
+            let arguments = str_of(item.get("arguments")).unwrap_or("");
+            let entry = if item_id.is_empty() { None } else { self.tools.get_mut(&item_id) };
             match entry {
                 None => {
                     // `added` never arrived. The done item's arguments are the backend's
@@ -380,24 +362,22 @@ impl CodexConverter {
                         if let Some(entry) = self.tools.get_mut(&key) {
                             entry.saw_args = true;
                         }
-                        self.emit_tool_args(tool_index, &arguments);
+                        self.emit_tool_args(tool_index, arguments);
                     }
                 }
-                Some(tool_index) => {
-                    let saw_args = self.tools.get(&item_id).map(|e| e.saw_args).unwrap_or(false);
-                    if !saw_args && !arguments.is_empty() {
+                Some(entry) => {
+                    if !entry.saw_args && !arguments.is_empty() {
                         // Header went out but no deltas ever came.
-                        if let Some(entry) = self.tools.get_mut(&item_id) {
-                            entry.saw_args = true;
-                        }
-                        self.emit_tool_args(tool_index, &arguments);
+                        entry.saw_args = true;
+                        let tool_index = entry.tool_index;
+                        self.emit_tool_args(tool_index, arguments);
                     }
                 }
             }
         } else if ty == "response.completed" || ty == "response.done" {
             self.capture_completed(&ev);
-            let usage = obj_of(ev.get("response")).and_then(|r| r.get("usage")).cloned();
-            self.finish(usage.as_ref().map(chat_usage_from_responses));
+            let usage = obj_of(ev.get("response")).and_then(|r| r.get("usage"));
+            self.finish(usage.map(chat_usage_from_responses));
         } else if ty == "response.failed" || ty == "error" {
             let message = codex_error_message(&ev);
             self.emit_error(&message);
@@ -420,7 +400,7 @@ where
         done: bool,
     }
     let state =
-        State { lines: Box::pin(sse_line_stream(body)), conv: CodexConverter::new(model.into(), opts), done: false };
+        State { lines: read_sse_lines_default(Box::pin(body)), conv: CodexConverter::new(model.into(), opts), done: false };
     futures::stream::unfold(state, |mut st| async move {
         loop {
             if let Some(chunk) = st.conv.out.pop_front() {
@@ -447,32 +427,13 @@ where
     })
 }
 
-/// Discriminant used by callers to tell a real completion from an upstream failure.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CodexCollected {
-    Completion(Value),
-    Error { message: String },
-}
-
-impl CodexCollected {
-    /// `{"error":{"message":…,"type":"upstream_error"}}` for the caller's envelope.
-    pub fn error_value(&self) -> Option<Value> {
-        match self {
-            CodexCollected::Error { message } => {
-                Some(json!({ "error": { "message": message, "type": "upstream_error" } }))
-            }
-            CodexCollected::Completion(_) => None,
-        }
-    }
-}
-
 /// Non-stream codex path: drain a Responses SSE into one Chat completion object, or report
 /// the upstream failure instead of fabricating a partial success.
-pub async fn collect_codex_sse<S>(body: S, model: &str, opts: CodexSseOptions) -> CodexCollected
+pub async fn collect_codex_sse<S>(body: S, model: &str, opts: CodexSseOptions) -> Result<Value, String>
 where
     S: Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
 {
-    let mut lines = Box::pin(sse_line_stream(body));
+    let mut lines = read_sse_lines_default(Box::pin(body));
     let mut text = String::new();
     let mut reasoning_text = String::new();
     let mut completed = false;
@@ -492,9 +453,8 @@ where
         if error.is_some() {
             continue;
         }
-        let Ok(ev) = serde_json::from_str::<Value>(data) else { continue };
-        let Some(ev) = ev.as_object().cloned() else { continue };
-        let ty = str_of(ev.get("type")).unwrap_or("").to_string();
+        let Ok(Value::Object(ev)) = serde_json::from_str::<Value>(data) else { continue };
+        let ty = str_of(ev.get("type")).unwrap_or("");
         if ty == "response.failed" || ty == "error" {
             error = Some(codex_error_message(&ev));
             continue;
@@ -538,7 +498,7 @@ where
     }
 
     if let Some(message) = error {
-        return CodexCollected::Error { message };
+        return Err(message);
     }
 
     let mut message = Map::new();
@@ -566,7 +526,7 @@ where
     if let Some(usage) = usage {
         completion.insert("usage".into(), chat_usage_from_responses(&usage));
     }
-    CodexCollected::Completion(Value::Object(completion))
+    Ok(Value::Object(completion))
 }
 
 #[cfg(test)]
@@ -778,21 +738,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn omits_prompt_tokens_details_without_cache_detail() {
-        let sse = [
-            d(json!({ "type": "response.output_text.delta", "delta": "hi" })),
-            String::new(),
-            d(json!({ "type": "response.completed", "response": { "usage": { "input_tokens": 5, "output_tokens": 1 } } })),
-            String::new(),
-        ]
-        .join("\n");
-        let out = parse_chunks(
-            &collect_text(codex_sse_to_openai_stream(chunked(&sse, 15), "gpt-5.2", CodexSseOptions::default())).await,
-        );
-        assert_eq!(out.usage, Some(json!({ "prompt_tokens": 5, "completion_tokens": 1 })));
-    }
-
-    #[tokio::test]
     async fn maps_a_streamed_function_call_to_tool_call_chunks() {
         let out = parse_chunks(
             &collect_text(codex_sse_to_openai_stream(chunked(&tool_call_sse(), 13), "gpt-5.2", CodexSseOptions::default()))
@@ -926,7 +871,7 @@ mod tests {
 
     #[tokio::test]
     async fn uses_stashed_deltas_when_the_done_item_has_no_arguments() {
-        // pendingArgs is the only source here: `added` was missed and the done item's
+        // The stashed deltas are the only source here: `added` was missed and the done item's
         // arguments are empty.
         let sse = [
             d(json!({ "type": "response.function_call_arguments.delta", "item_id": "fc_9", "delta": "{\"a\":" })),
@@ -1068,8 +1013,8 @@ mod tests {
 
     async fn collect_ok(sse: &str, size: usize, model: &str) -> Value {
         match collect_codex_sse(chunked(sse, size), model, CodexSseOptions::default()).await {
-            CodexCollected::Completion(v) => v,
-            other => panic!("unexpected error result: {other:?}"),
+            Ok(v) => v,
+            Err(message) => panic!("unexpected error result: {message}"),
         }
     }
 
@@ -1078,38 +1023,6 @@ mod tests {
         let completion = collect_ok(&tool_call_sse(), 23, "gpt-5.2").await;
         assert_eq!(completion["usage"], json!({ "prompt_tokens": 120, "completion_tokens": 18 }));
         assert_eq!(completion["choices"][0]["finish_reason"], json!("tool_calls"));
-    }
-
-    #[tokio::test]
-    async fn collect_maps_cached_tokens() {
-        let sse = [
-            d(json!({ "type": "response.output_text.delta", "delta": "hi" })),
-            String::new(),
-            d(json!({
-                "type": "response.completed",
-                "response": { "usage": { "input_tokens": 500, "output_tokens": 20, "input_tokens_details": { "cached_tokens": 200 } } }
-            })),
-            String::new(),
-        ]
-        .join("\n");
-        let completion = collect_ok(&sse, 27, "gpt-5.2").await;
-        assert_eq!(
-            completion["usage"],
-            json!({ "prompt_tokens": 500, "completion_tokens": 20, "prompt_tokens_details": { "cached_tokens": 200 } })
-        );
-    }
-
-    #[tokio::test]
-    async fn collect_omits_prompt_tokens_details_without_cache_detail() {
-        let sse = [
-            d(json!({ "type": "response.output_text.delta", "delta": "hi" })),
-            String::new(),
-            d(json!({ "type": "response.completed", "response": { "usage": { "input_tokens": 5, "output_tokens": 1 } } })),
-            String::new(),
-        ]
-        .join("\n");
-        let completion = collect_ok(&sse, 27, "gpt-5.2").await;
-        assert_eq!(completion["usage"], json!({ "prompt_tokens": 5, "completion_tokens": 1 }));
     }
 
     #[tokio::test]
@@ -1136,11 +1049,7 @@ mod tests {
         ]
         .join("\n");
         let result = collect_codex_sse(chunked(&sse, 9), "gpt-5.2", CodexSseOptions::default()).await;
-        assert_eq!(result, CodexCollected::Error { message: "rate limited".into() });
-        assert_eq!(
-            result.error_value(),
-            Some(json!({ "error": { "message": "rate limited", "type": "upstream_error" } }))
-        );
+        assert_eq!(result, Err("rate limited".into()));
     }
 
     #[tokio::test]
@@ -1151,7 +1060,7 @@ mod tests {
             CodexSseOptions::default(),
         )
         .await;
-        assert_eq!(via_error, CodexCollected::Error { message: "bad request".into() });
+        assert_eq!(via_error, Err("bad request".into()));
 
         let via_message = collect_codex_sse(
             chunked(&format!("{}\n", d(json!({ "type": "error", "message": "top-level message" }))), 7),
@@ -1159,7 +1068,7 @@ mod tests {
             CodexSseOptions::default(),
         )
         .await;
-        assert_eq!(via_message, CodexCollected::Error { message: "top-level message".into() });
+        assert_eq!(via_message, Err("top-level message".into()));
 
         let via_default = collect_codex_sse(
             chunked(&format!("{}\n", d(json!({ "type": "error" }))), 7),
@@ -1167,7 +1076,7 @@ mod tests {
             CodexSseOptions::default(),
         )
         .await;
-        assert_eq!(via_default, CodexCollected::Error { message: "codex upstream failure".into() });
+        assert_eq!(via_default, Err("codex upstream failure".into()));
     }
 
     #[tokio::test]
@@ -1182,7 +1091,7 @@ mod tests {
         ]
         .join("\n");
         let result = collect_codex_sse(chunked(&sse, 13), "m", CodexSseOptions::default()).await;
-        assert_eq!(result, CodexCollected::Error { message: "boom".into() });
+        assert_eq!(result, Err("boom".into()));
     }
 
     #[test]

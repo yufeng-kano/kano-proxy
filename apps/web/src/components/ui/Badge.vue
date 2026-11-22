@@ -1,16 +1,10 @@
 <script setup lang="ts">
 /** Small non-interactive label: a format tag, a count, a "Current" marker. */
-withDefaults(
-  defineProps<{
-    tone?: "neutral" | "accent" | "ok" | "warn" | "danger"
-    mono?: boolean
-  }>(),
-  { tone: "neutral" },
-)
+withDefaults(defineProps<{ tone?: "neutral" | "accent" | "ok" | "warn" }>(), { tone: "neutral" })
 </script>
 
 <template>
-  <span class="badge" :class="[tone, { mono }]"><slot /></span>
+  <span class="badge" :class="tone"><slot /></span>
 </template>
 
 <style scoped>
@@ -48,11 +42,5 @@ withDefaults(
   background: var(--warn-bg);
   border-color: var(--warn-border);
   color: var(--warn);
-}
-
-.danger {
-  background: var(--danger-bg);
-  border-color: var(--danger-border);
-  color: var(--danger);
 }
 </style>

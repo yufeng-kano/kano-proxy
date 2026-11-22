@@ -1,6 +1,6 @@
 import type { UsageRange, UsageRangeKind } from "@/types"
 
-export function pad2(n: number): string {
+function pad2(n: number): string {
   return String(n).padStart(2, "0")
 }
 
@@ -10,7 +10,7 @@ export function formatLocalDate(d: Date): string {
 }
 
 /** Formats a Date as YYYY-MM in local time. */
-export function formatLocalMonth(d: Date): string {
+function formatLocalMonth(d: Date): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`
 }
 
@@ -20,7 +20,7 @@ export function getStartOfDay(d: Date): Date {
 }
 
 /** Returns the local end of day (23:59:59.999). */
-export function getEndOfDay(d: Date): Date {
+function getEndOfDay(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999)
 }
 
@@ -43,7 +43,7 @@ export function getStartOfMonth(d: Date): Date {
 }
 
 /** Returns the local end of month (last day 23:59:59.999). */
-export function getEndOfMonth(d: Date): Date {
+function getEndOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999)
 }
 
@@ -124,9 +124,4 @@ export function isSameDay(a: Date, b: Date): boolean {
 /** Checks if two dates fall into the same calendar week (Mon–Sun) in local time. */
 export function isSameWeek(a: Date, b: Date): boolean {
   return isSameDay(getStartOfWeek(a), getStartOfWeek(b))
-}
-
-/** Checks if two dates fall into the same calendar month in local time. */
-export function isSameMonth(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth()
 }

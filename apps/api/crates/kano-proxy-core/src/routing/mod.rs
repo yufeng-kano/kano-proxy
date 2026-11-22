@@ -5,5 +5,3 @@ pub mod facts;
 pub mod feedback;
 pub mod strategy;
 pub mod types;
-
-pub use types::{CandidateFacts, OrderedCandidate, RoutingCandidate, StrategyContext};

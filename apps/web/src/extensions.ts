@@ -11,14 +11,9 @@ export interface NavigationItem {
 /**
  * An entry in the signed-in shell's account menu, under the user block.
  * Destinations an edition owns that are about the account rather than about
- * the proxy — the core itself adds none.
+ * the proxy — the core itself adds none. Same shape as a navigation item.
  */
-export interface AccountMenuItem {
-  name: string
-  to: string
-  label: string
-  icon: Component
-}
+export type AccountMenuItem = NavigationItem
 
 /**
  * A section an edition adds to the Settings dialog, after the core's General

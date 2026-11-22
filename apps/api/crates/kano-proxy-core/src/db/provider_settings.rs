@@ -6,10 +6,9 @@
 use sqlx::PgPool;
 
 use crate::ids::now_iso;
+use crate::routing::strategy::DEFAULT_STRATEGY;
 
 /// A missing row means `ordered`; rows are created lazily on first write, never backfilled.
-pub const DEFAULT_STRATEGY: &str = "ordered";
-
 /// `provider` is a builtin id or a custom or CLI provider's slug. Deleting that provider deletes
 /// its row in the same transaction, so a later provider under the same slug starts from the
 /// default (db/custom_providers.rs, db/cli.rs).

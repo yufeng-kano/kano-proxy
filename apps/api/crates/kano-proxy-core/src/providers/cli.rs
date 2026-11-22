@@ -30,18 +30,17 @@ fn pseudo_custom_row(row: &CliProviderRow) -> CustomProviderRow {
     }
 }
 
-/// `createCliAdapter(env, row)`. The transport is `cx.tunnels().transport(&row.id)`: a tunnel
-/// fault comes back as the 502 `x-tunnel-fault` marker response, never a transport error,
-/// exactly as the TypeScript `createAgentFetch` did. The catalog is agent-reported, never
-/// pulled (docs/cli.md § Model catalog), so the inherited live `list_models` is dropped and
-/// nothing ever queries the tunnel for a list the database already answers.
+/// The transport is `cx.tunnels().transport(&row.id)`: a tunnel fault comes back as the 502
+/// `x-tunnel-fault` marker response, never a transport error. The catalog is agent-reported,
+/// never pulled (docs/cli.md § Model catalog), so an adapter over a tunnel has no live
+/// `list_models` and nothing ever queries the tunnel for a list the database already answers.
 pub fn create_cli_adapter(cx: &AppState, row: &CliProviderRow) -> DynAdapter {
     let transport = cx.tunnels().transport(&row.id);
     let pseudo = pseudo_custom_row(row);
     if row.format == "anthropic" {
-        CustomAnthropicAdapter::new(pseudo).with_transport(transport).without_list_models().into_dyn()
+        CustomAnthropicAdapter::new(pseudo).with_transport(transport).into_dyn()
     } else {
-        CustomOpenAiAdapter::new(pseudo).with_transport(transport).without_list_models().into_dyn()
+        CustomOpenAiAdapter::new(pseudo).with_transport(transport).into_dyn()
     }
 }
 
@@ -248,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_fault_marker_survives_the_anthropic_adapters_openai_surface_error_rebuild() {
-        // The cli-anthropic chatCompletions error path reconstructs the response to re-read
+        // The cli-anthropic chat_completions error path reconstructs the response to re-read
         // its text — the x-tunnel-fault header must survive that rebuild or dispatch can
         // neither fail over nor bench.
         let registry = TunnelRegistry::new();

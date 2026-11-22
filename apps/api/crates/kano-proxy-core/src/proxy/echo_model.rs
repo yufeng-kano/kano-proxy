@@ -17,7 +17,7 @@ use serde_json::Value;
 
 /// Longest prefix held while looking for the first `data:` line; past it the stream passes
 /// through unrewritten.
-pub const MAX_HELD: usize = 64 * 1024;
+const MAX_HELD: usize = 64 * 1024;
 
 /// Sets the top-level `model` of a JSON object that already names one. Returns whether anything
 /// changed.

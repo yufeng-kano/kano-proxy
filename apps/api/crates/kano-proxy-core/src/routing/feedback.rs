@@ -14,9 +14,10 @@
 //! owns the walk and strike persistence.
 
 use http::HeaderMap;
-use serde_json::Value;
 
 use crate::db::accounts::{parse_iso_ms, read_usage_snapshot, AccountRow};
+use crate::routing::facts::exhausted_window_resets;
+use crate::tunnel::mux::{TUNNEL_FAULT_HEADER, TUNNEL_UPSTREAM_HEADER};
 
 const DEFAULT_COOLDOWN_MS: i64 = 300_000;
 pub const EDGE_TIMEOUT_COOLDOWN_MS: i64 = 30_000;
@@ -50,43 +51,20 @@ fn clamp_cooldown(ms: i64) -> i64 {
 /// Latest reset among any `anthropic-ratelimit-*-reset` response header (RFC 3339 timestamps)
 /// — taking the latest, not the first found, so a multi-dimension 429 (requests vs. tokens,
 /// each with its own reset) is not retried before every dimension has actually cleared.
+/// `HeaderName`s are always lowercase, so no case folding is needed.
 fn rate_limit_reset_header_ms(headers: &HeaderMap) -> Option<i64> {
-    let mut latest: Option<i64> = None;
-    for (name, value) in headers {
-        let key = name.as_str().to_ascii_lowercase();
-        if !(key.starts_with("anthropic-ratelimit-") && key.ends_with("-reset")) {
-            continue;
-        }
-        let Some(at) = value.to_str().ok().and_then(parse_iso_ms) else { continue };
-        if latest.is_none_or(|l| at > l) {
-            latest = Some(at);
-        }
-    }
-    latest
+    headers
+        .iter()
+        .filter(|(name, _)| name.as_str().starts_with("anthropic-ratelimit-") && name.as_str().ends_with("-reset"))
+        .filter_map(|(_, value)| value.to_str().ok().and_then(parse_iso_ms))
+        .max()
 }
 
 /// Earliest `resets_at` among the account's currently-exhausted (`utilization >= 100`)
 /// windows, per docs/providers.md § Routing module "Penalties".
 fn earliest_exhausted_window_reset_ms(account: &AccountRow, scope: Option<&str>, now_ms: i64) -> Option<i64> {
     let snapshot = read_usage_snapshot(account)?;
-    let mut earliest: Option<i64> = None;
-    for window in snapshot.windows.iter().filter(|w| crate::routing::facts::window_applies(w, scope)) {
-        let Some(utilization) = window.get("utilization").and_then(Value::as_f64) else { continue };
-        if utilization < 100.0 {
-            continue;
-        }
-        let Some(resets_at) = window.get("resets_at").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
-            continue;
-        };
-        let Some(at) = parse_iso_ms(resets_at) else { continue };
-        if at <= now_ms {
-            continue;
-        }
-        if earliest.is_none_or(|e| at < e) {
-            earliest = Some(at);
-        }
-    }
-    earliest
+    exhausted_window_resets(&snapshot.windows, scope, now_ms).min()
 }
 
 /// Proxy-internal reset hint (epoch ms), for adapters whose upstream states the reset in the
@@ -114,8 +92,8 @@ fn rate_limit_cooldown_ms(headers: &HeaderMap, account: &AccountRow, scope: Opti
 }
 
 /// The penalty for one upstream attempt's outcome, or `None` when the outcome is not a
-/// bench-and-try-next-candidate status — that status passes through / in-stream errors exactly
-/// as before, untouched by the routing module. `scope` is the candidate's quota scope: a 429
+/// bench-and-try-next-candidate status — that status passes through / in-stream errors,
+/// untouched by the routing module. `scope` is the candidate's quota scope: a 429
 /// benches that scope alone (docs/providers.md § Routing module "Quota scopes"); auth and
 /// billing failures are the credential's, so they always bench the whole account.
 pub fn penalty_for_outcome(
@@ -140,8 +118,6 @@ pub fn penalty_for_outcome(
 /// for 60s, so a group under traffic is not paying a tunnel round-trip per request while a
 /// laptop is closed. A response marked `x-tunnel-upstream` is a real local answer and takes the
 /// normal penalty table above.
-pub const TUNNEL_FAULT_HEADER: &str = "x-tunnel-fault";
-pub const TUNNEL_UPSTREAM_MARKER_HEADER: &str = "x-tunnel-upstream";
 pub const TUNNEL_OFFLINE_COOLDOWN_MS: i64 = 60_000;
 
 /// Present only for a fault; `failover` is implicit (every verdict fails over).
@@ -152,18 +128,12 @@ pub struct TunnelFaultVerdict {
 }
 
 pub fn agent_fault_verdict(headers: &HeaderMap) -> Option<TunnelFaultVerdict> {
-    if headers.contains_key(TUNNEL_UPSTREAM_MARKER_HEADER) {
+    if headers.contains_key(TUNNEL_UPSTREAM_HEADER) {
         return None;
     }
     let reason = headers.get(TUNNEL_FAULT_HEADER)?.to_str().ok().filter(|s| !s.is_empty())?.to_string();
     let bench_ms = (reason == "offline").then_some(TUNNEL_OFFLINE_COOLDOWN_MS);
     Some(TunnelFaultVerdict { bench_ms, reason })
-}
-
-/// Same status set [`penalty_for_outcome`] benches on — kept for call sites that only need the
-/// yes/no check.
-pub fn is_bench_status(status: u16) -> bool {
-    AUTH_BILLING_STATUSES.contains(&status) || status == 429
 }
 
 #[cfg(test)]
@@ -202,13 +172,11 @@ mod tests {
         assert!(is_overloaded_status(529));
         assert!(!is_overloaded_status(503));
         assert!(penalty_for_outcome(529, &HeaderMap::new(), &account_row("a", "grok"), None, now()).is_none());
-        assert!(!is_bench_status(529));
     }
 
     #[test]
     fn auth_and_billing_statuses_bench_five_minutes() {
         for status in [401u16, 402, 403] {
-            assert!(is_bench_status(status));
             assert_eq!(
                 penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), None, now()),
                 Some(Penalty { cooldown_ms: 300_000, scope: None })
@@ -228,11 +196,11 @@ mod tests {
     fn a_429_uses_the_latest_anthropic_reset_header() {
         let h = headers(&[
             ("anthropic-ratelimit-requests-reset", "2026-06-01T00:01:00.000Z"),
-            ("anthropic-ratelimit-tokens-reset", "2026-06-01T00:05:00.000Z"),
+            ("anthropic-ratelimit-tokens-reset", "2026-06-01T00:10:00.000Z"),
         ]);
         assert_eq!(
             penalty_for_outcome(429, &h, &account_row("a", "grok"), None, now()),
-            Some(Penalty { cooldown_ms: 300_000, scope: None })
+            Some(Penalty { cooldown_ms: 600_000, scope: None })
         );
     }
 
@@ -312,7 +280,6 @@ mod tests {
     fn a_non_bench_status_earns_no_penalty() {
         for status in [200u16, 400, 404, 500, 529] {
             assert!(penalty_for_outcome(status, &HeaderMap::new(), &account_row("a", "grok"), None, now()).is_none());
-            assert!(!is_bench_status(status));
         }
     }
 
@@ -329,7 +296,7 @@ mod tests {
         );
         // A real local answer is never a fault, whatever else the headers say.
         assert_eq!(
-            agent_fault_verdict(&headers(&[(TUNNEL_UPSTREAM_MARKER_HEADER, "1"), (TUNNEL_FAULT_HEADER, "offline")])),
+            agent_fault_verdict(&headers(&[(TUNNEL_UPSTREAM_HEADER, "1"), (TUNNEL_FAULT_HEADER, "offline")])),
             None
         );
     }

@@ -22,7 +22,6 @@
 
 import type {
   AccountsResponse,
-  CatalogModel,
   ChangelogResponse,
   CliDevice,
   CliProvider,
@@ -40,48 +39,12 @@ export const CACHE_TTL_MS = 120_000
 /**
  * Envelope version. Bump whenever a cached payload's shape changes: every
  * entry written by an older build then reads as a miss instead of feeding a
- * stale shape into the UI. v2: usage summaries and keys grew cost/spend
- * fields (docs/pricing.md). v3: accounts grew `custom_label`. v4: model group
- * targets became `{model, account_id, account_label}` objects — a v3 entry
- * holds bare strings, which would render as empty rows. v5: custom providers
- * grew `account_id` — a v4 entry has none, so the Groups picker would show
- * every endpoint as having no account to pin. v6: a model group's `name` became
- * a display label and its callable ids moved to `aliases` — a v5 entry has no
- * aliases, so every row would render an empty Aliases column. v7: usage
- * summaries split their per-model rows by account and group alias, and model
- * groups grew `routing` — a v6 entry has neither, so the By-model table would
- * hold rows with no account and the group rows no current-route indicator.
- * v8: the usage summary's per-model rows went back to one row per (provider,
- * model) — a v7 entry holds the account/alias split, which would double-count
- * every model the By-model table now shows once. v9: log rows dropped the
- * internal `api_keys` row id and grew `api_key_removed` — a v8 entry still
- * carries that id, which the row detail must never render. v10: model groups
- * became virtual endpoints (`slug` + per-group `models`, aliases/targets
- * gone) and the shared catalog dropped its `group` section — a v9 entry has
- * neither shape and would render empty rows on the Groups page. v11: usage
- * summaries grew calendar-aligned Day/Week/Month support with rangeKey
- * caching (`day:YYYY-MM-DD`, etc.). v12: CLI providers grew `account_id`
- * (the Groups picker's pin handle) — a v11 entry has none, so the picker
- * would render an empty rail until the TTL expired. v13: log rows grew
- * `account_removed` / `account_shared_by` and keep a removed record's last
- * name — a v12 entry would read a stored name as a live account. v14: account
- * status `unusable` became `reauth` — a v13 entry would paint an expired
- * sign-in as an unknown status with no Sign in again until the TTL expired.
- * v15: accounts grew `allow_credits` / `on_credits` and Codex's
- * `account.credits` — a v14 entry has none, so an opted-in row would paint
- * its credits switch off until the TTL expired. v16: a shared Codex row may
- * carry `usage.credits` and `on_credits` — a v15 entry has neither, so a
- * member's row would miss its balance and On credits until the TTL expired.
- * v17: accounts grew `benched` and `sign_in_expires_at` — a v16 entry has
- * neither, so an expired sign-in with a running bench would hide Resume and
- * an expiring one its notice until the TTL expired.
- * v18: the custom-providers entry became `{providers, shared}` to carry the
- * endpoints other users share — a v17 entry is a bare array of own rows.
+ * stale shape into the UI.
  */
-const CACHE_SCHEMA_VERSION = 18
+const CACHE_SCHEMA_VERSION = 19
 
 /** Changelog TTL — release notes change on deploy, not continuously (docs/changelog.md). */
-export const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
+const CHANGELOG_CACHE_TTL_MS = 60 * 60 * 1000
 
 const ACCOUNTS_PREFIX = "kano-proxy:accounts:"
 const MODELS_PREFIX = "kano-proxy:models:"
@@ -106,6 +69,17 @@ type Timed<T> = {
   data: T
 }
 
+/** Every per-user prefix, for the logout sweep. */
+const USER_PREFIXES = [
+  ACCOUNTS_PREFIX,
+  MODELS_PREFIX,
+  CUSTOM_PROVIDERS_PREFIX,
+  MODEL_GROUPS_PREFIX,
+  CLI_PREFIX,
+  USAGE_PREFIX,
+  LOGS_PREFIX,
+]
+
 function accountsKey(userId: string, provider: ProviderId): string {
   return `${ACCOUNTS_PREFIX}${userId}:${provider}`
 }
@@ -126,12 +100,21 @@ function cliKey(userId: string): string {
   return `${CLI_PREFIX}${userId}`
 }
 
-function usageKey(userId: string, rangeKey: string | number): string {
+function usageKey(userId: string, rangeKey: string): string {
   return `${USAGE_PREFIX}${userId}:${rangeKey}`
 }
 
 function logsKey(userId: string): string {
   return `${LOGS_PREFIX}${userId}`
+}
+
+/** Whether `key` is one of `userId`'s entries: accounts and usage hold one per provider / range. */
+function ownedBy(key: string, userId: string): boolean {
+  return (
+    key.startsWith(`${ACCOUNTS_PREFIX}${userId}:`) ||
+    key.startsWith(`${USAGE_PREFIX}${userId}:`) ||
+    [modelsKey, customProvidersKey, modelGroupsKey, cliKey, logsKey].some((k) => k(userId) === key)
+  )
 }
 
 /**
@@ -155,6 +138,12 @@ function readTimed<T>(storageKey: string): Timed<T> | null {
   }
 }
 
+/** A current-version entry saved less than `ttlMs` ago. */
+function isFresh(storageKey: string, ttlMs: number): boolean {
+  const entry = readTimed<unknown>(storageKey)
+  return entry !== null && Date.now() - entry.savedAt < ttlMs
+}
+
 function writeTimed<T>(storageKey: string, data: T): void {
   if (typeof localStorage === "undefined") return
   try {
@@ -173,24 +162,11 @@ export function readAccountsCache(
   return readTimed<AccountsResponse>(accountsKey(userId, provider))?.data ?? null
 }
 
-/** Returns cache age in ms, or null if missing. */
-export function accountsCacheAgeMs(
-  userId: string | null | undefined,
-  provider: ProviderId,
-): number | null {
-  if (!userId) return null
-  const entry = readTimed<AccountsResponse>(accountsKey(userId, provider))
-  if (!entry) return null
-  return Date.now() - entry.savedAt
-}
-
 export function isAccountsCacheFresh(
   userId: string | null | undefined,
   provider: ProviderId,
-  ttlMs = CACHE_TTL_MS,
 ): boolean {
-  const age = accountsCacheAgeMs(userId, provider)
-  return age !== null && age < ttlMs
+  return !!userId && isFresh(accountsKey(userId, provider), CACHE_TTL_MS)
 }
 
 export function writeAccountsCache(
@@ -204,67 +180,24 @@ export function writeAccountsCache(
 
 /**
  * Clears every server-data cache (accounts, models, custom providers, model
- * groups, usage, changelog) — used on logout, so nothing the previous user's
- * session fetched survives on disk for the next person on the machine.
- *
- * Sweeps `sessionStorage` as well as `localStorage`: entries written before
- * these caches moved to localStorage may still be sitting there in a
- * long-lived tab, and they must be cleared by the same sign-out.
+ * groups, CLI, usage, logs, changelog) — used on logout, so nothing the
+ * previous user's session fetched survives on disk for the next person on the
+ * machine. With a `userId`, other users' entries stay; the changelog entry,
+ * which belongs to no user, always goes.
  */
 export function clearDataCaches(userId?: string | null): void {
-  for (const store of dataStores()) sweepStore(store, userId)
-}
-
-function dataStores(): Storage[] {
-  const stores: Storage[] = []
-  // Legacy: these caches lived in sessionStorage before the move to
-  // localStorage — sweep both so pre-migration leftovers go too.
-  if (typeof localStorage !== "undefined") stores.push(localStorage)
-  if (typeof sessionStorage !== "undefined") stores.push(sessionStorage)
-  return stores
-}
-
-function sweepStore(store: Storage, userId?: string | null): void {
+  if (typeof localStorage === "undefined") return
   try {
     const keys: string[] = []
-    for (let i = 0; i < store.length; i++) {
-      const k = store.key(i)
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
       if (!k) continue
-      // No user id in this key, so there is no per-user entry to single out:
-      // it is always the one shared entry, always cleared.
       if (k === CHANGELOG_KEY) keys.push(k)
-      if (k.startsWith(ACCOUNTS_PREFIX)) {
-        if (userId && !k.startsWith(`${ACCOUNTS_PREFIX}${userId}:`)) continue
-        keys.push(k)
-      }
-      if (k.startsWith(MODELS_PREFIX)) {
-        if (userId && k !== modelsKey(userId)) continue
-        keys.push(k)
-      }
-      if (k.startsWith(CUSTOM_PROVIDERS_PREFIX)) {
-        if (userId && k !== customProvidersKey(userId)) continue
-        keys.push(k)
-      }
-      if (k.startsWith(MODEL_GROUPS_PREFIX)) {
-        if (userId && k !== modelGroupsKey(userId)) continue
-        keys.push(k)
-      }
-      if (k.startsWith(CLI_PREFIX)) {
-        if (userId && k !== cliKey(userId)) continue
-        keys.push(k)
-      }
-      if (k.startsWith(USAGE_PREFIX)) {
-        if (userId && !k.startsWith(`${USAGE_PREFIX}${userId}:`)) continue
-        keys.push(k)
-      }
-      if (k.startsWith(LOGS_PREFIX)) {
-        if (userId && k !== logsKey(userId)) continue
-        keys.push(k)
-      }
+      else if (USER_PREFIXES.some((p) => k.startsWith(p)) && (!userId || ownedBy(k, userId))) keys.push(k)
     }
-    for (const k of keys) store.removeItem(k)
+    for (const k of keys) localStorage.removeItem(k)
   } catch {
-    /* */
+    /* private mode: nothing was persisted to clear */
   }
 }
 
@@ -275,14 +208,8 @@ export function readModelsCache(
   return readTimed<ModelsResponse>(modelsKey(userId))?.data ?? null
 }
 
-export function isModelsCacheFresh(
-  userId: string | null | undefined,
-  ttlMs = CACHE_TTL_MS,
-): boolean {
-  if (!userId) return false
-  const entry = readTimed<ModelsResponse>(modelsKey(userId))
-  if (!entry) return false
-  return Date.now() - entry.savedAt < ttlMs
+export function isModelsCacheFresh(userId: string | null | undefined): boolean {
+  return !!userId && isFresh(modelsKey(userId), CACHE_TTL_MS)
 }
 
 export function writeModelsCache(
@@ -307,14 +234,8 @@ export function readCustomProvidersCache(
   return readTimed<CustomProvidersResponse>(customProvidersKey(userId))?.data ?? null
 }
 
-export function isCustomProvidersCacheFresh(
-  userId: string | null | undefined,
-  ttlMs = CACHE_TTL_MS,
-): boolean {
-  if (!userId) return false
-  const entry = readTimed<CustomProvidersResponse>(customProvidersKey(userId))
-  if (!entry) return false
-  return Date.now() - entry.savedAt < ttlMs
+export function isCustomProvidersCacheFresh(userId: string | null | undefined): boolean {
+  return !!userId && isFresh(customProvidersKey(userId), CACHE_TTL_MS)
 }
 
 export function writeCustomProvidersCache(
@@ -333,14 +254,12 @@ export function writeCustomProvidersCache(
  * page).
  */
 export function invalidateModelCaches(userId: string | null | undefined): void {
-  if (!userId) return
-  for (const store of dataStores()) {
-    try {
-      store.removeItem(modelsKey(userId))
-      store.removeItem(modelGroupsKey(userId))
-    } catch {
-      /* */
-    }
+  if (!userId || typeof localStorage === "undefined") return
+  try {
+    localStorage.removeItem(modelsKey(userId))
+    localStorage.removeItem(modelGroupsKey(userId))
+  } catch {
+    /* */
   }
 }
 
@@ -355,14 +274,8 @@ export function readModelGroupsCache(
   return readTimed<ModelGroup[]>(modelGroupsKey(userId))?.data ?? null
 }
 
-export function isModelGroupsCacheFresh(
-  userId: string | null | undefined,
-  ttlMs = CACHE_TTL_MS,
-): boolean {
-  if (!userId) return false
-  const entry = readTimed<ModelGroup[]>(modelGroupsKey(userId))
-  if (!entry) return false
-  return Date.now() - entry.savedAt < ttlMs
+export function isModelGroupsCacheFresh(userId: string | null | undefined): boolean {
+  return !!userId && isFresh(modelGroupsKey(userId), CACHE_TTL_MS)
 }
 
 export function writeModelGroupsCache(
@@ -378,18 +291,15 @@ export function writeModelGroupsCache(
  * as one paint. Names, slugs, model ids and timestamps only; tokens never
  * reach the browser at all (docs/cli.md).
  */
-export type CliCachePayload = { devices: CliDevice[]; providers: CliProvider[] }
+type CliCachePayload = { devices: CliDevice[]; providers: CliProvider[] }
 
 export function readCliCache(userId: string | null | undefined): CliCachePayload | null {
   if (!userId) return null
   return readTimed<CliCachePayload>(cliKey(userId))?.data ?? null
 }
 
-export function isCliCacheFresh(userId: string | null | undefined, ttlMs = CACHE_TTL_MS): boolean {
-  if (!userId) return false
-  const entry = readTimed<CliCachePayload>(cliKey(userId))
-  if (!entry) return false
-  return Date.now() - entry.savedAt < ttlMs
+export function isCliCacheFresh(userId: string | null | undefined): boolean {
+  return !!userId && isFresh(cliKey(userId), CACHE_TTL_MS)
 }
 
 export function writeCliCache(userId: string | null | undefined, data: CliCachePayload): void {
@@ -398,13 +308,13 @@ export function writeCliCache(userId: string | null | undefined, data: CliCacheP
 }
 
 /**
- * Usage summary cache, one entry per `days` range so switching the range
- * picker can paint that range's own cache immediately. Only the aggregate
- * JSON is ever cached — no prompts/completions/secrets pass through here.
+ * Usage summary cache, one entry per range so switching the range picker can
+ * paint that range's own cache immediately. Only the aggregate JSON is ever
+ * cached — no prompts/completions/secrets pass through here.
  */
 export function readUsageSummaryCache(
   userId: string | null | undefined,
-  rangeKey: string | number,
+  rangeKey: string,
 ): UsageSummary | null {
   if (!userId) return null
   return readTimed<UsageSummary>(usageKey(userId, rangeKey))?.data ?? null
@@ -412,18 +322,14 @@ export function readUsageSummaryCache(
 
 export function isUsageSummaryCacheFresh(
   userId: string | null | undefined,
-  rangeKey: string | number,
-  ttlMs = CACHE_TTL_MS,
+  rangeKey: string,
 ): boolean {
-  if (!userId) return false
-  const entry = readTimed<UsageSummary>(usageKey(userId, rangeKey))
-  if (!entry) return false
-  return Date.now() - entry.savedAt < ttlMs
+  return !!userId && isFresh(usageKey(userId, rangeKey), CACHE_TTL_MS)
 }
 
 export function writeUsageSummaryCache(
   userId: string | null | undefined,
-  rangeKey: string | number,
+  rangeKey: string,
   data: UsageSummary,
 ): void {
   if (!userId) return
@@ -442,14 +348,8 @@ export function readLogsCache(userId: string | null | undefined): LogsResponse |
   return readTimed<LogsResponse>(logsKey(userId))?.data ?? null
 }
 
-export function isLogsCacheFresh(
-  userId: string | null | undefined,
-  ttlMs = CACHE_TTL_MS,
-): boolean {
-  if (!userId) return false
-  const entry = readTimed<LogsResponse>(logsKey(userId))
-  if (!entry) return false
-  return Date.now() - entry.savedAt < ttlMs
+export function isLogsCacheFresh(userId: string | null | undefined): boolean {
+  return !!userId && isFresh(logsKey(userId), CACHE_TTL_MS)
 }
 
 export function writeLogsCache(
@@ -470,15 +370,10 @@ export function readChangelogCache(): ChangelogResponse | null {
   return readTimed<ChangelogResponse>(CHANGELOG_KEY)?.data ?? null
 }
 
-export function isChangelogCacheFresh(ttlMs = CHANGELOG_CACHE_TTL_MS): boolean {
-  const entry = readTimed<ChangelogResponse>(CHANGELOG_KEY)
-  if (!entry) return false
-  return Date.now() - entry.savedAt < ttlMs
+export function isChangelogCacheFresh(): boolean {
+  return isFresh(CHANGELOG_KEY, CHANGELOG_CACHE_TTL_MS)
 }
 
 export function writeChangelogCache(data: ChangelogResponse): void {
   writeTimed(CHANGELOG_KEY, data)
 }
-
-// silence unused if tree-shaken elsewhere
-export type { CatalogModel }

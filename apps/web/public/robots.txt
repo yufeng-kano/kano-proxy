@@ -12,7 +12,6 @@ Disallow: /anthropic/
 Disallow: /g/
 Disallow: /api/
 Disallow: /cli/v1/
-Disallow: /agent/
 Allow: /
 
 Sitemap: https://origin.invalid/docs/sitemap.xml

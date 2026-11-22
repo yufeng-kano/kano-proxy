@@ -16,7 +16,7 @@ A group has its own base URLs:
 | OpenAI-compatible | `https://<your-domain>/g/<group-slug>/openai/v1` |
 | Anthropic Messages | `https://<your-domain>/g/<group-slug>/anthropic` |
 
-A client pointed at those URLs uses the same API key as anywhere else. It can only call the model names the group defines. Each name maps to one or more **targets**: a `provider/model` id, tied to one account. The proxy tries the targets in order and uses the first one that can take the request.
+A client pointed at those URLs uses the same API key as anywhere else. It can only call the model names the group defines. Each name maps to one or more **targets**: a `provider/model` id, usually tied to one account. The proxy tries the targets in order and uses the first one that can take the request.
 
 Two common uses:
 

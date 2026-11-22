@@ -1,6 +1,6 @@
-//! Agent tunnel wire protocol v1, CLI side (docs/cli.md § Wire protocol).
-//! The agent tunnel wire protocol (docs/cli.md): JSON text control frames, binary body
-//! frames `[u32 BE request id][u8 kind][chunk]`. Both ends enforce the bounds.
+//! CLI tunnel wire protocol v1, CLI side (docs/cli.md § Wire protocol): JSON text
+//! control frames, binary body frames `[u32 BE request id][u8 kind][chunk]`. Both ends
+//! enforce the bounds.
 
 use serde::{Deserialize, Serialize};
 

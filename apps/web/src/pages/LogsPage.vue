@@ -34,7 +34,7 @@ import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { reachableShared, useCustomProviders } from "@/composables/useCustomProviders"
 import { useLogs } from "@/composables/useLogs"
-import { useI18n } from "@/i18n"
+import { PROVIDER_NAME_KEY, useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import {
   DEFAULT_WIDTHS,
@@ -79,18 +79,6 @@ const cli = useCli()
  */
 const ALL = "__all__"
 
-/**
- * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
- * ids. An explicit map rather than a template literal, same as the Models page:
- * a built key widens to `string` and would not fail the build when renamed.
- */
-const NAME_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.name",
-  codex: "provider.codex.name",
-  grok: "provider.grok.name",
-  antigravity: "provider.antigravity.name",
-}
-
 const COLUMN_KEY: Record<LogColumnKey, MessageKey> = {
   time: "logs.column.time",
   model: "logs.column.model",
@@ -129,7 +117,7 @@ const isFiltered = computed(
 const builtinIds = new Set<string>(PROVIDERS.map((p) => p.id))
 
 function providerName(slug: string): string {
-  if (builtinIds.has(slug)) return t(NAME_KEY[slug as ProviderId])
+  if (builtinIds.has(slug)) return t(PROVIDER_NAME_KEY[slug as ProviderId])
   return (
     customProviders.state.data?.find((cp) => cp.slug === slug)?.name ??
     cli.state.providers?.find((cp) => cp.slug === slug)?.name ??
@@ -143,13 +131,6 @@ function tallyText(tally: LogFacetTally | null | undefined): string | null {
   return t("logs.picker.meta", { requests: format.integer(tally.requests), cost: format.currency(tally.cost) })
 }
 
-/**
- * All + the builtins + the user's live custom and CLI slugs and the endpoints
- * shared with them — the same sources
- * the Models and Providers pages filter by — each with its kind and today's
- * count. A slug the user filtered to and has since deleted stays as its own
- * bare option: its rows are still in the log.
- */
 /** Today across every provider; null until the facets land. */
 const totalTally = computed<LogFacetTally | null>(() => {
   if (!facets.data) return null
@@ -162,6 +143,12 @@ const totalTally = computed<LogFacetTally | null>(() => {
   return { requests, cost }
 })
 
+/**
+ * All + the builtins + the user's live custom and CLI slugs and the endpoints
+ * shared with them — the same sources the Models and Providers pages filter
+ * by — each with its kind and today's count. A slug the user filtered to and
+ * has since deleted stays as its own bare option: its rows are still in the log.
+ */
 const providerOptions = computed<ListPickerOption[]>(() => {
   const today = new Map((facets.data?.providers ?? []).map((p) => [p.provider, p]))
   const option = (slug: string, label: string, kind: MessageKey) => ({
@@ -172,7 +159,7 @@ const providerOptions = computed<ListPickerOption[]>(() => {
   })
   const options: ListPickerOption[] = [
     { key: ALL, label: t("logs.filter.allProviders"), meta: tallyText(totalTally.value) },
-    ...PROVIDERS.map((p) => option(p.id, t(NAME_KEY[p.id]), "logs.picker.kind.subscription")),
+    ...PROVIDERS.map((p) => option(p.id, t(PROVIDER_NAME_KEY[p.id]), "logs.picker.kind.subscription")),
     ...(customProviders.state.data ?? []).map((cp) => option(cp.slug, cp.name, "logs.picker.kind.endpoint")),
     ...(cli.state.providers ?? []).map((cp) => option(cp.slug, cp.name, "logs.picker.kind.cli")),
     // A shadowed one shares its slug with the viewer's own option above.
@@ -408,7 +395,7 @@ watch(
     observer?.disconnect()
     observer = null
     // No IntersectionObserver (or nothing to watch): the Load more button is
-    // the whole feature, exactly as it was.
+    // the whole feature.
     if (!el || typeof IntersectionObserver === "undefined") return
     observer = new IntersectionObserver(onApproach, {
       // The page does not scroll — the card's body does (AppCard `fill`), so

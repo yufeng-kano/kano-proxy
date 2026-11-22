@@ -1,5 +1,4 @@
-//! the Anthropic-shaped surface (docs/api.md
-//! § Anthropic surface): `POST /anthropic/v1/messages`,
+//! The Anthropic-shaped surface (docs/api.md § Anthropic surface): `POST /anthropic/v1/messages`,
 //! `POST /anthropic/v1/messages/count_tokens` and `GET /anthropic/v1/models`.
 //!
 //! The POST handlers are shared with the group mounts (`/g/{slug}/anthropic/v1/…`): resolution
@@ -29,8 +28,8 @@ use crate::utils::loop_guard::{detect_anthropic_tool_loop, loop_detected_message
 use crate::utils::model::logging_provider_from_raw_model;
 use crate::AppState;
 
-use super::openai::{affinity_from, log_model, model_string, no_retry, spawn_log};
-use super::resolve_request::{resolve_request_model, RequestModelResolution};
+use super::openai::{affinity_from, log_model, model_string, no_retry, refusal, spawn_log};
+use super::resolve_request::{resolve_request_model, ResolutionFailure};
 
 /// Builtins that expose `adapter.messages` but **convert** to a non-Anthropic upstream format
 /// rather than passing the body through: grok → xAI Responses, antigravity → Gemini
@@ -40,7 +39,7 @@ use super::resolve_request::{resolve_request_model, RequestModelResolution};
 /// guard).
 const CONVERTING_MESSAGES_PROVIDERS: [&str; 2] = ["grok", "antigravity"];
 
-pub fn is_native_anthropic_passthrough(provider: &str, has_messages: bool) -> bool {
+pub(crate) fn is_native_anthropic_passthrough(provider: &str, has_messages: bool) -> bool {
     has_messages && !CONVERTING_MESSAGES_PROVIDERS.contains(&provider)
 }
 
@@ -56,7 +55,7 @@ pub fn routes() -> Router<AppState> {
 // ---------------------------------------------------------------------------------------
 
 async fn models(State(state): State<AppState>, Extension(id): Extension<ApiKeyIdentity>) -> Response {
-    let listed = list_models_for_user(&state, &id.user_id, ListModelsOptions { available_only: true, force: false }).await;
+    let listed = list_models_for_user(&state, &id.user_id, ListModelsOptions::default()).await;
     // Same catalog as the OpenAI surface; ids are always provider/upstream.
     let data: Vec<Value> = listed
         .models
@@ -70,36 +69,34 @@ async fn models(State(state): State<AppState>, Extension(id): Extension<ApiKeyId
 // Shared pieces
 // ---------------------------------------------------------------------------------------
 
-/// Anthropic-shaped answers for the two non-ok resolution outcomes, logged with the outcome's
-/// own status/error code. Shared by messages and count_tokens (docs/api.md § Group endpoints).
+/// Anthropic-shaped answers for a failed resolution, logged with the failure's own status/error
+/// code. Shared by messages and count_tokens (docs/api.md § Group endpoints).
 fn resolution_failure(
     cx: &AppState,
     id: &ApiKeyIdentity,
-    outcome: &RequestModelResolution,
+    failure: ResolutionFailure,
     model_raw: &str,
     started: i64,
 ) -> Response {
-    let group_not_found = matches!(outcome, RequestModelResolution::GroupNotFound { .. });
+    let (status, code) = match failure {
+        ResolutionFailure::GroupNotFound { .. } => (404, "group_not_found"),
+        ResolutionFailure::InvalidModel { .. } => (400, "invalid_model"),
+    };
     spawn_log(
         cx,
         LogEntry {
-            user_id: id.user_id.clone(),
-            api_key_id: Some(id.api_key_id.clone()),
             provider: logging_provider_from_raw_model(model_raw),
             model: log_model(model_raw),
-            status_code: if group_not_found { 404 } else { 400 },
-            latency_ms: now_ms() - started,
-            error_code: Some(if group_not_found { "group_not_found".into() } else { "invalid_model".into() }),
-            ..Default::default()
+            ..refusal(id, started, status, code)
         },
     );
-    match outcome {
-        RequestModelResolution::GroupNotFound { slug } => no_retry(ApiError::anthropic(
+    match failure {
+        ResolutionFailure::GroupNotFound { slug } => no_retry(ApiError::anthropic(
             StatusCode::NOT_FOUND,
             "not_found_error",
             &format!("unknown group endpoint \"{slug}\""),
         )),
-        RequestModelResolution::InvalidModel { group_slug } => {
+        ResolutionFailure::InvalidModel { group_slug } => {
             let message = match group_slug {
                 Some(slug) => format!(
                     "model must be one of this group endpoint's configured models (see GET /g/{slug}/anthropic/v1/models)"
@@ -108,7 +105,6 @@ fn resolution_failure(
             };
             no_retry(ApiError::anthropic(StatusCode::BAD_REQUEST, "invalid_request_error", &message))
         }
-        RequestModelResolution::Ok(_) => unreachable!("resolution succeeded"),
     }
 }
 
@@ -155,11 +151,11 @@ pub async fn handle_anthropic_messages(
     raw_body: Bytes,
 ) -> Response {
     let started = now_ms();
-    let Ok(body) = read_proxy_json(&raw_body) else { return invalid_json() };
+    let Some(body) = read_proxy_json(&raw_body) else { return invalid_json() };
     let model_raw = model_string(&body);
     let resolved = match resolve_request_model(cx, &id.user_id, slug, &model_raw).await {
-        Ok(RequestModelResolution::Ok(resolution)) => resolution,
-        Ok(other) => return resolution_failure(cx, id, &other, &model_raw, started),
+        Ok(Ok(resolution)) => resolution,
+        Ok(Err(failure)) => return resolution_failure(cx, id, failure, &model_raw, started),
         Err(err) => return ApiError::from(err).into_response(),
     };
 
@@ -181,13 +177,9 @@ pub async fn handle_anthropic_messages(
                 body,
                 headers: passthrough_headers(headers),
                 model: target_model,
-                provider: Some(resolved.primary.provider.clone()),
-                adapter: Some(resolved.primary.adapter.clone()),
+                provider: resolved.primary.provider.clone(),
                 group_name: resolved.group_name.clone(),
-                candidates: Some(resolved.candidates.clone()),
-                strategy: Some(resolved.strategy.clone()),
-                is_builtin: Some(resolved.primary.is_builtin),
-                custom_provider: resolved.primary.custom_provider.clone(),
+                candidates: resolved.candidates,
                 echo_model: resolved.group_name.is_some().then(|| resolved.raw.clone()),
                 ..Default::default()
             },
@@ -197,21 +189,16 @@ pub async fn handle_anthropic_messages(
 
     // Conversion ingress (grok Responses / codex / custom-openai). The loop guard applies here
     // — never on the native passthrough branch above.
-    let messages: Vec<Value> = body.get("messages").and_then(Value::as_array).cloned().unwrap_or_default();
-    let loop_detection = detect_anthropic_tool_loop(&messages);
+    let messages = body.get("messages").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+    let loop_detection = detect_anthropic_tool_loop(messages);
     if loop_detection.tripped {
         spawn_log(
             cx,
             LogEntry {
-                user_id: id.user_id.clone(),
-                api_key_id: Some(id.api_key_id.clone()),
                 provider: resolved.primary.provider.clone(),
                 model: target_model,
-                status_code: 400,
-                latency_ms: now_ms() - started,
-                error_code: Some("loop_detected".into()),
                 group_name: resolved.group_name.clone(),
-                ..Default::default()
+                ..refusal(id, started, 400, "loop_detected")
             },
         );
         return no_retry(ApiError::anthropic(
@@ -223,10 +210,9 @@ pub async fn handle_anthropic_messages(
 
     // grok (Anthropic ↔ xAI Responses, encrypted reasoning) and antigravity (Anthropic ↔
     // Gemini) both convert inside their own `messages()`, so they dispatch through the Messages
-    // path rather than the Chat Completions one.
-    if CONVERTING_MESSAGES_PROVIDERS.contains(&resolved.primary.provider.as_str())
-        && resolved.primary.adapter.has_messages()
-    {
+    // path rather than the Chat Completions one. Past the passthrough branch above, an adapter
+    // with `messages()` is one of those two.
+    if resolved.primary.adapter.has_messages() {
         let mut upstream_headers = passthrough_headers(headers);
         // Client-supplied isolation headers are already stripped: only the route sets them.
         if let Some(value) = &affinity.conv_id {
@@ -238,7 +224,6 @@ pub async fn handle_anthropic_messages(
         if let Some(value) = &affinity.turn_idx {
             set_header(&mut upstream_headers, "x-grok-turn-idx", value);
         }
-        set_header(&mut upstream_headers, "x-kano-api-key-id", &id.api_key_id);
         set_header(&mut upstream_headers, "x-kano-raw-model", &resolved.raw);
 
         return dispatch_anthropic_messages(
@@ -249,13 +234,9 @@ pub async fn handle_anthropic_messages(
                 body,
                 headers: upstream_headers,
                 model: target_model,
-                provider: Some(resolved.primary.provider.clone()),
-                adapter: Some(resolved.primary.adapter.clone()),
+                provider: resolved.primary.provider.clone(),
                 group_name: resolved.group_name.clone(),
-                candidates: Some(resolved.candidates.clone()),
-                strategy: Some(resolved.strategy.clone()),
-                is_builtin: Some(resolved.primary.is_builtin),
-                custom_provider: resolved.primary.custom_provider.clone(),
+                candidates: resolved.candidates,
                 ..Default::default()
             },
         )
@@ -268,16 +249,12 @@ pub async fn handle_anthropic_messages(
             user_id: id.user_id.clone(),
             api_key_id: Some(id.api_key_id.clone()),
             provider: resolved.primary.provider.clone(),
-            adapter: Some(resolved.primary.adapter.clone()),
             raw_model: resolved.raw.clone(),
             upstream_model: resolved.primary.upstream_model.clone(),
             body,
             affinity: Some(affinity),
             group_name: resolved.group_name.clone(),
-            candidates: Some(resolved.candidates.clone()),
-            strategy: Some(resolved.strategy.clone()),
-            is_builtin: Some(resolved.primary.is_builtin),
-            custom_provider: resolved.primary.custom_provider.clone(),
+            candidates: resolved.candidates,
             ..Default::default()
         },
     )
@@ -289,19 +266,17 @@ pub async fn handle_anthropic_messages(
 // ---------------------------------------------------------------------------------------
 
 /// How count_tokens answers when the provider has no upstream counting endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalCountMode {
-    /// The in-process `o200k_base` tokenizer (codex). The Worker reached it through the egress
-    /// relay; this server owns it (docs/rust-server.md, providers/codex_count.rs).
+#[derive(Clone, Copy)]
+enum LocalCountMode {
+    /// The in-process `o200k_base` tokenizer (codex, providers/codex_count.rs).
     Local,
     /// The sentinel `{"input_tokens": 0}` (grok, url-less custom-openai).
     Stub,
 }
 
-/// `countTokensLocalMode(provider)`: `Local` = tokenizer count, `Stub` = sentinel zero, `None`
-/// = a real upstream count exists and dispatch handles it (claude-code forwards natively,
-/// antigravity calls `v1internal:countTokens`). A pure function, unit-tested below.
-pub fn count_tokens_local_mode(provider: ProviderId) -> Option<LocalCountMode> {
+/// A builtin's local answer, or `None` when a real upstream count exists and dispatch handles
+/// it (claude-code forwards natively, antigravity calls `v1internal:countTokens`).
+fn count_tokens_local_mode(provider: ProviderId) -> Option<LocalCountMode> {
     match provider {
         ProviderId::Codex => Some(LocalCountMode::Local),
         ProviderId::Grok => Some(LocalCountMode::Stub),
@@ -326,11 +301,11 @@ pub async fn handle_anthropic_count_tokens(
     raw_body: Bytes,
 ) -> Response {
     let started = now_ms();
-    let Ok(body) = read_proxy_json(&raw_body) else { return invalid_json() };
+    let Some(body) = read_proxy_json(&raw_body) else { return invalid_json() };
     let model_raw = model_string(&body);
     let resolved = match resolve_request_model(cx, &id.user_id, slug, &model_raw).await {
-        Ok(RequestModelResolution::Ok(resolution)) => resolution,
-        Ok(other) => return resolution_failure(cx, id, &other, &model_raw, started),
+        Ok(Ok(resolution)) => resolution,
+        Ok(Err(failure)) => return resolution_failure(cx, id, failure, &model_raw, started),
         Err(err) => return ApiError::from(err).into_response(),
     };
 
@@ -347,7 +322,7 @@ pub async fn handle_anthropic_count_tokens(
     };
     if let Some(mode) = local_mode {
         let tokens = match mode {
-            LocalCountMode::Local => count_anthropic_tokens(&Value::Object(body.clone())),
+            LocalCountMode::Local => count_anthropic_tokens(&Value::Object(body)),
             LocalCountMode::Stub => None,
         };
         spawn_log(
@@ -376,14 +351,10 @@ pub async fn handle_anthropic_count_tokens(
             body,
             headers: passthrough_headers(headers),
             model: canonical_model_id(&resolved.primary.provider, &resolved.primary.upstream_model),
-            provider: Some(resolved.primary.provider.clone()),
-            adapter: Some(resolved.primary.adapter.clone()),
+            provider: resolved.primary.provider.clone(),
             endpoint: AnthropicEndpoint::CountTokens,
             group_name: resolved.group_name.clone(),
-            candidates: Some(resolved.candidates.clone()),
-            strategy: Some(resolved.strategy.clone()),
-            is_builtin: Some(resolved.primary.is_builtin),
-            custom_provider: resolved.primary.custom_provider.clone(),
+            candidates: resolved.candidates,
             ..Default::default()
         },
     )
@@ -425,15 +396,15 @@ mod tests {
 
     const BASE_URL: &str = "https://upstream.example.com/v1";
 
-    async fn custom_gateway(f: &Fixture) {
+    pub(super) async fn custom_gateway(f: &Fixture) {
         f.custom_provider("mygw", "openai", BASE_URL).await;
     }
 
-    fn user_message() -> serde_json::Value {
+    pub(super) fn user_message() -> serde_json::Value {
         json!([{ "role": "user", "content": "hi" }])
     }
 
-    fn anthropic_ok() -> serde_json::Value {
+    pub(super) fn anthropic_ok() -> serde_json::Value {
         json!({
             "id": "msg_1",
             "type": "message",
@@ -441,24 +412,6 @@ mod tests {
             "content": [{ "type": "text", "text": "hello" }],
             "usage": { "input_tokens": 9, "output_tokens": 2 }
         })
-    }
-
-    // ---- countTokensLocalMode ----
-
-    #[test]
-    fn count_tokens_passes_claude_code_and_antigravity_through_to_their_real_upstream_counts() {
-        assert_eq!(count_tokens_local_mode(ProviderId::ClaudeCode), None);
-        assert_eq!(count_tokens_local_mode(ProviderId::Antigravity), None);
-    }
-
-    #[test]
-    fn count_tokens_routes_codex_to_the_local_tokenizer() {
-        assert_eq!(count_tokens_local_mode(ProviderId::Codex), Some(LocalCountMode::Local));
-    }
-
-    #[test]
-    fn count_tokens_answers_grok_with_the_sentinel_stub_never_a_400() {
-        assert_eq!(count_tokens_local_mode(ProviderId::Grok), Some(LocalCountMode::Stub));
     }
 
     #[test]
@@ -1134,29 +1087,11 @@ mod provider_shape_tests {
 #[cfg(test)]
 mod request_edit_tests {
     use super::super::resolve_request::test_support::{fixture, Fixture};
+    use super::tests::{anthropic_ok, custom_gateway, user_message};
     use crate::db::test_support::skip_without_db;
     use axum::http::StatusCode;
     use serde_json::json;
     use tower::ServiceExt;
-
-    fn user_message() -> serde_json::Value {
-        json!([{ "role": "user", "content": "hi" }])
-    }
-
-    fn anthropic_ok() -> serde_json::Value {
-        json!({
-            "id": "msg_1",
-            "type": "message",
-            "role": "assistant",
-            "content": [{ "type": "text", "text": "hello" }],
-            "usage": { "input_tokens": 9, "output_tokens": 2 }
-        })
-    }
-
-    async fn custom_gateway(f: &Fixture) {
-        f.custom_provider("mygw", "openai", "https://upstream.example.com/v1").await;
-    }
-
 
     const CC_LINE: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
     const BILLING: &str = "x-anthropic-billing-header: cc_version=2.1.319; cc_entrypoint=cli;";

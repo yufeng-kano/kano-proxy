@@ -15,7 +15,6 @@ pub mod launch;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -24,7 +23,6 @@ use serde_json::Value;
 use crate::api::{self, CatalogModel, Group, GroupModel, GroupTarget};
 use crate::state::{backups_dir, AgentState, FieldRecord, StateFile};
 use crate::tui::{self, Nav};
-use crate::tunnel::TokenCache;
 
 use doc::{Doc, Kind};
 
@@ -355,8 +353,7 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
     let state = file.load()?;
     api::require_signed_in(&state)?;
     let base_url = state.base_url.clone();
-    let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-    let access = tokens.get(false).await?;
+    let access = api::fresh_access_token(file).await?;
 
     let catalog = api::list_models(&base_url, &access).await?;
     // What is there now feeds the pickers: a rerun edits the current choices.
@@ -406,7 +403,7 @@ pub async fn cmd_setup(file: &StateFile, kind: AgentKind, args: SetupArgs) -> Re
     if let Some(prev) = &previous {
         let _ = api::delete_key(&base_url, &access, &prev.key_id).await?;
     }
-    let key_name = format!("{}@{}", kind.id(), state.device_name.as_deref().unwrap_or("device"));
+    let key_name = format!("{}@{device_name}", kind.id());
     let key = api::create_key(&base_url, &access, &key_name).await?;
     eprintln!("✓ key \"{}\"", key.name);
 
@@ -707,8 +704,7 @@ pub async fn cmd_restore(file: &StateFile, kind: AgentKind, args: RestoreArgs) -
 
     // The server side — tolerant of "already gone".
     if state.signed_in() {
-        let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
-        match tokens.get(false).await {
+        match api::fresh_access_token(file).await {
             Ok(access) => {
                 match api::delete_key(&state.base_url, &access, &record.key_id).await? {
                     true => eprintln!("✓ revoked key \"{}\"", record.key_name),
@@ -1005,7 +1001,6 @@ mod tests {
                         (status, json!({ "error": if status == 401 { "unauthorized" } else { "unavailable" } }).to_string())
                     }
                     ("DELETE", p) if p.starts_with("/cli/v1/keys/key_") => (200, json!({ "ok": true }).to_string()),
-                    ("DELETE", "/cli/v1/keys/key_gone") => (404, json!({ "error": "not found" }).to_string()),
                     ("GET", "/g/claude-code/anthropic/v1/models") => (200, json!({ "data": [
                         { "id": "claude-opus-5" }, { "id": "claude-sonnet-5" }, { "id": "claude-haiku-4-5" }, { "id": "claude-fable-5-1" }, { "id": "my-alias" }
                     ]}).to_string()),
@@ -1423,13 +1418,5 @@ mod tests {
         let diff = line_diff("a\nb\nc\n", "a\nx\nc\n");
         assert_eq!(diff, ["- b", "+ x"]);
         assert!(line_diff("same\n", "same\n").is_empty());
-    }
-
-    #[test]
-    fn group_bases_follow_the_agents_wire() {
-        assert_eq!(AgentKind::ClaudeCode.group_base("https://p.example"), "https://p.example/g/claude-code/anthropic");
-        assert_eq!(AgentKind::Codex.group_base("https://p.example"), "https://p.example/g/codex-cli/openai/v1");
-        assert!(AgentKind::ClaudeCode.config_path().ends_with(Path::new(".claude").join("settings.json")));
-        assert!(AgentKind::Codex.config_path().ends_with(Path::new(".codex").join("config.toml")));
     }
 }

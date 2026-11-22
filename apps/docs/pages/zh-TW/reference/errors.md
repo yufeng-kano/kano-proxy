@@ -33,7 +33,7 @@ Anthropic 格式沒有 `code`，請看狀態碼和訊息判斷。
 
 ### 400 `invalid_model`
 
-訊息是 `model must be provider/model (e.g. claude-code/claude-opus-5)`；在 group 端點上，訊息會指向該 group 的模型清單。
+訊息以 `model must be provider/model` 開頭；在 group 端點上，訊息會指向該 group 的模型清單。
 
 模型 id 少了供應商前綴、指到你沒連接的供應商，或不是該 group 的模型名稱。從 **Models** 複製 id，或到 **Groups** 複製該 group 的模型名稱。
 
@@ -75,19 +75,19 @@ OpenAI base 的訊息是 `All upstream accounts unavailable`，Anthropic base �
 
 ### 400 `unsupported_field`
 
-`/responses` 請求用了需要伺服器保存狀態、或 proxy 無法轉換的內容：`previous_response_id`、`conversation`、`background`、`item_reference`、`input_file`、`input_audio`。請在每個請求裡帶上完整對話。
+`/responses` 請求用了需要伺服器保存狀態、或 proxy 無法轉換的內容：`previous_response_id`、`conversation`、`background`、`item_reference`、`input_file`、`input_audio`，或沒有 `image_url` 的 `input_image`（例如 `file_id` 參照）。請在每個請求裡帶上完整對話，圖片直接內嵌或給網址。
 
 ### 400 `unsupported_modality` 或 `unsupported_audio_format`
 
 請求裡的音訊是目標不能處理的：送音訊給不支援音訊輸入的供應商，或把語音轉文字請求送到 OpenAI 格式自訂端點以外的供應商。`unsupported_audio_format` 表示音訊的 `format` 值無法辨識。見[音訊](/zh-TW/reference/endpoints#音訊)。
 
-### 413 `request_too_large`
+### 413 請求內容太大
 
-請求內容超過 Codex 上游能接受的大小。請縮短對話，或開新的 session。另外，任何超過 512 MiB 的請求都會在檢查金鑰之前就被拒絕，回一個純文字的 `413`。
+任何超過 512 MiB 的請求內容，都會在金鑰檢查通過後、送往供應商之前被拒絕，回一個純文字的 `413`。請縮短對話，或開新的 session。供應商自己回的 `413` 屬於上游錯誤，見下一節。
 
 ### 上游錯誤 `upstream_error`
 
-供應商回的其他錯誤狀態，例如模型不接受某個請求而回 `400`，會連同供應商的狀態碼一起傳回。OpenAI base 的 code 是 `upstream_error`。標頭 `x-kano-upstream-provider` 與 `x-kano-upstream-model` 會寫出是哪個供應商和模型拒絕的。訊息內容來自供應商，請直接看訊息。
+供應商回的其他錯誤狀態，例如模型不接受某個請求而回 `400`，會連同供應商的狀態碼和訊息一起傳回。標頭 `x-kano-upstream-provider` 與 `x-kano-upstream-model` 會寫出是哪個供應商和模型拒絕的。訊息內容來自供應商，請直接看訊息。串流中同樣的錯誤則會以 `upstream_error` 事件出現，見下文。
 
 ### 500 `internal_error`
 
@@ -110,7 +110,7 @@ event: error
 data: {"type":"error","error":{"type":"api_error","message":"upstream_unavailable"}}
 ```
 
-`no_upstream_account`、`upstream_unavailable`、`upstream_error`、`request_too_large` 都可能以這種方式出現。有一種錯誤只會在串流中出現：
+`no_upstream_account`、`upstream_unavailable`、`upstream_error` 都可能以這種方式出現。有一種錯誤只會在串流中出現：
 
 - **`upstream_stall`。** 供應商 120 秒都沒送任何資料，proxy 會以 `upstream stalled: no data received for 120s` 結束串流。Anthropic base 的 type 是 `overloaded_error`。請重試。
 
@@ -119,7 +119,7 @@ data: {"type":"error","error":{"type":"api_error","message":"upstream_unavailabl
 ## 重試提示
 
 - `503 upstream_unavailable` 在 proxy 知道帳號何時恢復時，會帶 `Retry-After`。
-- `x-should-retry: false` 標示重試也沒用的錯誤：`invalid_model`、`not_found`、`no_upstream_account`、`loop_detected`、`unsupported_field`、`unsupported_modality`、`request_too_large`、`spend_limit_exceeded`。
+- `x-should-retry: false` 標示重試也沒用的錯誤：`invalid_model`、`not_found`、`no_upstream_account`、`loop_detected`、`unsupported_field`、`unsupported_modality`、`spend_limit_exceeded`。
 - `x-should-retry: true` 標示 `503 upstream_unavailable`。
 
 Claude Code 會讀 `x-should-retry`，其他客戶端不一定會。

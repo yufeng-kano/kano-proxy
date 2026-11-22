@@ -7,8 +7,9 @@
  *
  * Component styles live with their components (`components/ui/*.vue`). This
  * file holds only what has no component to belong to: the token blocks, the
- * document reset, the utilities (`.sr-only`, `.mono`) that any of them may
- * need, and `.select`, the one native control without a component of its own.
+ * document reset, the utilities (`.sr-only`, `.mono`, `.tabular`) that any of
+ * them may need, and `.select`, the one native control without a component of
+ * its own.
  */
 
 :root {
@@ -70,26 +71,16 @@
      hue family on purpose so a chart segment never reads as a severity
      signal.
      --chart-input / --chart-input-soft are the same blue hue at two
-     lightness steps (an ordinal pair: cached input tokens vs uncached),
-     --chart-completion is a separate magenta hue for completion tokens.
+     lightness steps (an ordinal pair: cached input tokens vs uncached).
      Validated with the dataviz skill's six-checks script against this
-     file's own --surface (light #ffffff / dark #131316): input/completion
-     clears categorical CVD + normal-vision separation + 3:1 surface
-     contrast in both modes, and is also separated from the existing
-     --danger red in dark mode (chosen deliberately cooler/pinker than a
-     red-leaning magenta for this); input-soft/input clears the ordinal
-     ramp checks (monotone L, light-end contrast). input-soft vs completion
-     sits in the CVD 6–8 floor band in dark mode, which this method treats
-     as legal only with secondary encoding — covered here since the chart
-     always ships a legend, hover/focus tooltip, and table view alongside
-     color.
+     file's own --surface (light #ffffff / dark #131316): the pair clears
+     the ordinal ramp checks (monotone L, light-end contrast) in both modes.
      Re-validate with scripts/validate_palette.js from the dataviz skill
-     before changing any of the three. */
+     before changing either. */
   --chart-input-soft: #86b6ef;
   --chart-input: #2a78d6;
-  --chart-completion: #c94f8f;
   /* Model identity for the grouped-bars and cache-rate-curve views — a
-     *different job* from the three tokens above (which encode token kind, not
+     *different job* from the two tokens above (which encode token kind, not
      which model). Six categorical slots in fixed order, assigned by a model's
      rank in the range totals so a model keeps its color across buckets and
      across a filter change; the 7th+ model folds into --series-other rather
@@ -233,7 +224,6 @@
   --bar-full: #f87171;
   --chart-input-soft: #1c5cab;
   --chart-input: #3987e5;
-  --chart-completion: #bd4a86;
   /* Same six hues re-stepped for the dark surface (not an automatic flip) —
      all six clear 3:1 on #131316. See the light block for the full note. */
   --series-1: #3987e5;
@@ -265,8 +255,7 @@ body {
   margin: 0;
   /* The shell is a fixed frame: the document itself never scrolls, only the
      content region inside it does. Locking the height here is what keeps the
-     sidebar and page header put — and it also removes the reserved-gutter
-     problem the old scrolling document had. */
+     sidebar and page header put. */
   height: 100%;
   overflow: hidden;
   background: var(--bg);
@@ -332,9 +321,10 @@ a {
 }
 
 /* --- Global utilities --------------------------------------------------
-   The only two that earn a global: `.sr-only` is needed by components that
-   have no stylesheet of their own (inline SVG in particular), and `.mono` is
-   the app's one typographic mode switch. */
+   The only three that earn a global: `.sr-only` is needed by components that
+   have no stylesheet of their own (inline SVG in particular), `.mono` is the
+   app's one typographic mode switch, and `.tabular` stops figures in a column
+   jittering between values. */
 
 .sr-only {
   position: absolute;
@@ -354,7 +344,6 @@ a {
   font-variant-ligatures: none;
 }
 
-/* Numbers that sit in a column must not jitter between values. */
 .tabular {
   font-variant-numeric: tabular-nums;
 }

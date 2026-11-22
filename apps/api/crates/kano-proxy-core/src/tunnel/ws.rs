@@ -1,16 +1,15 @@
 //! The WebSocket half of the tunnel, as an axum upgrade handler.
 //!
-//! The route (`GET /agent/v1/connect/:providerId`) authenticates first: it
+//! The route (`GET /cli/v1/connect/:providerId`) authenticates first: it
 //! verifies the access token, checks the device still exists (revoking deletes it) and checks the
 //! provider row belongs to the token's user, then hands the verified facts here
-//! as [`ConnectParams`]. This layer never sees or validates tokens, exactly as
-//! the Durable Object never did (docs/cli.md § Wire protocol).
+//! as [`ConnectParams`]. This layer never sees or validates tokens (docs/cli.md § Wire protocol).
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use futures::{SinkExt, StreamExt};
 
-use super::mux::{MessageOutcome, MuxMessage};
+use super::mux::{MessageOutcome, MuxMessage, OutFrame};
 use super::registry::{CommandReceiver, Connection, ConnectParams, SocketCommand, TunnelRegistry};
 
 /// Accepts the upgrade and runs the socket until either end closes.
@@ -38,10 +37,8 @@ async fn run(registry: TunnelRegistry, params: ConnectParams, socket: WebSocket)
 async fn write_loop(mut sink: futures::stream::SplitSink<WebSocket, Message>, mut commands: CommandReceiver) {
     while let Some(command) = commands.recv().await {
         let message = match command {
-            SocketCommand::Frame(frame) => match frame {
-                super::mux::OutFrame::Text(text) => Message::Text(text.into()),
-                super::mux::OutFrame::Binary(data) => Message::Binary(data.into()),
-            },
+            SocketCommand::Frame(OutFrame::Text(text)) => Message::Text(text.into()),
+            SocketCommand::Frame(OutFrame::Binary(data)) => Message::Binary(data.into()),
             SocketCommand::Close { code, reason } => {
                 let _ = sink
                     .send(Message::Close(Some(CloseFrame { code, reason: reason.into() })))
@@ -65,8 +62,7 @@ async fn read_loop(
         let Ok(message) = message else { return };
         match message {
             Message::Text(text) => {
-                // The heartbeat pair the DO configured as an auto-response: an
-                // idle connected agent costs nothing beyond this reply.
+                // The heartbeat: an idle connected agent costs nothing beyond this reply.
                 if text.as_str() == "ping" {
                     if connection.send_text("pong".to_string()).is_err() {
                         return;
@@ -112,9 +108,9 @@ mod tests {
     use super::*;
     use crate::tunnel::protocol::{
         encode_binary_frame, TunnelFaultReason, CliProviderFormat, BODY_KIND_REQUEST, BODY_KIND_RESPONSE,
-        CLOSE_REPLACED, CLOSE_RETRY, CLOSE_TOKEN_EXPIRED, MAX_CHUNK_BYTES, MAX_INFLIGHT,
+        CLOSE_REPLACED, CLOSE_RETRY, CLOSE_TOKEN_EXPIRED, MAX_CHUNK_BYTES,
     };
-    use crate::tunnel::registry::{ConnectObserver, ModelsSink, TunnelRegistry};
+    use crate::tunnel::registry::{ModelsSink, TunnelRegistry};
 
     #[derive(Clone)]
     struct TestState {
@@ -199,7 +195,7 @@ mod tests {
         let url = serve(state(registry.clone(), "p1", 60_000)).await;
         let mut client = dial(&url).await;
         assert_eq!(hello(&mut client).await, json!({"t":"hello","proto":1,"slug":"my-mac"}));
-        assert!(registry.status("p1").connected);
+        assert!(registry.is_connected("p1"));
     }
 
     #[tokio::test]
@@ -266,30 +262,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_fifth_in_flight_request_is_refused_busy() {
-        let registry = TunnelRegistry::new();
-        let url = serve(state(registry.clone(), "p1", 60_000)).await;
-        let mut client = dial(&url).await;
-        hello(&mut client).await;
-
-        let mut open = Vec::new();
-        for _ in 0..MAX_INFLIGHT {
-            open.push(proxy(&registry, "p1", "/chat/completions"));
-            next_control(&mut client).await; // req
-            next_control(&mut client).await; // req_end
-        }
-        let fault = registry
-            .proxy("p1", &Method::POST, "/chat/completions", &HeaderMap::new(), None)
-            .await
-            .err()
-            .map(|f| f.reason);
-        assert_eq!(fault, Some(TunnelFaultReason::Busy));
-        for handle in open {
-            handle.abort();
-        }
-    }
-
-    #[tokio::test]
     async fn a_silent_agent_faults_the_request_timeout() {
         let registry = TunnelRegistry::new().with_first_res_timeout(Duration::from_millis(80));
         let url = serve(state(registry.clone(), "p1", 60_000)).await;
@@ -322,7 +294,7 @@ mod tests {
             other => panic!("expected the 4001 close, got {other:?}"),
         }
         // The survivor is still the live socket.
-        assert!(registry.status("p1").connected);
+        assert!(registry.is_connected("p1"));
         second.send(ClientMessage::Text("ping".into())).await.unwrap();
         match next_message(&mut second).await {
             ClientMessage::Text(text) => assert_eq!(text.as_str(), "pong"),
@@ -368,7 +340,6 @@ mod tests {
         let response = proxying.await.unwrap().expect("headers arrived before the bad frame");
         assert!(response.text().await.is_err());
         assert_eq!(next_control(&mut client).await, json!({"t":"cancel","id":id}));
-        assert_eq!(registry.status("p1").inflight, 0);
     }
 
     #[tokio::test]
@@ -394,31 +365,17 @@ mod tests {
     impl ModelsSink for Sink {
         async fn persist_models(&self, _provider_id: &str, models: Vec<String>) -> anyhow::Result<()> {
             if self.fail {
-                anyhow::bail!("d1 write failed");
+                anyhow::bail!("write failed");
             }
             self.reports.lock().unwrap().push(models);
             Ok(())
         }
     }
 
-    struct Observer {
-        seen: Mutex<Vec<String>>,
-    }
-
-    #[async_trait]
-    impl ConnectObserver for Observer {
-        async fn on_connect(&self, _user_id: &str, slug: &str, _provider_id: &str) {
-            self.seen.lock().unwrap().push(slug.to_string());
-        }
-    }
-
     #[tokio::test]
     async fn a_models_report_is_validated_and_persisted() {
         let sink = Arc::new(Sink { reports: Mutex::new(Vec::new()), fail: false });
-        let observer = Arc::new(Observer { seen: Mutex::new(Vec::new()) });
-        let registry = TunnelRegistry::new()
-            .with_models_sink(sink.clone())
-            .with_connect_observer(observer.clone());
+        let registry = TunnelRegistry::new().with_models_sink(sink.clone());
         let url = serve(state(registry, "p1", 60_000)).await;
         let mut client = dial(&url).await;
         hello(&mut client).await;
@@ -434,7 +391,6 @@ mod tests {
             sink.reports.lock().unwrap().clone(),
             vec![vec!["llama3.3:70b".to_string(), "org/model".to_string()]]
         );
-        assert_eq!(observer.seen.lock().unwrap().clone(), vec!["my-mac".to_string()]);
     }
 
     #[tokio::test]

@@ -24,7 +24,7 @@ use crate::logging::usage_capture::from_openai_usage;
 use crate::pricing::litellm::{compute_cost, CostUsage, ModelPrice};
 
 /// Longest partial line held while waiting for its newline — the usage sniffer's own carry cap.
-pub const MAX_HELD_LINE: usize = 256 * 1024;
+const MAX_HELD_LINE: usize = 256 * 1024;
 
 const USAGE_MARKER: &[u8] = b"\"usage\"";
 

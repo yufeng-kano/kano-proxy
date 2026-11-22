@@ -1,38 +1,20 @@
-//! Validation and limits for user-defined model groups (//! docs/providers.md § Model groups).
+//! Validation and limits for user-defined model groups (docs/providers.md § Model groups).
 
 use std::future::Future;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::model::split_model_id;
-
-/// `ordered`. Kept here until the
-/// routing module's port lands; see the port report.
-pub const DEFAULT_STRATEGY: &str = "ordered";
+use crate::db::model_groups::{GroupModelInput, GroupTarget};
+use crate::routing::strategy::DEFAULT_STRATEGY;
 
 pub const MAX_MODEL_GROUPS_PER_USER: usize = 50;
 pub const MAX_MODELS_PER_GROUP: usize = 20;
 pub const MAX_TARGETS_PER_MODEL: usize = 20;
 pub const MAX_MODEL_NAME_LENGTH: usize = 128;
 pub const MAX_DISPLAY_NAME_LENGTH: usize = 64;
-
-/// One routing target: `provider/model` plus an optional pinned `upstream_accounts` id
-///.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupTarget {
-    pub model: String,
-    pub account_id: Option<String>,
-}
-
-/// Wire/storage shape of one group model: a callable name plus its targets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupModelInput {
-    pub name: String,
-    pub targets: Vec<GroupTarget>,
-}
 
 /// Same shape as a custom-provider slug (docs/providers.md § Model groups "Slug") — but with
 /// **no reserved-word list**: the `/g/` path prefix is its own namespace, so a group slug can
@@ -54,9 +36,9 @@ pub fn validate_group_slug(slug: &str) -> Option<String> {
     None
 }
 
-/// One callable model name on a group endpoint: trimmed, 1-128 chars, no whitespace. Unlike
-/// the v3 bare-name aliases, `/` **is allowed** — a group endpoint has no `provider/model`
-/// resolution to collide with, so a group can mirror full ids as well as bare ones.
+/// One callable model name on a group endpoint: trimmed, 1-128 chars, no whitespace. `/` **is
+/// allowed** — a group endpoint has no `provider/model` resolution to collide with, so a group
+/// can mirror full ids as well as bare ones.
 pub fn validate_model_name(name: &str) -> Option<String> {
     if name.is_empty() || name.chars().count() > MAX_MODEL_NAME_LENGTH {
         return Some(format!("model name must be 1-{MAX_MODEL_NAME_LENGTH} characters"));
@@ -215,8 +197,8 @@ where
         }
         seen.push(name.clone());
 
-        let targets_value = obj.get("targets").cloned().unwrap_or(Value::Null);
-        match validate_group_targets(&targets_value, resolve_prefix, resolve_account).await {
+        let targets = obj.get("targets").unwrap_or(&Value::Null);
+        match validate_group_targets(targets, resolve_prefix, resolve_account).await {
             Ok(targets) => out.push(GroupModelInput { name, targets }),
             Err(error) => return Err(format!("model \"{name}\": {error}")),
         }
@@ -572,12 +554,5 @@ mod tests {
         )
         .await
         .is_err());
-    }
-
-    #[test]
-    fn documented_limits() {
-        assert_eq!(MAX_MODEL_GROUPS_PER_USER, 50);
-        assert_eq!(MAX_TARGETS_PER_MODEL, 20);
-        assert_eq!(MAX_MODELS_PER_GROUP, 20);
     }
 }

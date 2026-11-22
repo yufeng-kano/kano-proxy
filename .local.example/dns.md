@@ -7,39 +7,23 @@ Copy to `.local/dns.md` and replace placeholders. **Do not commit** the filled f
 | Item | Value |
 |------|--------|
 | Hostname | `<your-domain>` e.g. `proxy.example.com` |
-| Zone (Cloudflare) | `<zone-name>` |
-| Same-host UI+API | yes (recommended) |
+| DNS zone / provider | `<zone-name>` |
+| Server address | `<server-ip-or-name>` |
 
-Production vars (also set in Cloudflare, not only here):
-
-```text
-APP_URL=https://<your-domain>
-GOOGLE_REDIRECT_URI=https://<your-domain>/api/auth/callback
-```
+The same values go into the server's `.env` (`DOMAIN`, `APP_URL`, `GOOGLE_REDIRECT_URI` — docs/deployment.md § Domains).
 
 ## DNS records
 
-| Type | Name | Target | Proxy | Notes |
-|------|------|--------|-------|-------|
-| CNAME or A/AAAA | `<subdomain or @>` | `<pages-or-worker-target>` | Proxied | |
+| Type | Name | Target | Notes |
+|------|------|--------|-------|
+| A / AAAA | `<subdomain or @>` | `<server-ip>` | |
 
-## Worker routes (same host)
+## Ingress
 
-| Route | Service |
-|-------|---------|
-| `<your-domain>/openai/*` | Worker `kano-proxy` |
-| `<your-domain>/anthropic/*` | Worker `kano-proxy` |
-| `<your-domain>/api/*` | Worker `kano-proxy` |
-| (optional) `<your-domain>/health` | Worker `kano-proxy` |
+One hostname serves the UI and the API (docs/deployment.md § Domains). Record which front end terminates TLS:
 
-Pages serves remaining paths (SPA).
-
-## Bind order / dashboard notes
-
-Record the order you attached custom domain + routes so recreate is possible:
-
-1. …
-2. …
+- the bundled `caddy` service (ports 80 and 443 open to the server), or
+- your own reverse proxy: which one, and where its configuration lives. It must route the API paths listed in docs/deployment.md § Quick start to the API container and everything else to the web container, without buffering.
 
 ## Google OAuth
 

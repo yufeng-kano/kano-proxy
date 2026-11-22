@@ -15,10 +15,9 @@ use crate::pool::{AcquiredAccount, StoredCredential};
 use crate::AppState;
 
 /// How long a caller that lost the refresh race waits for the winner's credential before it
-/// goes ahead with its own: three seconds, a token endpoint round trip with room to spare. The
-/// wait used to be 75ms, shorter than that round trip, so the losers of nearly every refresh
-/// went out with the token the winner was about to make worthless (docs/providers.md § OAuth
-/// refresh single-flight).
+/// goes ahead with its own: three seconds, a token endpoint round trip with room to spare. A
+/// wait shorter than that round trip sends the losers out with the token the winner is about
+/// to make worthless (docs/providers.md § OAuth refresh single-flight).
 const REFRESH_POLL_ATTEMPTS: u32 = 60;
 const REFRESH_POLL_DELAY: Duration = Duration::from_millis(50);
 
@@ -81,18 +80,11 @@ where
     let db = cx.pool();
     for attempt in 0..=REFRESH_POLL_ATTEMPTS {
         if attempt > 0 {
-            let row = match get_account(db, &account.row.user_id, &account.row.id).await {
-                Ok(Some(row)) => row,
-                _ => return account,
-            };
-            let credential: StoredCredential = match decrypt_json(key, &row.encrypted_payload) {
-                Ok(c) => c,
-                Err(_) => return account,
-            };
-            if !due(&row, &credential) {
-                return AcquiredAccount { row, credential };
+            let Some(current) = reload(db, key, &account).await else { return account };
+            if !due(&current.row, &current.credential) {
+                return current;
             }
-            if row.refreshing_at.is_some() {
+            if current.row.refreshing_at.is_some() {
                 if attempt < REFRESH_POLL_ATTEMPTS {
                     tokio::time::sleep(REFRESH_POLL_DELAY).await;
                 }
@@ -106,14 +98,7 @@ where
         };
         if let Some(lock_token) = lock_token {
             let outcome: Result<AcquiredAccount, ()> = async {
-                let row = match get_account(db, &account.row.user_id, &account.row.id).await {
-                    Ok(Some(row)) => row,
-                    _ => {
-                        let _ = release_refresh_lock(db, &account.row.id, &lock_token).await;
-                        return Ok(account.clone());
-                    }
-                };
-                let credential: StoredCredential = decrypt_json(key, &row.encrypted_payload).map_err(|_| ())?;
+                let AcquiredAccount { row, credential } = reload(db, key, &account).await.ok_or(())?;
                 if !due(&row, &credential) {
                     let _ = release_refresh_lock(db, &row.id, &lock_token).await;
                     return Ok(AcquiredAccount { row, credential });
@@ -157,6 +142,13 @@ where
     account
 }
 
+/// The account as stored now; `None` when the row is gone or its payload unreadable.
+async fn reload(db: &sqlx::PgPool, key: Option<&str>, account: &AcquiredAccount) -> Option<AcquiredAccount> {
+    let row = get_account(db, &account.row.user_id, &account.row.id).await.ok()??;
+    let credential = decrypt_json(key, &row.encrypted_payload).ok()?;
+    Some(AcquiredAccount { row, credential })
+}
+
 /// A refresh the token endpoint did not honour: record it and release the lock in one
 /// statement, then carry on with the stored credential. Only the status is logged or stored,
 /// never the answer's body.
@@ -190,6 +182,7 @@ async fn keep_old_credential(
     }
     AcquiredAccount { row, credential }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,7 +283,7 @@ mod tests {
         assert_eq!(sign_in_state(&renewed.row, crate::app::now_ms()), SignIn::Ok);
     }
 
-    /// Past its expiry the old token is no use to anyone, so every caller asks again, as before.
+    /// Past its expiry the old token is no use to anyone, so every caller asks again.
     #[tokio::test]
     async fn a_dead_token_is_never_paced() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -342,8 +335,8 @@ mod tests {
     }
 
     /// The loser of a refresh race waits for the winner's credential. A token endpoint round
-    /// trip takes a few hundred milliseconds; the old 75ms wait gave up before it and sent the
-    /// token the winner was about to make worthless.
+    /// trip takes a few hundred milliseconds; a loser that gives up before it sends the token
+    /// the winner is about to make worthless.
     #[tokio::test]
     async fn a_caller_that_lost_the_race_waits_for_the_winners_credential() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -376,7 +369,7 @@ mod tests {
         for (reason, still_benched) in [("401", false), ("429", true)] {
             let dead = expiring_in(-1_000);
             let row = insert_account(&pool, &user.id, "claude-code", &dead).await;
-            crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", &row.id, Some(300_000), Some(reason), now).await.unwrap();
+            crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", &row.id, 300_000, reason, now).await.unwrap();
             let account = AcquiredAccount { row: row.clone(), credential: dead };
             let renewed = refresh_oauth_credential(&cx, account, |c| c.access_token == "old", |_| async {
                 Ok(StoredCredential { access_token: "new".into(), refresh_token: Some("r2".into()), ..Default::default() })

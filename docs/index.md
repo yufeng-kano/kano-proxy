@@ -1,13 +1,13 @@
 # kano-proxy documentation
 
-Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropic Messages APIs, with per-user OAuth pools for Claude Code / Codex / Grok / Antigravity. Self-hosted: one Rust server and a PostgreSQL database, run with docker compose. The Cloudflare Workers edition this replaced is kept on the `serverless` branch.
+Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropic Messages APIs, with per-user OAuth pools for Claude Code / Codex / Grok / Antigravity. Self-hosted: one Rust server and a PostgreSQL database, run with docker compose.
 
 ## Docs map
 
 | Doc | Summary |
 |-----|---------|
-| [rust-server.md](./rust-server.md) | The server: rationale for Rust, crate layout, Postgres storage, configuration and the compatibility contract it had to keep |
-| [cloud-edition.md](./cloud-edition.md) | Public core/private kano-proxy-cloud boundaries, subscription contracts, verification and cutover gates |
+| [rust-server.md](./rust-server.md) | The server: rationale for Rust, Postgres storage, configuration, persisted byte formats, shared seams and conventions |
+| [cloud-edition.md](./cloud-edition.md) | Public core / private kano-proxy-cloud boundary and the composition-time extension points: pool extension, web shell, usage notice terms |
 | [product.md](./product.md) | Goals, non-goals, tenants, the usage notice, providers, model naming |
 | [api.md](./api.md) | Public LLM routes (`/openai/v1` Chat Completions + Responses API, `/anthropic`), errors, served-upstream headers, reasoning, audio (input & transcriptions), cache |
 | [auth.md](./auth.md) | Google OIDC admin, the usage-notice gate, client API keys, OAuth account binding |
@@ -28,7 +28,7 @@ Multi-tenant **subscription account-pool** proxy: OpenAI-compatible and Anthropi
 
 - **Server:** Rust (axum, tokio, sqlx), one process, direct upstream egress
 - **Web:** Vue 3 + Vite + TypeScript, built to static files the server or any web server can serve
-- **Data:** PostgreSQL. In-process caches replace what a key-value store used to hold; the tunnel registry lives in the process
+- **Data:** PostgreSQL. Caches and the tunnel registry live in the process
 - **Envs:** local + production only
 
 Each app owns its own manifest, lockfile and build; nothing language-specific sits at the repository root, and the release version is the `version` of the `kano-proxy-core` crate (`apps/api/crates/kano-proxy-core/Cargo.toml`).

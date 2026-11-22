@@ -4,7 +4,7 @@
 
 1. **OpenAI-compatible surface** (`/openai/v1`) for coding agents (CC Switch, OpenAI SDKs) — Chat Completions plus the **Responses API** (`/responses`), which is what the Codex CLI speaks, so Codex can drive any bound provider through the proxy.
 2. **Anthropic Messages surface** (`/anthropic`) for Claude Code and Anthropic-shaped clients.
-3. **Every bound subscription provider** (`claude-code`, `codex`, `grok`) is available on **both** surfaces via format adapters — not “one API format per provider.”
+3. **Every bound subscription provider** (`claude-code`, `codex`, `grok`, `antigravity`) is available on **both** surfaces via format adapters — not “one API format per provider.”
 4. **Per-user subscription account pools** (not shared Platform API keys as the product).
 5. **User-defined custom upstream providers:** bring your own OpenAI- or Anthropic-compatible endpoint (base URL + API key) and it behaves like a built-in provider — a slug, model ids `slug/upstream`, both surfaces, pool/bench inherited (see [providers.md](./providers.md)).
 6. **Model groups:** per-user virtual endpoints (`/g/<slug>/openai/v1`, `/g/<slug>/anthropic`) whose configured model names each expand to an ordered list of `provider/model` targets — one mechanism for both per-client model mapping (a client's hard-coded names get their own endpoint) and joining the same model across different accounts/prefixes, with cross-provider failover by target order (see [providers.md](./providers.md)).
@@ -18,7 +18,6 @@
 - Embeddings / image generation / audio **output** (audio **input** via `/openai/v1/chat/completions` and speech-to-text **audio transcriptions** via `/openai/v1/audio/transcriptions` on custom OpenAI providers are supported — see [api.md](./api.md))
 - Staging environment
 - Content logging or prompt audit storage
-- Inventing Anthropic `cache_control` on OpenAI→Claude conversion
 - Inventing Grok sticky headers (`x-grok-conv-id` etc.)
 - Stateful Responses API features: `previous_response_id`, `conversation`, `background`, `GET /responses/{id}`, and hosted tools executed by the proxy (web search, code interpreter, …). The proxy keeps no upstream state (`store: false` everywhere); hosted tools pass through to codex only (see [api.md](./api.md) § `POST /openai/v1/responses`)
 
@@ -32,7 +31,7 @@
 
 ## Usage notice
 
-Every user accepts a short usage notice before the web app does anything else, and again when it changes (operator decision 2026-11-02, replacing the earlier non-goal "no ToS or legal warning copy in the UI"). It says that Kano Proxy is unofficial, that it signs in to subscription accounts the way each provider's own CLI does and this may break the provider's terms, that providers have restricted accounts used this way, that users connect only accounts they hold, that upstream endpoints are undocumented, and that the software comes without warranty. The notice changes no feature: every provider, pool and route works as before.
+Every user accepts a short usage notice before the web app does anything else, and again when it changes (operator decision 2026-11-02). It says that Kano Proxy is unofficial, that it signs in to subscription accounts the way each provider's own CLI does and this may break the provider's terms, that providers have restricted accounts used this way, that users connect only accounts they hold, that upstream endpoints are undocumented, and that the software comes without warranty. The notice gates nothing else: once it is accepted, every provider, pool and route works the same.
 
 - The gate and its versioning: [auth.md](./auth.md) § Usage notice
 - The page: [admin-ui.md](./admin-ui.md) § Usage notice page
@@ -47,11 +46,11 @@ Every user accepts a short usage notice before the web app does anything else, a
 | `grok` | xAI Chat Completions via SuperGrok OAuth | Device code (and future ingest methods) | Multi-account |
 | `antigravity` | Gemini via the Google Antigravity CloudCode API (Google AI Pro / Ultra) | Browser OAuth + paste the localhost callback | Multi-account |
 
-Token **acquisition methods may differ**; once stored, pool semantics are the same: priority, acquire, bench on 401/402/403/429, promote, remove.
+Token **acquisition methods may differ**; once stored, pool semantics are the same: priority, acquire, bench on 401/402/403/429, reorder, remove.
 
 ### Custom endpoints (user-defined)
 
-Any user can also add their own OpenAI- or Anthropic-compatible endpoint (a self-hosted gateway, another provider's API, a proxy they run) by giving it a **slug**, a **base URL**, an **API key**, and a **format** (`openai` | `anthropic`). Once added it is a first-class provider on both surfaces with model ids `slug/upstream` and the same account-pool / bench / failover semantics as built-ins — see [providers.md](./providers.md) for the full contract, [database.md](./database.md) for the `custom_providers` table, and [auth.md](./auth.md) for the admin REST routes. Custom providers deliberately diverge from built-ins in two ways: an **openai**-format endpoint forwards the client's body near-verbatim (including `temperature` and `reasoning_effort`, with no ceiling clamp and no default — built-ins forward `temperature`/`top_p` too now, but `grok` and `claude-code` clamp/default it and `codex` still ignores it entirely; custom-openai may rewrite only `reasoning_effort` on a same-account retry after a recognized unsupported-effort 400, see [api.md](./api.md)), and neither format has a usage/billing surface to poll.
+Any user can also add their own OpenAI- or Anthropic-compatible endpoint (a self-hosted gateway, another provider's API, a proxy they run) by giving it a **slug**, a **base URL**, an **API key**, and a **format** (`openai` | `anthropic`). Once added it is a first-class provider on both surfaces with model ids `slug/upstream` and the same account-pool / bench / failover semantics as built-ins — see [providers.md](./providers.md) for the full contract, [database.md](./database.md) for the `custom_providers` table, and [auth.md](./auth.md) for the admin REST routes. Custom providers deliberately diverge from built-ins in two ways: an **openai**-format endpoint forwards the client's body near-verbatim (including `temperature` and `reasoning_effort`, with no ceiling clamp and no default — built-ins forward `temperature`/`top_p` too, but `grok` and `claude-code` clamp/default it and `codex` ignores it entirely; custom-openai may rewrite only `reasoning_effort` on a same-account retry after a recognized unsupported-effort 400, see [api.md](./api.md)), and neither format has a usage/billing surface to poll.
 
 ## Model naming
 
@@ -94,11 +93,12 @@ Must work for coding agents:
 | Claude | 5h % (none on a verified Ultra account), Week %, optional scoped weekly rows |
 | Codex | Dynamic windows from upstream (5h and/or Week; omit missing) |
 | Grok | Weekly % from subscription billing surface (unofficial; stale on failure) |
+| Antigravity | Per-group quota windows from `retrieveUserQuotaSummary` |
 | Custom endpoints | None — static API keys have no usage/billing surface to poll; the admin UI shows only a status dot (active/benched) |
 
 ## Success criteria
 
 - Coding agent can set OpenAI base + key + `provider/model` and complete a multi-tool turn for any bound provider.
 - Anthropic client can set Anthropic base + key + the **same** `provider/model` and complete Messages (Claude: tools + `cache_control` passthrough; Grok/Codex: converted).
-- Admin can add multiple accounts, see usage bars, promote/remove, mint/revoke keys.
+- Admin can add multiple accounts, see usage bars, reorder/remove, mint/revoke keys.
 - Admin can add a custom OpenAI- or Anthropic-compatible endpoint (slug + base URL + API key) and immediately call it as `slug/model` on both surfaces, same as a built-in provider.

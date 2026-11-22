@@ -28,41 +28,13 @@ pub struct UsageWindow {
     pub scope: Option<String>,
 }
 
-/// Computed at read time from priority order plus router facts, never stored
-/// (docs/admin-ui.md § Providers page).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AccountStatus {
-    Active,
-    ActiveNoFable,
-    ActiveFable,
-    Standby,
-    Limited,
-    Benched,
-    Unusable,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AccountUsage {
     pub windows: Vec<UsageWindow>,
     /// Show a borrower the account's own credit balance and whether it routes on it, both read
     /// by the core off the row's stored facts. An edition sets it only where it also shows the
     /// account's own windows (docs/cloud-edition.md § Pool extension).
-    #[serde(default)]
     pub show_credits: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AccountUsageView {
-    pub id: String,
-    pub priority: i32,
-    pub status: AccountStatus,
-    pub label: Option<String>,
-    pub custom_label: Option<String>,
-    pub account: Option<Map<String, Value>>,
-    pub usage: Option<AccountUsage>,
-    pub error: Option<String>,
-    pub stale: bool,
 }
 
 /// Opaque client-supplied affinity ids forwarded verbatim upstream; never generated here.
@@ -73,10 +45,10 @@ pub struct AffinityIds {
     pub turn_idx: Option<String>,
 }
 
-/// The normalized chat request every adapter receives (fields as in the TypeScript type).
+/// The normalized chat request every adapter receives.
 #[derive(Debug, Clone, Default)]
 pub struct ChatCompletionRequest {
-    pub model: String,
+    /// The exact client-sent model string (a group endpoint's model name, or `provider/model`).
     pub raw_model: String,
     pub upstream_model: String,
     pub messages: Vec<Value>,
@@ -125,9 +97,8 @@ pub enum AudioInput {
     Passthrough,
 }
 
-/// Per-call context the TypeScript `extras` carried: `apiKeyId` scopes per-caller cache
-/// state; deadlines come from the dispatch-scoped `first_byte_timeout`. Background work
-/// that `waitUntil` kept alive is simply `tokio::spawn`ed.
+/// Per-call context: `api_key_id` scopes per-caller cache state; the deadline is the
+/// dispatch-scoped `first_byte_timeout`.
 #[derive(Debug, Clone, Default)]
 pub struct CallExtras {
     pub api_key_id: Option<String>,

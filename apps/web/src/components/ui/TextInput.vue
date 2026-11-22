@@ -16,7 +16,7 @@ withDefaults(
     multiline?: boolean
     rows?: number
     autocomplete?: string
-    inputmode?: "text" | "url" | "email" | "numeric"
+    inputmode?: "url" | "email" | "numeric"
   }>(),
   { type: "text", rows: 4, autocomplete: "off" },
 )

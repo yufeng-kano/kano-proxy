@@ -6,6 +6,8 @@
 //! authors the Anthropic body itself through `proxy::openai_anthropic`. Every call goes
 //! through `cx.transport()`; SSE bodies are piped, never buffered.
 
+use std::borrow::Cow;
+
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::response::Response;
@@ -19,11 +21,12 @@ use crate::providers::types::{
     UsageWindow,
 };
 use crate::providers::ProviderId;
+use crate::proxy::dispatch::json_response;
 use crate::proxy::openai_anthropic::{
     add_conversion_cache_control, anthropic_sse_to_openai_stream, anthropic_to_openai_response, move_retired_output_format,
     openai_to_anthropic_messages, AnthropicMessagesInput,
 };
-use crate::proxy::request_edits::CLAUDE_CODE_LINES;
+use crate::proxy::request_edits::{BILLING_HEADER_PREFIX, CLAUDE_CODE_LINES};
 use crate::upstream::{UpstreamRequest, UpstreamResponse};
 use crate::utils::reasoning::map_reasoning;
 use crate::AppState;
@@ -35,15 +38,13 @@ const REQUIRED_SYSTEM: &str = CLAUDE_CODE_LINES[1];
 /// What Claude Code's interactive line and its Agent SDK variant both start with: a client
 /// system that already has it needs no second copy.
 const CLAUDE_CODE_LINE_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude";
-/// Claude Code 2.1.319's first system block (`x-anthropic-billing-header: cc_version=…;`).
-const BILLING_HEADER_PREFIX: &str = "x-anthropic-billing-header:";
 
 const DEFAULT_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 /// Claude Code CLI client fingerprint. The OAuth upstream expects requests to look like the
 /// CLI that owns these tokens; a real client's own values are forwarded when it sends them —
 /// these are only the fallback for surfaces with no client headers to relay.
-pub const CLAUDE_CLIENT_FINGERPRINT: [(&str, &str); 5] = [
+const CLAUDE_CLIENT_FINGERPRINT: [(&str, &str); 5] = [
     ("user-agent", "claude-cli/2.1.280 (external, cli)"),
     ("x-stainless-package-version", "0.112.1"),
     ("x-stainless-runtime-version", "v26.3.0"),
@@ -177,48 +178,41 @@ const REQUIRED_BETAS: [&str; 2] = ["oauth-2025-04-20", "claude-code-20250219"];
 const CONVERSION_BETAS: [&str; 2] = ["interleaved-thinking-2025-05-14", "fine-grained-tool-streaming-2025-05-14"];
 
 /// Builds an `anthropic-beta` header value: `REQUIRED_BETAS` first, then each comma-separated
-/// entry of `extra` in order, deduped against the required pair and against earlier entries in
-/// `extra` itself.
-pub fn beta_headers(extra: Option<&str>) -> String {
-    let mut base: Vec<&str> = REQUIRED_BETAS.to_vec();
-    if let Some(extra) = extra {
-        for part in extra.split(',') {
-            let t = part.trim();
-            if !t.is_empty() && !base.contains(&t) {
-                base.push(t);
-            }
+/// entry of `extras` in order, deduped against the required pair and against earlier entries.
+fn beta_headers<'a>(extras: impl IntoIterator<Item = &'a str>) -> String {
+    let mut betas: Vec<&str> = REQUIRED_BETAS.to_vec();
+    for part in extras.into_iter().flat_map(|extra| extra.split(',')) {
+        let t = part.trim();
+        if !t.is_empty() && !betas.contains(&t) {
+            betas.push(t);
         }
     }
-    base.join(",")
+    betas.join(",")
 }
 
 /// `anthropic-beta` for the native `/anthropic` passthrough — faithful, not opinionated: the
 /// two OAuth-required betas, then the client's own list verbatim (deduped, order preserved).
 /// Feature betas are never force-added here; `effort-2025-11-24` is the one exception, added
 /// automatically when the (patched) body carries `output_config`, deduped the same way.
-pub fn resolve_beta_header(client_beta: Option<&str>, has_output_config: bool) -> String {
-    let extras: Vec<&str> = [client_beta, has_output_config.then_some(EFFORT_BETA)].into_iter().flatten().collect();
-    if extras.is_empty() {
-        beta_headers(None)
-    } else {
-        beta_headers(Some(&extras.join(",")))
-    }
+fn resolve_beta_header(client_beta: Option<&str>, has_output_config: bool) -> String {
+    beta_headers(client_beta.into_iter().chain(has_output_config.then_some(EFFORT_BETA)))
 }
 
 /// Idempotent fixed system line (docs/providers.md § Claude Code "Required system line"): added
 /// unless the system already opens with Claude Code's own line, where "opens" skips a leading
 /// billing-header block, which Anthropic requires first and unchanged. A line further down does
 /// not count: the upstream reads the identity at the front.
-fn prepend_required_system(body: &Map<String, Value>) -> Map<String, Value> {
+fn prepend_required_system(mut body: Map<String, Value>) -> Map<String, Value> {
     let required = json!({ "type": "text", "text": REQUIRED_SYSTEM });
-    let mut out = body.clone();
-    match body.get("system") {
-        Some(Value::String(sys)) => {
+    let system = body.entry("system").or_insert(Value::Null);
+    match system {
+        Value::String(sys) => {
             if !sys.starts_with(CLAUDE_CODE_LINE_PREFIX) {
-                out.insert("system".into(), json!([required, { "type": "text", "text": sys }]));
+                let text = std::mem::take(sys);
+                *system = json!([required, { "type": "text", "text": text }]);
             }
         }
-        Some(Value::Array(sys)) => {
+        Value::Array(sys) => {
             fn text_of(block: &Value) -> Option<&str> {
                 if block.get("type").and_then(Value::as_str) != Some("text") {
                     return None;
@@ -227,16 +221,12 @@ fn prepend_required_system(body: &Map<String, Value>) -> Map<String, Value> {
             }
             let at = usize::from(sys.first().and_then(text_of).is_some_and(|t| t.starts_with(BILLING_HEADER_PREFIX)));
             if !sys.get(at).and_then(text_of).is_some_and(|text| text.starts_with(CLAUDE_CODE_LINE_PREFIX)) {
-                let mut blocks = sys.clone();
-                blocks.insert(at, required);
-                out.insert("system".into(), Value::Array(blocks));
+                sys.insert(at, required);
             }
         }
-        _ => {
-            out.insert("system".into(), json!([required]));
-        }
+        _ => *system = json!([required]),
     }
-    out
+    body
 }
 
 /// The upstream response as the client sees it on a passthrough surface: status and headers
@@ -250,14 +240,6 @@ fn passthrough(res: UpstreamResponse) -> Response {
         builder = builder.header(name, value);
     }
     builder.body(Body::from_stream(res.body)).expect("response builds")
-}
-
-fn json_response(status: StatusCode, value: &Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(value).expect("json serializes")))
-        .expect("response builds")
 }
 
 /// Shared native-passthrough forward for `/v1/messages` and `/v1/messages/count_tokens` —
@@ -274,8 +256,15 @@ async fn forward_to_anthropic(
     let raw = body.as_object().cloned().unwrap_or_default();
     // With "Remove the Claude Code line" on, the caller already removed the client's copies and
     // the proxy adds none of its own (docs/providers.md § Request edits).
-    let prepended = if extras.edits.strip_claude_code_line { raw } else { prepend_required_system(&raw) };
-    let patched = move_retired_output_format(&prepended).into_owned();
+    let prepended = if extras.edits.strip_claude_code_line { raw } else { prepend_required_system(raw) };
+    // Keep the body already owned unless the output_format move had to rewrite it.
+    let patched = match move_retired_output_format(&prepended) {
+        Cow::Owned(moved) => moved,
+        borrowed => {
+            drop(borrowed);
+            prepended
+        }
+    };
     let client_beta = headers.get("anthropic-beta").and_then(|v| v.to_str().ok());
     let has_output_config = patched.contains_key("output_config");
     let anthropic_version = headers.get("anthropic-version").and_then(|v| v.to_str().ok()).unwrap_or("2023-06-01");
@@ -431,18 +420,17 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         let system = if extras.edits.strip_claude_code_line {
             anthropic_body
         } else {
-            prepend_required_system(&anthropic_body)
+            prepend_required_system(anthropic_body)
         };
         // "Keep prompt cache for 1 hour" gives the message markers the conversation TTL too.
         let conversation =
             req.prompt_cache_key.as_deref().is_some_and(|k| !k.is_empty()) || extras.edits.force_cache_ttl_1h;
-        let with_system = add_conversion_cache_control(&system, conversation);
-        let betas = [CONVERSION_BETAS[0], CONVERSION_BETAS[1], EFFORT_BETA].join(",");
+        let with_system = add_conversion_cache_control(system, conversation);
         let mut upstream = UpstreamRequest::post(format!("{ANTHROPIC_API}/v1/messages"))
             .json(&Value::Object(with_system))
             .header("authorization", &format!("Bearer {}", acc.credential.access_token))
             .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", &beta_headers(Some(&betas)));
+            .header("anthropic-beta", &beta_headers(CONVERSION_BETAS.into_iter().chain([EFFORT_BETA])));
         // No client headers to relay on this surface — the proxy authors the whole upstream
         // request, so the fallback fingerprint is all there is.
         upstream = with_client_fingerprint(upstream, None);
@@ -508,18 +496,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
 
         let usage_res = match usage_res {
             Ok(res) => res,
-            Err(e) => {
-                return FetchedUsage { windows: Vec::new(), account: Map::new(), stale: true, error: Some(e.to_string()), edge_blocked: false }
-            }
+            Err(e) => return FetchedUsage { stale: true, error: Some(e.to_string()), ..Default::default() },
         };
         if !usage_res.status.is_success() {
-            return FetchedUsage {
-                windows: Vec::new(),
-                account: Map::new(),
-                stale: true,
-                error: Some(format!("usage {}", usage_res.status.as_u16())),
-                edge_blocked: false,
-            };
+            let error = format!("usage {}", usage_res.status.as_u16());
+            return FetchedUsage { stale: true, error: Some(error), ..Default::default() };
         }
         let usage = usage_res.json_value().await.unwrap_or(Value::Null);
         let profile = match profile_res {
@@ -597,7 +578,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 .filter(|s| !s.is_empty() && s.chars().count() <= 40);
             profile_account.insert("plan_display_name".into(), name.map_or(Value::Null, |n| json!(n)));
         }
-        FetchedUsage { windows, account: profile_account, stale: false, error: None, edge_blocked: false }
+        FetchedUsage { windows, account: profile_account, ..Default::default() }
     }
 }
 
@@ -609,104 +590,32 @@ mod tests {
     use http::HeaderValue;
     use std::sync::Arc;
 
-    const BASE: [&str; 2] = ["oauth-2025-04-20", "claude-code-20250219"];
-    const CONVERSION_EXTRA: [&str; 2] = ["interleaved-thinking-2025-05-14", "fine-grained-tool-streaming-2025-05-14"];
-
-    fn split(header: &str) -> Vec<&str> {
-        header.split(',').collect()
-    }
-
-    // ---------------------------------------------------------------- betaHeaders
+    // ------------------------------------------------------------------ anthropic-beta
 
     #[test]
-    fn beta_headers_returns_the_two_required_flags_with_no_extra() {
-        assert_eq!(split(&beta_headers(None)), BASE);
-        assert_eq!(split(&beta_headers(Some(""))), BASE);
+    fn the_beta_header_leads_with_the_required_pair_and_keeps_the_clients_list_verbatim() {
+        let base = "oauth-2025-04-20,claude-code-20250219";
+        let features = "fine-grained-tool-streaming-2025-05-14,context-management-2025-06-27,interleaved-thinking-2025-05-14";
+        for (client, output_config, expected) in [
+            (None, false, base.to_string()),
+            (Some(""), false, base.to_string()),
+            (Some("context-management-2025-06-27"), false, format!("{base},context-management-2025-06-27")),
+            // A client copy of a required beta, or a repeat, is not doubled.
+            (Some("oauth-2025-04-20"), false, base.to_string()),
+            (Some("claude-code-20250219,context-management-2025-06-27"), false, format!("{base},context-management-2025-06-27")),
+            (Some("foo,foo,bar"), false, format!("{base},foo,bar")),
+            // Feature betas are the client's choice: forwarded in its order, never added.
+            (Some(features), false, format!("{base},{features}")),
+            // `output_config` brings the effort beta, once, after the client's own.
+            (None, true, format!("{base},{EFFORT_BETA}")),
+            (Some("context-management-2025-06-27"), true, format!("{base},context-management-2025-06-27,{EFFORT_BETA}")),
+            (Some(EFFORT_BETA), true, format!("{base},{EFFORT_BETA}")),
+        ] {
+            assert_eq!(resolve_beta_header(client, output_config), expected, "{client:?} output_config={output_config}");
+        }
     }
 
-    #[test]
-    fn beta_headers_appends_a_client_extra_not_already_in_the_base_set() {
-        assert_eq!(split(&beta_headers(Some("context-management-2025-06-27"))), ["oauth-2025-04-20", "claude-code-20250219", "context-management-2025-06-27"]);
-    }
-
-    #[test]
-    fn beta_headers_does_not_double_an_extra_that_duplicates_a_base_flag() {
-        assert_eq!(split(&beta_headers(Some("oauth-2025-04-20"))), BASE);
-    }
-
-    #[test]
-    fn beta_headers_dedups_repeated_extras_within_the_same_string() {
-        assert_eq!(split(&beta_headers(Some("foo,foo,bar"))), ["oauth-2025-04-20", "claude-code-20250219", "foo", "bar"]);
-    }
-
-    #[test]
-    fn beta_headers_preserves_extra_order_verbatim_including_feature_betas() {
-        assert_eq!(
-            split(&beta_headers(Some(&CONVERSION_EXTRA.join(",")))),
-            [BASE.as_slice(), CONVERSION_EXTRA.as_slice()].concat()
-        );
-    }
-
-    // ------------------------------------------- resolveBetaHeader (native passthrough)
-
-    #[test]
-    fn no_client_betas_and_no_output_config_emits_exactly_the_required_pair() {
-        let header = resolve_beta_header(None, false);
-        assert_eq!(split(&header), BASE);
-        assert!(!split(&header).contains(&"interleaved-thinking-2025-05-14"));
-        assert!(!split(&header).contains(&"fine-grained-tool-streaming-2025-05-14"));
-    }
-
-    #[test]
-    fn adds_the_effort_beta_when_the_patched_body_carries_output_config() {
-        assert_eq!(split(&resolve_beta_header(None, true)), [BASE.as_slice(), &[EFFORT_BETA]].concat());
-    }
-
-    #[test]
-    fn does_not_add_the_effort_beta_without_output_config_even_with_other_client_betas() {
-        let header = resolve_beta_header(Some("context-management-2025-06-27"), false);
-        assert_eq!(split(&header), [BASE.as_slice(), &["context-management-2025-06-27"]].concat());
-        assert!(!header.contains(EFFORT_BETA));
-    }
-
-    #[test]
-    fn does_not_double_a_client_supplied_effort_beta_when_output_config_is_present() {
-        let header = resolve_beta_header(Some(EFFORT_BETA), true);
-        assert_eq!(split(&header).iter().filter(|b| **b == EFFORT_BETA).count(), 1);
-        assert_eq!(split(&header), [BASE.as_slice(), &[EFFORT_BETA]].concat());
-    }
-
-    #[test]
-    fn keeps_other_client_betas_alongside_the_auto_added_effort_beta() {
-        let header = resolve_beta_header(Some("context-management-2025-06-27"), true);
-        assert_eq!(split(&header), [BASE.as_slice(), &["context-management-2025-06-27", EFFORT_BETA]].concat());
-    }
-
-    #[test]
-    fn treats_an_absent_client_beta_the_same_as_none() {
-        assert_eq!(split(&resolve_beta_header(None, true)), [BASE.as_slice(), &[EFFORT_BETA]].concat());
-    }
-
-    #[test]
-    fn honors_the_clients_own_choice_to_send_interleaved_thinking() {
-        let header = resolve_beta_header(Some("interleaved-thinking-2025-05-14"), false);
-        assert_eq!(split(&header), [BASE.as_slice(), &["interleaved-thinking-2025-05-14"]].concat());
-    }
-
-    #[test]
-    fn preserves_the_clients_full_beta_list_verbatim_and_in_order() {
-        let client_list = ["fine-grained-tool-streaming-2025-05-14", "context-management-2025-06-27", "interleaved-thinking-2025-05-14"];
-        let header = resolve_beta_header(Some(&client_list.join(",")), false);
-        assert_eq!(split(&header), [BASE.as_slice(), client_list.as_slice()].concat());
-    }
-
-    #[test]
-    fn a_client_sending_one_of_the_fixed_pair_is_not_doubled() {
-        let header = resolve_beta_header(Some("claude-code-20250219,context-management-2025-06-27"), false);
-        assert_eq!(split(&header), [BASE.as_slice(), &["context-management-2025-06-27"]].concat());
-    }
-
-    // ------------------------------------------------------------------ supportsModel
+    // ----------------------------------------------------------------- supports_model
 
     #[test]
     fn supports_model_fable_seat_eligibility() {
@@ -767,7 +676,6 @@ mod tests {
 
     fn chat_request(messages: Value, tools: Option<Value>, prompt_cache_key: Option<&str>) -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "claude-code/claude-opus-5".into(),
             raw_model: "claude-code/claude-opus-5".into(),
             upstream_model: "claude-opus-5".into(),
             messages: messages.as_array().cloned().unwrap(),
@@ -847,7 +755,7 @@ mod tests {
 
     fn system_after_prepend(system: Value) -> Value {
         let body = json!({ "system": system }).as_object().cloned().unwrap();
-        prepend_required_system(&body)["system"].clone()
+        prepend_required_system(body).remove("system").unwrap()
     }
 
     #[test]
@@ -1089,7 +997,7 @@ mod tests {
         assert_eq!(transport.requests()[0].header("user-agent"), Some(CLAUDE_CLIENT_FINGERPRINT[0].1));
     }
 
-    // ------------------------------------------------------------------- fetchUsage
+    // ------------------------------------------------------------------ fetch_usage
 
     /// Answers the two concurrent GETs fetch_usage makes, by URL rather than by call order.
     fn stub_usage(transport: &Arc<MockTransport>, usage: Value, profile: Value, usage_status: StatusCode, profile_status: StatusCode) {
@@ -1306,7 +1214,7 @@ mod tests {
         assert!(!usage.edge_blocked);
     }
 
-    // ------------------------------------------------------------------- listModels
+    // ------------------------------------------------------------------ list_models
 
     #[tokio::test]
     async fn list_models_maps_ids_and_reports_a_non_ok_status() {
@@ -1330,7 +1238,7 @@ mod tests {
         assert_eq!(listed.error.as_deref(), Some("models 401"));
     }
 
-    // ------------------------------------------------------------- refreshIfNeeded
+    // ----------------------------------------------------------- refresh_if_needed
 
     #[tokio::test]
     async fn refresh_if_needed_exchanges_an_expired_credential() {

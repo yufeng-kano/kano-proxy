@@ -1,5 +1,5 @@
 //! Test storage: a fresh, uniquely named Postgres database per test, migrated with the core
-//! baseline (docs/rust-server.md § Verification). Replaces the TypeScript `FakeD1` double.
+//! baseline (docs/rust-server.md § Verification).
 //!
 //! Every helper returns `None` when `KANO_TEST_DATABASE_URL` (default
 //! `postgres://postgres:test@127.0.0.1:55432/postgres`) is unreachable, so a machine without
@@ -15,7 +15,7 @@ use sqlx::PgPool;
 use crate::config::CoreConfig;
 use crate::crypto::token_crypto::encrypt_json;
 use crate::db::accounts::AccountRow;
-use crate::db::users::{GoogleProfile, UserRow};
+use crate::db::users::UserRow;
 use crate::extensions::Extensions;
 use crate::ids::{new_id, now_iso};
 use crate::pool::StoredCredential;
@@ -24,7 +24,7 @@ use crate::AppState;
 
 /// Base64 of 32 zero-ish bytes; only ever used against throwaway test databases.
 pub const TEST_TOKEN_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
-pub const TEST_SESSION_SECRET: &str = "test-session-secret-not-real";
+const TEST_SESSION_SECRET: &str = "test-session-secret-not-real";
 pub const TEST_APP_URL: &str = "https://app.example.com";
 
 fn admin_url() -> String {
@@ -38,7 +38,7 @@ pub fn skip_without_db() {
     eprintln!("skipping: no test database at KANO_TEST_DATABASE_URL");
 }
 
-/// A pool on a freshly created `kano_test_<hex>` database with the core migrations applied.
+/// A pool on a freshly created `kano_test_<secs>_<hex>` database with the core migrations applied.
 /// `None` means the server is unreachable (never a hidden failure of the migrations
 /// themselves, which still panic).
 pub async fn test_pool() -> Option<PgPool> {
@@ -117,8 +117,7 @@ pub fn test_config() -> CoreConfig {
 
 /// An [`AppState`] on `pool` whose only upstream is `transport` — no test ever reaches a real
 /// provider or Google (docs/testing.md).
-/// Background work is off, as the Worker tests' no-op `waitUntil` left it: the mock
-/// transport then sees exactly the handler's own requests.
+/// Background work is off, so the mock transport sees exactly the handler's own requests.
 pub fn test_state(pool: PgPool, transport: Arc<dyn UpstreamTransport>) -> AppState {
     AppState::builder(test_config(), pool).transport(transport).background_work(false).build()
 }
@@ -142,8 +141,32 @@ pub async fn insert_user(pool: &PgPool, email: &str) -> UserRow {
 /// A user straight from Google sign-in, before the usage notice. Writes only baseline columns,
 /// so it also works on the schema an upgrade test starts from.
 pub async fn insert_user_without_notice(pool: &PgPool, email: &str) -> UserRow {
-    let profile = GoogleProfile { sub: format!("sub-{email}"), email: email.into(), name: Some("Test User".into()), picture: None };
-    crate::db::users::upsert_google_user(pool, &profile).await.expect("insert user")
+    let ts = now_iso();
+    let user = UserRow {
+        id: new_id("usr"),
+        google_sub: format!("sub-{email}"),
+        email: email.into(),
+        name: Some("Test User".into()),
+        picture_url: None,
+        created_at: ts.clone(),
+        updated_at: ts,
+        notice_version: None,
+        notice_accepted_at: None,
+    };
+    sqlx::query(
+        "INSERT INTO users (id, google_sub, email, name, picture_url, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, NULL, $5, $6)",
+    )
+    .bind(&user.id)
+    .bind(&user.google_sub)
+    .bind(&user.email)
+    .bind(user.name.as_deref())
+    .bind(&user.created_at)
+    .bind(&user.updated_at)
+    .execute(pool)
+    .await
+    .expect("insert user");
+    user
 }
 
 /// An API key row for `user_id`, returning the plaintext the client would present.
@@ -198,13 +221,9 @@ async fn sweep_stale_test_databases(admin: &PgPool) {
         Err(_) => return,
     };
     for name in names {
+        // A name without the creation time is not this helper's to drop.
         let created: Option<i64> = name.strip_prefix("kano_test_").and_then(|rest| rest.split('_').next()).and_then(|s| s.parse().ok());
-        let stale = match created {
-            Some(secs) => secs < cutoff,
-            // Old naming scheme (no timestamp): always stale.
-            None => true,
-        };
-        if stale {
+        if created.is_some_and(|secs| secs < cutoff) {
             let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)")).execute(admin).await;
         }
     }

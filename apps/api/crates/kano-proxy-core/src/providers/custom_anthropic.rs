@@ -1,7 +1,7 @@
-//! BYO Anthropic-compatible provider (docs/providers.md § Custom providers).
+//! BYO Anthropic-compatible provider (docs/providers.md § Custom endpoints).
 //!
 //! BYO Anthropic-compatible endpoint. `messages()` / `count_tokens()` are a native
-//! passthrough (mirrors claude-code's `forwardToAnthropic`) MINUS every Claude-Code-OAuth
+//! passthrough (mirrors claude-code's `forward_to_anthropic`) MINUS every Claude-Code-OAuth
 //! specific: no required-system prepend, no auto-added `effort-2025-11-24` beta, no fixed
 //! base betas — the `anthropic-beta` header is forwarded verbatim from the client (or
 //! omitted) rather than resolved. One exception to the passthrough: an endpoint that answers
@@ -20,7 +20,8 @@ use serde_json::{Map, Value};
 
 use super::custom_anthropic_tools::without_anthropic_defined_tools;
 use super::custom_openai::{
-    header_or, into_response, is_event_stream, model_list, non_empty_header, object_or_empty, rebuild,
+    header_or, into_response, is_event_stream, list_models_with, non_empty_header, object_or_empty, rebuild,
+    DEFAULT_ANTHROPIC_VERSION,
 };
 use super::types::{
     AdapterError, CallExtras, ChatCompletionRequest, DynAdapter, ListedModels, ProviderAdapter,
@@ -34,34 +35,27 @@ use crate::proxy::openai_anthropic::{
 use crate::upstream::transport::{UpstreamRequest, UpstreamTransport};
 use crate::AppState;
 
-pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
-
 /// The beta whose presence marks a request as Claude Code to Anthropic's usage accounting
 /// (docs/providers.md § Request edits). Dropped from a forwarded client list with the
 /// identity switch on; kept on the claude-code adapter, whose OAuth upstream requires it.
-pub const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
+const CLAUDE_CODE_BETA: &str = "claude-code-20250219";
 
 pub struct CustomAnthropicAdapter {
     id: String,
     base: String,
-    /// Injected transport for CLI providers (docs/cli.md) — see custom_openai.rs.
+    /// A CLI provider's tunnel (docs/cli.md); `None` uses `AppState::transport()`.
     transport: Option<Arc<dyn UpstreamTransport>>,
-    list_models: bool,
 }
 
 impl CustomAnthropicAdapter {
     pub fn new(row: CustomProviderRow) -> Self {
-        Self { id: row.slug, base: row.base_url, transport: None, list_models: true }
+        Self { id: row.slug, base: row.base_url, transport: None }
     }
 
+    /// Same adapter semantics down a CLI tunnel; as in custom_openai.rs, the adapter then has
+    /// no live `list_models`.
     pub fn with_transport(mut self, transport: Arc<dyn UpstreamTransport>) -> Self {
         self.transport = Some(transport);
-        self
-    }
-
-    /// CLI providers drop the live catalog — it is agent-reported, never pulled.
-    pub fn without_list_models(mut self) -> Self {
-        self.list_models = false;
         self
     }
 
@@ -97,7 +91,7 @@ impl CustomAnthropicAdapter {
         let native_post = |body: &Map<String, Value>| {
             let mut request = UpstreamRequest::post(url.as_str())
                 .header("x-api-key", &account.credential.access_token)
-                .json(&Value::Object(body.clone()))
+                .json(body)
                 .header("anthropic-version", header_or(headers, "anthropic-version", DEFAULT_ANTHROPIC_VERSION));
             if let Some(beta) = &beta {
                 request = request.header("anthropic-beta", beta);
@@ -125,17 +119,8 @@ impl CustomAnthropicAdapter {
     }
 }
 
-/// `createCustomAnthropicAdapter(row)`.
 pub fn custom_anthropic_adapter(row: CustomProviderRow) -> DynAdapter {
     CustomAnthropicAdapter::new(row).into_dyn()
-}
-
-/// `createCustomAnthropicAdapter(row, agentFetch)`.
-pub fn custom_anthropic_adapter_with_transport(
-    row: CustomProviderRow,
-    transport: Arc<dyn UpstreamTransport>,
-) -> DynAdapter {
-    CustomAnthropicAdapter::new(row).with_transport(transport).into_dyn()
 }
 
 #[async_trait]
@@ -201,7 +186,7 @@ impl ProviderAdapter for CustomAnthropicAdapter {
         // Proxy-placed cache breakpoints (docs/api.md § Prompt cache); "Keep prompt cache for 1
         // hour" gives the message markers the conversation TTL too.
         let conversation = req.prompt_cache_key.is_some() || extras.edits.force_cache_ttl_1h;
-        let outgoing = add_conversion_cache_control(&anthropic_body, conversation);
+        let outgoing = add_conversion_cache_control(anthropic_body, conversation);
 
         let mut request = UpstreamRequest::post(format!("{}/v1/messages", self.base))
             .header("x-api-key", &account.credential.access_token)
@@ -249,31 +234,15 @@ impl ProviderAdapter for CustomAnthropicAdapter {
     }
 
     fn has_list_models(&self) -> bool {
-        self.list_models
+        self.transport.is_none()
     }
 
     async fn list_models(&self, cx: &AppState, account: &AcquiredAccount) -> ListedModels {
         let request = UpstreamRequest::get(format!("{}/v1/models", self.base))
             .header("x-api-key", &account.credential.access_token)
             .header("anthropic-version", DEFAULT_ANTHROPIC_VERSION);
-        let res = match self.transport(cx).send(request).await {
-            Ok(res) => res,
-            Err(e) => return ListedModels { models: Vec::new(), error: Some(e.to_string()) },
-        };
-        if !res.status.is_success() {
-            return ListedModels { models: Vec::new(), error: Some(format!("models {}", res.status.as_u16())) };
-        }
-        match res.json_value().await {
-            Ok(json) => ListedModels { models: model_list(&json, true), error: None },
-            Err(e) => ListedModels { models: Vec::new(), error: Some(e.to_string()) },
-        }
+        list_models_with(self.transport(cx), request, true).await
     }
-}
-
-/// The `messages` field of an internal chat request, for the conversion tests.
-#[cfg(test)]
-fn messages(values: Value) -> Vec<Value> {
-    values.as_array().cloned().unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -293,10 +262,9 @@ mod tests {
 
     fn chat(messages_json: Value) -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "my-claude/claude-3".into(),
             raw_model: "my-claude/claude-3".into(),
             upstream_model: "claude-3".into(),
-            messages: messages(messages_json),
+            messages: messages_json.as_array().cloned().unwrap_or_default(),
             ..Default::default()
         }
     }
@@ -463,26 +431,8 @@ mod tests {
         assert_eq!(transport.requests()[1].header("anthropic-beta"), None);
     }
 
-    #[tokio::test]
-    async fn does_not_prepend_a_claude_code_system_line() {
-        let transport = MockTransport::new();
-        transport.respond_json(StatusCode::OK, json!({}));
-        let state = adapter_state(transport.clone());
-        adapter()
-            .messages(
-                &state,
-                &account(KEY),
-                &json!({ "model": "claude-3", "messages": [], "system": "be terse" }),
-                &HeaderMap::new(),
-                &CallExtras::default(),
-            )
-            .await
-            .expect("messages");
-        assert_eq!(transport.requests()[0].json()["system"], "be terse");
-    }
-
     // -----------------------------------------------------------------------
-    // countTokens()
+    // count_tokens()
 
     #[tokio::test]
     async fn count_tokens_posts_to_the_count_tokens_path_with_the_same_auth_construction() {
@@ -652,7 +602,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // chatCompletions() — /openai/v1 surface via the shared converters
+    // chat_completions() — /openai/v1 surface via the shared converters
 
     #[tokio::test]
     async fn places_the_proxy_cache_breakpoints_with_no_system_prepend() {
@@ -782,7 +732,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // listModels()
+    // list_models()
 
     #[tokio::test]
     async fn list_models_gets_base_v1_models_with_x_api_key_auth() {

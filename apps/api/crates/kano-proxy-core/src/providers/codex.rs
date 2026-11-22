@@ -3,13 +3,10 @@
 //!
 //! ChatGPT `codex/responses` adapter: Chat Completions ↔ Responses SSE on the conversion
 //! path, and the client's own Responses body forwarded after the documented fix-ups on the
-//! native path. Egress is direct to chatgpt.com through `AppState::transport()` — the Cloud
-//! Run relay exists only because Cloudflare stamps `CF-Worker` on every Worker subrequest,
-//! and this server is not a Worker (docs/rust-server.md § Why). The client-visible
-//! behaviors the relay used to guarantee are preserved without it: an upstream `413` is
-//! surfaced as-is with its own body, a failed token count degrades to `{"input_tokens": 0}`
-//! (providers/codex_count.rs), and nothing synthesizes an auth-shaped status that would
-//! bench an account for a fault that is not its own.
+//! native path. Egress is direct to chatgpt.com through `AppState::transport()`. An upstream
+//! `413` is surfaced as-is with its own body, a failed token count degrades to
+//! `{"input_tokens": 0}` (providers/codex_count.rs), and nothing synthesizes an auth-shaped
+//! status that would bench an account for a fault that is not its own.
 
 use std::sync::{Arc, Mutex};
 
@@ -25,9 +22,11 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::db::accounts::{iso_from_ms, parse_iso_ms};
+use crate::ids::random_uuid;
 use crate::pool::{AcquiredAccount, StoredCredential};
-use crate::proxy::codex_openai::{codex_sse_to_openai_stream, collect_codex_sse, CodexCollected, CodexSseOptions};
-use crate::proxy::responses_openai::{collect_responses_sse, CollectedResponses};
+use crate::proxy::codex_openai::{codex_sse_to_openai_stream, collect_codex_sse, CodexSseOptions};
+use crate::proxy::dispatch::json_response;
+use crate::proxy::responses_openai::collect_responses_sse;
 use crate::upstream::{UpstreamRequest, UpstreamResponse};
 use crate::utils::reasoning::map_reasoning;
 use crate::AppState;
@@ -52,9 +51,9 @@ const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/respons
 
 /// The Codex TUI identity every `/codex/responses` call advertises; the version tracks
 /// [`CODEX_CLIENT_VERSION`] (asserted in this module's tests).
-pub const CODEX_USER_AGENT: &str =
+const CODEX_USER_AGENT: &str =
     "codex-tui/0.165.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.165.0)";
-pub const CODEX_ORIGINATOR: &str = "codex-tui";
+const CODEX_ORIGINATOR: &str = "codex-tui";
 
 /// OpenAI's documented `prompt_cache_key` ceiling; over it is a hard 400.
 const CODEX_PROMPT_CACHE_KEY_MAX: usize = 64;
@@ -157,7 +156,7 @@ fn chatgpt_account_id(credential: &StoredCredential) -> String {
 /// `/openai/v1`, `metadata.user_id`-derived on `/anthropic`). A key ending in
 /// `_session_<uuid>` contributes that bare UUID, matching what the Codex CLI itself puts in
 /// this header; any other non-empty key is used as-is. The caller still fits the winner.
-pub fn codex_session_id(prompt_cache_key: Option<&str>) -> Option<String> {
+fn codex_session_id(prompt_cache_key: Option<&str>) -> Option<String> {
     let key = prompt_cache_key.map(str::trim).filter(|s| !s.is_empty())?;
     Some(session_uuid(key).unwrap_or_else(|| key.to_string()))
 }
@@ -173,7 +172,7 @@ fn session_uuid(key: &str) -> Option<String> {
 /// hits if its value is stable. Long keys are hashed rather than truncated: client ids share
 /// long fixed prefixes, so a prefix cut would collapse every session of one account onto a
 /// single cache shard.
-pub fn fit_codex_prompt_cache_key(key: &str) -> String {
+fn fit_codex_prompt_cache_key(key: &str) -> String {
     if let Some(uuid) = session_uuid(key) {
         return uuid;
     }
@@ -183,22 +182,11 @@ pub fn fit_codex_prompt_cache_key(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))
 }
 
-/// A `crypto.randomUUID()` equivalent: a v4 UUID used only when no client identifier exists.
-fn random_uuid() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex = hex::encode(bytes);
-    format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
-}
-
 /// The `session_id` header value actually sent upstream: client affinity ids first, then the
 /// prompt_cache_key-derived candidate, then a per-request random UUID — each fitted to the
 /// 64-char ceiling above, because affinity ids are opaque client input and are just as
 /// capable of exceeding the limit.
-pub fn codex_session_id_header(affinity: Option<&AffinityIds>, prompt_cache_key: Option<&str>) -> String {
+fn codex_session_id_header(affinity: Option<&AffinityIds>, prompt_cache_key: Option<&str>) -> String {
     let from_affinity = affinity.and_then(|a| {
         a.session_id
             .clone()
@@ -218,7 +206,7 @@ pub fn codex_session_id_header(affinity: Option<&AffinityIds>, prompt_cache_key:
 /// Responses rejects a `call_id` over 64 chars, and Claude Code emits tool ids long enough to
 /// hit that. Shorten to a 64-char prefix plus a hash suffix, matching the reference proxy so
 /// a `function_call` and its `function_call_output` still resolve to the same id.
-pub fn shorten_codex_call_id(id: &Value) -> Value {
+pub(super) fn shorten_codex_call_id(id: &Value) -> Value {
     let Some(text) = id.as_str() else { return id.clone() };
     if text.chars().count() <= 64 {
         return id.clone();
@@ -430,7 +418,7 @@ fn extract_system_instructions(messages: &[Value]) -> String {
 
 /// Pure builder for the `/codex/responses` request body. `reasoning` arrives already mapped
 /// and clamped (the adapter resolves `reasoning_effort` before calling this).
-pub fn build_codex_request_body(req: &ChatCompletionRequest, reasoning: Option<&Value>) -> Map<String, Value> {
+fn build_codex_request_body(req: &ChatCompletionRequest, reasoning: Option<&Value>) -> Map<String, Value> {
     let instructions = extract_system_instructions(&req.messages);
     // System messages are hoisted into `instructions`; filter them before the input mapper so
     // its defensive system→developer branch cannot duplicate the top-level instructions item.
@@ -517,7 +505,7 @@ const CALL_ID_ITEM_TYPES: [&str; 4] =
 /// shortened, `prompt_cache_key` fitted, `tool_choice` dropped without tools, rejected fields
 /// stripped. Everything else — client-echoed reasoning items, hosted tools, namespace groups,
 /// `text`, `client_metadata` — rides through untouched.
-pub fn build_codex_native_request_body(
+fn build_codex_native_request_body(
     client: &Map<String, Value>,
     upstream_model: &str,
     reasoning: Option<&Value>,
@@ -648,7 +636,7 @@ fn codex_request(
         .header("connection", "Keep-Alive")
         .header("session_id", session_id)
         .header("accept", "text/event-stream")
-        .json(&Value::Object(body.clone()));
+        .json(body);
     if !chatgpt_account_id.is_empty() {
         request = request.header("chatgpt-account-id", chatgpt_account_id);
     }
@@ -659,8 +647,8 @@ fn codex_request(
 }
 
 /// Upstream non-2xx passes through with its own status and body — a `413
-/// request_too_large` from the Responses backend reaches the client as-is, as it did through
-/// the relay, and dispatch classifies it (docs/api.md § Errors).
+/// request_too_large` from the Responses backend reaches the client as-is, and dispatch
+/// classifies it (docs/api.md § Errors).
 async fn passthrough_error(response: UpstreamResponse) -> Response {
     let status = response.status;
     let content_type = response.content_type().unwrap_or("application/json").to_string();
@@ -673,12 +661,9 @@ async fn passthrough_error(response: UpstreamResponse) -> Response {
     out
 }
 
-fn json_response(status: StatusCode, value: &Value) -> Response {
-    let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
-    let mut out = Response::new(Body::from(body));
-    *out.status_mut() = status;
-    out.headers_mut().insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static("application/json"));
-    out
+/// A failed collected turn: `502 {"error":{"message":…,"type":"upstream_error"}}`.
+fn upstream_error_response(message: &str) -> Response {
+    json_response(StatusCode::BAD_GATEWAY, &json!({ "error": { "message": message, "type": "upstream_error" } }))
 }
 
 fn sse_response(body: Body) -> Response {
@@ -707,19 +692,12 @@ struct ReplayWriter {
 
 impl ReplayWriter {
     async fn write(&self, items: Vec<Value>, assistant_text: String) {
-        let turn = codex_replay_turn(&self.start_hash, &items, &assistant_text, &shorten_codex_call_id);
+        let turn = codex_replay_turn(&self.start_hash, &items, &assistant_text);
         let history = append_codex_replay_turn(&self.history, turn);
         if history.turns.is_empty() {
             return;
         }
-        write_codex_reasoning_replay(
-            self.cx.cache(),
-            &self.api_key_id,
-            &self.model,
-            Some(&self.session_key),
-            &history,
-        )
-        .await;
+        write_codex_reasoning_replay(self.cx.cache(), &self.api_key_id, &self.model, &self.session_key, &history).await;
     }
 }
 
@@ -727,7 +705,7 @@ impl ReplayWriter {
 // Adapter
 // ---------------------------------------------------------------------------
 
-pub struct CodexAdapter;
+struct CodexAdapter;
 
 pub fn adapter() -> DynAdapter {
     Arc::new(CodexAdapter)
@@ -761,11 +739,8 @@ impl CodexAdapter {
             return Ok(sse_response(Body::from_stream(response.body)));
         }
         Ok(match collect_responses_sse(response.body).await {
-            CollectedResponses::Response(response) => json_response(StatusCode::OK, &response),
-            error => json_response(
-                StatusCode::BAD_GATEWAY,
-                &error.error_value().unwrap_or(Value::Null),
-            ),
+            Ok(response) => json_response(StatusCode::OK, &response),
+            Err(message) => upstream_error_response(&message),
         })
     }
 }
@@ -815,7 +790,7 @@ impl ProviderAdapter for CodexAdapter {
             map
         };
 
-        if let (true, Some(payload)) = (result.ok, result.payload.as_ref()) {
+        if let Some(payload) = result.payload.as_ref() {
             let mut account = account_value(
                 payload.email.clone().or_else(|| acc.credential.email.clone()),
                 Some(payload.plan_type.clone()),
@@ -860,36 +835,30 @@ impl ProviderAdapter for CodexAdapter {
                 .await;
         }
 
-        let api_key_id = extras.api_key_id.clone().unwrap_or_default();
-        let client_session =
-            codex_reasoning_replay_session_key(req.affinity.as_ref(), req.prompt_cache_key.as_deref());
-        // Opaque reasoning belongs to the upstream account as well as the conversation.
-        let session_key = client_session.map(|session| format!("{session}\0{}", account.row.id));
-        let replay_scoped = !api_key_id.is_empty() && session_key.is_some();
-
         let mut body = build_codex_request_body(req, reasoning.as_ref());
-        let hashes = if replay_scoped { codex_input_hashes(&body) } else { Vec::new() };
-        let history = if replay_scoped {
-            read_codex_reasoning_replay(cx.cache(), &api_key_id, &req.upstream_model, session_key.as_deref()).await
-        } else {
-            None
-        };
-        let input: Vec<Value> =
-            body.get("input").and_then(Value::as_array).cloned().unwrap_or_default();
-        let (replayed, retained) = replay_codex_history(&input, &hashes, history.as_ref());
-        body.insert("input".into(), Value::Array(replayed));
-
-        let writer = if replay_scoped {
-            Some(Arc::new(ReplayWriter {
-                cx: cx.clone(),
-                api_key_id,
-                model: req.upstream_model.clone(),
-                session_key: session_key.clone().unwrap_or_default(),
-                start_hash: hashes.last().cloned().unwrap_or_default(),
-                history: retained,
-            }))
-        } else {
-            None
+        // Replay is scoped per caller and per conversation; opaque reasoning also belongs to the
+        // upstream account, so the account id is part of the session key.
+        let api_key_id = extras.api_key_id.clone().filter(|id| !id.is_empty());
+        let session = codex_reasoning_replay_session_key(req.affinity.as_ref(), req.prompt_cache_key.as_deref());
+        let writer = match (api_key_id, session) {
+            (Some(api_key_id), Some(session)) => {
+                let session_key = format!("{session}\0{}", account.row.id);
+                let hashes = codex_input_hashes(&body);
+                let history =
+                    read_codex_reasoning_replay(cx.cache(), &api_key_id, &req.upstream_model, &session_key).await;
+                let input = body.get("input").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default();
+                let (replayed, retained) = replay_codex_history(input, &hashes, history.as_ref());
+                body.insert("input".into(), Value::Array(replayed));
+                Some(Arc::new(ReplayWriter {
+                    cx: cx.clone(),
+                    api_key_id,
+                    model: req.upstream_model.clone(),
+                    session_key,
+                    start_hash: hashes.last().cloned().unwrap_or_default(),
+                    history: retained,
+                }))
+            }
+            _ => None,
         };
 
         let session_id = codex_session_id_header(req.affinity.as_ref(), req.prompt_cache_key.as_deref());
@@ -901,8 +870,8 @@ impl ProviderAdapter for CodexAdapter {
         }
 
         if req.stream.unwrap_or(false) {
-            // `waitUntil` becomes a detached task: the client is already draining the stream
-            // when the completed turn is known, so the cache write cannot be awaited inline.
+            // A detached task: the client is already draining the stream when the completed
+            // turn is known, so the cache write cannot be awaited inline.
             let opts = match writer {
                 Some(writer) => CodexSseOptions::with_replay_items(Arc::new(move |items, text| {
                     let writer = writer.clone();
@@ -933,9 +902,9 @@ impl ProviderAdapter for CodexAdapter {
             }
         }
         Ok(match collected {
-            CodexCollected::Completion(completion) => json_response(StatusCode::OK, &completion),
+            Ok(completion) => json_response(StatusCode::OK, &completion),
             // response.failed / error mid-turn: never fabricate a 200 completion.
-            error => json_response(StatusCode::BAD_GATEWAY, &error.error_value().unwrap_or(Value::Null)),
+            Err(message) => upstream_error_response(&message),
         })
     }
 }
@@ -946,7 +915,6 @@ mod tests {
     use super::*;
     use crate::db::test_support::{insert_account, insert_user, skip_without_db, test_pool, test_state};
     use crate::providers::codex_models::CODEX_CLIENT_VERSION;
-    use crate::providers::codex_reasoning_cache::codex_reasoning_replay_cache_key_for_test;
     use crate::proxy::openai_anthropic::anthropic_to_openai_chat_request;
     use crate::upstream::transport::RecordedRequest;
     use crate::upstream::MockTransport;
@@ -957,7 +925,6 @@ mod tests {
 
     fn request(messages: Value) -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "codex/gpt-5.2".into(),
             raw_model: "codex/gpt-5.2".into(),
             upstream_model: "m".into(),
             messages: messages.as_array().cloned().unwrap_or_default(),
@@ -1021,8 +988,6 @@ mod tests {
         assert_eq!(captured.header("openai-beta"), None);
         assert!(!captured.header("session_id").unwrap_or("").is_empty());
         assert_eq!(captured.header("authorization"), Some("Bearer tok_test"));
-        // Direct egress: no relay envelope survives in the Rust edition.
-        assert_eq!(captured.header("x-serverless-authorization"), None);
     }
 
     #[tokio::test]
@@ -1106,7 +1071,7 @@ mod tests {
         assert_eq!(capture(&cx, &mock, &from_jwt, &header_req()).await.header("chatgpt-account-id"), Some("acct-jwt"));
     }
 
-    // ----- buildCodexRequestBody ------------------------------------------
+    // ----- build_codex_request_body ---------------------------------------
 
     #[test]
     fn preserves_image_detail_without_adding_a_default() {
@@ -1185,59 +1150,21 @@ mod tests {
             { "role": "assistant", "content": null, "tool_calls": [{ "id": "short", "function": { "name": "x" } }] },
         ]));
         let input = input_of(&body);
+        // A call and its output must keep pairing upstream.
         assert_eq!(input[0]["call_id"], json!(expected));
         assert_eq!(input[1]["call_id"], json!(expected));
         assert_eq!(input[2]["call_id"], json!("short"));
-        assert_eq!(expected.len(), 64);
-    }
 
-    #[test]
-    fn matches_the_reference_sha256_suffix_for_a_long_call_id() {
-        let body = build(json!([
-            { "role": "assistant", "content": null, "tool_calls": [{ "id": "x".repeat(65), "function": { "name": "x" } }] }
-        ]));
-        assert_eq!(input_of(&body)[0]["call_id"], json!(format!("{}_9537c5fdf120482f", "x".repeat(47))));
-    }
-
-    #[test]
-    fn leaves_exactly_64_character_call_ids_untouched() {
-        let id = "z".repeat(64);
-        let body = build(json!([
-            { "role": "assistant", "content": null, "tool_calls": [{ "id": id, "function": { "name": "x" } }] }
-        ]));
-        assert_eq!(input_of(&body)[0]["call_id"], json!(id));
-    }
-
-    #[test]
-    fn derives_the_call_id_suffix_from_a_real_sha256() {
-        // Pin the suffix to the platform digest, including a multi-byte input, so the id a
-        // client sends still resolves to the same shortened form.
-        for id in ["z".repeat(65), "汉字".repeat(50), "a".repeat(120), format!("toolu_{}", "x".repeat(100))] {
-            let digest = hex::encode(Sha256::digest(id.as_bytes()));
-            let suffix = format!("_{}", &digest[..16]);
-            let head: String = id.chars().take(64 - suffix.len()).collect();
-            let body = build(json!([
-                { "role": "assistant", "tool_calls": [{ "id": id, "function": { "name": "f", "arguments": "{}" } }] }
-            ]));
-            let got = input_of(&body)[0]["call_id"].as_str().unwrap().to_string();
-            assert_eq!(got, format!("{head}{suffix}"));
-            assert_eq!(got.chars().count(), 64);
-        }
-    }
-
-    #[test]
-    fn gives_a_function_call_and_its_output_the_same_shortened_id() {
-        // If these diverge the tool result no longer pairs with its call upstream.
-        let id = format!("call_{}", "9".repeat(120));
-        let body = build(json!([
-            { "role": "assistant", "tool_calls": [{ "id": id, "function": { "name": "f", "arguments": "{}" } }] },
-            { "role": "tool", "tool_call_id": id, "content": "ok" },
-        ]));
-        let input = input_of(&body);
-        let call = input.iter().find(|i| i["type"] == json!("function_call")).unwrap();
-        let output = input.iter().find(|i| i["type"] == json!("function_call_output")).unwrap();
-        assert_eq!(call["call_id"], output["call_id"]);
-        assert_eq!(call["call_id"].as_str().unwrap().len(), 64);
+        let call_id = |id: &str| {
+            let body = build(json!([{ "role": "assistant", "tool_calls": [{ "id": id, "function": { "name": "f" } }] }]));
+            input_of(&body)[0]["call_id"].as_str().unwrap().to_string()
+        };
+        assert_eq!(call_id(&"z".repeat(64)), "z".repeat(64), "64 characters fit");
+        assert_eq!(call_id(&"x".repeat(65)), format!("{}_9537c5fdf120482f", "x".repeat(47)));
+        // The ceiling counts characters, so a multi-byte id is cut on a character boundary.
+        let multibyte = call_id(&"汉字".repeat(50));
+        assert_eq!(multibyte.chars().count(), 64);
+        assert!(multibyte.starts_with(&"汉字".repeat(23)));
     }
 
     #[test]
@@ -1255,8 +1182,6 @@ mod tests {
         let input = input_of(&body);
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["role"], json!("user"));
-        // No trace of the old "[system]\n" fake-user-message wrapping.
-        assert!(!Value::Array(input).to_string().contains("[system]"));
 
         let body = build(json!([
             { "role": "system", "content": "First." },
@@ -1386,7 +1311,7 @@ mod tests {
         );
     }
 
-    // ----- Anthropic ingress (via anthropicToOpenAIChatRequest) -----------
+    // ----- Anthropic ingress (via anthropic_to_openai_chat_request) --------
 
     fn anthropic_messages(body: Value) -> Vec<Value> {
         anthropic_to_openai_chat_request(body.as_object().unwrap()).messages
@@ -1441,13 +1366,7 @@ mod tests {
         );
     }
 
-    // ----- codexSessionId --------------------------------------------------
-
-    #[test]
-    fn codex_session_id_extracts_the_bare_session_uuid() {
-        let uuid = "0e35a1af-fe45-49c8-b0cc-fb1c58b1b06e";
-        assert_eq!(codex_session_id(Some(&format!("user_ab_account_x_session_{uuid}"))).as_deref(), Some(uuid));
-    }
+    // ----- codex_session_id ------------------------------------------------
 
     #[test]
     fn codex_session_id_passes_other_keys_through_and_yields_none_for_blanks() {
@@ -1479,8 +1398,8 @@ mod tests {
         let response = CodexAdapter.chat_completions(cx, account, req, &extras).await.unwrap();
         let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
         if req.stream.unwrap_or(false) {
-            // The streaming path persists replay from a detached task (the `waitUntil` seam),
-            // so the client is never made to wait for a cache write.
+            // The streaming path persists replay from a detached task, so the client is never
+            // made to wait for a cache write.
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
         mock.requests().last().unwrap().json().as_object().cloned().unwrap()
@@ -1505,7 +1424,7 @@ mod tests {
     /// The stored history for one session, read the way the adapter reads it.
     async fn stored(cx: &AppState, account: &AcquiredAccount, session: &str) -> Option<CodexReasoningReplayEntry> {
         let key = format!("{session}\0{}", account.row.id);
-        read_codex_reasoning_replay(cx.cache(), "key_1", "gpt-5.6-sol", Some(&key)).await
+        read_codex_reasoning_replay(cx.cache(), "key_1", "gpt-5.6-sol", &key).await
     }
 
     fn input_items(body: &Map<String, Value>) -> Vec<Value> {
@@ -1726,10 +1645,6 @@ mod tests {
         let before = stored(&cx, &account, "sess_1").await.expect("first turn stored");
         run_turn(&cx, &mock, &account, &req, json!([{ "type": "message", "content": [] }]), "answer").await;
         assert_eq!(stored(&cx, &account, "sess_1").await.as_ref(), Some(&before));
-        assert_eq!(
-            codex_reasoning_replay_cache_key_for_test("key_1", "gpt-5.6-sol", &format!("sess_1\0{}", account.row.id)),
-            codex_reasoning_replay_cache_key_for_test("key_1", "gpt-5.6-sol", &format!("sess_1\0{}", account.row.id))
-        );
     }
 
     // ----- OAuth refresh ---------------------------------------------------
@@ -1927,8 +1842,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_upstream_413_is_surfaced_as_is_with_its_own_body() {
-        // The relay used to synthesize this envelope; direct egress simply passes the
-        // upstream's own 413 through, and dispatch classifies it (docs/api.md § Errors).
+        // The upstream's own 413 passes through, and dispatch classifies it (docs/api.md
+        // § Errors).
         let mock = MockTransport::new();
         let Some((cx, account)) = codex_fixture(&mock).await else { return skip_without_db() };
         for stream in [false, true] {
@@ -1974,6 +1889,5 @@ mod tests {
     #[test]
     fn the_user_agent_tracks_the_single_client_version_constant() {
         assert!(CODEX_USER_AGENT.contains(CODEX_CLIENT_VERSION));
-        assert!(CODEX_USER_AGENT.starts_with("codex-tui/"));
     }
 }

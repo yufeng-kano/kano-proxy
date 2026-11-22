@@ -2,9 +2,8 @@
 //!
 //! Session-scoped cache for Codex Responses reasoning replay: a bounded history of
 //! completed assistant turns, each identified by the hashes of the normalized visible
-//! Responses input prefix before and after it. The Worker's KV namespace becomes
-//! [`crate::cache::Cache`] (`AppState::cache()`), with the same `v2` key shape, the same 1h
-//! TTL and the same 256 KiB serialized cap.
+//! Responses input prefix before and after it. Held in [`crate::cache::Cache`]
+//! (`AppState::cache()`) for an hour, at most 256 KiB serialized per session.
 
 use std::time::Duration;
 
@@ -15,7 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::cache::Cache;
 use crate::providers::types::AffinityIds;
 
-pub const CODEX_REASONING_REPLAY_TTL_SECONDS: u64 = 3600;
+const CODEX_REASONING_REPLAY_TTL_SECONDS: u64 = 3600;
 const CODEX_REASONING_REPLAY_MAX_BYTES: usize = 256 * 1024;
 
 /// One opaque Responses output item (`reasoning` / `function_call` / `custom_tool_call`).
@@ -67,7 +66,7 @@ fn is_replay_item(value: &Value) -> bool {
     value.as_object().map(|o| o.get("type").and_then(Value::as_str).is_some()).unwrap_or(false)
 }
 
-/// The TypeScript `isReplayEntry` guard, applied on both read and write.
+/// The shape every stored turn must have, checked on both read and write.
 fn is_replay_entry(entry: &CodexReasoningReplayEntry) -> bool {
     entry.turns.iter().all(|turn| {
         !turn.start_hash.is_empty()
@@ -81,10 +80,9 @@ pub async fn read_codex_reasoning_replay(
     cache: &Cache,
     api_key_id: &str,
     model: &str,
-    session_key: Option<&str>,
+    session_key: &str,
 ) -> Option<CodexReasoningReplayEntry> {
-    let session_key = session_key.filter(|s| !s.is_empty())?;
-    if api_key_id.is_empty() || model.is_empty() {
+    if api_key_id.is_empty() || model.is_empty() || session_key.is_empty() {
         return None;
     }
     let raw = cache.get(&scoped_cache_key(api_key_id, model, session_key)).await?;
@@ -99,11 +97,10 @@ pub async fn write_codex_reasoning_replay(
     cache: &Cache,
     api_key_id: &str,
     model: &str,
-    session_key: Option<&str>,
+    session_key: &str,
     entry: &CodexReasoningReplayEntry,
 ) {
-    let Some(session_key) = session_key.filter(|s| !s.is_empty()) else { return };
-    if api_key_id.is_empty() || model.is_empty() || !is_replay_entry(entry) {
+    if api_key_id.is_empty() || model.is_empty() || session_key.is_empty() || !is_replay_entry(entry) {
         return;
     }
     let Ok(serialized) = serde_json::to_vec(entry) else { return };
@@ -117,24 +114,6 @@ pub async fn write_codex_reasoning_replay(
             Duration::from_secs(CODEX_REASONING_REPLAY_TTL_SECONDS),
         )
         .await;
-}
-
-pub async fn delete_codex_reasoning_replay(
-    cache: &Cache,
-    api_key_id: &str,
-    model: &str,
-    session_key: Option<&str>,
-) {
-    let Some(session_key) = session_key.filter(|s| !s.is_empty()) else { return };
-    if api_key_id.is_empty() || model.is_empty() {
-        return;
-    }
-    cache.delete(&scoped_cache_key(api_key_id, model, session_key)).await;
-}
-
-/// Exported for tests — same material as the private scoped key.
-pub fn codex_reasoning_replay_cache_key_for_test(api_key_id: &str, model: &str, session_key: &str) -> String {
-    scoped_cache_key(api_key_id, model, session_key)
 }
 
 /// Preserve older replayed prefixes when the history reaches its byte budget: a turn that
@@ -230,51 +209,46 @@ mod tests {
                 2,
             )],
         };
-        write_codex_reasoning_replay(&cache, "key1", "gpt-5.2", Some("sessA"), &entry).await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key1", "gpt-5.2", Some("sessA")).await, Some(entry));
+        write_codex_reasoning_replay(&cache, "key1", "gpt-5.2", "sessA", &entry).await;
+        assert_eq!(read_codex_reasoning_replay(&cache, "key1", "gpt-5.2", "sessA").await, Some(entry));
     }
 
     #[tokio::test]
     async fn isolates_by_api_key_model_and_session() {
         let cache = Cache::new();
         let entry = CodexReasoningReplayEntry { turns: vec![turn(vec![reasoning()], "before", "after", 1)] };
-        write_codex_reasoning_replay(&cache, "key1", "gpt-5.2", Some("sessA"), &entry).await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key2", "gpt-5.2", Some("sessA")).await, None);
-        assert_eq!(read_codex_reasoning_replay(&cache, "key1", "gpt-5.1", Some("sessA")).await, None);
-        assert_eq!(read_codex_reasoning_replay(&cache, "key1", "gpt-5.2", Some("sessB")).await, None);
-        let a = codex_reasoning_replay_cache_key_for_test("key1", "gpt-5.2", "sessA");
-        let b = codex_reasoning_replay_cache_key_for_test("key2", "gpt-5.2", "sessA");
-        assert_ne!(a, b);
-        assert!(a.starts_with("codex-reasoning-replay:v2:"));
+        write_codex_reasoning_replay(&cache, "key1", "gpt-5.2", "sessA", &entry).await;
+        assert_eq!(read_codex_reasoning_replay(&cache, "key2", "gpt-5.2", "sessA").await, None);
+        assert_eq!(read_codex_reasoning_replay(&cache, "key1", "gpt-5.1", "sessA").await, None);
+        assert_eq!(read_codex_reasoning_replay(&cache, "key1", "gpt-5.2", "sessB").await, None);
     }
 
     #[tokio::test]
-    async fn treats_a_missing_session_key_as_a_no_op() {
+    async fn treats_an_empty_session_key_as_a_no_op() {
         let cache = Cache::new();
         let entry = CodexReasoningReplayEntry { turns: vec![turn(vec![reasoning()], "before", "after", 1)] };
-        write_codex_reasoning_replay(&cache, "key", "model", None, &entry).await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", None).await, None);
-        // Nothing was stored under any key derived from this call.
-        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", Some("sess")).await, None);
+        write_codex_reasoning_replay(&cache, "key", "model", "", &entry).await;
+        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", "").await, None);
+        assert_eq!(cache.get(&scoped_cache_key("key", "model", "")).await, None);
     }
 
     #[tokio::test]
     async fn returns_none_for_corrupt_json_and_never_panics() {
         let cache = Cache::new();
-        let key = codex_reasoning_replay_cache_key_for_test("key", "model", "sess");
+        let key = scoped_cache_key("key", "model", "sess");
         cache.put_text(&key, "not json", Duration::from_secs(60)).await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", Some("sess")).await, None);
+        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", "sess").await, None);
         cache
             .put_text(&key, r#"{"items":[{"nope":true}],"assistant_text_hash":"hash"}"#, Duration::from_secs(60))
             .await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", Some("sess")).await, None);
+        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", "sess").await, None);
         // A structurally-typed entry that fails the guard is rejected too.
         let bad = serde_json::to_string(&CodexReasoningReplayEntry {
             turns: vec![turn(vec![json!({ "no_type": 1 })], "a", "b", 1)],
         })
         .unwrap();
         cache.put_text(&key, &bad, Duration::from_secs(60)).await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", Some("sess")).await, None);
+        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", "sess").await, None);
     }
 
     #[tokio::test]
@@ -282,16 +256,7 @@ mod tests {
         let cache = Cache::new();
         let item = json!({ "type": "reasoning", "encrypted_content": "x".repeat(300_000) });
         let entry = CodexReasoningReplayEntry { turns: vec![turn(vec![item], "before", "after", 1)] };
-        write_codex_reasoning_replay(&cache, "key", "model", Some("sess"), &entry).await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", Some("sess")).await, None);
-    }
-
-    #[tokio::test]
-    async fn deletes_an_entry() {
-        let cache = Cache::new();
-        let entry = CodexReasoningReplayEntry { turns: vec![turn(vec![reasoning()], "before", "after", 1)] };
-        write_codex_reasoning_replay(&cache, "key", "model", Some("sess"), &entry).await;
-        delete_codex_reasoning_replay(&cache, "key", "model", Some("sess")).await;
-        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", Some("sess")).await, None);
+        write_codex_reasoning_replay(&cache, "key", "model", "sess", &entry).await;
+        assert_eq!(read_codex_reasoning_replay(&cache, "key", "model", "sess").await, None);
     }
 }

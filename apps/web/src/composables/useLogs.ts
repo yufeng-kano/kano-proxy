@@ -1,7 +1,6 @@
 import { computed, reactive, ref } from "vue"
 import { getLogFacets, listLogs } from "@/services/api"
 import {
-  CACHE_TTL_MS,
   isLogsCacheFresh,
   readLogsCache,
   writeLogsCache,
@@ -16,7 +15,6 @@ type LogsState = {
   nextCursor: string | null
   /** First paint with nothing to show yet — the page renders skeletons. */
   loading: boolean
-  refreshing: boolean
   loadingMore: boolean
   error: string | null
   moreError: string | null
@@ -27,14 +25,13 @@ function emptyState(): LogsState {
     rows: [],
     nextCursor: null,
     loading: false,
-    refreshing: false,
     loadingMore: false,
     error: null,
     moreError: null,
   }
 }
 
-// Module-level singleton, same pattern as useUsage's `byDays`: leaving the page
+// Module-level singleton, same pattern as useUsage's `byKey`: leaving the page
 // and coming back repaints what was already loaded — including the pages the
 // user pressed Load more for, which no cache holds.
 const state = reactive<LogsState>(emptyState())
@@ -116,14 +113,10 @@ export function useLogs() {
         applyPage(cached.rows, cached.next_cursor)
         state.loading = false
       }
-      if (!force && cached && isLogsCacheFresh(userId.value, CACHE_TTL_MS)) {
-        state.refreshing = false
-        return
-      }
+      if (!force && cached && isLogsCacheFresh(userId.value)) return
     }
 
     if (!state.rows.length) state.loading = true
-    state.refreshing = true
     state.error = null
     state.moreError = null
     const started = generation
@@ -144,7 +137,6 @@ export function useLogs() {
     } finally {
       if (started === generation) {
         state.loading = false
-        state.refreshing = false
       }
     }
   }
@@ -239,6 +231,5 @@ export function useLogs() {
     loadMore,
     setProvider,
     setErrorsOnly,
-    CACHE_TTL_MS,
   }
 }

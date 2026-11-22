@@ -1,9 +1,9 @@
 //! The model catalog for one user's bound providers (docs/api.md § Models, docs/cli.md § Model catalog).
 //!
-//! The model list for one user's bound providers. Builtin pools are queried live through their
-//! adapter (codex has no models endpoint, so it contributes nothing — no invented catalog);
-//! custom providers are manual or live per `models_mode`; CLI providers report their own list
-//! through the tunnel and are read straight from storage. Nothing here fabricates a model.
+//! Builtin pools are queried live through their adapter (codex has no models endpoint, so it
+//! contributes nothing — no invented catalog); custom providers are manual or live per
+//! `models_mode`; CLI providers report their own list through the tunnel and are read straight
+//! from storage. Nothing here fabricates a model.
 //!
 //! The one-hour `models:v1:<user>:<provider>` cache is kept (unlike the per-account usage
 //! cache): the client-facing `/openai/v1/models` and `/anthropic/v1/models` are called by API
@@ -34,10 +34,7 @@ pub struct CatalogModel {
     pub provider: String,
     pub upstream: String,
     pub display_name: String,
-    pub available: bool,
     pub owned_by: String,
-    /// Always `"model"`.
-    pub object: String,
 }
 
 impl CatalogModel {
@@ -51,19 +48,26 @@ impl CatalogModel {
                 .clone()
                 .filter(|d| !d.is_empty())
                 .unwrap_or_else(|| model.id.clone()),
-            available: true,
             owned_by: provider.to_string(),
-            object: "model".to_string(),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProviderModelsSection {
     pub provider: String,
     pub models: Vec<CatalogModel>,
     pub error: Option<String>,
-    pub cached: bool,
+}
+
+impl ProviderModelsSection {
+    fn fresh(provider: &str, models: Vec<CatalogModel>, error: Option<String>) -> Self {
+        Self { provider: provider.to_string(), models, error }
+    }
+
+    fn from_cache(provider: &str, cached: CachedModels) -> Self {
+        Self { provider: provider.to_string(), models: cached.models, error: cached.error }
+    }
 }
 
 const MODELS_CACHE_TTL: Duration = Duration::from_secs(3600);
@@ -80,22 +84,15 @@ fn models_cache_key(user_id: &str, provider: &str) -> String {
 struct CachedModels {
     models: Vec<CatalogModel>,
     error: Option<String>,
-    #[serde(rename = "fetchedAt")]
-    fetched_at: i64,
 }
 
+/// The cache expires entries at `MODELS_CACHE_TTL` itself, so a hit is always fresh.
 async fn read_models_cache(cx: &AppState, user_id: &str, provider: &str) -> Option<CachedModels> {
-    let snapshot: CachedModels = cx.cache().get_json(&models_cache_key(user_id, provider)).await?;
-    // The in-process cache expires on its own; the stamp check keeps the TypeScript guard for a
-    // snapshot that outlived its TTL by any other route.
-    if now_ms() - snapshot.fetched_at > MODELS_CACHE_TTL.as_millis() as i64 + 5_000 {
-        return None;
-    }
-    Some(snapshot)
+    cx.cache().get_json(&models_cache_key(user_id, provider)).await
 }
 
 async fn write_models_cache(cx: &AppState, user_id: &str, provider: &str, models: Vec<CatalogModel>, error: Option<String>) {
-    let snapshot = CachedModels { models, error, fetched_at: now_ms() };
+    let snapshot = CachedModels { models, error };
     cx.cache().put_json(&models_cache_key(user_id, provider), &snapshot, MODELS_CACHE_TTL).await;
 }
 
@@ -136,28 +133,18 @@ async fn fetch_provider_models(
     let slug = provider.as_str();
     if !force {
         if let Some(cached) = read_models_cache(cx, user_id, slug).await {
-            return ProviderModelsSection {
-                provider: slug.to_string(),
-                models: cached.models,
-                error: cached.error,
-                cached: true,
-            };
+            return ProviderModelsSection::from_cache(slug, cached);
         }
     }
 
     let Some(account) = pick_usable_account(cx, user_id, slug, shared).await else {
         // Don't cache "no account" aggressively — skip the write entirely.
-        return ProviderModelsSection { provider: slug.to_string(), models: Vec::new(), error: None, cached: false };
+        return ProviderModelsSection::fresh(slug, Vec::new(), None);
     };
 
     let adapter = get_adapter(provider);
     if !adapter.has_list_models() {
-        return ProviderModelsSection {
-            provider: slug.to_string(),
-            models: Vec::new(),
-            error: Some("provider has no listModels".into()),
-            cached: false,
-        };
+        return ProviderModelsSection::fresh(slug, Vec::new(), Some("provider has no listModels".into()));
     }
 
     // A refresh failure is not a catalog failure: the stored credential still gets a turn, and
@@ -173,7 +160,7 @@ async fn fetch_provider_models(
     let result = adapter.list_models(cx, &account).await;
     let models: Vec<CatalogModel> = result.models.iter().map(|m| CatalogModel::new(slug, m)).collect();
     write_models_cache(cx, user_id, slug, models.clone(), result.error.clone()).await;
-    ProviderModelsSection { provider: slug.to_string(), models, error: result.error, cached: false }
+    ProviderModelsSection::fresh(slug, models, result.error)
 }
 
 /// manual → the stored manual list. auto → live `list_models` with an acquired key (same 1h
@@ -196,22 +183,12 @@ async fn fetch_custom_provider_models(
     };
 
     if row.models_mode == "manual" {
-        return ProviderModelsSection {
-            provider: row.slug.clone(),
-            models: manual_models(),
-            error: None,
-            cached: false,
-        };
+        return ProviderModelsSection::fresh(&row.slug, manual_models(), None);
     }
 
     if !force {
         if let Some(cached) = read_models_cache(cx, user_id, &row.slug).await {
-            return ProviderModelsSection {
-                provider: row.slug.clone(),
-                models: cached.models,
-                error: cached.error,
-                cached: true,
-            };
+            return ProviderModelsSection::from_cache(&row.slug, cached);
         }
     }
 
@@ -221,45 +198,28 @@ async fn fetch_custom_provider_models(
     };
     let Some(account) = usable else {
         // No usable key to query live — same "don't cache aggressively" policy as built-ins.
-        return ProviderModelsSection {
-            provider: row.slug.clone(),
-            models: manual_models(),
-            error: None,
-            cached: false,
-        };
+        return ProviderModelsSection::fresh(&row.slug, manual_models(), None);
     };
 
     let adapter = custom_provider_adapter(row);
     if !adapter.has_list_models() {
-        return ProviderModelsSection {
-            provider: row.slug.clone(),
-            models: manual_models(),
-            error: None,
-            cached: false,
-        };
+        return ProviderModelsSection::fresh(&row.slug, manual_models(), None);
     }
 
     let result = adapter.list_models(cx, &account).await;
     if let Some(error) = result.error {
         let fallback = manual_models();
         write_models_cache(cx, user_id, &row.slug, fallback.clone(), Some(error.clone())).await;
-        return ProviderModelsSection {
-            provider: row.slug.clone(),
-            models: fallback,
-            error: Some(error),
-            cached: false,
-        };
+        return ProviderModelsSection::fresh(&row.slug, fallback, Some(error));
     }
 
     let models: Vec<CatalogModel> = result.models.iter().map(|m| CatalogModel::new(&row.slug, m)).collect();
     write_models_cache(cx, user_id, &row.slug, models.clone(), None).await;
-    ProviderModelsSection { provider: row.slug.clone(), models, error: None, cached: false }
+    ProviderModelsSection::fresh(&row.slug, models, None)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ListModelsOptions {
-    /// Kept for API shape; every returned model is available, so this filters nothing.
-    pub available_only: bool,
     /// Bypass the one-hour cache (`?refresh=true`).
     pub force: bool,
 }
@@ -304,7 +264,7 @@ pub async fn list_models_for_user(cx: &AppState, user_id: &str, opts: ListModels
             .into_iter()
             .map(|id| CatalogModel::new(&row.slug, &UpstreamModel { id, display_name: None }))
             .collect();
-        sections.push(ProviderModelsSection { provider: row.slug, models, error: None, cached: false });
+        sections.push(ProviderModelsSection::fresh(&row.slug, models, None));
     }
 
     // Custom endpoints shared with the viewer (docs/cloud-edition.md § "Pool extension"), each
@@ -324,7 +284,7 @@ pub async fn list_models_for_user(cx: &AppState, user_id: &str, opts: ListModels
         sections.push(section);
     }
 
-    // Model groups are deliberately absent here (since v4): each group is its own endpoint whose
+    // Model groups are deliberately absent here: each group is its own endpoint whose
     // /models lists its names (docs/api.md § Group endpoints).
     let models = sections.iter().flat_map(|s| s.models.iter().cloned()).collect();
     UserModels { models, providers: sections }
@@ -359,7 +319,7 @@ mod tests {
                                            manual_models_json, sort_order, created_at, updated_at)
              VALUES ($1, $2, $3, $3, $4, $5, $6, $7, 0, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')",
         )
-        .bind(format!("cprov_{slug}"))
+        .bind(format!("cprov_{user_id}_{slug}"))
         .bind(user_id)
         .bind(slug)
         .bind(format)
@@ -439,8 +399,31 @@ mod tests {
         list_models_for_user(&state, &user, ListModelsOptions::default()).await;
         let second = list_models_for_user(&state, &user, ListModelsOptions::default()).await;
         assert_eq!(transport.requests().len(), 1, "the second call is served from the cache");
-        assert!(section(&second.providers, "cached-ep").unwrap().cached);
         assert_eq!(ids(&second.models, "cached-ep"), ["cached-ep/m1"]);
+    }
+
+    #[tokio::test]
+    async fn the_cache_is_per_user_even_for_the_same_slug() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let transport = MockTransport::new();
+        transport.respond_json(StatusCode::OK, json!({ "data": [{ "id": "a" }] }));
+        transport.respond_json(StatusCode::OK, json!({ "data": [{ "id": "b" }] }));
+        let state = test_state(pool, transport.clone());
+        let first = seed_user(state.pool()).await;
+        let second = seed_user(state.pool()).await;
+        for user in [&first, &second] {
+            seed_custom_provider(state.pool(), user, "same-ep", "openai", "auto", None).await;
+            seed_key(state.pool(), user, "same-ep").await;
+        }
+
+        let a = list_models_for_user(&state, &first, ListModelsOptions::default()).await;
+        let b = list_models_for_user(&state, &second, ListModelsOptions::default()).await;
+        assert_eq!(transport.requests().len(), 2, "the second user never reads the first user's entry");
+        assert_eq!(ids(&a.models, "same-ep"), ["same-ep/a"]);
+        assert_eq!(ids(&b.models, "same-ep"), ["same-ep/b"]);
+        let again = list_models_for_user(&state, &first, ListModelsOptions::default()).await;
+        assert_eq!(ids(&again.models, "same-ep"), ["same-ep/a"]);
+        assert_eq!(transport.requests().len(), 2);
     }
 
     #[tokio::test]
@@ -456,7 +439,7 @@ mod tests {
 
         list_models_for_user(&state, &user, ListModelsOptions::default()).await;
         let refreshed =
-            list_models_for_user(&state, &user, ListModelsOptions { force: true, ..Default::default() }).await;
+            list_models_for_user(&state, &user, ListModelsOptions { force: true }).await;
         assert_eq!(transport.requests().len(), 2);
         assert_eq!(ids(&refreshed.models, "force-ep"), ["force-ep/m2"]);
     }
@@ -577,7 +560,6 @@ mod tests {
         assert_eq!(ids(&out.models, "laptop"), ["laptop/a", "laptop/c"]);
         let section = section(&out.providers, "laptop").unwrap();
         assert_eq!(section.error, None);
-        assert!(!section.cached);
     }
 
     #[tokio::test]
@@ -627,7 +609,7 @@ mod tests {
 
     use crate::pool::extension::test_support::{owner_endpoint, state_with_extension, SharedCustomExtension};
 
-    fn lending_state(pool: PgPool, transport: std::sync::Arc<MockTransport>, lent: Vec<crate::pool::SharedCustomProvider>) -> AppState {
+    fn lending_state(pool: PgPool, transport: std::sync::Arc<MockTransport>, lent: Vec<crate::pool::extension::SharedCustomProvider>) -> AppState {
         state_with_extension(pool, transport, SharedCustomExtension::lending(lent))
     }
 
@@ -648,9 +630,9 @@ mod tests {
         assert_eq!(calls[0].url, "https://owner.example.com/v1/models");
         assert_eq!(calls[0].header("authorization"), Some("Bearer sk-owner-team-gw"));
 
-        // The owner reads the entry the borrower filled (the transport has nothing queued).
+        // The owner reads the entry the borrower filled (the transport has nothing queued, so a
+        // live call would panic).
         let own = list_models_for_user(&state, &owner, ListModelsOptions::default()).await;
-        assert!(section(&own.providers, "team-gw").unwrap().cached);
         assert_eq!(ids(&own.models, "team-gw"), ["team-gw/live-model"]);
     }
 
@@ -688,12 +670,12 @@ mod tests {
         let out = list_models_for_user(&state, &borrower, ListModelsOptions::default()).await;
         let borrowed = section(&out.providers, "team-gw").unwrap();
         assert_eq!(borrowed.error.as_deref(), Some(SHARED_MODELS_ERROR));
-        assert!(!serde_json::to_string(&out.providers).unwrap().contains("owner-gateway"));
+        assert!(!format!("{:?}", out.providers).contains("owner-gateway"));
 
-        // The owner reads the same cache entry and keeps the real text.
+        // The owner reads the same cache entry (a second live call would panic) and keeps the
+        // real text.
         let own = list_models_for_user(&state, &owner, ListModelsOptions::default()).await;
         let theirs = section(&own.providers, "team-gw").unwrap();
-        assert!(theirs.cached);
         assert!(theirs.error.as_deref().unwrap().contains("owner-gateway.internal"));
     }
 
@@ -703,14 +685,7 @@ mod tests {
         assert_eq!(model.id, "claude-code/claude-opus-4-6");
         assert_eq!(model.display_name, "claude-opus-4-6");
         assert_eq!(model.owned_by, "claude-code");
-        assert_eq!(model.object, "model");
-        assert!(model.available);
         let named = CatalogModel::new("grok", &UpstreamModel { id: "grok-4.5".into(), display_name: Some("Grok".into()) });
         assert_eq!(named.display_name, "Grok");
-    }
-
-    #[test]
-    fn the_cache_key_keeps_its_kv_shape() {
-        assert_eq!(models_cache_key("user_1", "grok"), "models:v1:user_1:grok");
     }
 }

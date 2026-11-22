@@ -9,13 +9,12 @@ import AppButton from "@/components/ui/AppButton.vue"
 import Banner from "@/components/ui/Banner.vue"
 import Modal from "@/components/ui/Modal.vue"
 import Segmented from "@/components/ui/Segmented.vue"
+import { formatLocalDate, offsetMinutesAt } from "@/components/overview/dateRange"
 import { useI18n } from "@/i18n"
 import { downloadLogsExport } from "@/services/api"
 import {
   EXPORT_FIELDS_BY_COLUMN,
   exportRange,
-  localDay,
-  offsetMinutes,
   type ExportRangeKind,
   type LogColumnKey,
 } from "@/services/logsView"
@@ -41,8 +40,8 @@ weekAgo.setDate(weekAgo.getDate() - 6)
 
 const form = reactive({
   range: "today" as ExportRangeKind,
-  from: localDay(weekAgo),
-  to: localDay(today),
+  from: formatLocalDate(weekAgo),
+  to: formatLocalDate(today),
   useFilters: true,
   columns: "visible" as "visible" | "all",
   format: "csv" as "csv" | "json",
@@ -73,7 +72,8 @@ async function submit() {
     await downloadLogsExport({
       ...range,
       format: form.format,
-      offsetMinutes: offsetMinutes(new Date()),
+      // The offset the export writes local times in.
+      offsetMinutes: offsetMinutesAt(new Date()),
       columns: form.columns === "visible" ? props.columns.flatMap((key) => EXPORT_FIELDS_BY_COLUMN[key]) : undefined,
       ...(form.useFilters
         ? { provider: props.provider ?? undefined, modelFilter: props.modelFilter, errorsOnly: props.errorsOnly }

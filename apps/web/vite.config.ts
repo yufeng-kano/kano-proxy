@@ -23,14 +23,4 @@ export default defineConfig({
       "/health": { target: apiTarget, changeOrigin: true },
     },
   },
-  preview: {
-    host: "127.0.0.1",
-    port: 4173,
-    proxy: {
-      "/api": { target: apiTarget, changeOrigin: true },
-      "/openai": { target: apiTarget, changeOrigin: true },
-      "/anthropic": { target: apiTarget, changeOrigin: true },
-      "/health": { target: apiTarget, changeOrigin: true },
-    },
-  },
 })

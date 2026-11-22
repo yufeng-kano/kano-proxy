@@ -2,16 +2,16 @@
 
 Signed-in operators see **what changed** and **which version they are running**, sourced from this repo's published GitHub Releases. An edition may leave the whole surface out of its web shell (`ShellOptions.changelog`, [cloud-edition.md](./cloud-edition.md) § Web shell); this document describes the standalone build.
 
-There is no hand-maintained `CHANGELOG.md` and no changelog table in the database. The release notes written at release time (see [deployment.md](./deployment.md) — Releases) are the single source of truth; the admin UI reads them through the server.
+There is no hand-maintained `CHANGELOG.md` and no changelog table in the database. The release notes written at release time ([deployment.md](./deployment.md) § Releases) are the single source of truth; the admin UI reads them through the server.
 
-Which makes those notes a **user-facing surface with no fallback**: whatever the release body says is exactly what this page shows, and an empty body renders an empty card. They are hand-written for that reason — `gh release create --generate-notes` summarizes merged pull requests, and this repo lands work as direct commits, so it yields a bare compare link. See [deployment.md](./deployment.md) § Release notes are hand-written.
+Which makes those notes a **user-facing surface with no fallback**: whatever the release body says is exactly what this page shows, and an empty body shows only "No notes for this release." They are hand-written for that reason — `gh release create --generate-notes` summarizes merged pull requests, and this repo lands work as direct commits, so it yields a bare compare link ([deployment.md](./deployment.md) § Releases).
 
 ## Surfaces
 
 | Surface | Content |
 |---------|---------|
-| `GET /api/changelog` | Session-auth JSON: running version, latest published version, update flag, sanitized release list |
-| `/changelog` (web) | One entry per release, newest first, as a two-column timeline (version rail + notes — [admin-ui.md](./admin-ui.md) § Changelog page); the running version is marked |
+| `GET /api/changelog` | Session-auth JSON: `current` (running version), `latest` (newest published tag), `updateAvailable`, `releases` (sanitized, newest first), `available` (`false` when `GITHUB_REPO` is unset or malformed), plus `cached`, `stale` and `error` describing where the data came from |
+| `/changelog` (web) | One entry per release, newest first, as a two-column timeline (version rail + notes — [admin-ui.md](./admin-ui.md) § Changelog page); the running version is marked, and a banner names a newer release |
 | Sidebar badge | Running version on every signed-in page; a dot appears when a newer release exists |
 
 ## Data flow
@@ -30,7 +30,7 @@ env!("CARGO_PKG_VERSION")
 
 This needs no configuration: the release process already requires that version to equal the release tag (see [deployment.md](./deployment.md)), so the compiled value is correct by construction — and a local build reports a real version instead of a blank. An edition that ships on its own cycle overrides it with its own.
 
-Only releases whose tag is a product version (`vMAJOR.MINOR.PATCH`) are listed or considered for `latest`. The CLI's `cli-v…` releases live in the same GitHub repo ([deployment.md](./deployment.md) § CLI release) and are skipped here: they say nothing about the server an operator is running, and letting one become `latest` would flag a phantom update on every page.
+Only published, non-prerelease releases whose tag is a product version (`vMAJOR.MINOR.PATCH`, the `v` optional) are listed or considered for `latest`, which is the first of them in GitHub's order. The CLI's `cli-v…` releases live in the same GitHub repo ([deployment.md](./deployment.md) § CLI release) and are skipped here: they say nothing about the server an operator is running, and letting one become `latest` would flag a phantom update on every page.
 
 `updateAvailable` is computed server-side by numeric SemVer comparison. When the local version is **ahead** of the newest published release — normal between a version bump and its release — the flag is `false`. Only strictly-behind reports an update.
 
@@ -43,7 +43,7 @@ Only releases whose tag is a product version (`vMAJOR.MINOR.PATCH`) are listed o
 
 `GITHUB_REPO` is public information and belongs in the tracked example. `GITHUB_TOKEN` is a secret and must never be committed — see [deployment.md](./deployment.md).
 
-A missing or misconfigured `GITHUB_REPO` degrades gracefully: the endpoint still returns the running version so the sidebar version badge keeps working, with an error field and an empty release list.
+A missing or misconfigured `GITHUB_REPO` degrades gracefully: the endpoint still returns the running version so the sidebar version badge keeps working, with `available: false`, an `error` and an empty release list; the page then says release notes are unavailable.
 
 ## Caching and rate limits
 
@@ -62,9 +62,9 @@ The cache key is **global** (`changelog:v1`), deliberately **not** user-scoped l
 
 ### Stale-serve — a deliberate deviation
 
-When a refetch fails, this endpoint returns the **last good data** with `stale: true` rather than an error.
+When a refetch fails, this endpoint returns the **last good data** with `stale: true` and the failure in `error`, rather than failing. With no entry to fall back on it returns an empty list and the `error`, never an invented one.
 
-The other cache in this codebase (the model catalog) treats an expired entry as a miss and surfaces upstream errors. Changelog differs on purpose: **stale release notes are harmless, stale usage numbers are misleading**. It also means a quota exhausted by a co-tenant IP degrades to slightly-old notes instead of a broken page.
+The model catalog cache treats an expired entry as a miss and surfaces upstream errors. Changelog differs on purpose: **stale release notes are harmless, stale usage numbers are misleading**. It also means a quota exhausted by a co-tenant IP degrades to slightly-old notes instead of a broken page.
 
 ## HTML sanitization
 
@@ -74,7 +74,7 @@ The server sanitizes **again** before storing and serving, and the page renders 
 
 Strategy is **escape-then-allowlist**: escape everything, then re-emit only tags this codebase constructs itself. Attribute strings are never passed through verbatim.
 
-- Allowed: `a code em h2 h3 li p strong tt ul`
+- Allowed: `a code em h2 h3 li ol p strong tt ul`
 - `a` keeps only `href`, which must be `https://`; `rel="noopener noreferrer" target="_blank"` is written by us, and GitHub's own `class`/`rel` are dropped
 - Every other allowed tag is emitted bare (that is how GitHub sends them)
 - A tag outside the allowlist is dropped but **its text is kept**, so a future GitHub addition (tables, images) degrades to readable text rather than vanishing

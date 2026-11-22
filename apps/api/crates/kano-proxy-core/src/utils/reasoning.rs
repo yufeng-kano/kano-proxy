@@ -1,17 +1,13 @@
-//! Reasoning effort ladder (docs/api.md § reasoning
-//! effort). The ladder is `none < low < medium < high < xhigh < max`; every provider
+//! Reasoning effort ladder (docs/api.md § reasoning effort). The ladder is `none < low < medium < high < xhigh < max`; every provider
 //! declares the highest token its API accepts and efforts above it clamp down instead of
 //! erroring. [`map_reasoning`] produces the provider-specific body fragment.
 
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::providers::ProviderId;
 
-/// Ladder order is the variant order: `REASONING_EFFORTS.indexOf` is [`ReasoningEffort::index`]
-/// and the derived `Ord` is the ladder comparison.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+/// Ladder order is the variant order: the derived `Ord` is the ladder comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReasoningEffort {
     None,
     Low,
@@ -21,7 +17,7 @@ pub enum ReasoningEffort {
     Max,
 }
 
-/// The ladder in order, as the TypeScript `REASONING_EFFORTS`.
+/// The ladder in order.
 pub const REASONING_EFFORTS: [ReasoningEffort; 6] = [
     ReasoningEffort::None,
     ReasoningEffort::Low,
@@ -43,25 +39,14 @@ impl ReasoningEffort {
         }
     }
 
-    /// Position on the ladder (`REASONING_EFFORTS.indexOf`).
-    pub fn index(self) -> usize {
-        REASONING_EFFORTS.iter().position(|e| *e == self).expect("ladder contains every variant")
-    }
-
     /// Exact (already lowercased) ladder token, or `None` for anything else.
     pub fn from_token(token: &str) -> Option<ReasoningEffort> {
         REASONING_EFFORTS.iter().copied().find(|e| e.as_str() == token)
     }
 }
 
-impl std::fmt::Display for ReasoningEffort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// `parseReasoningEffort`'s three outcomes: absent (`undefined`/`null`/`""`), a ladder
-/// token, or `"invalid"` (a non-string, or a string that is not a ladder token).
+/// A request's reasoning effort: absent (missing, `null` or `""`), a ladder token, or invalid
+/// (a non-string, or a string that is not a ladder token).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParsedReasoningEffort {
     Absent,
@@ -82,27 +67,25 @@ impl ParsedReasoningEffort {
     }
 }
 
-/// `parseReasoningEffort(v)` over a request field: `undefined`/`null`/`""` → absent,
-/// a case-insensitive ladder token → that token, anything else → invalid.
+/// A request field: missing/`null`/`""` → absent, a case-insensitive ladder token → that
+/// token, anything else → invalid.
 pub fn parse_reasoning_effort(value: Option<&Value>) -> ParsedReasoningEffort {
     match value {
         None | Some(Value::Null) => ParsedReasoningEffort::Absent,
-        Some(Value::String(s)) => {
-            if s.is_empty() {
-                return ParsedReasoningEffort::Absent;
-            }
-            match ReasoningEffort::from_token(&s.to_lowercase()) {
-                Some(e) => ParsedReasoningEffort::Effort(e),
-                None => ParsedReasoningEffort::Invalid,
-            }
-        }
+        Some(Value::String(s)) => parse_reasoning_effort_str(s),
         Some(_) => ParsedReasoningEffort::Invalid,
     }
 }
 
-/// `parseReasoningEffort` for a value that is already known to be a string.
+/// [`parse_reasoning_effort`] for a value that is already known to be a string.
 pub fn parse_reasoning_effort_str(value: &str) -> ParsedReasoningEffort {
-    parse_reasoning_effort(Some(&Value::String(value.to_string())))
+    if value.is_empty() {
+        return ParsedReasoningEffort::Absent;
+    }
+    match ReasoningEffort::from_token(&value.to_lowercase()) {
+        Some(e) => ParsedReasoningEffort::Effort(e),
+        None => ParsedReasoningEffort::Invalid,
+    }
 }
 
 /// Closest allowed ladder token to `rejected`. Equal distance prefers the higher token.
@@ -111,34 +94,8 @@ pub fn nearest_reasoning_effort(
     rejected: ReasoningEffort,
     allowed: &[ReasoningEffort],
 ) -> Option<ReasoningEffort> {
-    if allowed.is_empty() {
-        return None;
-    }
-    if allowed.contains(&rejected) {
-        return Some(rejected);
-    }
-    let rejected_idx = rejected.index() as isize;
-    let mut best: Option<ReasoningEffort> = None;
-    let mut best_dist = usize::MAX;
-    for token in allowed {
-        let idx = token.index() as isize;
-        let dist = (idx - rejected_idx).unsigned_abs();
-        match best {
-            None => {
-                best = Some(*token);
-                best_dist = dist;
-            }
-            Some(current) => {
-                if dist < best_dist {
-                    best = Some(*token);
-                    best_dist = dist;
-                } else if dist == best_dist && token.index() > current.index() {
-                    best = Some(*token);
-                }
-            }
-        }
-    }
-    best
+    let distance = |effort: ReasoningEffort| (effort as isize - rejected as isize).unsigned_abs();
+    allowed.iter().copied().min_by_key(|&effort| (distance(effort), std::cmp::Reverse(effort)))
 }
 
 /// Highest effort each provider's API accepts; efforts above it clamp down instead of
@@ -156,16 +113,11 @@ pub fn reasoning_ceiling(provider: ProviderId) -> ReasoningEffort {
 
 /// Clamp `effort` to the provider ceiling.
 pub fn clamp_to_ceiling(provider: ProviderId, effort: ReasoningEffort) -> ReasoningEffort {
-    let cap = reasoning_ceiling(provider);
-    if effort.index() > cap.index() {
-        cap
-    } else {
-        effort
-    }
+    effort.min(reasoning_ceiling(provider))
 }
 
-/// Map a client reasoning effort to the provider-specific payload fragment (key order as
-/// the TypeScript object literals produce it). `None` effort → an empty object.
+/// Map a client reasoning effort to the provider-specific payload fragment. `None` effort → an
+/// empty object.
 pub fn map_reasoning(provider: ProviderId, effort: Option<ReasoningEffort>) -> Map<String, Value> {
     let mut out = Map::new();
     let Some(effort) = effort else { return out };
@@ -387,12 +339,5 @@ mod tests {
     #[test]
     fn nearest_is_none_for_an_empty_allowed_set() {
         assert_eq!(nearest_reasoning_effort(ReasoningEffort::High, &[]), Option::None);
-    }
-
-    #[test]
-    fn serde_uses_the_wire_tokens() {
-        assert_eq!(serde_json::to_value(ReasoningEffort::XHigh).unwrap(), json!("xhigh"));
-        let parsed: ReasoningEffort = serde_json::from_value(json!("max")).unwrap();
-        assert_eq!(parsed, ReasoningEffort::Max);
     }
 }

@@ -29,7 +29,6 @@ pub trait Wire: Send + Sync {
     fn no_account_frame(&self, provider: &str) -> Bytes;
     fn unavailable_frame(&self) -> Bytes;
     fn upstream_error_frame(&self) -> Bytes;
-    fn request_too_large_frame(&self, message: &str) -> Bytes;
     /// Upstream non-2xx after failover: `message` is already extracted from `text`, the error
     /// type is read from `text` in the surface's own envelope shape.
     fn upstream_error_frame_from_body(&self, message: &str, text: &str) -> Bytes;
@@ -38,7 +37,6 @@ pub trait Wire: Send + Sync {
     fn no_account_body(&self, provider: &str) -> Value;
     fn unavailable_body(&self) -> Value;
     fn upstream_error_body(&self) -> Value;
-    fn request_too_large_body(&self, message: &str) -> Value;
 
     fn non_stream_response(&self) -> NonStreamResponse;
 
@@ -48,7 +46,11 @@ pub trait Wire: Send + Sync {
     fn parse_usage(&self, usage: Option<&Value>) -> NormalizedUsage;
 }
 
-/// Shared by both implementations: an SSE frame is a complete event, terminated by a blank line.
-pub(crate) fn frame_bytes(text: String) -> Bytes {
-    Bytes::from(text.into_bytes())
+/// The upstream error envelope's `error.type`, in both surfaces' shape; `api_error` when the
+/// body is not JSON or names none.
+pub(crate) fn error_type_from_body(text: &str) -> String {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| value.get("error")?.get("type")?.as_str().filter(|t| !t.is_empty()).map(str::to_string))
+        .unwrap_or_else(|| "api_error".to_string())
 }

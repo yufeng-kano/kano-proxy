@@ -3,18 +3,16 @@
 //!
 //! Model resolution shared by both surface mounts: the shared bases resolve `provider/model`
 //! directly; a `/g/{slug}/…` mount resolves the slug to the caller's group first (unknown slug
-//! → the route's 404) and then the request's `model` within that group. The TypeScript branched
-//! on whether Hono had a `slug` param; here the group mounts pass `Some(slug)` and the shared
-//! bases pass `None` — the handlers themselves stay shared.
+//! → the route's 404) and then the request's `model` within that group. The group mounts pass
+//! `Some(slug)` and the shared bases pass `None` — the handlers themselves stay shared.
 
 use crate::db::model_groups::get_group_by_slug;
 use crate::routing::candidates::{resolve_candidates, resolve_group_model_candidates, RoutingResolution};
 use crate::AppState;
 
-/// What `resolve_request_model` concluded. The two failure arms carry exactly what the routes
-/// need for their surface-shaped envelope and their `request_logs` row.
-pub enum RequestModelResolution {
-    Ok(Box<RoutingResolution>),
+/// Why a request's model did not resolve. Each arm carries exactly what the routes need for
+/// their surface-shaped envelope and their `request_logs` row.
+pub enum ResolutionFailure {
     /// The path slug is not one of the caller's groups.
     GroupNotFound { slug: String },
     /// No such model: an unparsable `provider/model` on a shared base, or a name the group
@@ -22,26 +20,24 @@ pub enum RequestModelResolution {
     InvalidModel { group_slug: Option<String> },
 }
 
-/// `resolveRequestModel(c, userId, modelRaw)`; `slug` is the group mount's path parameter.
+/// `slug` is the group mount's path parameter.
 pub async fn resolve_request_model(
     cx: &AppState,
     user_id: &str,
     slug: Option<&str>,
     model_raw: &str,
-) -> anyhow::Result<RequestModelResolution> {
+) -> anyhow::Result<Result<RoutingResolution, ResolutionFailure>> {
     let Some(slug) = slug else {
-        return Ok(match resolve_candidates(cx, user_id, model_raw).await? {
-            Some(resolution) => RequestModelResolution::Ok(Box::new(resolution)),
-            None => RequestModelResolution::InvalidModel { group_slug: None },
-        });
+        return Ok(resolve_candidates(cx, user_id, model_raw)
+            .await?
+            .ok_or(ResolutionFailure::InvalidModel { group_slug: None }));
     };
     let Some(group) = get_group_by_slug(cx.pool(), user_id, slug).await? else {
-        return Ok(RequestModelResolution::GroupNotFound { slug: slug.to_string() });
+        return Ok(Err(ResolutionFailure::GroupNotFound { slug: slug.to_string() }));
     };
-    Ok(match resolve_group_model_candidates(cx, user_id, &group, model_raw).await? {
-        Some(resolution) => RequestModelResolution::Ok(Box::new(resolution)),
-        None => RequestModelResolution::InvalidModel { group_slug: Some(slug.to_string()) },
-    })
+    Ok(resolve_group_model_candidates(cx, user_id, &group, model_raw)
+        .await?
+        .ok_or_else(|| ResolutionFailure::InvalidModel { group_slug: Some(slug.to_string()) }))
 }
 
 /// Fixtures shared by the LLM-surface route tests. Every upstream is a
@@ -210,7 +206,7 @@ pub(crate) mod test_support {
         }
 
         /// Every `request_logs` row once at least `expected` have been written — the rows are
-        /// spawned off the response path, exactly as `waitUntil` wrote them.
+        /// written by tasks spawned off the response path.
         pub async fn logs(&self, expected: usize) -> Vec<Value> {
             for _ in 0..100 {
                 let rows: Vec<Value> =
@@ -274,14 +270,15 @@ mod tests {
         let Some(f) = fixture().await else { return skip_without_db() };
         f.account("claude-code").await;
 
-        let resolved = resolve_request_model(&f.state, &f.user.id, None, "claude-code/claude-opus-5").await.unwrap();
-        let RequestModelResolution::Ok(resolution) = resolved else { panic!("expected a resolution") };
+        let Ok(resolution) = resolve_request_model(&f.state, &f.user.id, None, "claude-code/claude-opus-5").await.unwrap() else {
+            panic!("expected a resolution")
+        };
         assert_eq!(resolution.primary.provider, "claude-code");
         assert_eq!(resolution.primary.upstream_model, "claude-opus-5");
         assert!(resolution.group_name.is_none());
 
         let bare = resolve_request_model(&f.state, &f.user.id, None, "claude-opus-5").await.unwrap();
-        assert!(matches!(bare, RequestModelResolution::InvalidModel { group_slug: None }));
+        assert!(matches!(bare, Err(ResolutionFailure::InvalidModel { group_slug: None })));
     }
 
     #[tokio::test]
@@ -290,19 +287,20 @@ mod tests {
         f.account("claude-code").await;
         f.group("team", "fast", &["claude-code/claude-opus-5"]).await;
 
-        let resolved = resolve_request_model(&f.state, &f.user.id, Some("team"), "fast").await.unwrap();
-        let RequestModelResolution::Ok(resolution) = resolved else { panic!("expected a resolution") };
+        let Ok(resolution) = resolve_request_model(&f.state, &f.user.id, Some("team"), "fast").await.unwrap() else {
+            panic!("expected a resolution")
+        };
         assert_eq!(resolution.group_name.as_deref(), Some("team/fast"));
         assert_eq!(resolution.primary.provider, "claude-code");
 
         // An unknown slug is the route's 404; a known slug with an unknown name is
         // invalid_model — and a `provider/model` string never falls through to the shared base.
         let unknown_slug = resolve_request_model(&f.state, &f.user.id, Some("nope"), "fast").await.unwrap();
-        assert!(matches!(unknown_slug, RequestModelResolution::GroupNotFound { ref slug } if slug == "nope"));
+        assert!(matches!(unknown_slug, Err(ResolutionFailure::GroupNotFound { ref slug }) if slug == "nope"));
         let unknown_model = resolve_request_model(&f.state, &f.user.id, Some("team"), "claude-code/claude-opus-5")
             .await
             .unwrap();
-        assert!(matches!(unknown_model, RequestModelResolution::InvalidModel { group_slug: Some(ref s) } if s == "team"));
+        assert!(matches!(unknown_model, Err(ResolutionFailure::InvalidModel { group_slug: Some(ref s) }) if s == "team"));
     }
 
     #[tokio::test]
@@ -315,6 +313,6 @@ mod tests {
         assert_eq!(group.slug, "team");
 
         let resolved = resolve_request_model(&f.state, &f.user.id, Some("team"), "fast").await.unwrap();
-        assert!(matches!(resolved, RequestModelResolution::GroupNotFound { .. }));
+        assert!(matches!(resolved, Err(ResolutionFailure::GroupNotFound { .. })));
     }
 }

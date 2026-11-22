@@ -63,7 +63,7 @@ fn jitter_ms(cap_ms: u64) -> u64 {
     nanos % cap_ms.max(1)
 }
 
-/// The DO rejects a whole out-of-bounds report and the CLI would then cache
+/// The server rejects a whole out-of-bounds report and the CLI would then cache
 /// it as "sent" and never retry — so the protocol bounds are applied locally
 /// first: drop invalid ids, cap at 100, and say what was dropped.
 fn sanitize_models_report(slug: &str, models: Vec<String>) -> Vec<String> {
@@ -201,13 +201,10 @@ async fn run_socket(
 
     let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
     let semaphore = Arc::new(Semaphore::new(concurrency));
-    let http = reqwest::Client::builder()
-        .user_agent(concat!("kano-proxy-cli/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .expect("reqwest client builds");
+    let http = api::client();
 
-    // Heartbeat: text "ping", answered by the DO's auto-response without
-    // waking it (docs/cli.md § AgentTunnel).
+    // Heartbeat: text "ping", answered by the server with "pong" (docs/cli.md
+    // § The tunnel registry).
     let hb_tx = out_tx.clone();
     let heartbeat = tokio::spawn(async move {
         loop {
@@ -252,7 +249,7 @@ async fn run_socket(
 
     heartbeat.abort();
     models.abort();
-    // Abort in-flight local requests — the DO already faulted them when the
+    // Abort in-flight local requests — the server already faulted them when the
     // socket dropped, or is about to.
     for (_, inflight) in registry.lock().await.drain() {
         inflight.abort.abort();
@@ -320,7 +317,7 @@ async fn read_loop(
                             inflight.abort.abort();
                         }
                     }
-                    // Frames that only flow CLI → DO; ignore echoes.
+                    // Frames that only flow CLI → server; ignore echoes.
                     ControlFrame::Res { .. }
                     | ControlFrame::ResEnd { .. }
                     | ControlFrame::ResErr { .. }
@@ -361,6 +358,10 @@ async fn wait_for_shutdown(flag: &Arc<AtomicBool>) {
     }
 }
 
+fn res_err(id: u32, reason: &str) -> Message {
+    Message::Text(encode_control(&ControlFrame::ResErr { id, reason: reason.into() }))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn spawn_request(
     provider: &ProviderState,
@@ -374,20 +375,16 @@ async fn spawn_request(
     http: &reqwest::Client,
 ) {
     let out = out_tx.clone();
-    // Both ends distrust the other: re-check the allowlist even though the DO
+    // Both ends distrust the other: re-check the allowlist even though the server
     // already enforced it (docs/cli.md § Wire protocol).
     if !is_allowed_path(&provider.format, &path) {
-        let _ = out
-            .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() })))
-            .await;
+        let _ = out.send(res_err(id, "aborted")).await;
         return;
     }
     let Ok(permit) = semaphore.clone().try_acquire_owned() else {
-        // Should not happen — the DO caps in-flight at the same bound — but
+        // Should not happen — the server caps in-flight at the same bound — but
         // refuse locally rather than queueing.
-        let _ = out
-            .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() })))
-            .await;
+        let _ = out.send(res_err(id, "aborted")).await;
         return;
     };
 
@@ -399,6 +396,9 @@ async fn spawn_request(
     let registry_for_task = registry.clone();
     let http = http.clone();
 
+    // Held until the entry is in: a request that fails at once must not remove itself
+    // before it was inserted, which would leave its entry behind for the socket's life.
+    let mut inflight = registry.lock().await;
     let handle = tokio::spawn(async move {
         let _permit = permit;
         let started = Instant::now();
@@ -417,7 +417,7 @@ async fn spawn_request(
                 _ => req.bearer_auth(key),
             };
         }
-        // GET/HEAD carry no body on this protocol (the DO sends req_end with
+        // GET/HEAD carry no body on this protocol (the server sends req_end with
         // no chunks) and some local servers reject a chunked body on them.
         if !matches!(method.as_str(), "GET" | "HEAD") {
             let body_stream = futures_util::stream::unfold(body_rx, |mut rx| async move {
@@ -428,13 +428,9 @@ async fn spawn_request(
             drop(body_rx);
         }
 
-        let result = req.send().await;
-        let status = match &result {
-            Ok(res) => res.status().as_u16(),
-            Err(_) => 0,
-        };
-        match result {
+        match req.send().await {
             Ok(res) => {
+                let status = res.status().as_u16();
                 let mut headers = std::collections::BTreeMap::new();
                 if let Some(ct) = res.headers().get("content-type").and_then(|v| v.to_str().ok()) {
                     // Header reduction discipline: content-type only.
@@ -456,11 +452,7 @@ async fn spawn_request(
                             }
                         }
                         Err(_) => {
-                            let _ = out
-                                .send(Message::Text(
-                                    encode_control(&ControlFrame::ResErr { id, reason: "aborted".into() }),
-                                ))
-                                .await;
+                            let _ = out.send(res_err(id, "aborted")).await;
                             registry_for_task.lock().await.remove(&id);
                             return;
                         }
@@ -477,17 +469,12 @@ async fn spawn_request(
                 } else {
                     "aborted"
                 };
-                let _ = out
-                    .send(Message::Text(encode_control(&ControlFrame::ResErr { id, reason: reason.into() })))
-                    .await;
+                let _ = out.send(res_err(id, reason)).await;
                 eprintln!("[{slug}] #{id} {method} {path} -> local {reason} ({}ms)", started.elapsed().as_millis());
             }
         }
         registry_for_task.lock().await.remove(&id);
     });
 
-    registry.lock().await.insert(
-        id,
-        InflightRequest { body_tx: Some(body_tx), abort: handle.abort_handle() },
-    );
+    inflight.insert(id, InflightRequest { body_tx: Some(body_tx), abort: handle.abort_handle() });
 }

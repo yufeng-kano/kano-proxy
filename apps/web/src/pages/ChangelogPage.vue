@@ -11,7 +11,7 @@
  * page), and the page header stays sticky above it.
  *
  * `body_html` is sanitized twice server-side — GitHub's renderer, then the
- * Worker's escape-then-allowlist pass (docs/changelog.md § HTML sanitization) —
+ * server's escape-then-allowlist pass (docs/changelog.md § HTML sanitization) —
  * which is what makes `v-html` here correct rather than a hole.
  */
 import { computed, onMounted } from "vue"
@@ -154,7 +154,6 @@ function onRefresh() {
 
             <!-- Sanitized server-side (GitHub's renderer, then ours) — see
                  docs/changelog.md. -->
-            <!-- eslint-disable-next-line vue/no-v-html -->
             <div v-if="release.body_html" class="release-body" v-html="release.body_html" />
             <p v-else class="release-empty">{{ t("changelog.noNotes") }}</p>
           </div>

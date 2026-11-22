@@ -16,7 +16,7 @@ The proxy never stores prompts or responses. A row holds only metadata: who, whi
 The page header has these controls:
 
 - **Model**: **All models**, or one model or alias. The list shows what you used today, with each option's request count and cost. **By model** lists models; **By alias** lists [model group](/app/groups) names plus **No alias**. The switch also changes which name leads in each row.
-- **Provider**: **All providers**, or one built-in provider or custom endpoint, with its kind and today's count and cost. Choosing one narrows the model list.
+- **Provider**: **All providers**, or one built-in provider, custom endpoint or CLI provider, with its kind and today's count and cost. Choosing one narrows the model list.
 - **Show**: **All** or **Errors**. **Errors** keeps only failed requests.
 - **Columns**: choose which columns to show. **Reset** brings back every column at its default width.
 - The refresh button loads the newest rows.

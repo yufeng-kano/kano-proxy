@@ -17,11 +17,8 @@ use crate::db::accounts::{
 };
 use crate::pool::{AcquiredAccount, StoredCredential};
 use crate::providers::identity::pick_account_label;
-use crate::providers::types::{DynAdapter, ProviderAdapter};
+use crate::providers::types::{DynAdapter, FetchedUsage, ProviderAdapter};
 use crate::AppState;
-
-/// `{ ok: true, snapshot } | { ok: false, error }` in the TypeScript.
-pub type UsagePersistResult = Result<UsageSnapshot, String>;
 
 /// Fetch usage from upstream and persist it. A failure releases the lock without writing; a
 /// soft failure (the adapter reports `error` with no windows) still writes, merged with the
@@ -33,7 +30,7 @@ pub async fn fetch_and_persist_usage(
     row: &AccountRow,
     adapter: &dyn ProviderAdapter,
     lock_token: &str,
-) -> UsagePersistResult {
+) -> Result<UsageSnapshot, String> {
     match persist(cx, row, adapter, lock_token).await {
         Ok(snapshot) => Ok(snapshot),
         Err(error) => {
@@ -43,30 +40,26 @@ pub async fn fetch_and_persist_usage(
     }
 }
 
-async fn persist(cx: &AppState, row: &AccountRow, adapter: &dyn ProviderAdapter, lock_token: &str) -> UsagePersistResult {
+async fn persist(cx: &AppState, row: &AccountRow, adapter: &dyn ProviderAdapter, lock_token: &str) -> Result<UsageSnapshot, String> {
     let credential: StoredCredential =
         decrypt_json(cx.config().token_encryption_key.as_deref(), &row.encrypted_payload).map_err(|e| e.to_string())?;
-    let snap = adapter.fetch_usage(cx, &AcquiredAccount { row: row.clone(), credential }).await;
+    let FetchedUsage { windows, account, stale, error, edge_blocked } =
+        adapter.fetch_usage(cx, &AcquiredAccount { row: row.clone(), credential }).await;
 
-    let prior_meta: Map<String, Value> = row
+    let mut account_meta: Map<String, Value> = row
         .account_meta_json
         .as_deref()
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    let mut account_meta = prior_meta;
-    for (key, value) in snap.account.clone() {
-        account_meta.insert(key, value);
-    }
+    account_meta.extend(account.iter().map(|(key, value)| (key.clone(), value.clone())));
 
-    // Prefer upstream email / username as stable pool label, same as the route's inline
-    // version this replaces.
-    let email = snap.account.get("email").and_then(Value::as_str);
-    let display = snap
-        .account
+    // Prefer upstream email / username as the stable pool label.
+    let email = account.get("email").and_then(Value::as_str);
+    let display = account
         .get("display_name")
         .and_then(Value::as_str)
-        .or_else(|| snap.account.get("username").and_then(Value::as_str));
+        .or_else(|| account.get("username").and_then(Value::as_str));
     let fallback = row.label.as_deref().filter(|l| !l.is_empty()).unwrap_or(&row.id);
     let better = pick_account_label(email, display, fallback);
     let meta_json = serde_json::to_string(&Value::Object(account_meta)).map_err(|e| e.to_string())?;
@@ -79,21 +72,15 @@ async fn persist(cx: &AppState, row: &AccountRow, adapter: &dyn ProviderAdapter,
     // rule as a thrown error: never overwrite a good snapshot (docs/providers.md § Usage cache
     // "'Failure' includes a soft failure"). Windows always win when they do arrive, error or
     // not.
-    let prior_snapshot = if snap.windows.is_empty() && snap.error.is_some() { read_usage_snapshot(row) } else { None };
+    let prior_snapshot = if windows.is_empty() && error.is_some() { read_usage_snapshot(row) } else { None };
     let persisted = match prior_snapshot {
-        Some(prior) => UsageSnapshot {
-            windows: prior.windows,
-            account: prior.account,
-            error: snap.error.clone(),
-            stale: true,
-            edge_blocked: snap.edge_blocked,
-        },
+        Some(prior) => UsageSnapshot { windows: prior.windows, account: prior.account, error, stale: true, edge_blocked },
         None => UsageSnapshot {
-            windows: snap.windows.iter().map(|w| serde_json::to_value(w).expect("usage window serializes")).collect(),
-            account: Some(snap.account.clone()),
-            error: snap.error.clone(),
-            stale: snap.stale,
-            edge_blocked: snap.edge_blocked,
+            windows: windows.iter().map(|w| serde_json::to_value(w).expect("usage window serializes")).collect(),
+            account: Some(account),
+            error,
+            stale,
+            edge_blocked,
         },
     };
     write_usage_snapshot(cx.pool(), &row.id, lock_token, &persisted).await.map_err(|e| e.to_string())?;
@@ -109,7 +96,7 @@ async fn persist(cx: &AppState, row: &AccountRow, adapter: &dyn ProviderAdapter,
 /// caller (another concurrent request, or the accounts-page poll) also short-circuits without
 /// queuing — the stored snapshot already serves every reader; there is nothing here to report
 /// a failure to, so a lost race is simply a no-op rather than a queued retry.
-pub async fn refresh_account_usage_in_background(cx: &AppState, row: &AccountRow, adapter: &dyn ProviderAdapter) {
+async fn refresh_account_usage_in_background(cx: &AppState, row: &AccountRow, adapter: &dyn ProviderAdapter) {
     if !adapter.has_fetch_usage() {
         return;
     }
@@ -129,8 +116,8 @@ pub async fn refresh_account_usage_in_background(cx: &AppState, row: &AccountRow
     let _ = fetch_and_persist_usage(cx, &fresh_row, adapter, &lock_token).await;
 }
 
-/// The `ctx.waitUntil` form: the same refresh detached onto the runtime, for callers on a
-/// request path that must not wait for it (docs/rust-server.md § Module map, "Background
+/// The same refresh detached onto the runtime, for callers on a request path that must not
+/// wait for it (docs/rust-server.md § Module map, "Background
 /// work").
 pub fn spawn_account_usage_refresh(cx: &AppState, row: AccountRow, adapter: DynAdapter) -> tokio::task::JoinHandle<()> {
     let cx = cx.clone();
@@ -157,7 +144,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     /// A stub adapter: `fetch_usage` answers with `usage` and records the credential it was
-    /// handed, standing in for the vitest inline adapter objects.
+    /// handed.
     struct StubAdapter {
         usage: Mutex<Option<FetchedUsage>>,
         seen_credential: Arc<Mutex<Option<String>>>,
@@ -223,7 +210,7 @@ mod tests {
         assert_eq!(seen.lock().unwrap().as_deref(), Some("fresh-access"));
     }
 
-    // ---------------- fetchAndPersistUsage — soft failure vs. hard failure
+    // ---------------- fetch_and_persist_usage — soft failure vs. hard failure
 
     fn prior_snapshot() -> UsageSnapshot {
         UsageSnapshot {
@@ -235,8 +222,7 @@ mod tests {
         }
     }
 
-    /// Seeds an account (optionally with a prior snapshot) and takes its usage lock, as the
-    /// vitest `setup` helper does.
+    /// Seeds an account (optionally with a prior snapshot) and takes its usage lock.
     async fn setup(pool: &PgPool, prior: Option<UsageSnapshot>) -> (AccountRow, String) {
         let user = insert_user(pool, &format!("persist-{}@example.com", crate::ids::new_id("t"))).await;
         let row = insert_account(pool, &user.id, "grok", &StoredCredential { access_token: "tok".into(), ..Default::default() }).await;
@@ -338,8 +324,8 @@ mod tests {
         let cx = test_state(pool.clone(), MockTransport::new());
         let (row, token) = setup(&pool, Some(prior_snapshot())).await;
         let prior_fetched_at = row.usage_fetched_at.clone();
-        // The Rust `fetchUsage` cannot throw, so the hard failure is the equivalent one this
-        // port can reach: an undecryptable payload, before any upstream call.
+        // `fetch_usage` cannot fail, so the hard failure is an undecryptable payload, before
+        // any upstream call.
         let mut broken = row.clone();
         broken.encrypted_payload = "not-a-ciphertext".into();
         let adapter = StubAdapter::new(usage(Vec::new(), json!({}), None, false));

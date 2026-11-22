@@ -7,15 +7,13 @@ import { useI18n, type MessageKey } from "@/i18n"
 /**
  * Paths the app itself lands on rather than the user choosing them — a
  * restore onto one of these would be a no-op at best and a redirect loop at
- * worst, so they are never recorded as "where the user was". The legacy
- * aliases are here too: restoring `/accounts` would only bounce to
- * `/providers`, so the canonical path is what gets stored.
+ * worst, so they are never recorded as "where the user was".
  */
 // /cli/authorize carries its request id in the query, which lastPath does not
 // keep — a restore onto the bare path could only show "request missing".
 // Any route, including an edition's extension route, opts out the same way with
 // `meta: { restorable: false }` (docs/admin-ui.md § View preferences).
-const NON_RESTORABLE = new Set(["/", "/login", "/dashboard", "/accounts", "/cli", "/cli/authorize", "/keys"])
+const NON_RESTORABLE = new Set(["/", "/login", "/cli/authorize"])
 
 export interface RouterOptions {
   /** `false` leaves `/changelog` out, so it falls through to the catch-all (ShellOptions.changelog). */
@@ -118,14 +116,6 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
             } satisfies RouteRecordRaw,
           ]),
       ...extraRoutes,
-      // Pre-2.0 paths. A bookmark or a persisted last-route from an older build
-      // must land on the renamed page, not fall through the catch-all.
-      { path: "/dashboard", redirect: "/overview" },
-      { path: "/accounts", redirect: "/providers" },
-      // The CLI page merged into Providers (docs/admin-ui.md § CLI section).
-      { path: "/cli", redirect: "/providers" },
-      // API keys became the Access page once CLI devices moved in beside them.
-      { path: "/keys", redirect: "/access" },
       {
         path: "/:pathMatch(.*)*",
         redirect: "/overview",
@@ -191,29 +181,19 @@ export function createAppRouter(extraRoutes: RouteRecordRaw[] = [], options: Rou
     // already ran, so this can never skip login.
     if (isBoot && entryPath === "/") {
       const stashed = takeLoginRedirect()
-      if (stashed && stashed !== to.fullPath && router.resolve(stashed).matched.length > 0) {
-        return stashed
-      }
+      if (stashed && stashed !== to.fullPath) return stashed
     }
 
     // Restore the last visited page — but only when the browser landed on the
     // bare app root, never when the user typed or bookmarked a specific URL
     // (including /overview itself). Runs after the auth check above, so a
-    // persisted path can't skip login; and `resolve().matched` keeps a route
-    // deleted since it was stored from 404ing the boot.
+    // persisted path can't skip login. A route deleted since it was stored
+    // falls through the catch-all to /overview.
     if (isBoot && entryPath === "/" && !to.query.redirect) {
       const saved = readPrefs().lastPath
-      if (saved && saved !== to.path && !NON_RESTORABLE.has(saved)) {
-        const target = router.resolve(saved)
-        if (
-          // A pref written before the route opted out must not replay it either.
-          target.meta.restorable !== false &&
-          // A route deleted since the pref was written would otherwise fall
-          // through the catch-all and bounce straight back here.
-          target.matched.length > 0
-        ) {
-          return saved
-        }
+      // A pref written before the route opted out must not replay it either.
+      if (saved && saved !== to.path && !NON_RESTORABLE.has(saved) && router.resolve(saved).meta.restorable !== false) {
+        return saved
       }
     }
 

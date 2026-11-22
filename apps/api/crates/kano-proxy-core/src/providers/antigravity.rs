@@ -16,19 +16,22 @@ use axum::response::Response;
 use bytes::Bytes;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, StatusCode};
-use rand::{Rng, RngCore};
+use rand::Rng;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::app::now_ms;
 use crate::auth::provider_oauth::{antigravity_oauth_client, AntigravityOAuth};
 use crate::db::accounts::parse_iso_ms;
+use crate::ids::random_uuid;
 use crate::pool::acquire::{save_credential, AcquiredAccount, StoredCredential};
+use crate::proxy::dispatch::json_response;
 use crate::proxy::gemini_anthropic::{
     anthropic_to_gemini_request, gemini_response_to_anthropic, gemini_sse_to_anthropic_stream,
 };
 use crate::proxy::gemini_openai::{gemini_response_to_openai, gemini_sse_to_openai_stream, openai_to_gemini_request};
 use crate::proxy::gemini_wire::empty_response_failure;
+use crate::routing::feedback::RATELIMIT_RESET_HINT_HEADER;
 use crate::upstream::transport::{TransportError, UpstreamRequest, UpstreamResponse};
 use crate::AppState;
 
@@ -38,12 +41,6 @@ use super::types::{
     AdapterError, AudioInput, CallExtras, ChatCompletionRequest, DynAdapter, FetchedUsage, ListedModels,
     ProviderAdapter, UpstreamModel, UsageWindow,
 };
-
-/// The adapter states the bench duration in this header on the failed response it hands back,
-/// because Antigravity states its limit in the *body* and only the adapter can classify it;
-/// `routing::feedback` prefers the hint over everything else (docs/providers.md
-/// § Antigravity). Mirrors `RATELIMIT_RESET_HINT_HEADER` in [`crate::routing::feedback`].
-const RATELIMIT_RESET_HINT_HEADER: &str = "x-kano-ratelimit-reset";
 
 /// Tried in order. `daily-` is the one the desktop app prefers and is the higher-capacity of
 /// the two; `cloudcode-pa` is the fallback. CLIProxyAPI `antigravityBaseURLFallbackOrder`
@@ -95,7 +92,7 @@ const CLIENT_PLATFORM: &str = "darwin/arm64";
 const NODE_API_CLIENT_UA: &str = "google-api-nodejs-client/10.3.0";
 const GOOG_API_CLIENT_UA: &str = "gl-node/22.21.1";
 
-/// Bound side fetches (refresh / models / usage) so a hung Google edge cannot stall a worker.
+/// Bound side fetches (refresh / models / usage) so a hung Google edge cannot stall a request.
 const SIDE_FETCH_TIMEOUT: Duration = Duration::from_millis(10_000);
 /// `onboardUser` is a long-running operation and is only ever run during login.
 const ONBOARD_TIMEOUT: Duration = Duration::from_millis(30_000);
@@ -204,13 +201,10 @@ async fn refresh_antigravity_credential(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AntigravityProject {
     pub project_id: String,
-    pub tier_id: Option<String>,
+    pub tier_id: String,
 }
 
 fn extract_project(payload: &Value) -> String {
-    if !payload.is_object() {
-        return String::new();
-    }
     for key in ["cloudaicompanionProject", "projectId", "project"] {
         let Some(value) = payload.get(key) else { continue };
         if let Some(text) = value.as_str() {
@@ -218,11 +212,9 @@ fn extract_project(payload: &Value) -> String {
                 return text.trim().to_string();
             }
         }
-        if value.is_object() {
-            if let Some(id) = value.get("id").and_then(Value::as_str) {
-                if !id.trim().is_empty() {
-                    return id.trim().to_string();
-                }
+        if let Some(id) = value.get("id").and_then(Value::as_str) {
+            if !id.trim().is_empty() {
+                return id.trim().to_string();
             }
         }
     }
@@ -231,14 +223,8 @@ fn extract_project(payload: &Value) -> String {
 
 /// `allowedTiers[].isDefault`, else `currentTier.id`, else Google's own free tier id.
 fn default_tier_id(payload: &Value) -> String {
-    if !payload.is_object() {
-        return "free-tier".into();
-    }
     if let Some(tiers) = payload.get("allowedTiers").and_then(Value::as_array) {
         for tier in tiers {
-            if !tier.is_object() {
-                continue;
-            }
             if tier.get("isDefault") == Some(&Value::Bool(true)) {
                 if let Some(id) = tier.get("id").and_then(Value::as_str) {
                     if !id.trim().is_empty() {
@@ -256,19 +242,18 @@ fn default_tier_id(payload: &Value) -> String {
     "free-tier".into()
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct LoadCodeAssist {
-    pub project_id: String,
-    pub tier_id: String,
+struct LoadCodeAssist {
+    project_id: String,
+    tier_id: String,
     /// `paidTier.availableCredits` Google One AI balance, when the tier reports one —
     /// measured on Google AI Pro, the matching entry carries only
     /// `minimumCreditAmountForUsage` and no `creditAmount`, so `None` is the common case, not
     /// an error. That floor is deliberately not read either: it would be a usability gate on
     /// credits whose semantics are unverified (docs/providers.md § Antigravity).
-    pub credits: Option<f64>,
+    credits: Option<f64>,
     /// `paidTier.name` — the plan's own name, preferred over the id for display.
-    pub paid_tier_name: Option<String>,
-    pub paid_tier_id: Option<String>,
+    paid_tier_name: Option<String>,
+    paid_tier_id: Option<String>,
 }
 
 /// A JavaScript `Number(value)` over the JSON values Google puts in `creditAmount`: the
@@ -298,9 +283,8 @@ async fn error_detail(response: UpstreamResponse) -> String {
 
 /// A side call (`loadCodeAssist`, `retrieveUserQuotaSummary`) on the same hosts, in the same
 /// order, as the data plane: `daily-` first, then `cloudcode-pa`, which is also what the real
-/// CLI does. These two used to go straight to `cloudcode-pa`, which as of 2026-10-16 does not
-/// return the Gemini 4 Argon quota group that `daily-` does. The last host's error is the one
-/// reported.
+/// CLI does. `cloudcode-pa` alone does not return the Gemini 4 Argon quota group that `daily-`
+/// does (2026-10-16). The last host's error is the one reported.
 async fn side_post(cx: &AppState, path: &str, name: &str, access_token: &str, body: &Value) -> anyhow::Result<Value> {
     let mut last_error: Option<anyhow::Error> = None;
     for base in BASE_URLS {
@@ -331,16 +315,13 @@ async fn side_post(cx: &AppState, path: &str, name: &str, access_token: &str, bo
 /// its Google One AI credit balance. CLIProxyAPI `internal/auth/antigravity/auth.go`
 /// `FetchProjectID` for the project/tier halves, `antigravity_executor_credits.go` for the
 /// credit half.
-pub async fn load_code_assist(cx: &AppState, access_token: &str) -> anyhow::Result<LoadCodeAssist> {
+async fn load_code_assist(cx: &AppState, access_token: &str) -> anyhow::Result<LoadCodeAssist> {
     let body = json!({ "metadata": { "ideType": "ANTIGRAVITY" } });
     let json = side_post(cx, LOAD_CODE_ASSIST_PATH, "loadCodeAssist", access_token, &body).await?;
     let paid_tier = json.get("paidTier");
     let mut credits = None;
     if let Some(available) = paid_tier.and_then(|t| t.get("availableCredits")).and_then(Value::as_array) {
         for credit in available {
-            if !credit.is_object() {
-                continue;
-            }
             let credit_type = credit.get("creditType").and_then(Value::as_str).unwrap_or("").to_ascii_uppercase();
             if credit_type != "GOOGLE_ONE_AI" {
                 continue;
@@ -375,20 +356,16 @@ const GROUP_ORDER: [&str; 3] = ["Gemini", "Argon", "Other"];
 /// gives a window label one short column. Compress to the strings every other adapter already
 /// emits, and leave anything unrecognized alone rather than mangling it.
 fn window_short_name(bucket_name: &str) -> String {
+    static FIVE_HOUR_RE: once_cell::sync::Lazy<regex::Regex> =
+        once_cell::sync::Lazy::new(|| regex::Regex::new(r"five[\s_-]*hour|\b5\s*h\b").expect("valid regex"));
     let lower = bucket_name.to_lowercase();
-    if five_hour_re().is_match(&lower) {
+    if FIVE_HOUR_RE.is_match(&lower) {
         return "5h".into();
     }
     if lower.contains("week") {
         return "Week".into();
     }
     bucket_name.to_string()
-}
-
-fn five_hour_re() -> &'static regex::Regex {
-    static RE: once_cell::sync::Lazy<regex::Regex> =
-        once_cell::sync::Lazy::new(|| regex::Regex::new(r"five[\s_-]*hour|\b5\s*h\b").expect("valid regex"));
-    &RE
 }
 
 /// "GEMINI 4 ARGON" → "Argon", checked first because it also contains "gemini" and would
@@ -415,9 +392,6 @@ fn collect_quota_buckets(raw: Option<&Value>, group_name: Option<&str>, out: &mu
     let prefix = group_name.map(group_short_name);
     let mut ranked: Vec<(usize, UsageWindow)> = Vec::new();
     for entry in entries {
-        if !entry.is_object() {
-            continue;
-        }
         if entry.get("disabled") == Some(&Value::Bool(true)) {
             continue;
         }
@@ -456,7 +430,7 @@ fn collect_quota_buckets(raw: Option<&Value>, group_name: Option<&str>, out: &mu
 /// under `/model`. CLIProxyAPI does not implement this endpoint; the wire shape is read from
 /// the CLI's embedded protobuf descriptor (`…v1internal.QuotaSummary*`) — see
 /// docs/providers.md § Antigravity.
-pub async fn retrieve_user_quota_summary(
+async fn retrieve_user_quota_summary(
     cx: &AppState,
     access_token: &str,
     project: &str,
@@ -468,7 +442,6 @@ pub async fn retrieve_user_quota_summary(
     if let Some(groups) = json.get("groups").and_then(Value::as_array) {
         let mut named: Vec<(usize, &str, &Value)> = groups
             .iter()
-            .filter(|group| group.is_object())
             .filter_map(|group| {
                 let name = group.get("displayName").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty())?;
                 let rank = GROUP_ORDER.iter().position(|g| *g == group_short_name(name)).unwrap_or(GROUP_ORDER.len());
@@ -488,7 +461,7 @@ pub async fn retrieve_user_quota_summary(
 /// none. It is a long-running operation: poll until `done`. CLIProxyAPI polls five times at
 /// 2s; a dispatch-path request cannot afford that latency, so this only ever runs during
 /// login.
-pub async fn onboard_user(cx: &AppState, access_token: &str, tier_id: &str) -> anyhow::Result<String> {
+async fn onboard_user(cx: &AppState, access_token: &str, tier_id: &str) -> anyhow::Result<String> {
     let ua = format!("{} {NODE_API_CLIENT_UA}", hub_user_agent(cx));
     let body = Bytes::from(
         json!({
@@ -497,7 +470,7 @@ pub async fn onboard_user(cx: &AppState, access_token: &str, tier_id: &str) -> a
         })
         .to_string(),
     );
-    for attempt in 0..5 {
+    for _ in 0..5 {
         let request = api_request(cx, format!("{}{ONBOARD_USER_PATH}", BASE_URLS[0]), access_token, "*/*")
             .header("user-agent", &ua)
             .header("x-goog-api-client", GOOG_API_CLIENT_UA)
@@ -516,7 +489,6 @@ pub async fn onboard_user(cx: &AppState, access_token: &str, tier_id: &str) -> a
             }
             anyhow::bail!("onboardUser completed without a project id");
         }
-        let _ = attempt;
         tokio::time::sleep(Duration::from_millis(2000)).await;
     }
     anyhow::bail!("onboardUser did not complete")
@@ -526,10 +498,10 @@ pub async fn onboard_user(cx: &AppState, access_token: &str, tier_id: &str) -> a
 pub async fn bootstrap_antigravity_project(cx: &AppState, access_token: &str) -> anyhow::Result<AntigravityProject> {
     let loaded = load_code_assist(cx, access_token).await?;
     if !loaded.project_id.is_empty() {
-        return Ok(AntigravityProject { project_id: loaded.project_id, tier_id: Some(loaded.tier_id) });
+        return Ok(AntigravityProject { project_id: loaded.project_id, tier_id: loaded.tier_id });
     }
     let project_id = onboard_user(cx, access_token, &loaded.tier_id).await?;
-    Ok(AntigravityProject { project_id, tier_id: Some(loaded.tier_id) })
+    Ok(AntigravityProject { project_id, tier_id: loaded.tier_id })
 }
 
 fn stored_project(credential: &StoredCredential) -> String {
@@ -551,30 +523,15 @@ async fn ensure_project(cx: &AppState, account: AcquiredAccount) -> anyhow::Resu
         return Ok(account);
     }
     let project = bootstrap_antigravity_project(cx, &account.credential.access_token).await?;
-    let mut credential = account.credential.clone();
-    let mut extra = credential.extra.clone().unwrap_or_default();
+    let mut credential = account.credential;
+    let mut extra = credential.extra.take().unwrap_or_default();
     extra.insert("project_id".into(), json!(project.project_id));
-    extra.insert("tier_id".into(), json!(project.tier_id));
     credential.extra = Some(extra);
     save_credential(cx, &account.row.id, &credential, None).await?;
     Ok(AcquiredAccount { row: account.row, credential })
 }
 
 // ── Upstream request ───────────────────────────────────────────────────────
-
-fn random_hex_bytes(n: usize) -> Vec<u8> {
-    let mut bytes = vec![0u8; n];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    bytes
-}
-
-fn random_uuid() -> String {
-    let mut b = random_hex_bytes(16);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h = hex::encode(&b);
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
-}
 
 /// Keeps one conversation on one backend shard so its prompt cache hits. CLIProxyAPI
 /// `generateStableSessionID` hashes the first user text part and formats it as a negative
@@ -614,12 +571,7 @@ fn is_falsy(value: Option<&Value>) -> bool {
 /// Wraps a Gemini request in the CloudCode envelope. CLIProxyAPI `geminiToAntigravity`
 /// (executor_request.go): the model, project and `userAgent: "antigravity"` sit outside
 /// `request`, and `requestType` is `agent` for everything but the image models.
-pub fn build_antigravity_envelope(
-    model: &str,
-    project_id: &str,
-    request: Value,
-    session_id: Option<&str>,
-) -> Value {
+fn build_antigravity_envelope(model: &str, project_id: &str, request: Value, session_id: Option<&str>) -> Value {
     let mut request = match request {
         Value::Object(map) => map,
         _ => Map::new(),
@@ -851,14 +803,6 @@ fn error_response(result: FailedUpstream) -> Response {
     builder.body(Body::from(result.body)).expect("response builds")
 }
 
-fn json_response(status: StatusCode, value: &Value) -> Response {
-    Response::builder()
-        .status(status)
-        .header(CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(value).unwrap_or_default()))
-        .expect("response builds")
-}
-
 fn sse_response(stream: crate::upstream::transport::ByteStream) -> Response {
     Response::builder()
         .status(StatusCode::OK)
@@ -930,14 +874,14 @@ impl ProviderAdapter for AntigravityAdapter {
 
         let session_id = req
             .prompt_cache_key
-            .clone()
+            .as_deref()
             .filter(|s| !s.is_empty())
-            .or_else(|| req.affinity.as_ref().and_then(|a| a.conv_id.clone()).filter(|s| !s.is_empty()));
+            .or_else(|| req.affinity.as_ref().and_then(|a| a.conv_id.as_deref()).filter(|s| !s.is_empty()));
         let mut envelope = build_antigravity_envelope(
             &req.upstream_model,
             &stored_project(&acc.credential),
             openai_to_gemini_request(req),
-            session_id.as_deref(),
+            session_id,
         );
         if extras.edits.strip_claude_code_line {
             rewrite_prompt_filter_sentences(&mut envelope);
@@ -998,17 +942,9 @@ impl ProviderAdapter for AntigravityAdapter {
             return Ok(invalid_effort_response());
         };
 
-        let session_id = body
-            .get("metadata")
-            .and_then(|m| m.get("user_id"))
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let mut envelope = build_antigravity_envelope(
-            &upstream_model,
-            &stored_project(&acc.credential),
-            converted.request,
-            session_id.as_deref(),
-        );
+        let session_id = body.get("metadata").and_then(|m| m.get("user_id")).and_then(Value::as_str);
+        let mut envelope =
+            build_antigravity_envelope(&upstream_model, &stored_project(&acc.credential), converted.request, session_id);
         if extras.edits.strip_claude_code_line {
             rewrite_prompt_filter_sentences(&mut envelope);
         }
@@ -1168,45 +1104,30 @@ impl ProviderAdapter for AntigravityAdapter {
             Err(e) => {
                 let mut meta = Map::new();
                 meta.insert("email".into(), json!(email));
-                return FetchedUsage {
-                    windows: Vec::new(),
-                    account: meta,
-                    stale: true,
-                    error: Some(e.to_string()),
-                    edge_blocked: false,
-                };
+                return FetchedUsage { account: meta, stale: true, error: Some(e.to_string()), ..Default::default() };
             }
         };
         let project = if !loaded.project_id.is_empty() {
-            Some(loaded.project_id.clone())
+            Some(loaded.project_id)
         } else {
             Some(stored_project(&acc.credential)).filter(|p| !p.is_empty())
         };
         let mut meta = Map::new();
         meta.insert("email".into(), json!(email));
-        meta.insert(
-            "plan_type".into(),
-            json!(loaded.paid_tier_name.clone().or_else(|| loaded.paid_tier_id.clone()).unwrap_or(loaded.tier_id.clone())),
-        );
+        meta.insert("plan_type".into(), json!(loaded.paid_tier_name.or(loaded.paid_tier_id).unwrap_or(loaded.tier_id)));
         meta.insert("project_id".into(), json!(project));
         // `is_some` and not a truthiness check: a balance of 0 is a fact worth printing, not
         // a missing one.
         if let Some(credits) = loaded.credits {
             let credits = if credits.fract() == 0.0 && credits.abs() < 9.0e15 { json!(credits as i64) } else { json!(credits) };
-            meta.insert("credits_remaining".into(), json!(credits));
+            meta.insert("credits_remaining".into(), credits);
         }
         let Some(project) = project else {
-            return FetchedUsage { windows: Vec::new(), account: meta, ..Default::default() };
+            return FetchedUsage { account: meta, ..Default::default() };
         };
         match retrieve_user_quota_summary(cx, &acc.credential.access_token, &project).await {
             Ok(windows) => FetchedUsage { windows, account: meta, ..Default::default() },
-            Err(e) => FetchedUsage {
-                windows: Vec::new(),
-                account: meta,
-                stale: true,
-                error: Some(e.to_string()),
-                edge_blocked: false,
-            },
+            Err(e) => FetchedUsage { account: meta, stale: true, error: Some(e.to_string()), ..Default::default() },
         }
     }
 }
@@ -1216,6 +1137,7 @@ mod tests {
     use super::*;
     use crate::db::accounts::iso_from_ms;
     use crate::db::test_support::{insert_account, insert_user, skip_without_db, test_pool, test_state};
+    use crate::providers::antigravity_limits::ANTIGRAVITY_QUOTA_BENCH_MS;
     use crate::upstream::transport::MockTransport;
     use http::HeaderValue;
     use http_body_util::BodyExt;
@@ -1248,14 +1170,13 @@ mod tests {
     async fn setup(transport: Arc<MockTransport>, credential: StoredCredential) -> Option<(AppState, AcquiredAccount)> {
         let pool = test_pool().await?;
         let state = test_state(pool.clone(), transport);
-        let user = insert_user(&pool, &format!("ag-{}@example.com", hex::encode(random_hex_bytes(4)))).await;
+        let user = insert_user(&pool, &format!("ag-{}@example.com", crate::ids::new_id(""))).await;
         let row = insert_account(&pool, &user.id, "antigravity", &credential).await;
         Some((state, AcquiredAccount { row, credential }))
     }
 
     fn chat_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "antigravity/gemini-3-flash".into(),
             raw_model: "antigravity/gemini-3-flash".into(),
             upstream_model: "gemini-3-flash".into(),
             messages: vec![json!({ "role": "user", "content": "hi" })],
@@ -1282,6 +1203,11 @@ mod tests {
         )
     }
 
+    /// The bench deadline the adapter attached for dispatch.
+    fn reset_hint(res: &Response) -> i64 {
+        res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap()
+    }
+
     async fn body_json(response: Response) -> Value {
         let bytes = response.into_body().collect().await.expect("body collects").to_bytes();
         serde_json::from_slice(&bytes).expect("json body")
@@ -1293,7 +1219,7 @@ mod tests {
         headers
     }
 
-    // ── buildAntigravityEnvelope ────────────────────────────────────────────
+    // ── build_antigravity_envelope ──────────────────────────────────────────
 
     #[test]
     fn puts_model_project_and_the_fixed_user_agent_outside_the_gemini_request() {
@@ -1446,7 +1372,7 @@ mod tests {
         assert_eq!(envelope["requestType"], json!("image_gen"));
     }
 
-    // ── refreshIfNeeded ─────────────────────────────────────────────────────
+    // ── refresh_if_needed ───────────────────────────────────────────────────
 
     #[tokio::test]
     async fn rejects_on_a_failed_project_bootstrap_so_dispatch_skips_the_candidate() {
@@ -1473,7 +1399,7 @@ mod tests {
         assert!(transport.requests().is_empty());
     }
 
-    // ── chatCompletions ─────────────────────────────────────────────────────
+    // ── chat_completions ────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn posts_the_envelope_to_the_daily_base_url_with_the_antigravity_identity() {
@@ -1551,13 +1477,11 @@ mod tests {
     #[tokio::test]
     async fn falls_back_on_a_429_then_returns_the_last_failure() {
         let transport = MockTransport::new();
-        let quota = || {
-            quota_429(json!([{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED" }]))
-        };
-        transport.expect(move |_| Ok(quota()));
-        transport.expect(move |_| {
-            Ok(quota_429(json!([{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED" }])))
-        });
+        for _ in BASE_URLS {
+            transport.expect(|_| {
+                Ok(quota_429(json!([{ "@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "QUOTA_EXHAUSTED" }])))
+            });
+        }
         let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
 
         let before = now_ms();
@@ -1568,8 +1492,8 @@ mod tests {
         assert_eq!(transport.requests().len(), 2);
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
         // Quota exhaustion with no upstream reset benches for the documented hour.
-        let hint: i64 = res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap();
-        assert!(hint >= before + super::super::antigravity_limits::ANTIGRAVITY_QUOTA_BENCH_MS);
+        let hint = reset_hint(&res);
+        assert!(hint >= before + ANTIGRAVITY_QUOTA_BENCH_MS);
     }
 
     #[tokio::test]
@@ -1590,7 +1514,7 @@ mod tests {
             .chat_completions(&cx, &account, &chat_request(), &CallExtras::default())
             .await
             .unwrap();
-        let hint: i64 = res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap();
+        let hint = reset_hint(&res);
         assert!(hint >= before + 30_000);
         assert!(hint < before + 60_000);
     }
@@ -1614,26 +1538,21 @@ mod tests {
             .unwrap();
         assert_eq!(transport.requests().len(), 2);
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
-        let hint: i64 = res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap();
-        assert!(hint >= before + super::super::antigravity_limits::ANTIGRAVITY_QUOTA_BENCH_MS);
+        let hint = reset_hint(&res);
+        assert!(hint >= before + ANTIGRAVITY_QUOTA_BENCH_MS);
     }
 
     #[tokio::test]
     async fn does_not_bench_the_account_for_a_terminal_no_capacity_429() {
         let transport = MockTransport::new();
-        let no_capacity = || {
-            UpstreamResponse::json(
-                StatusCode::TOO_MANY_REQUESTS,
-                &json!({ "error": { "status": "RESOURCE_EXHAUSTED", "message": "no capacity" } }),
-            )
-        };
-        transport.expect(move |_| Ok(no_capacity()));
-        transport.expect(move |_| {
-            Ok(UpstreamResponse::json(
-                StatusCode::TOO_MANY_REQUESTS,
-                &json!({ "error": { "status": "RESOURCE_EXHAUSTED", "message": "no capacity" } }),
-            ))
-        });
+        for _ in BASE_URLS {
+            transport.expect(|_| {
+                Ok(UpstreamResponse::json(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &json!({ "error": { "status": "RESOURCE_EXHAUSTED", "message": "no capacity" } }),
+                ))
+            });
+        }
         let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
 
         let res = AntigravityAdapter
@@ -1643,7 +1562,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
         // Fleet-side condition, not this credential's: the hint must not put the account on
         // the 300s default bench, only let the failover walk continue.
-        let hint: i64 = res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap();
+        let hint = reset_hint(&res);
         assert!(hint <= now_ms());
     }
 
@@ -1673,7 +1592,7 @@ mod tests {
             .unwrap();
         assert_eq!(transport.requests().len(), 2);
         assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
-        let hint: i64 = res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap();
+        let hint = reset_hint(&res);
         assert!(hint <= now_ms());
     }
 
@@ -1694,7 +1613,7 @@ mod tests {
             .chat_completions(&cx, &account, &chat_request(), &CallExtras::default())
             .await
             .unwrap();
-        let hint: i64 = res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap();
+        let hint = reset_hint(&res);
         assert!(hint >= before + 30_000);
         assert!(hint < before + 60_000);
     }
@@ -1713,8 +1632,8 @@ mod tests {
             .chat_completions(&cx, &account, &chat_request(), &CallExtras::default())
             .await
             .unwrap();
-        let hint: i64 = res.headers()[RATELIMIT_RESET_HINT_HEADER].to_str().unwrap().parse().unwrap();
-        assert!(hint >= before + super::super::antigravity_limits::ANTIGRAVITY_QUOTA_BENCH_MS);
+        let hint = reset_hint(&res);
+        assert!(hint >= before + ANTIGRAVITY_QUOTA_BENCH_MS);
     }
 
     #[tokio::test]
@@ -1749,6 +1668,7 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(transport.requests()[0].header("user-agent"), Some(CLI_UA));
         let sent = transport.requests()[0].json();
         assert_eq!(sent["request"]["contents"], json!([{ "role": "user", "parts": [{ "text": "hi" }] }]));
         assert_eq!(sent["request"]["generationConfig"]["maxOutputTokens"], json!(64));
@@ -1812,7 +1732,7 @@ mod tests {
 
     #[tokio::test]
     async fn hide_claude_code_identity_rewrites_the_prompt_filter_sentences_in_system_text_only() {
-        if setup(MockTransport::new(), credential()).await.is_none() {
+        if test_pool().await.is_none() {
             return skip_without_db();
         }
         let edits = crate::providers::types::RequestEdits { strip_claude_code_line: true, ..Default::default() };
@@ -1827,14 +1747,14 @@ mod tests {
 
     #[tokio::test]
     async fn without_the_switch_the_system_text_reaches_antigravity_unchanged() {
-        if setup(MockTransport::new(), credential()).await.is_none() {
+        if test_pool().await.is_none() {
             return skip_without_db();
         }
         let (system, _) = sent_system_and_user(Default::default()).await;
         assert_eq!(system, json!(format!("{INTERACTIVE}\n{DUAL_USE}\n{PASTED}")));
     }
 
-    // ── countTokens ─────────────────────────────────────────────────────────
+    // ── count_tokens ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn posts_a_bare_request_body_and_answers_anthropic_shaped() {
@@ -1912,7 +1832,7 @@ mod tests {
         assert_eq!(body_json(res).await["type"], json!("error"));
     }
 
-    // ── listModels ──────────────────────────────────────────────────────────
+    // ── list_models ─────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn reads_the_live_fetch_available_models_map_ids_verbatim() {
@@ -1925,6 +1845,7 @@ mod tests {
 
         let result = AntigravityAdapter.list_models(&cx, &account).await;
         assert_eq!(transport.requests()[0].url, format!("{DAILY}/v1internal:fetchAvailableModels"));
+        assert_eq!(transport.requests()[0].header("user-agent"), Some(CLI_UA));
         assert_eq!(transport.requests()[0].json(), json!({ "project": "proj-42" }));
         // The upstream id is what callers must send; the drifting UI name is only a label
         // (docs/providers.md § Antigravity).
@@ -2006,7 +1927,7 @@ mod tests {
         assert_eq!(result.error, None);
     }
 
-    // ── fetchUsage quota windows ────────────────────────────────────────────
+    // ── fetch_usage quota windows ───────────────────────────────────────────
 
     /// loadCodeAssist then retrieveUserQuotaSummary, in the order fetchUsage calls them.
     fn stub_quota(transport: &MockTransport, summary: Value, tier: Value) {
@@ -2234,7 +2155,7 @@ mod tests {
         assert_eq!(usage.account["project_id"], json!("proj-42"));
     }
 
-    // ── fetchUsage metadata ─────────────────────────────────────────────────
+    // ── fetch_usage metadata ────────────────────────────────────────────────
 
     /// The `loadCodeAssist` answer plus a quota summary the test does not care about.
     fn stub_load_only(transport: &MockTransport, loaded: Value) {
@@ -2354,29 +2275,6 @@ mod tests {
     }
 
     // ── Antigravity client identity ─────────────────────────────────────────
-
-    #[tokio::test]
-    async fn sends_the_cli_user_agent_on_the_anthropic_surface_too() {
-        let transport = MockTransport::new();
-        transport.expect(|_| Ok(ok_generate("hi there")));
-        let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
-        let body = json!({ "model": "gemini-3-flash", "messages": [{ "role": "user", "content": "hi" }], "max_tokens": 64 });
-        AntigravityAdapter
-            .messages(&cx, &account, &body, &headers_with_raw_model("antigravity/gemini-3-flash"), &CallExtras::default())
-            .await
-            .unwrap();
-        assert_eq!(transport.requests()[0].header("user-agent"), Some(CLI_UA));
-    }
-
-    #[tokio::test]
-    async fn sends_the_cli_user_agent_on_fetch_available_models() {
-        let transport = MockTransport::new();
-        transport.respond_json(StatusCode::OK, json!({ "models": {} }));
-        let Some((cx, account)) = setup(transport.clone(), credential()).await else { return skip_without_db() };
-        AntigravityAdapter.list_models(&cx, &account).await;
-        assert_eq!(transport.requests()[0].url, format!("{DAILY}/v1internal:fetchAvailableModels"));
-        assert_eq!(transport.requests()[0].header("user-agent"), Some(CLI_UA));
-    }
 
     #[tokio::test]
     async fn keeps_the_hub_user_agent_on_the_onboard_user_control_plane_call() {

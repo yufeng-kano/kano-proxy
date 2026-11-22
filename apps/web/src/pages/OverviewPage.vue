@@ -5,7 +5,7 @@
  * expandable into a detail modal — then one Activity card whose sub-tabs
  * (Tokens / Requests / Cache / By model) share a single full-size chart
  * region. Errors and average latency ride the Activity header as compact
- * stats, so nothing the old tile row said is lost.
+ * stats.
  *
  * Data is cache-first and silent about it: the cache paints immediately and
  * says nothing. Only the Refresh the user pressed reports progress, on the
@@ -230,7 +230,7 @@ const activityChart = computed<{ series: MetricSeries; formatValue: (n: number) 
   },
 )
 
-/** Errors + latency — the two former tiles, now compact header stats. */
+/** Errors + latency, the Activity header's compact stats. */
 const errorsStat = computed(() => format.integer(totals.value?.errors))
 const latencyStat = computed(() => format.duration(totals.value?.avg_latency_ms))
 
@@ -387,7 +387,6 @@ function coverageNote(row: ModelUsageRow): string | null {
             :label="t('overview.activity.label')"
             @select="onSelectActivityTab"
           />
-          <!-- The two former tiles, as header stats beside the sub-tabs. -->
           <div class="activity-stats">
             <span class="stat">
               <span class="stat-label">{{ t("overview.stat.errors") }}</span>
@@ -519,7 +518,7 @@ function coverageNote(row: ModelUsageRow): string | null {
   gap: var(--space-4);
 }
 
-/* The two figures that survived the tile removal, so they are set to be read:
+/* Errors and latency are figures to be read, not chrome:
    body size, the value at full text tone and weight (docs/admin-ui.md
    § Design restraint — a value that matters is not shrunk and greyed). */
 .stat {

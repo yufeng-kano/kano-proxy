@@ -3,18 +3,14 @@
 //! (`kind = 'provider'`, [`crate::routes::providers`]). Rows expire in 15 minutes and are
 //! pruned opportunistically on the same path that adds them (docs/logging.md).
 
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::ids::now_iso;
 
-pub const GOOGLE_KIND: &str = "google";
-pub const PROVIDER_KIND: &str = "provider";
-
-/// Login states live 15 minutes, the same budget the TypeScript used for both flows.
+/// Login states live 15 minutes, in both flows.
 pub const LOGIN_STATE_TTL_MS: i64 = 900_000;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct OAuthLoginStateRow {
     pub id: String,
     pub kind: String,
@@ -39,8 +35,10 @@ pub async fn insert_google_state(db: &PgPool, id: &str, expires_at: &str) -> Res
     Ok(())
 }
 
-pub async fn get_google_state(db: &PgPool, id: &str) -> Result<Option<OAuthLoginStateRow>, sqlx::Error> {
-    sqlx::query_as::<_, OAuthLoginStateRow>("SELECT * FROM oauth_login_states WHERE id = $1 AND kind = 'google'")
+/// Claims a sign-in state: deletes the Google row and returns its `expires_at`. One statement,
+/// so two callbacks racing on the same state cannot both get it.
+pub async fn take_google_state(db: &PgPool, id: &str) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("DELETE FROM oauth_login_states WHERE id = $1 AND kind = 'google' RETURNING expires_at")
         .bind(id)
         .fetch_optional(db)
         .await
@@ -132,18 +130,18 @@ mod tests {
         insert_google_state(&pool, "gstate_1", &expires).await.unwrap();
         insert_provider_state(&pool, "login_1", &user.id, "codex", r#"{"oauth_state":"s1"}"#, &expires).await.unwrap();
 
-        let google = get_google_state(&pool, "gstate_1").await.unwrap().unwrap();
-        assert_eq!(google.payload_json, "{}");
-        assert_eq!(google.user_id, None);
-        assert!(get_google_state(&pool, "login_1").await.unwrap().is_none(), "a provider row is not a google state");
+        assert!(take_google_state(&pool, "login_1").await.unwrap().is_none(), "a provider row is not a google state");
+        // Two callbacks racing on one state: exactly one claims it.
+        let (a, b) = tokio::join!(take_google_state(&pool, "gstate_1"), take_google_state(&pool, "gstate_1"));
+        assert_eq!(a.unwrap().is_some() as u8 + b.unwrap().is_some() as u8, 1);
 
         assert!(get_provider_state(&pool, &user.id, "codex", "login_1").await.unwrap().is_some());
         assert!(get_provider_state(&pool, "someone-else", "codex", "login_1").await.unwrap().is_none());
         assert!(get_provider_state(&pool, &user.id, "grok", "login_1").await.unwrap().is_none());
         assert_eq!(list_provider_states(&pool, &user.id, "codex").await.unwrap().len(), 1);
 
-        assert!(delete_state(&pool, "gstate_1").await.unwrap());
-        assert!(!delete_state(&pool, "gstate_1").await.unwrap());
+        assert!(delete_state(&pool, "login_1").await.unwrap());
+        assert!(!delete_state(&pool, "login_1").await.unwrap());
     }
 
     #[tokio::test]
@@ -152,7 +150,7 @@ mod tests {
         insert_google_state(&pool, "old", "2020-01-01T00:00:00.000Z").await.unwrap();
         insert_google_state(&pool, "live", &iso_from_ms(crate::app::now_ms() + LOGIN_STATE_TTL_MS)).await.unwrap();
         assert_eq!(delete_expired_states(&pool, &crate::ids::now_iso()).await.unwrap(), 1);
-        assert!(get_google_state(&pool, "old").await.unwrap().is_none());
-        assert!(get_google_state(&pool, "live").await.unwrap().is_some());
+        assert!(take_google_state(&pool, "old").await.unwrap().is_none());
+        assert!(take_google_state(&pool, "live").await.unwrap().is_some());
     }
 }

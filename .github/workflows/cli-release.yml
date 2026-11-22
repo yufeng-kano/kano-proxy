@@ -2,9 +2,9 @@
 # CLI tag (cli-vX.Y.Z), then bump the Homebrew tap + Scoop bucket
 # (docs/deployment.md § CLI release, docs/cli.md § Distribution).
 #
-# Independent of the product line: product tags (vX.Y.Z) deploy the Worker via
-# release-deploy.yml and never reach this workflow. Publish CLI releases with
-# `--latest=false` so GitHub's releases/latest keeps pointing at the product.
+# Independent of the product line: a product tag (vX.Y.Z) skips every job here.
+# Publish CLI releases with `--latest=false` so GitHub's releases/latest keeps
+# pointing at the product.
 #
 # Optional repository secret:
 #   TAP_PUSH_TOKEN — push access to yufeng-kano/homebrew-tap and

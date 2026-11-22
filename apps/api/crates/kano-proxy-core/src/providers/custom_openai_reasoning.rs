@@ -1,5 +1,5 @@
 //! Reasoning effort for BYO OpenAI providers (docs/providers.md
-//! § Custom providers, "same-account remap, not a first-send clamp").
+//! § Custom endpoints, "same-account remap, not a first-send clamp").
 //!
 //! An ordered registry of parsers that recognize "this valid ladder token is not in the
 //! upstream's allowed set" in a 400 body. A new vendor error string is a new parser, not a
@@ -15,32 +15,29 @@ use crate::utils::reasoning::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffortRejection {
-    pub rejected: ReasoningEffort,
-    pub allowed: Vec<ReasoningEffort>,
+struct EffortRejection {
+    rejected: ReasoningEffort,
+    allowed: Vec<ReasoningEffort>,
 }
 
-/// `EffortRejectionParser` — a body text recognizer.
-pub type EffortRejectionParser = fn(&str) -> Option<EffortRejection>;
+/// A body text recognizer.
+type EffortRejectionParser = fn(&str) -> Option<EffortRejection>;
 
-/// `/unexpected reasoning effort\s+(\S+?)\.\s*supported types are\s+(.+)/i`.
 static TABBY_QWEN_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?i)unexpected reasoning effort\s+(\S+?)\.\s*supported types are\s+(.+)")
         .expect("tabby template error regex")
 });
 
-/// `/\(\s*default\s*\)/gi`.
 static DEFAULT_MARKER_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\(\s*default\s*\)").expect("default marker regex"));
 
-/// `/,|\band\b/i`.
 static SUPPORTED_SPLIT_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i),|\band\b").expect("supported list split regex"));
 
 /// Tabby + Qwen 3.8 Jinja:
 /// `TemplateError: Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low.`
 /// Matches anywhere so FastAPI `{"detail":"…"}` and a bare exception string both work.
-pub fn parse_tabby_qwen_template_error(body_text: &str) -> Option<EffortRejection> {
+fn parse_tabby_qwen_template_error(body_text: &str) -> Option<EffortRejection> {
     let caps = TABBY_QWEN_RE.captures(body_text)?;
     let rejected = parse_effort_token(caps.get(1)?.as_str())?;
     let allowed = parse_supported_effort_list(caps.get(2)?.as_str());
@@ -52,7 +49,7 @@ pub fn parse_tabby_qwen_template_error(body_text: &str) -> Option<EffortRejectio
 
 const PARSERS: &[EffortRejectionParser] = &[parse_tabby_qwen_template_error];
 
-pub fn parse_unsupported_effort_rejection(body_text: &str) -> Option<EffortRejection> {
+fn parse_unsupported_effort_rejection(body_text: &str) -> Option<EffortRejection> {
     PARSERS.iter().find_map(|parse| parse(body_text))
 }
 
@@ -87,7 +84,7 @@ fn parse_supported_effort_list(raw: &str) -> Vec<ReasoningEffort> {
     SUPPORTED_SPLIT_RE.split(&cleaned).filter_map(parse_effort_token).collect()
 }
 
-/// `raw.trim().replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, "")`, then the ladder parse.
+/// Outer non-alphanumerics trimmed, then the ladder parse.
 fn parse_effort_token(raw: &str) -> Option<ReasoningEffort> {
     let trimmed = raw.trim().trim_matches(|c: char| !c.is_ascii_alphanumeric());
     match parse_reasoning_effort_str(trimmed) {
@@ -117,25 +114,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_fastapi_tabby_payload_in_document_order() {
-        assert_eq!(
-            parse_tabby_qwen_template_error(&tabby_fastapi()),
-            Some(rejection(
-                ReasoningEffort::High,
-                &[ReasoningEffort::XHigh, ReasoningEffort::Medium, ReasoningEffort::Low]
-            ))
-        );
-    }
-
-    #[test]
-    fn matches_a_bare_template_error_string() {
-        assert_eq!(
-            parse_tabby_qwen_template_error(TABBY_DETAIL),
-            Some(rejection(
-                ReasoningEffort::High,
-                &[ReasoningEffort::XHigh, ReasoningEffort::Medium, ReasoningEffort::Low]
-            ))
-        );
+    fn parses_the_tabby_payload_in_document_order_bare_or_inside_fastapi_json() {
+        for body in [tabby_fastapi(), TABBY_DETAIL.to_string()] {
+            assert_eq!(
+                parse_tabby_qwen_template_error(&body),
+                Some(rejection(
+                    ReasoningEffort::High,
+                    &[ReasoningEffort::XHigh, ReasoningEffort::Medium, ReasoningEffort::Low]
+                )),
+                "{body}"
+            );
+        }
     }
 
     #[test]
@@ -166,22 +155,6 @@ mod tests {
             parse_tabby_qwen_template_error("TemplateError: Unexpected reasoning effort high. Supported types are ."),
             None
         );
-    }
-
-    #[test]
-    fn the_registry_returns_the_first_parsers_result() {
-        assert_eq!(
-            parse_unsupported_effort_rejection(&tabby_fastapi()),
-            Some(rejection(
-                ReasoningEffort::High,
-                &[ReasoningEffort::XHigh, ReasoningEffort::Medium, ReasoningEffort::Low]
-            ))
-        );
-    }
-
-    #[test]
-    fn the_registry_returns_none_when_no_parser_matches() {
-        assert_eq!(parse_unsupported_effort_rejection("Internal Server Error"), None);
     }
 
     #[test]

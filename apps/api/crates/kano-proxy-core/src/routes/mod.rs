@@ -1,7 +1,6 @@
-//! HTTP route groups. `core_routes` assembles them in the order
-//! `application.ts` mounts them; each group module owns its paths.
+//! HTTP route groups. `core_routes` assembles them; each group module owns its paths.
 
-pub mod anthropic;
+pub(crate) mod anthropic;
 pub mod auth;
 pub mod changelog;
 pub mod cli;
@@ -10,14 +9,14 @@ pub mod cli_v1;
 pub mod custom_providers;
 pub mod group_endpoints;
 pub mod keys;
-pub mod logs;
+pub(crate) mod logs;
 pub mod model_groups;
 pub mod models;
-pub mod openai;
+pub(crate) mod openai;
 pub mod providers;
-pub mod resolve_request;
-pub mod responses;
-pub mod usage;
+pub(crate) mod resolve_request;
+pub(crate) mod responses;
+pub(crate) mod usage;
 
 use axum::Router;
 
@@ -25,7 +24,7 @@ use crate::AppState;
 
 /// All core route groups, without state applied (so an edition can merge its own).
 ///
-/// `/api/*` carries the admin CORS rule from `application.ts`: cookie-credentialed and locked
+/// `/api/*` carries the admin CORS rule: cookie-credentialed and locked
 /// to `APP_URL`, so a page on any other origin gets no `Access-Control-Allow-Origin` header
 /// and cannot read an admin response. Admin JSON is `no-store` (`http::cors`).
 /// `shadowed` lists core paths the edition serves itself (docs/rust-server.md § Module map);
@@ -48,13 +47,11 @@ pub fn core_routes(state: &AppState, shadowed: &[String]) -> Router<AppState> {
         .layer(crate::http::cors::no_store_layer());
     // `/cli/v1` is its own namespace beside `/api/*`: token-authenticated, never
     // session, and no CORS — the CLI is the only caller (docs/cli.md § Server routes).
-    // `/agent/v1` was its pre-2.0 name and now only tells a 1.x binary to update.
     // The LLM surfaces (`/openai/v1`, `/anthropic`, `/g`) carry permissive, never credentialed
     // CORS and the API-key middleware, which also runs the edition's `RequestPolicy`
-    // (`openai::llm_routes`, matching `application.ts`).
+    // (`openai::llm_routes`).
     Router::new()
         .merge(admin)
         .nest("/cli/v1", cli_v1::routes())
-        .nest("/agent/v1", cli_v1::legacy_routes())
         .merge(openai::llm_routes(state))
 }

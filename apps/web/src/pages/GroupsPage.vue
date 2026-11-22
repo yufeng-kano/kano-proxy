@@ -26,7 +26,6 @@ import { useModelGroups } from "@/composables/useModelGroups"
 import { useI18n } from "@/i18n"
 import { groupBaseUrls, listModels } from "@/services/api"
 import {
-  CACHE_TTL_MS,
   isModelsCacheFresh,
   readModelsCache,
   writeModelsCache,
@@ -102,7 +101,7 @@ function onListKeydown(event: KeyboardEvent) {
 /** Targets that cannot take a request right now, across every model in the group. */
 function issueCount(group: ModelGroup): number {
   let count = 0
-  for (const model of group.models ?? []) {
+  for (const model of group.models) {
     model.targets.forEach((target, index) => {
       if (isUnusable(model, index) || isMissingAccount(target)) count++
     })
@@ -140,15 +139,14 @@ function isMissingAccount(target: ModelGroupTarget): boolean {
  * Current-route indicator, per model (docs/admin-ui.md § Groups page).
  * `routing` is index-aligned with the model's `targets` and computed from the
  * same stored facts dispatch uses, so it says what the next request would
- * actually do. Optional throughout: a cache entry written before the field
- * existed has none, and the rows then render without the markers.
+ * actually do.
  */
 function routingFor(model: ModelGroupModel, index: number): ModelGroupTargetRouting | null {
-  return model.routing?.targets?.[index] ?? null
+  return model.routing.targets[index] ?? null
 }
 
 function isCurrentTarget(model: ModelGroupModel, index: number): boolean {
-  return model.routing?.current_target_index === index
+  return model.routing.current_target_index === index
 }
 
 function isUnusable(model: ModelGroupModel, index: number): boolean {
@@ -227,7 +225,7 @@ async function loadCatalog(opts?: { refresh?: boolean }) {
   const uid = user.value?.id ?? null
   const cached = readModelsCache(uid)
   if (cached) catalog.value = cached.data
-  if (cached && !opts?.refresh && isModelsCacheFresh(uid, CACHE_TTL_MS)) return
+  if (cached && !opts?.refresh && isModelsCacheFresh(uid)) return
 
   try {
     // Past the local cache only: the picker needs ids, not a fresh upstream
@@ -373,7 +371,7 @@ function endpointUrls(group: ModelGroup): Array<{ key: string; label: string; ur
                 <span class="group-meta">
                   <span class="mono group-slug">{{ group.slug }}</span>
                   <span aria-hidden="true">·</span>
-                  <span>{{ t("models.count", { count: group.models?.length ?? 0 }) }}</span>
+                  <span>{{ t("models.count", { count: group.models.length }) }}</span>
                 </span>
               </span>
               <template v-if="issueCount(group)">
@@ -447,7 +445,7 @@ function endpointUrls(group: ModelGroup): Array<{ key: string; label: string; ur
           </div>
 
           <div
-            v-for="model in selectedGroup.models ?? []"
+            v-for="model in selectedGroup.models"
             :key="model.name"
             class="model-row"
             role="row"

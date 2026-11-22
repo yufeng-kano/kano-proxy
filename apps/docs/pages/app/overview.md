@@ -35,7 +35,7 @@ Three cards sit at the top: **Spend**, **Requests**, and **Tokens**. Each one sh
 
 **Tokens** counts input plus output tokens.
 
-The expand button on a card opens a larger chart and a table with each model's **Min**, **Max**, **Avg**, and **Sum** per bar over the range. **Avg** ignores bars where that model had no traffic.
+The expand button on a card opens a larger chart and a table with each model's **Min**, **Max**, **Avg**, and **Sum** per bar over the range. **Min**, **Max** and **Avg** ignore bars where that model had no traffic.
 
 ### Activity
 

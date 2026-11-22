@@ -22,9 +22,9 @@ use crate::changelog::version::parse_semver;
 use crate::upstream::{UpstreamRequest, UpstreamTransport};
 use crate::AppState;
 
-pub const CHANGELOG_CACHE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
-pub const CHANGELOG_FRESH_MS: i64 = 60 * 60 * 1000;
-/// Wait for GitHub's response headers, matching the Worker's 10s abort.
+const CHANGELOG_CACHE_TTL_SECONDS: u64 = 7 * 24 * 60 * 60;
+const CHANGELOG_FRESH_MS: i64 = 60 * 60 * 1000;
+/// How long to wait for GitHub's response headers.
 const GITHUB_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,7 +41,6 @@ pub struct ChangelogRelease {
 pub struct CachedChangelog {
     pub releases: Vec<ChangelogRelease>,
     pub latest: Option<String>,
-    pub error: Option<String>,
     #[serde(rename = "fetchedAt")]
     pub fetched_at: i64,
 }
@@ -67,7 +66,7 @@ pub async fn read_changelog_cache(state: &AppState) -> Option<CachedChangelog> {
     read_changelog_cache_with(state.cache()).await
 }
 
-pub async fn read_changelog_cache_with(cache: &Cache) -> Option<CachedChangelog> {
+async fn read_changelog_cache_with(cache: &Cache) -> Option<CachedChangelog> {
     cache.get_json::<CachedChangelog>(changelog_cache_key()).await
 }
 
@@ -75,25 +74,14 @@ pub fn is_changelog_fresh(snap: &CachedChangelog) -> bool {
     now_ms() - snap.fetched_at < CHANGELOG_FRESH_MS
 }
 
-pub async fn write_changelog_cache(
-    state: &AppState,
-    releases: &[ChangelogRelease],
-    latest: Option<&str>,
-    error: Option<&str>,
-) {
-    write_changelog_cache_with(state.cache(), releases, latest, error).await;
+pub async fn write_changelog_cache(state: &AppState, releases: &[ChangelogRelease], latest: Option<&str>) {
+    write_changelog_cache_with(state.cache(), releases, latest).await;
 }
 
-pub async fn write_changelog_cache_with(
-    cache: &Cache,
-    releases: &[ChangelogRelease],
-    latest: Option<&str>,
-    error: Option<&str>,
-) {
+async fn write_changelog_cache_with(cache: &Cache, releases: &[ChangelogRelease], latest: Option<&str>) {
     let payload = CachedChangelog {
         releases: releases.to_vec(),
         latest: latest.map(str::to_string),
-        error: error.map(str::to_string),
         fetched_at: now_ms(),
     };
     cache
@@ -108,13 +96,13 @@ pub struct FetchedReleases {
     pub latest: Option<String>,
 }
 
-/// GitHub Releases for `repo`, sanitized. `Err` carries the same short reason strings the
-/// TypeScript route reports: `HTTP <status>`, `invalid response`, `unreachable/timeout`.
+/// GitHub Releases for `repo`, sanitized. `Err` carries a short reason string the route reports:
+/// `HTTP <status>`, `invalid response`, `unreachable/timeout`.
 pub async fn fetch_releases(state: &AppState, repo: &str) -> Result<FetchedReleases, String> {
     fetch_releases_with(state.transport().as_ref(), state.config().github_token.as_deref(), repo).await
 }
 
-pub async fn fetch_releases_with(
+async fn fetch_releases_with(
     transport: &dyn UpstreamTransport,
     github_token: Option<&str>,
     repo: &str,
@@ -205,20 +193,12 @@ mod tests {
                 body_html: "<p>old notes</p>".into(),
             }],
             latest: Some("v1.10.0".into()),
-            error: None,
             fetched_at: now_ms(),
         }
     }
 
     #[test]
-    fn the_cache_key_is_global() {
-        assert_eq!(changelog_cache_key(), "changelog:v1");
-    }
-
-    #[test]
-    fn freshness_window_is_one_hour_and_the_ttl_is_seven_days() {
-        assert_eq!(CHANGELOG_FRESH_MS, 60 * 60 * 1000);
-        assert_eq!(CHANGELOG_CACHE_TTL_SECONDS, 7 * 24 * 60 * 60);
+    fn an_entry_older_than_the_freshness_window_is_not_fresh() {
         let fresh = snapshot();
         assert!(is_changelog_fresh(&fresh));
         let aged = CachedChangelog { fetched_at: now_ms() - 2 * 60 * 60 * 1000, ..snapshot() };
@@ -238,11 +218,10 @@ mod tests {
         let cache = Cache::new();
         assert_eq!(read_changelog_cache_with(&cache).await, None);
         let snap = snapshot();
-        write_changelog_cache_with(&cache, &snap.releases, snap.latest.as_deref(), None).await;
+        write_changelog_cache_with(&cache, &snap.releases, snap.latest.as_deref()).await;
         let read = read_changelog_cache_with(&cache).await.expect("a cached snapshot");
         assert_eq!(read.releases, snap.releases);
         assert_eq!(read.latest.as_deref(), Some("v1.10.0"));
-        assert_eq!(read.error, None);
         assert!(is_changelog_fresh(&read));
     }
 

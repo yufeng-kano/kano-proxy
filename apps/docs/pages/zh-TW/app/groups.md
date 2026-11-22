@@ -16,7 +16,7 @@ Groups 是建立模型群組的地方。模型群組是一個屬於你自己的�
 | OpenAI 相容 | `https://<your-domain>/g/<group-slug>/openai/v1` |
 | Anthropic Messages | `https://<your-domain>/g/<group-slug>/anthropic` |
 
-客戶端指向這些網址時，用的是跟其他地方相同的 API key，但只能呼叫群組裡定義的模型名稱。每個名稱對應一個或多個**目標**：一個 `provider/model` id，綁定一個帳號。proxy 依順序嘗試目標，用第一個接得了請求的。
+客戶端指向這些網址時，用的是跟其他地方相同的 API key，但只能呼叫群組裡定義的模型名稱。每個名稱對應一個或多個**目標**：一個 `provider/model` id，通常綁定一個帳號。proxy 依順序嘗試目標，用第一個接得了請求的。
 
 常見的兩種用法：
 

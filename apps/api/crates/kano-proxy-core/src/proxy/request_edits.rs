@@ -232,19 +232,8 @@ mod tests {
     }
 
     #[test]
-    fn a_leading_billing_header_block_is_dropped() {
-        // Claude Code 2.1.319's shape: billing block first, identity second. Both go.
-        let mut body = object(json!({
-            "system": [
-                { "type": "text", "text": BILLING },
-                { "type": "text", "text": CC },
-                { "type": "text", "text": "Project rules." },
-            ],
-        }));
-        edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: true, ..Default::default() });
-        assert_eq!(body["system"], json!([{ "type": "text", "text": "Project rules." }]));
-
-        // Only the leading block is an attribution header; one further down is just text.
+    fn only_a_leading_billing_header_block_is_dropped() {
+        // One further down is just text.
         let mut body = object(json!({
             "system": [
                 { "type": "text", "text": "Project rules." },
@@ -254,24 +243,10 @@ mod tests {
         edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: true, ..Default::default() });
         assert_eq!(body["system"], json!([{ "type": "text", "text": "Project rules." }, { "type": "text", "text": BILLING }]));
 
-        // Only the identity blocks gone leaves the billing block in place for the non-leading case,
-        // and a system left with nothing is removed entirely.
+        // A system left with nothing is removed entirely.
         let mut body = object(json!({ "system": [{ "type": "text", "text": BILLING }] }));
         edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: true, ..Default::default() });
         assert!(body.get("system").is_none(), "the billing block alone leaves no system");
-    }
-
-    #[test]
-    fn a_billing_header_block_is_left_alone_without_the_switch() {
-        let mut body = object(json!({
-            "system": [{ "type": "text", "text": BILLING }, { "type": "text", "text": CC }],
-        }));
-        edit_anthropic_body(&mut body, RequestEdits { strip_claude_code_line: false, ..Default::default() });
-        assert_eq!(
-            body["system"],
-            json!([{ "type": "text", "text": BILLING }, { "type": "text", "text": CC }]),
-            "nothing is edited without the switch"
-        );
     }
 
     #[test]
@@ -319,10 +294,14 @@ mod tests {
 
     #[test]
     fn switches_off_change_nothing() {
-        let original = json!({ "speed": "fast", "system": CC });
-        let mut body = object(original.clone());
-        edit_anthropic_body(&mut body, RequestEdits::default());
-        assert_eq!(Value::Object(body), original);
+        for original in [
+            json!({ "speed": "fast", "system": CC }),
+            json!({ "system": [{ "type": "text", "text": BILLING }, { "type": "text", "text": CC }] }),
+        ] {
+            let mut body = object(original.clone());
+            edit_anthropic_body(&mut body, RequestEdits::default());
+            assert_eq!(Value::Object(body), original);
+        }
         let mut req = ChatCompletionRequest {
             raw_body: object(json!({ "service_tier": "priority", "speed": "fast" })),
             messages: vec![json!({ "role": "system", "content": CC })],

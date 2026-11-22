@@ -260,11 +260,11 @@ async function runTest() {
          account row. Without that row there is nowhere to store them. -->
     <div v-if="editing && provider.account_id" class="edits">
       <RequestEditSwitches
-        :strip-fast-mode="!!provider.strip_fast_mode"
-        :strip-claude-code-line="!!provider.strip_claude_code_line"
+        :strip-fast-mode="provider.strip_fast_mode"
+        :strip-claude-code-line="provider.strip_claude_code_line"
         :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
         :line-hint="t('providers.edits.lineHintEndpoint')"
-        :force-cache-ttl1h="!!provider.force_cache_ttl_1h"
+        :force-cache-ttl1h="provider.force_cache_ttl_1h"
         :cache-hint="provider.format === 'anthropic' ? t('providers.edits.cacheHintEndpoint') : undefined"
         :busy="busy"
         @change="emit('edits', $event)"

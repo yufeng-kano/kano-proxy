@@ -1,13 +1,14 @@
-//! OpenAI Responses API ↔ Chat Completions (//! docs/api.md § `POST /openai/v1/responses`). The conversion path for every non-codex
-//! target: a Responses request becomes the internal Chat shape, dispatches like
-//! `/openai/v1/chat/completions`, and the Chat result becomes Responses events / a
-//! Response object. Also the small in-stream error rewrite the native codex path needs so
-//! dispatch's OpenAI-shaped error frames reach a Responses client as `response.failed`.
+//! OpenAI Responses API ↔ Chat Completions (docs/api.md § `POST /openai/v1/responses`). The
+//! conversion path for every non-codex target: a Responses request becomes the internal Chat
+//! shape, dispatches like `/openai/v1/chat/completions`, and the Chat result becomes Responses
+//! events / a Response object. Also the small in-stream error rewrite the native codex path
+//! needs so dispatch's OpenAI-shaped error frames reach a Responses client as
+//! `response.failed`.
 //!
 //! Streaming conversion is incremental: the input byte stream is split into SSE lines as it
 //! arrives and each line's events are emitted before the next line is pulled, so nothing is
-//! buffered beyond the item currently open (docs/api.md § Streaming). Rust streams are
-//! pull-based, so the TypeScript `backpressuredStream` wrapper has no counterpart here.
+//! buffered beyond the item currently open (docs/api.md § Streaming). The output stream is
+//! pull-based: nothing is read from upstream until the client polls.
 
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -16,48 +17,51 @@ use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Map, Value};
 
-use crate::app::now_ms;
+use crate::app::now_seconds;
 use crate::ids::new_id;
+use crate::proxy::codex_openai::codex_error_message;
+use crate::proxy::openai_anthropic::js_string;
+use crate::proxy::sse_error_rewrite::rewrite_sse_errors;
+use crate::proxy::sse_lines::read_sse_lines_default;
 
 /// A request field the proxy cannot honour (needs server-side state, or an unconvertible
 /// part). Route → `400 unsupported_field`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{message}")]
 pub struct UnsupportedResponsesField {
-    pub field: String,
     pub message: String,
 }
 
 impl UnsupportedResponsesField {
-    fn new(field: &str, message: &str) -> Self {
-        Self { field: field.to_string(), message: message.to_string() }
+    fn new(message: impl Into<String>) -> Self {
+        Self { message: message.into() }
     }
 }
 
 /// How a flattened Chat function name maps back to the Responses tool the client declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResponsesToolKind {
+enum ResponsesToolKind {
     Function,
     Custom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponsesToolRef {
-    pub kind: ResponsesToolKind,
+    kind: ResponsesToolKind,
     /// Present for a tool that came out of a `namespace` group — echoed on the call item.
-    pub namespace: Option<String>,
+    namespace: Option<String>,
     /// The client's own (unflattened) tool name.
-    pub name: String,
+    name: String,
 }
 
 impl ResponsesToolRef {
-    pub fn function(name: &str) -> Self {
+    fn function(name: &str) -> Self {
         Self { kind: ResponsesToolKind::Function, namespace: None, name: name.to_string() }
     }
-    pub fn custom(name: &str) -> Self {
+    fn custom(name: &str) -> Self {
         Self { kind: ResponsesToolKind::Custom, namespace: None, name: name.to_string() }
     }
-    pub fn namespaced(self, namespace: &str) -> Self {
+    fn namespaced(self, namespace: &str) -> Self {
         Self { namespace: Some(namespace.to_string()), ..self }
     }
     fn is_custom(&self) -> bool {
@@ -75,11 +79,11 @@ pub struct ResponsesToChatResult {
     pub tool_names: ResponsesToolNames,
 }
 
-pub const WEB_SEARCH_STUB_NAME: &str = "web_search";
+const WEB_SEARCH_STUB_NAME: &str = "web_search";
 
 /// Stub that replaces a hosted `web_search` tool on the conversion path (docs/api.md "Web
 /// search on the conversion path").
-pub fn web_search_stub_tool() -> Value {
+fn web_search_stub_tool() -> Value {
     json!({
         "type": "function",
         "function": {
@@ -105,14 +109,6 @@ fn str_of(v: Option<&Value>) -> Option<&str> {
     v.and_then(|v| v.as_str())
 }
 
-/// JavaScript `String(x)` for the values a request body can carry.
-fn js_string(v: Option<&Value>) -> String {
-    match v {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(s)) => s.clone(),
-        Some(other) => other.to_string(),
-    }
-}
 
 fn text_of_parts(content: Option<&Value>, joiner: &str) -> String {
     match content {
@@ -145,12 +141,11 @@ fn text_of_parts(content: Option<&Value>, joiner: &str) -> String {
 /// User-role content: text and images become Chat parts; anything else is a hard reject
 /// rather than a silent drop.
 fn user_content_parts(content: Option<&Value>) -> Result<Value, UnsupportedResponsesField> {
-    match content {
+    let raw_parts = match content {
         Some(Value::String(s)) => return Ok(Value::String(s.clone())),
-        Some(Value::Array(_)) => {}
+        Some(Value::Array(parts)) => parts,
         _ => return Ok(Value::String(String::new())),
-    }
-    let raw_parts = content.and_then(|c| c.as_array()).expect("array checked above");
+    };
     let mut parts: Vec<Value> = Vec::new();
     for part in raw_parts {
         if let Value::String(s) = part {
@@ -171,7 +166,6 @@ fn user_content_parts(content: Option<&Value>) -> Result<Value, UnsupportedRespo
             };
             let Some(url) = url.filter(|u| !u.is_empty()) else {
                 return Err(UnsupportedResponsesField::new(
-                    "input.content.input_image",
                     "input_image needs an image_url (data: URL or https URL); file_id references are not supported",
                 ));
             };
@@ -184,10 +178,9 @@ fn user_content_parts(content: Option<&Value>) -> Result<Value, UnsupportedRespo
             }
             parts.push(json!({ "type": "image_url", "image_url": Value::Object(image) }));
         } else if ty == "input_file" || ty == "input_audio" {
-            return Err(UnsupportedResponsesField::new(
-                &format!("input.content.{ty}"),
-                &format!("{ty} content parts are not supported on this endpoint"),
-            ));
+            return Err(UnsupportedResponsesField::new(format!(
+                "{ty} content parts are not supported on this endpoint"
+            )));
         }
     }
     if parts.len() == 1 {
@@ -203,11 +196,7 @@ fn user_content_parts(content: Option<&Value>) -> Result<Value, UnsupportedRespo
 }
 
 fn custom_call_arguments(input: Option<&Value>) -> String {
-    let text = match input {
-        Some(Value::String(s)) => s.clone(),
-        other => js_string(other),
-    };
-    json!({ "input": text }).to_string()
+    json!({ "input": js_string(input) }).to_string()
 }
 
 fn encode_gemini_thought_signature(call_id: &str, signature: &str) -> String {
@@ -247,20 +236,17 @@ pub fn responses_to_chat_request(
     if let Some(prev) = str_of(body.get("previous_response_id")) {
         if !prev.is_empty() {
             return Err(UnsupportedResponsesField::new(
-                "previous_response_id",
                 "previous_response_id is not supported: this proxy stores no responses (store is always false); send the full input instead",
             ));
         }
     }
     if !matches!(body.get("conversation"), None | Some(Value::Null)) {
         return Err(UnsupportedResponsesField::new(
-            "conversation",
             "conversation is not supported: this proxy keeps no server-side conversation state",
         ));
     }
     if body.get("background") == Some(&Value::Bool(true)) {
         return Err(UnsupportedResponsesField::new(
-            "background",
             "background responses are not supported: nothing is stored to poll later",
         ));
     }
@@ -293,25 +279,24 @@ pub fn responses_to_chat_request(
         messages.push(Value::Object(msg));
     }
 
-    let owned_items: Vec<Value> = match body.get("input") {
-        Some(Value::String(s)) => vec![json!({ "type": "message", "role": "user", "content": s })],
-        Some(Value::Array(items)) => items.clone(),
-        _ => Vec::new(),
+    let string_input: [Value; 1];
+    let items: &[Value] = match body.get("input") {
+        Some(Value::String(s)) => {
+            string_input = [json!({ "type": "message", "role": "user", "content": s })];
+            &string_input
+        }
+        Some(Value::Array(items)) => items,
+        _ => &[],
     };
 
-    for raw in &owned_items {
+    for raw in items {
         let Some(raw) = raw.as_object() else { continue };
         let ty = match str_of(raw.get("type")) {
-            Some(t) => t.to_string(),
-            None => {
-                if raw.contains_key("role") {
-                    "message".to_string()
-                } else {
-                    String::new()
-                }
-            }
+            Some(t) => t,
+            None if raw.contains_key("role") => "message",
+            None => "",
         };
-        match ty.as_str() {
+        match ty {
             "message" => {
                 let role = match raw.get("role") {
                     None | Some(Value::Null) => "user".to_string(),
@@ -380,10 +365,10 @@ pub fn responses_to_chat_request(
                 if let Some(signature) = thought_signatures.remove(&call_id) {
                     call.insert("thought_signature".into(), Value::String(signature));
                 }
-                if pending.is_none() {
-                    pending = Some(Pending { content: Value::Null, tool_calls: Vec::new() });
-                }
-                pending.as_mut().expect("just created").tool_calls.push(Value::Object(call));
+                pending
+                    .get_or_insert_with(|| Pending { content: Value::Null, tool_calls: Vec::new() })
+                    .tool_calls
+                    .push(Value::Object(call));
             }
             "function_call_output" | "custom_tool_call_output" => {
                 flush(&mut pending, &mut messages);
@@ -395,7 +380,6 @@ pub fn responses_to_chat_request(
             }
             "item_reference" => {
                 return Err(UnsupportedResponsesField::new(
-                    "input.item_reference",
                     "item_reference input items need stored responses, which this proxy does not keep",
                 ))
             }
@@ -569,9 +553,8 @@ pub fn responses_to_chat_request(
     }
 
     let format = as_object(body.get("text")).and_then(|t| as_object(t.get("format")));
-    match format.and_then(|f| str_of(f.get("type"))) {
-        Some("json_schema") => {
-            let format = format.expect("checked");
+    match format.map(|f| (f, str_of(f.get("type")))) {
+        Some((format, Some("json_schema"))) => {
             let mut schema = Map::new();
             let name = str_of(format.get("name")).filter(|n| !n.is_empty()).unwrap_or("response");
             schema.insert("name".into(), Value::String(name.to_string()));
@@ -589,7 +572,7 @@ pub fn responses_to_chat_request(
                 json!({ "type": "json_schema", "json_schema": Value::Object(schema) }),
             );
         }
-        Some("json_object") => {
+        Some((_, Some("json_object"))) => {
             chat.insert("response_format".into(), json!({ "type": "json_object" }));
         }
         _ => {}
@@ -628,13 +611,9 @@ pub fn responses_to_chat_request(
 // Chat → Responses output
 // ---------------------------------------------------------------------------
 
-fn now_seconds() -> i64 {
-    now_ms().div_euclid(1000)
-}
-
 /// Chat `usage` → Responses `usage`; detail fields only when the upstream reported them
 /// (absent means unreported, never 0).
-pub fn chat_usage_to_responses(usage: Option<&Value>) -> Option<Value> {
+fn chat_usage_to_responses(usage: Option<&Value>) -> Option<Value> {
     let u = usage?.as_object()?;
     let input = u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
     let output = u.get("completion_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -700,8 +679,8 @@ fn tool_call_item(
     Value::Object(item)
 }
 
-fn thought_signature_of(tool_call: &Map<String, Value>) -> Option<String> {
-    str_of(tool_call.get("thought_signature")).filter(|s| !s.is_empty()).map(|s| s.to_string())
+fn thought_signature_of(tool_call: &Map<String, Value>) -> Option<&str> {
+    str_of(tool_call.get("thought_signature")).filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Clone)]
@@ -734,7 +713,6 @@ struct ToolEntry {
     args: String,
     custom: bool,
     closed: bool,
-    thought_signature: Option<String>,
 }
 
 struct ResponsesConverter {
@@ -768,13 +746,14 @@ impl ResponsesConverter {
         }
     }
 
-    fn emit(&mut self, event_type: &str, payload: Map<String, Value>) {
+    /// Queues one event; `payload`'s keys follow `type` and `sequence_number`.
+    fn emit(&mut self, event_type: &str, payload: Value) {
         let mut body = Map::new();
         body.insert("type".into(), json!(event_type));
         body.insert("sequence_number".into(), json!(self.seq));
         self.seq += 1;
-        for (k, v) in payload {
-            body.insert(k, v);
+        if let Value::Object(payload) = payload {
+            body.extend(payload);
         }
         let text = format!("event: {event_type}\ndata: {}\n\n", Value::Object(body));
         self.out.push_back(Bytes::from(text));
@@ -804,10 +783,7 @@ impl ResponsesConverter {
                 });
                 self.emit(
                     "response.reasoning_summary_text.done",
-                    json!({ "item_id": id, "output_index": index, "summary_index": 0, "text": text })
-                        .as_object()
-                        .cloned()
-                        .expect("object"),
+                    json!({ "item_id": id, "output_index": index, "summary_index": 0, "text": text }),
                 );
                 self.emit(
                     "response.reasoning_summary_part.done",
@@ -816,16 +792,10 @@ impl ResponsesConverter {
                         "output_index": index,
                         "summary_index": 0,
                         "part": { "type": "summary_text", "text": text },
-                    })
-                    .as_object()
-                    .cloned()
-                    .expect("object"),
+                    }),
                 );
-                self.output[index] = item.clone();
-                self.emit(
-                    "response.output_item.done",
-                    json!({ "output_index": index, "item": item }).as_object().cloned().expect("object"),
-                );
+                self.emit("response.output_item.done", json!({ "output_index": index, "item": item }));
+                self.output[index] = item;
             }
             Open::Message { id, index, text } => {
                 let part = json!({ "type": "output_text", "text": text, "annotations": [] });
@@ -838,23 +808,14 @@ impl ResponsesConverter {
                 });
                 self.emit(
                     "response.output_text.done",
-                    json!({ "item_id": id, "output_index": index, "content_index": 0, "text": text })
-                        .as_object()
-                        .cloned()
-                        .expect("object"),
+                    json!({ "item_id": id, "output_index": index, "content_index": 0, "text": text }),
                 );
                 self.emit(
                     "response.content_part.done",
-                    json!({ "item_id": id, "output_index": index, "content_index": 0, "part": part })
-                        .as_object()
-                        .cloned()
-                        .expect("object"),
+                    json!({ "item_id": id, "output_index": index, "content_index": 0, "part": part }),
                 );
-                self.output[index] = item.clone();
-                self.emit(
-                    "response.output_item.done",
-                    json!({ "output_index": index, "item": item }).as_object().cloned().expect("object"),
-                );
+                self.emit("response.output_item.done", json!({ "output_index": index, "item": item }));
+                self.output[index] = item;
             }
             Open::Tool { index, tool_index } => {
                 let Some(tool) = self.tools.get_mut(&tool_index) else { return };
@@ -865,29 +826,17 @@ impl ResponsesConverter {
                 if custom {
                     // Custom tools carry a raw string the model produced as JSON fragments —
                     // only whole at the end, so the item goes out whole.
-                    let mut in_progress = item.as_object().cloned().expect("object");
-                    in_progress.insert("status".into(), json!("in_progress"));
-                    self.emit(
-                        "response.output_item.added",
-                        json!({ "output_index": index, "item": Value::Object(in_progress) })
-                            .as_object()
-                            .cloned()
-                            .expect("object"),
-                    );
+                    let mut in_progress = item.clone();
+                    in_progress["status"] = json!("in_progress");
+                    self.emit("response.output_item.added", json!({ "output_index": index, "item": in_progress }));
                 } else {
                     self.emit(
                         "response.function_call_arguments.done",
-                        json!({ "item_id": id, "output_index": index, "arguments": args })
-                            .as_object()
-                            .cloned()
-                            .expect("object"),
+                        json!({ "item_id": id, "output_index": index, "arguments": args }),
                     );
                 }
-                self.output[index] = item.clone();
-                self.emit(
-                    "response.output_item.done",
-                    json!({ "output_index": index, "item": item }).as_object().cloned().expect("object"),
-                );
+                self.emit("response.output_item.done", json!({ "output_index": index, "item": item }));
+                self.output[index] = item;
             }
         }
     }
@@ -904,10 +853,7 @@ impl ResponsesConverter {
         self.open = Some(Open::Reasoning { id: id.clone(), index, text: String::new() });
         self.emit(
             "response.output_item.added",
-            json!({ "output_index": index, "item": { "id": id, "type": "reasoning", "summary": [] } })
-                .as_object()
-                .cloned()
-                .expect("object"),
+            json!({ "output_index": index, "item": { "id": id, "type": "reasoning", "summary": [] } }),
         );
         self.emit(
             "response.reasoning_summary_part.added",
@@ -916,10 +862,7 @@ impl ResponsesConverter {
                 "output_index": index,
                 "summary_index": 0,
                 "part": { "type": "summary_text", "text": "" },
-            })
-            .as_object()
-            .cloned()
-            .expect("object"),
+            }),
         );
         (id, index)
     }
@@ -940,10 +883,7 @@ impl ResponsesConverter {
         });
         self.output.push(item.clone());
         self.open = Some(Open::Message { id: id.clone(), index, text: String::new() });
-        self.emit(
-            "response.output_item.added",
-            json!({ "output_index": index, "item": item }).as_object().cloned().expect("object"),
-        );
+        self.emit("response.output_item.added", json!({ "output_index": index, "item": item }));
         self.emit(
             "response.content_part.added",
             json!({
@@ -951,10 +891,7 @@ impl ResponsesConverter {
                 "output_index": index,
                 "content_index": 0,
                 "part": { "type": "output_text", "text": "", "annotations": [] },
-            })
-            .as_object()
-            .cloned()
-            .expect("object"),
+            }),
         );
         (id, index)
     }
@@ -962,20 +899,14 @@ impl ResponsesConverter {
     fn emit_thought_signature(&mut self, call_id: &str, signature: &str) {
         let item = gemini_thought_signature_item(call_id, signature);
         let index = self.output.len();
-        self.output.push(item.clone());
-        self.emit(
-            "response.output_item.added",
-            json!({ "output_index": index, "item": item }).as_object().cloned().expect("object"),
-        );
-        self.emit(
-            "response.output_item.done",
-            json!({ "output_index": index, "item": item }).as_object().cloned().expect("object"),
-        );
+        self.emit("response.output_item.added", json!({ "output_index": index, "item": item }));
+        self.emit("response.output_item.done", json!({ "output_index": index, "item": item }));
+        self.output.push(item);
     }
 
-    fn open_tool(&mut self, tool_index: i64, call_id: &str, name: &str, thought_signature: Option<String>) {
+    fn open_tool(&mut self, tool_index: i64, call_id: &str, name: &str, thought_signature: Option<&str>) {
         self.close_open();
-        if let Some(signature) = thought_signature.as_deref() {
+        if let Some(signature) = thought_signature {
             self.emit_thought_signature(call_id, signature);
         }
         let custom = self.opts.tool_names.get(name).map(|r| r.is_custom()).unwrap_or(false);
@@ -990,33 +921,14 @@ impl ResponsesConverter {
                 args: String::new(),
                 custom,
                 closed: false,
-                thought_signature,
             },
         );
         self.output.push(json!({}));
         self.open = Some(Open::Tool { index, tool_index });
         if !custom {
-            let tool_ref = self.opts.tool_names.get(name).cloned();
-            let mut item = Map::new();
-            item.insert("id".into(), json!(id));
-            item.insert("type".into(), json!("function_call"));
-            item.insert("call_id".into(), json!(call_id));
-            item.insert(
-                "name".into(),
-                json!(tool_ref.as_ref().map(|r| r.name.as_str()).unwrap_or(name)),
-            );
-            item.insert("arguments".into(), json!(""));
-            item.insert("status".into(), json!("in_progress"));
-            if let Some(namespace) = tool_ref.as_ref().and_then(|r| r.namespace.as_deref()) {
-                item.insert("namespace".into(), json!(namespace));
-            }
-            self.emit(
-                "response.output_item.added",
-                json!({ "output_index": index, "item": Value::Object(item) })
-                    .as_object()
-                    .cloned()
-                    .expect("object"),
-            );
+            let mut item = tool_call_item(&id, call_id, name, "", &self.opts.tool_names);
+            item["status"] = json!("in_progress");
+            self.emit("response.output_item.added", json!({ "output_index": index, "item": item }));
         }
     }
 
@@ -1033,10 +945,7 @@ impl ResponsesConverter {
             json!({ "code": code.unwrap_or("upstream_error"), "message": message }),
         );
         let response = self.snapshot(extra);
-        self.emit(
-            "response.failed",
-            json!({ "response": response }).as_object().cloned().expect("object"),
-        );
+        self.emit("response.failed", json!({ "response": response }));
     }
 
     fn finish(&mut self) {
@@ -1056,22 +965,16 @@ impl ResponsesConverter {
         }
         let response = self.snapshot(extra);
         let event = if status == "incomplete" { "response.incomplete" } else { "response.completed" };
-        self.emit(event, json!({ "response": response }).as_object().cloned().expect("object"));
+        self.emit(event, json!({ "response": response }));
     }
 
     fn start(&mut self) {
         let mut in_progress = Map::new();
         in_progress.insert("status".into(), json!("in_progress"));
         let snapshot = self.snapshot(in_progress.clone());
-        self.emit(
-            "response.created",
-            json!({ "response": snapshot }).as_object().cloned().expect("object"),
-        );
+        self.emit("response.created", json!({ "response": snapshot }));
         let snapshot = self.snapshot(in_progress);
-        self.emit(
-            "response.in_progress",
-            json!({ "response": snapshot }).as_object().cloned().expect("object"),
-        );
+        self.emit("response.in_progress", json!({ "response": snapshot }));
     }
 
     /// Handles one upstream SSE line. Returns `false` when the turn is over.
@@ -1104,12 +1007,11 @@ impl ResponsesConverter {
         else {
             return true;
         };
-        if let Some(delta) = as_object(choice.get("delta")).cloned() {
+        if let Some(delta) = as_object(choice.get("delta")) {
             if let Some(reasoning) = str_of(delta.get("reasoning_content")).filter(|s| !s.is_empty()) {
-                let reasoning = reasoning.to_string();
                 let (id, index) = self.open_reasoning();
                 if let Some(Open::Reasoning { text, .. }) = &mut self.open {
-                    text.push_str(&reasoning);
+                    text.push_str(reasoning);
                 }
                 self.emit(
                     "response.reasoning_summary_text.delta",
@@ -1118,17 +1020,13 @@ impl ResponsesConverter {
                         "output_index": index,
                         "summary_index": 0,
                         "delta": reasoning,
-                    })
-                    .as_object()
-                    .cloned()
-                    .expect("object"),
+                    }),
                 );
             }
             if let Some(content) = str_of(delta.get("content")).filter(|s| !s.is_empty()) {
-                let content = content.to_string();
                 let (id, index) = self.open_message();
                 if let Some(Open::Message { text, .. }) = &mut self.open {
-                    text.push_str(&content);
+                    text.push_str(content);
                 }
                 self.emit(
                     "response.output_text.delta",
@@ -1137,42 +1035,29 @@ impl ResponsesConverter {
                         "output_index": index,
                         "content_index": 0,
                         "delta": content,
-                    })
-                    .as_object()
-                    .cloned()
-                    .expect("object"),
+                    }),
                 );
             }
             if let Some(Value::Array(tool_calls)) = delta.get("tool_calls") {
                 for tc in tool_calls {
                     let Some(tc) = tc.as_object() else { continue };
                     let tool_index = tc.get("index").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let function = as_object(tc.get("function")).cloned();
-                    let thought_signature = thought_signature_of(tc);
+                    let function = as_object(tc.get("function"));
                     if !self.tools.contains_key(&tool_index) {
-                        let name = function
-                            .as_ref()
-                            .and_then(|f| str_of(f.get("name")))
-                            .unwrap_or("")
-                            .to_string();
+                        let name = function.and_then(|f| str_of(f.get("name"))).unwrap_or("");
                         let call_id = match str_of(tc.get("id")).filter(|s| !s.is_empty()) {
                             Some(id) => id.to_string(),
                             None => format!("call_{tool_index}_{}", self.seq),
                         };
-                        self.open_tool(tool_index, &call_id, &name, thought_signature.clone());
-                    } else if let Some(entry) = self.tools.get_mut(&tool_index) {
-                        if entry.thought_signature.is_none() && thought_signature.is_some() {
-                            entry.thought_signature = thought_signature.clone();
-                        }
+                        self.open_tool(tool_index, &call_id, name, thought_signature_of(tc));
                     }
-                    let args = function.as_ref().and_then(|f| str_of(f.get("arguments"))).unwrap_or("");
+                    let args = function.and_then(|f| str_of(f.get("arguments"))).unwrap_or("");
                     if !args.is_empty() {
-                        let args = args.to_string();
                         let Some(entry) = self.tools.get_mut(&tool_index) else { continue };
                         if entry.closed {
                             continue;
                         }
-                        entry.args.push_str(&args);
+                        entry.args.push_str(args);
                         let entry_id = entry.id.clone();
                         let custom = entry.custom;
                         if !custom {
@@ -1181,10 +1066,7 @@ impl ResponsesConverter {
                                     let index = *index;
                                     self.emit(
                                         "response.function_call_arguments.delta",
-                                        json!({ "item_id": entry_id, "output_index": index, "delta": args })
-                                            .as_object()
-                                            .cloned()
-                                            .expect("object"),
+                                        json!({ "item_id": entry_id, "output_index": index, "delta": args }),
                                     );
                                 }
                             }
@@ -1217,7 +1099,7 @@ where
         done: bool,
     }
     let state = State {
-        lines: Box::pin(sse_line_stream(body)),
+        lines: read_sse_lines_default(Box::pin(body)),
         conv: ResponsesConverter::new(opts),
         started: false,
         done: false,
@@ -1260,7 +1142,6 @@ where
 
 /// Non-stream Chat completion → one Response object (same item shapes as the stream).
 pub fn openai_to_responses_object(json: &Value, opts: &ResponsesOutputOptions) -> Value {
-    let json = json.as_object().cloned().unwrap_or_default();
     let mut output: Vec<Value> = Vec::new();
     let choice = json
         .get("choices")
@@ -1276,11 +1157,7 @@ pub fn openai_to_responses_object(json: &Value, opts: &ResponsesOutputOptions) -
                 "summary": [{ "type": "summary_text", "text": reasoning }],
             }));
         }
-        let text = match message.get("content") {
-            Some(Value::String(s)) => s.clone(),
-            Some(Value::Array(_)) => text_of_parts(message.get("content"), ""),
-            _ => String::new(),
-        };
+        let text = text_of_parts(message.get("content"), "");
         if !text.is_empty() {
             output.push(json!({
                 "id": new_id("msg"),
@@ -1303,7 +1180,7 @@ pub fn openai_to_responses_object(json: &Value, opts: &ResponsesOutputOptions) -
                 let thought_signature = thought_signature_of(tc);
                 let custom = opts.tool_names.get(name).map(|r| r.is_custom()).unwrap_or(false);
                 if let Some(signature) = thought_signature {
-                    output.push(gemini_thought_signature_item(&call_id, &signature));
+                    output.push(gemini_thought_signature_item(&call_id, signature));
                 }
                 output.push(tool_call_item(
                     &new_id(if custom { "ctc" } else { "fc" }),
@@ -1343,70 +1220,6 @@ pub fn openai_to_responses_object(json: &Value, opts: &ResponsesOutputOptions) -
 // Native codex path helpers
 // ---------------------------------------------------------------------------
 
-/// Parsed SSE lines have a finite byte budget; native byte passthrough does not use this
-/// reader.
-pub(crate) const MAX_SSE_LINE_BYTES: usize = 16 * 1024 * 1024;
-
-/// Split an upstream byte stream into SSE lines as the bytes arrive, including an
-/// unterminated line at EOF. A private port of `readSseLines` so this module does not wait
-/// on `proxy::sse_lines`.
-pub(crate) fn sse_line_stream<S>(body: S) -> impl Stream<Item = Result<String, io::Error>> + Send
-where
-    S: Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
-{
-    struct State<S> {
-        body: S,
-        buf: Vec<u8>,
-        pending: VecDeque<String>,
-        eof: bool,
-    }
-    let state = State { body: Box::pin(body), buf: Vec::new(), pending: VecDeque::new(), eof: false };
-    futures::stream::unfold(state, |mut st| async move {
-        loop {
-            if let Some(line) = st.pending.pop_front() {
-                return Some((Ok(line), st));
-            }
-            if st.eof {
-                return None;
-            }
-            match st.body.next().await {
-                Some(Ok(chunk)) => {
-                    st.buf.extend_from_slice(&chunk);
-                    let mut start = 0;
-                    while let Some(pos) = st.buf[start..].iter().position(|b| *b == b'\n') {
-                        let end = start + pos;
-                        st.pending.push_back(String::from_utf8_lossy(&st.buf[start..end]).into_owned());
-                        start = end + 1;
-                    }
-                    st.buf.drain(..start);
-                    if st.buf.len() > MAX_SSE_LINE_BYTES {
-                        st.eof = true;
-                        st.pending.clear();
-                        return Some((
-                            Err(io::Error::other("Upstream SSE event exceeds the 16 MiB parsing limit")),
-                            st,
-                        ));
-                    }
-                }
-                Some(Err(e)) => {
-                    st.eof = true;
-                    return Some((Err(e), st));
-                }
-                None => {
-                    st.eof = true;
-                    if !st.buf.is_empty() {
-                        st.pending.push_back(String::from_utf8_lossy(&st.buf).into_owned());
-                        st.buf.clear();
-                    }
-                }
-            }
-        }
-    })
-}
-
-const ERROR_PREFIXES: [&[u8]; 2] = [b"data: {\"error\"", b"data:{\"error\""];
-pub(crate) const MAX_PROXY_ERROR_BYTES: usize = 64 * 1024;
-
 fn responses_failed_line(line: &str, model: &str) -> String {
     let Some(rest) = line.strip_prefix("data:") else { return line.to_string() };
     let Ok(json) = serde_json::from_str::<Value>(rest.trim()) else { return line.to_string() };
@@ -1434,7 +1247,7 @@ fn responses_failed_line(line: &str, model: &str) -> String {
 /// Rewrites dispatch's OpenAI-shaped in-stream error lines (`data: {"error":…}` — pool
 /// exhaustion, upstream non-2xx, stall) into a `response.failed` event, leaving every other
 /// byte of the relayed Responses SSE untouched. Only error candidates are buffered, up to
-/// 64 KiB.
+/// [`crate::proxy::sse_error_rewrite::MAX_PROXY_ERROR_BYTES`].
 pub fn rewrite_openai_error_frames_to_responses<S>(
     body: S,
     model: String,
@@ -1442,180 +1255,16 @@ pub fn rewrite_openai_error_frames_to_responses<S>(
 where
     S: Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
 {
-    #[derive(PartialEq, Eq)]
-    enum LineState {
-        Prefix,
-        Pass,
-        Error,
-        Skip,
-    }
-    struct State<S> {
-        body: S,
-        model: String,
-        state: LineState,
-        prefix: Vec<u8>,
-        error: Vec<u8>,
-        out: VecDeque<Bytes>,
-        eof: bool,
-        flushed: bool,
-    }
-
-    fn reset<S>(st: &mut State<S>) {
-        st.state = LineState::Prefix;
-        st.prefix.clear();
-        st.error.clear();
-    }
-
-    fn end_line<S>(st: &mut State<S>, newline: bool) {
-        match st.state {
-            LineState::Prefix => {
-                if !st.prefix.is_empty() {
-                    st.out.push_back(Bytes::from(st.prefix.clone()));
-                }
-            }
-            LineState::Error => {
-                let original = String::from_utf8_lossy(&st.error).into_owned();
-                let rewritten = responses_failed_line(&original, &st.model);
-                if rewritten == original {
-                    st.out.push_back(Bytes::from(st.error.clone()));
-                    if newline {
-                        st.out.push_back(Bytes::from_static(b"\n"));
-                    }
-                } else {
-                    let mut text = rewritten;
-                    if newline {
-                        text.push('\n');
-                    }
-                    st.out.push_back(Bytes::from(text));
-                }
-            }
-            _ => {}
-        }
-        reset(st);
-    }
-
-    fn feed<S>(st: &mut State<S>, chunk: &[u8]) {
-        let mut offset = 0;
-        while offset < chunk.len() {
-            let newline = chunk[offset..].iter().position(|b| *b == b'\n').map(|p| offset + p);
-            let end = newline.unwrap_or(chunk.len());
-            while offset < end && st.state == LineState::Prefix {
-                st.prefix.push(chunk[offset]);
-                offset += 1;
-                let size = st.prefix.len();
-                let candidates: Vec<&&[u8]> = ERROR_PREFIXES
-                    .iter()
-                    .filter(|p| size <= p.len() && p[..size] == st.prefix[..])
-                    .collect();
-                if candidates.is_empty() {
-                    st.state = LineState::Pass;
-                    st.out.push_back(Bytes::from(st.prefix.clone()));
-                } else if candidates.iter().any(|p| p.len() == size) {
-                    st.state = LineState::Error;
-                    st.error.clear();
-                    st.error.extend_from_slice(&st.prefix);
-                }
-            }
-            match st.state {
-                LineState::Pass => {
-                    let stop = end + usize::from(newline.is_some());
-                    if end > offset || newline.is_some() {
-                        st.out.push_back(Bytes::copy_from_slice(&chunk[offset..stop]));
-                    }
-                }
-                LineState::Error => {
-                    if st.error.len() + end - offset > MAX_PROXY_ERROR_BYTES {
-                        let line = responses_failed_line(
-                            "data: {\"error\":{\"code\":\"upstream_error\",\"message\":\"Proxy error exceeds the 64 KiB rewrite limit\"}}",
-                            &st.model,
-                        );
-                        st.out.push_back(Bytes::from(format!("{line}\n")));
-                        st.error.clear();
-                        st.state = LineState::Skip;
-                    } else {
-                        st.error.extend_from_slice(&chunk[offset..end]);
-                    }
-                }
-                _ => {}
-            }
-            if let Some(newline) = newline {
-                if st.state == LineState::Prefix {
-                    if !st.prefix.is_empty() {
-                        st.out.push_back(Bytes::from(st.prefix.clone()));
-                    }
-                    st.out.push_back(Bytes::from_static(b"\n"));
-                    reset(st);
-                } else {
-                    end_line(st, true);
-                }
-                offset = newline + 1;
-            } else {
-                offset = end;
-            }
-        }
-    }
-
-    let state = State {
-        body: Box::pin(body),
-        model,
-        state: LineState::Prefix,
-        prefix: Vec::new(),
-        error: Vec::new(),
-        out: VecDeque::new(),
-        eof: false,
-        flushed: false,
-    };
-    futures::stream::unfold(state, |mut st| async move {
-        loop {
-            if let Some(chunk) = st.out.pop_front() {
-                return Some((Ok(chunk), st));
-            }
-            if st.eof {
-                if st.flushed {
-                    return None;
-                }
-                st.flushed = true;
-                end_line(&mut st, false);
-                continue;
-            }
-            match st.body.next().await {
-                Some(Ok(chunk)) => feed(&mut st, &chunk),
-                Some(Err(e)) => {
-                    st.eof = true;
-                    st.flushed = true;
-                    return Some((Err(e), st));
-                }
-                None => st.eof = true,
-            }
-        }
-    })
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CollectedResponses {
-    Response(Value),
-    /// `{"error":{"message":…,"type":"upstream_error"}}` for the caller's envelope.
-    Error { message: String },
-}
-
-impl CollectedResponses {
-    pub fn error_value(&self) -> Option<Value> {
-        match self {
-            CollectedResponses::Error { message } => {
-                Some(json!({ "error": { "message": message, "type": "upstream_error" } }))
-            }
-            CollectedResponses::Response(_) => None,
-        }
-    }
+    rewrite_sse_errors(Box::pin(body), move |line: &str| responses_failed_line(line, &model))
 }
 
 /// Non-stream native path: drain a Responses SSE and return its terminal `response` object,
-/// or the failure.
-pub async fn collect_responses_sse<S>(body: S) -> CollectedResponses
+/// or the failure's message.
+pub async fn collect_responses_sse<S>(body: S) -> Result<Value, String>
 where
     S: Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
 {
-    let mut lines = Box::pin(sse_line_stream(body));
+    let mut lines = read_sse_lines_default(Box::pin(body));
     let mut response: Option<Value> = None;
     let mut error: Option<String> = None;
     while let Some(line) = lines.next().await {
@@ -1629,15 +1278,7 @@ where
         let Some(ev) = ev.as_object() else { continue };
         let ty = str_of(ev.get("type")).unwrap_or("");
         if ty == "response.failed" || ty == "error" {
-            let message = as_object(ev.get("response"))
-                .and_then(|r| as_object(r.get("error")))
-                .and_then(|e| str_of(e.get("message")))
-                .filter(|m| !m.is_empty())
-                .or_else(|| as_object(ev.get("error")).and_then(|e| str_of(e.get("message"))).filter(|m| !m.is_empty()))
-                .or_else(|| str_of(ev.get("message")).filter(|m| !m.is_empty()))
-                .unwrap_or("codex upstream failure")
-                .to_string();
-            error = Some(message);
+            error = Some(codex_error_message(ev));
         } else if matches!(ty, "response.completed" | "response.incomplete" | "response.done") {
             if let Some(r) = ev.get("response").filter(|r| r.is_object()) {
                 response = Some(r.clone());
@@ -1645,14 +1286,9 @@ where
         }
     }
     if let Some(message) = error {
-        return CollectedResponses::Error { message };
+        return Err(message);
     }
-    match response {
-        Some(response) => CollectedResponses::Response(response),
-        None => CollectedResponses::Error {
-            message: "upstream ended without response.completed".to_string(),
-        },
-    }
+    response.ok_or_else(|| "upstream ended without response.completed".to_string())
 }
 
 #[cfg(test)]
@@ -1955,22 +1591,26 @@ mod tests {
     #[test]
     fn rejects_unsupported_fields() {
         let cases: Vec<(Value, &str)> = vec![
-            (json!({ "previous_response_id": "resp_1" }), "previous_response_id"),
-            (json!({ "conversation": "conv_1" }), "conversation"),
-            (json!({ "background": true }), "background"),
-            (json!({ "input": [{ "type": "item_reference", "id": "msg_1" }] }), "input.item_reference"),
+            (json!({ "previous_response_id": "resp_1" }), "previous_response_id is not supported"),
+            (json!({ "conversation": "conv_1" }), "conversation is not supported"),
+            (json!({ "background": true }), "background responses are not supported"),
+            (json!({ "input": [{ "type": "item_reference", "id": "msg_1" }] }), "item_reference input items"),
             (
                 json!({ "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_file", "file_id": "f" }] }] }),
-                "input.content.input_file",
+                "input_file content parts are not supported",
+            ),
+            (
+                json!({ "input": [{ "type": "message", "role": "user", "content": [{ "type": "input_image", "file_id": "f" }] }] }),
+                "input_image needs an image_url",
             ),
         ];
-        for (extra, field) in cases {
+        for (extra, prefix) in cases {
             let mut body = body_of(json!({ "model": "grok/grok-4.5", "input": "hi" }));
             for (k, v) in extra.as_object().expect("object") {
                 body.insert(k.clone(), v.clone());
             }
             let err = responses_to_chat_request(&body).expect_err("rejects");
-            assert_eq!(err.field, field);
+            assert!(err.message.starts_with(prefix), "{}", err.message);
         }
     }
 
@@ -2386,7 +2026,7 @@ mod tests {
         .await;
         assert_eq!(
             out,
-            CollectedResponses::Response(json!({
+            Ok(json!({
                 "id": "resp_1",
                 "status": "completed",
                 "output": [],
@@ -2402,16 +2042,12 @@ mod tests {
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"output\":[]}}",
         ]))
         .await;
-        assert_eq!(failed, CollectedResponses::Error { message: "rate limited".into() });
-        assert_eq!(
-            failed.error_value(),
-            Some(json!({ "error": { "message": "rate limited", "type": "upstream_error" } }))
-        );
+        assert_eq!(failed, Err("rate limited".into()));
         let eof =
             collect_responses_sse(sse_body(&["data: {\"type\":\"response.created\",\"response\":{}}"])).await;
         assert_eq!(
             eof,
-            CollectedResponses::Error { message: "upstream ended without response.completed".into() }
+            Err("upstream ended without response.completed".into())
         );
     }
 }

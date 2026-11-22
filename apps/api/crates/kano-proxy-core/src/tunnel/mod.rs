@@ -1,4 +1,4 @@
-//! CLI CLI tunnel: wire protocol, mux and the in-process registry replacing the AgentTunnel Durable Object (docs/cli.md).
+//! CLI tunnel: wire protocol, mux and the in-process registry (docs/cli.md).
 
 pub mod protocol;
 pub mod mux;

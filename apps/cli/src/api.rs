@@ -12,36 +12,26 @@ use crate::state::{State, StateFile};
 pub struct LoginStart {
     pub request_id: String,
     pub verify_url: String,
-    #[allow(dead_code)]
-    pub expires_at: String,
 }
 
+/// The first token pair's access token is not read: commands mint their own through the
+/// rotation path, which also exercises persist-before-use.
 #[derive(Debug, Deserialize)]
 pub struct LoginComplete {
     pub device_id: String,
     pub refresh_token: String,
-    /// Unused today — commands mint their own via the rotation path, which
-    /// also exercises persist-before-use. Kept for wire completeness.
-    #[allow(dead_code)]
-    pub access_token: String,
-    #[allow(dead_code)]
-    pub expires_in: u64,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct TokenPair {
-    pub refresh_token: String,
-    pub access_token: String,
-    #[allow(dead_code)]
-    pub expires_in: u64,
+struct TokenPair {
+    refresh_token: String,
+    access_token: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ProviderItem {
     pub id: String,
     pub slug: String,
-    #[allow(dead_code)]
-    pub name: String,
     pub format: String,
     pub connected: bool,
     #[serde(default)]
@@ -95,7 +85,7 @@ pub struct Group {
     pub models: Vec<GroupModel>,
 }
 
-fn client() -> reqwest::Client {
+pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("kano-proxy-cli/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -122,31 +112,31 @@ async fn post_json<T: for<'de> Deserialize<'de>>(
     if let Some(token) = bearer {
         req = req.bearer_auth(token);
     }
+    send_json(req, url).await
+}
+
+/// Send and return the body of a 2xx answer; any other status becomes the server's error.
+async fn send_text(req: reqwest::RequestBuilder, url: &str) -> Result<String> {
     let res = req.send().await.with_context(|| format!("cannot reach {url}"))?;
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
     if !status.is_success() {
         return Err(api_error(status, &text));
     }
-    serde_json::from_str(&text).with_context(|| format!("unexpected response from {url}"))
+    Ok(text)
 }
 
 async fn send_json<T: for<'de> Deserialize<'de>>(req: reqwest::RequestBuilder, url: &str) -> Result<T> {
-    let res = req.send().await.with_context(|| format!("cannot reach {url}"))?;
-    let status = res.status();
-    let text = res.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(api_error(status, &text));
-    }
+    let text = send_text(req, url).await?;
     serde_json::from_str(&text).with_context(|| format!("unexpected response from {url}"))
 }
 
-/// `DELETE` that reports a 404 as `Ok(false)` — "already gone" is a success for every
-/// caller here (a key revoked from the web UI, a group deleted there).
-async fn delete_tolerant(url: &str, access_token: &str) -> Result<bool> {
+/// `DELETE` that reports the `gone` status as `Ok(false)` — "already gone" is a success for
+/// the callers that pass one (a key revoked from the web UI, a group deleted there).
+async fn delete(url: &str, access_token: &str, gone: Option<reqwest::StatusCode>) -> Result<bool> {
     let res = client().delete(url).bearer_auth(access_token).send().await.with_context(|| format!("cannot reach {url}"))?;
     let status = res.status();
-    if status == reqwest::StatusCode::NOT_FOUND {
+    if Some(status) == gone {
         return Ok(false);
     }
     if !status.is_success() {
@@ -179,19 +169,8 @@ pub async fn login_complete(base_url: &str, request_id: &str, code: &str) -> Res
 /// and trip the server's reuse-as-theft revocation.
 async fn rotate_token(base_url: &str, refresh_token: &str) -> Result<TokenPair> {
     let url = format!("{base_url}/cli/v1/token");
-    let res = client()
-        .post(&url)
-        .timeout(std::time::Duration::from_secs(20))
-        .json(&json!({ "refresh_token": refresh_token }))
-        .send()
-        .await
-        .with_context(|| format!("cannot reach {url}"))?;
-    let status = res.status();
-    let text = res.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(api_error(status, &text));
-    }
-    serde_json::from_str(&text).with_context(|| format!("unexpected response from {url}"))
+    let req = client().post(&url).timeout(std::time::Duration::from_secs(20)).json(&json!({ "refresh_token": refresh_token }));
+    send_json(req, &url).await
 }
 
 /// Rotate the refresh token and return a fresh access token.
@@ -228,17 +207,7 @@ pub async fn list_providers(base_url: &str, access_token: &str) -> Result<Vec<Pr
         providers: Vec<ProviderItem>,
     }
     let url = format!("{base_url}/cli/v1/providers");
-    let res = client()
-        .get(&url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .with_context(|| format!("cannot reach {url}"))?;
-    let status = res.status();
-    let text = res.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(api_error(status, &text));
-    }
+    let text = send_text(client().get(&url).bearer_auth(access_token), &url).await?;
     let w: Wrapper = serde_json::from_str(&text).context("unexpected providers response")?;
     Ok(w.providers)
 }
@@ -262,35 +231,13 @@ pub async fn create_provider(
 }
 
 pub async fn delete_provider(base_url: &str, access_token: &str, id: &str) -> Result<()> {
-    let url = format!("{base_url}/cli/v1/providers/{id}");
-    let res = client()
-        .delete(&url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .with_context(|| format!("cannot reach {url}"))?;
-    let status = res.status();
-    if !status.is_success() {
-        let text = res.text().await.unwrap_or_default();
-        return Err(api_error(status, &text));
-    }
-    Ok(())
+    delete(&format!("{base_url}/cli/v1/providers/{id}"), access_token, None).await.map(drop)
 }
 
 /// `DELETE /cli/v1/device` — the device revokes itself (`kano-proxy logout`). A 401 means
 /// the server already forgot it (revoked from the web UI): `Ok(false)`, nothing to do.
 pub async fn delete_device(base_url: &str, access_token: &str) -> Result<bool> {
-    let url = format!("{base_url}/cli/v1/device");
-    let res = client().delete(&url).bearer_auth(access_token).send().await.with_context(|| format!("cannot reach {url}"))?;
-    let status = res.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Ok(false);
-    }
-    if !status.is_success() {
-        let text = res.text().await.unwrap_or_default();
-        return Err(api_error(status, &text));
-    }
-    Ok(true)
+    delete(&format!("{base_url}/cli/v1/device"), access_token, Some(reqwest::StatusCode::UNAUTHORIZED)).await
 }
 
 /// `GET /cli/v1/models` — what `agent setup` picks from. Live, never invented.
@@ -311,7 +258,7 @@ pub async fn create_key(base_url: &str, access_token: &str, name: &str) -> Resul
 
 /// Revoke a key this device minted. `Ok(false)` when it was already gone.
 pub async fn delete_key(base_url: &str, access_token: &str, id: &str) -> Result<bool> {
-    delete_tolerant(&format!("{base_url}/cli/v1/keys/{id}"), access_token).await
+    delete(&format!("{base_url}/cli/v1/keys/{id}"), access_token, Some(reqwest::StatusCode::NOT_FOUND)).await
 }
 
 pub async fn list_groups(base_url: &str, access_token: &str) -> Result<Vec<Group>> {
@@ -340,7 +287,19 @@ pub async fn update_group_models(base_url: &str, access_token: &str, id: &str, m
 }
 
 pub async fn delete_group(base_url: &str, access_token: &str, id: &str) -> Result<bool> {
-    delete_tolerant(&format!("{base_url}/cli/v1/model-groups/{id}"), access_token).await
+    delete(&format!("{base_url}/cli/v1/model-groups/{id}"), access_token, Some(reqwest::StatusCode::NOT_FOUND)).await
+}
+
+/// A `GET …/models` list in the shape both wires share: `{data: [{id}, …]}`.
+#[derive(Deserialize)]
+struct ModelList {
+    #[serde(default)]
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    id: Option<String>,
 }
 
 /// The verification read after `agent setup`: the group endpoint's own catalog, with the key
@@ -349,16 +308,7 @@ pub async fn delete_group(base_url: &str, access_token: &str, id: &str) -> Resul
 /// will use (`…/g/<slug>/anthropic` or `…/g/<slug>/openai/v1`).
 pub async fn list_group_endpoint_models(group_base: &str, api_key: &str) -> Result<Vec<String>> {
     let url = if group_base.ends_with("/v1") { format!("{group_base}/models") } else { format!("{group_base}/v1/models") };
-    #[derive(Deserialize)]
-    struct Entry {
-        id: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct List {
-        #[serde(default)]
-        data: Vec<Entry>,
-    }
-    let list: List = send_json(client().get(&url).bearer_auth(api_key).timeout(std::time::Duration::from_secs(20)), &url).await?;
+    let list: ModelList = send_json(client().get(&url).bearer_auth(api_key).timeout(std::time::Duration::from_secs(20)), &url).await?;
     Ok(list.data.into_iter().filter_map(|e| e.id).collect())
 }
 
@@ -381,16 +331,7 @@ pub async fn probe_local_models(format: &str, target: &str, target_key: Option<&
     if !res.status().is_success() {
         bail!("models probe answered {}", res.status());
     }
-    #[derive(Deserialize)]
-    struct Entry {
-        id: Option<String>,
-    }
-    #[derive(Deserialize)]
-    struct List {
-        #[serde(default)]
-        data: Vec<Entry>,
-    }
-    let list: List = res.json().await.context("models probe returned unexpected JSON")?;
+    let list: ModelList = res.json().await.context("models probe returned unexpected JSON")?;
     Ok(list.data.into_iter().filter_map(|e| e.id).filter(|id| !id.is_empty()).collect())
 }
 
@@ -439,7 +380,7 @@ pub fn is_server_answer(e: &anyhow::Error) -> bool {
     })
 }
 
-/// Load state and require a signed-in device, with a uniform message.
+/// Require a signed-in device, with a uniform message.
 pub fn require_signed_in(state: &State) -> Result<()> {
     if !state.signed_in() {
         bail!("this device is not signed in — run `kano-proxy login` first");

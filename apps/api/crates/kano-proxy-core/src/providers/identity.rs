@@ -1,6 +1,5 @@
-//! Resolve email / display name after OAuth for account pool labels
-//!. Every call goes through the transport and fails
-//! open to `None`s.
+//! Resolve email / display name after OAuth for account pool labels. Every call goes
+//! through the transport and fails open to `None`s.
 
 use base64::Engine;
 use serde_json::Value;
@@ -17,7 +16,6 @@ pub struct Identity {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CodexIdentity {
     pub email: Option<String>,
-    pub display_name: Option<String>,
     pub plan: Option<String>,
 }
 
@@ -44,21 +42,14 @@ pub async fn fetch_claude_identity(cx: &AppState, access_token: &str) -> Identit
     Identity { email: non_empty(account.and_then(|a| a.get("email"))), display_name }
 }
 
-/// `usage_json` is the codex usage fetch (providers/codex_usage.rs) the adapter supplies, so
+/// `usage_payload` is the codex usage fetch (providers/codex_usage.rs) the caller supplies, so
 /// this module stays free of provider-specific calls: `Some(payload)` when the usage
-/// endpoint answered, with `email` and `plan_type` fields.
-pub fn codex_identity(access_token: &str, account_id: Option<&str>, usage_payload: Option<&Value>) -> CodexIdentity {
-    let from_jwt = email_from_jwt(access_token);
-    if account_id.is_none() {
-        return CodexIdentity { email: from_jwt, display_name: None, plan: None };
-    }
-    match usage_payload {
-        Some(payload) => CodexIdentity {
-            email: non_empty(payload.get("email")).or(from_jwt),
-            display_name: None,
-            plan: non_empty(payload.get("plan_type")),
-        },
-        None => CodexIdentity { email: from_jwt, display_name: None, plan: None },
+/// endpoint answered, with `email` and `plan_type` fields. The token's own claims are the
+/// fallback email.
+pub fn codex_identity(access_token: &str, usage_payload: Option<&Value>) -> CodexIdentity {
+    CodexIdentity {
+        email: usage_payload.and_then(|p| non_empty(p.get("email"))).or_else(|| email_from_jwt(access_token)),
+        plan: usage_payload.and_then(|p| non_empty(p.get("plan_type"))),
     }
 }
 
@@ -82,7 +73,7 @@ pub async fn fetch_antigravity_identity(cx: &AppState, access_token: &str) -> Id
     Identity { email: non_empty(json.get("email")), display_name: non_empty(json.get("name")) }
 }
 
-pub fn email_from_jwt(access_token: &str) -> Option<String> {
+fn email_from_jwt(access_token: &str) -> Option<String> {
     let mid = access_token.split('.').nth(1)?;
     if mid.is_empty() {
         return None;
@@ -125,12 +116,18 @@ mod tests {
     }
 
     #[test]
-    fn codex_identity_without_account_id_uses_jwt_only() {
-        let id = codex_identity(&jwt(r#"{"email":"j@b.c"}"#), None, Some(&serde_json::json!({"email":"u@b.c","plan_type":"plus"})));
-        assert_eq!(id, CodexIdentity { email: Some("j@b.c".into()), display_name: None, plan: None });
-        let id = codex_identity(&jwt(r#"{"email":"j@b.c"}"#), Some("acc"), Some(&serde_json::json!({"plan_type":"plus"})));
-        assert_eq!(id.email.as_deref(), Some("j@b.c"));
-        assert_eq!(id.plan.as_deref(), Some("plus"));
+    fn codex_identity_prefers_the_usage_payload_and_falls_back_to_the_jwt() {
+        let token = jwt(r#"{"email":"j@b.c"}"#);
+        let id = |payload: Option<serde_json::Value>| codex_identity(&token, payload.as_ref());
+        assert_eq!(
+            id(Some(serde_json::json!({"email":"u@b.c","plan_type":"plus"}))),
+            CodexIdentity { email: Some("u@b.c".into()), plan: Some("plus".into()) }
+        );
+        assert_eq!(
+            id(Some(serde_json::json!({"email":"","plan_type":"plus"}))),
+            CodexIdentity { email: Some("j@b.c".into()), plan: Some("plus".into()) }
+        );
+        assert_eq!(id(None), CodexIdentity { email: Some("j@b.c".into()), plan: None });
     }
 
     #[test]

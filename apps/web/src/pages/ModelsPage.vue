@@ -18,7 +18,7 @@
  * builtins in their declared order, then one group per custom endpoint, then
  * one per CLI provider, then — defensively — any section belonging to none, so a stale cache right
  * after an endpoint was deleted still renders its models instead of dropping
- * them silently. Model groups are absent by design (v4): each is its own
+ * them silently. Model groups are absent by design: each is its own
  * endpoint with its own /models (docs/api.md § Group endpoints).
  */
 import { computed, onMounted, ref } from "vue"
@@ -37,11 +37,10 @@ import TextInput from "@/components/ui/TextInput.vue"
 import { useAuth } from "@/composables/useAuth"
 import { useCli } from "@/composables/useCli"
 import { reachableShared, useCustomProviders } from "@/composables/useCustomProviders"
-import { useI18n } from "@/i18n"
+import { PROVIDER_NAME_KEY, useI18n } from "@/i18n"
 import type { MessageKey } from "@/i18n"
 import { listModels } from "@/services/api"
 import {
-  CACHE_TTL_MS,
   isModelsCacheFresh,
   readModelsCache,
   writeModelsCache,
@@ -50,8 +49,8 @@ import { getModelsPrefs, setModelsPrefs } from "@/services/prefs"
 import {
   PROVIDERS,
   type CatalogModel,
+  type CustomProviderFormat,
   type ModelsResponse,
-  type ProviderId,
 } from "@/types"
 
 type EmptyKind = "codex" | "custom" | "shared" | "generic"
@@ -84,25 +83,17 @@ const { user } = useAuth()
 const customProviders = useCustomProviders()
 const cli = useCli()
 
-/**
- * Provider display copy lives in the catalog, and `PROVIDERS` carries only wire
- * ids. An explicit map rather than a template literal: `` `provider.${id}.name` ``
- * widens to `string` and would not typecheck against `MessageKey`, so a
- * renamed key has to fail the build here.
- */
-const NAME_KEY: Record<ProviderId, MessageKey> = {
-  "claude-code": "provider.claude-code.name",
-  codex: "provider.codex.name",
-  grok: "provider.grok.name",
-  antigravity: "provider.antigravity.name",
-}
-
 /** Why a group is empty decides what it tells the user to do about it. */
 const GROUP_EMPTY_KEY: Record<EmptyKind, MessageKey> = {
   codex: "models.group.emptyCodex",
   custom: "models.group.emptyCustom",
   shared: "models.group.emptyShared",
   generic: "models.group.emptyGeneric",
+}
+
+/** The wire format an endpoint speaks, named as the custom endpoint dialog names it. */
+function formatLabel(format: CustomProviderFormat): string {
+  return format === "anthropic" ? t("custom.dialog.formatAnthropic") : t("custom.dialog.formatOpenAI")
 }
 
 /**
@@ -135,7 +126,7 @@ const groups = computed<ModelGroup[]>(() => {
     if (list) list.push(m)
     else byPrefix.set(key, [m])
   }
-  const metaFor = (key: string) => providerMeta.value?.find((x) => x.provider === key)
+  const metaFor = (key: string) => providerMeta.value.find((x) => x.provider === key)
 
   const out: ModelGroup[] = []
   const seen = new Set<string>()
@@ -145,7 +136,7 @@ const groups = computed<ModelGroup[]>(() => {
     seen.add(p.id)
     out.push({
       key: p.id,
-      name: t(NAME_KEY[p.id]),
+      name: t(PROVIDER_NAME_KEY[p.id]),
       blurb: null,
       formatBadge: null,
       sharedBy: null,
@@ -162,10 +153,7 @@ const groups = computed<ModelGroup[]>(() => {
       key: cp.slug,
       name: cp.name,
       blurb: `${cp.slug}/*`,
-      formatBadge:
-        cp.format === "anthropic"
-          ? t("custom.dialog.formatAnthropic")
-          : t("custom.dialog.formatOpenAI"),
+      formatBadge: formatLabel(cp.format),
       sharedBy: null,
       models: byPrefix.get(cp.slug) ?? [],
       error: metaFor(cp.slug)?.error ?? null,
@@ -182,10 +170,7 @@ const groups = computed<ModelGroup[]>(() => {
       key: cp.slug,
       name: cp.name,
       blurb: `${cp.slug}/*`,
-      formatBadge:
-        cp.format === "anthropic"
-          ? t("custom.dialog.formatAnthropic")
-          : t("custom.dialog.formatOpenAI"),
+      formatBadge: formatLabel(cp.format),
       sharedBy: null,
       models: byPrefix.get(cp.slug) ?? [],
       error: metaFor(cp.slug)?.error ?? null,
@@ -204,10 +189,7 @@ const groups = computed<ModelGroup[]>(() => {
       key: sp.slug,
       name: sp.name,
       blurb: `${sp.slug}/*`,
-      formatBadge:
-        sp.format === "anthropic"
-          ? t("custom.dialog.formatAnthropic")
-          : t("custom.dialog.formatOpenAI"),
+      formatBadge: formatLabel(sp.format),
       sharedBy: t("providers.account.shared", { owner: sp.share.ownerLabel }),
       models: byPrefix.get(sp.slug) ?? [],
       error: metaFor(sp.slug)?.error ?? null,
@@ -216,9 +198,7 @@ const groups = computed<ModelGroup[]>(() => {
   }
 
   // 5. Defensively, a prefix matching neither a builtin nor a known endpoint
-  // (a stale cache right after a deletion) so its models still render. Model
-  // groups no longer appear in this catalog at all (v4 — each group is its
-  // own endpoint; see docs/api.md § Group endpoints).
+  // (a stale cache right after a deletion) so its models still render.
   for (const [key, list] of byPrefix) {
     if (seen.has(key)) continue
     out.push({
@@ -346,7 +326,7 @@ async function load(opts?: { force?: boolean }) {
     if (cached) {
       applyResponse(cached)
       loading.value = false
-      if (isModelsCacheFresh(uid, CACHE_TTL_MS)) {
+      if (isModelsCacheFresh(uid)) {
         void customProviders.load()
         void cli.load()
         return
@@ -373,7 +353,7 @@ async function load(opts?: { force?: boolean }) {
 
 function applyResponse(res: ModelsResponse) {
   models.value = res.data
-  providerMeta.value = res.providers ?? []
+  providerMeta.value = res.providers
 }
 
 async function copyId(id: string) {

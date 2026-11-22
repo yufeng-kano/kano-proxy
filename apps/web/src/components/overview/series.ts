@@ -3,10 +3,6 @@
  * zero-filled, model-ranked, color-assigned shapes the metric cards, the
  * activity chart, and the detail modals all draw from — one implementation,
  * so every surface tells the same story (docs/admin-ui.md § Overview page).
- *
- * The bucket zero-fill (the +1 partial-bucket rule in particular) and the
- * rank-then-fold model identity are ported from the chart this replaced;
- * the comments on the non-obvious parts travel with the code.
  */
 
 import type { BarBucket } from "./BarChart.vue"
@@ -28,11 +24,11 @@ const SERIES_COLORS = [
   "var(--series-5)",
   "var(--series-6)",
 ]
-export const OTHER_COLOR = "var(--series-other)"
+const OTHER_COLOR = "var(--series-other)"
 /** Identity for the folded tail. No slash, so it can never collide with a real `provider/model` id. */
-export const OTHER_KEY = "__other__"
+const OTHER_KEY = "__other__"
 
-export type RankedModel = {
+type RankedModel = {
   /** Raw `provider/model` id, or OTHER_KEY. */
   key: string
   /** What every surface prints: the canonical id, or the "Others" label for the folded tail. */
@@ -57,26 +53,7 @@ function metricOf(point: UsageSeriesPoint, metric: MetricId): number {
   return point.prompt_tokens + point.completion_tokens
 }
 
-export type TimeBucket = { key: string; date: Date }
-
-/**
- * The grain the API actually bucketed in. `grain` is authoritative when the
- * server sent it: a one-day range explicitly asked for with `grain=day` also
- * reports `days: 1`, and reading `days` first would generate hourly keys that
- * match nothing in the response and paint a chart of zeros.
- */
-export function isSummaryHourly(summary: UsageSummary): boolean {
-  if (summary.grain) return summary.grain === "hour"
-  return summary.days === 1
-}
-
-/**
- * The calendar the API bucketed in, as minutes east of UTC (docs/admin-ui.md).
- * Absent on a legacy `days=` response, which is plain UTC.
- */
-function bucketOffsetMs(summary: UsageSummary): number {
-  return (summary.offset ?? 0) * 60_000
-}
+type TimeBucket = { key: string; date: Date }
 
 /**
  * The API's key for the bucket containing `date`. Shifting by the bucket
@@ -96,43 +73,23 @@ function bucketKeyFor(grain: "hour" | "day", date: Date, offsetMs: number): stri
 }
 
 /**
- * The full zero-fill grid for a summary's range, oldest first, keyed in the
- * API's bucket calendar. For calendar-bounded ranges (when `summary.to` is
- * present), builds the exact buckets covering the span. For rolling windows
- * without `to`, applies the +1 partial-bucket rule to catch the newest bucket.
+ * The full zero-fill grid for a summary's range, oldest first: the exact
+ * buckets covering `from`..`to`, keyed in the calendar the API bucketed in
+ * (`offset`, minutes east of UTC — docs/admin-ui.md).
  */
-export function timeBuckets(summary: UsageSummary): TimeBucket[] {
-  const hourly = isSummaryHourly(summary)
-  const stepMs = hourly ? 3_600_000 : 86_400_000
-  const offsetMs = bucketOffsetMs(summary)
-  const parsedFrom = new Date(summary.from)
-  const rawFrom = Number.isNaN(parsedFrom.getTime())
-    ? new Date(Date.now() - (hourly ? 24 : summary.days || 7) * stepMs)
-    : parsedFrom
-
-  let count: number
-  let start: Date
-
-  if (summary.to) {
-    const parsedTo = new Date(summary.to)
-    // `to` is the range's last millisecond, so a 7-day week measures 1ms short
-    // of 7 steps; rounding lands on the bucket count the calendar actually has.
-    const spanMs = Math.max(stepMs, parsedTo.getTime() - rawFrom.getTime())
-    count = Math.max(1, Math.round(spanMs / stepMs))
-    start = rawFrom
-  } else {
-    const nominalCount = hourly ? 24 : summary.days || 7
-    count = nominalCount + 1
-    // Snap the rolling window's ragged start down to a bucket boundary in the
-    // API's calendar, so the first key names a whole bucket.
-    const shifted = rawFrom.getTime() + offsetMs
-    start = new Date(Math.floor(shifted / stepMs) * stepMs - offsetMs)
-  }
+function timeBuckets(summary: UsageSummary): TimeBucket[] {
+  const stepMs = summary.grain === "hour" ? 3_600_000 : 86_400_000
+  const offsetMs = summary.offset * 60_000
+  const start = new Date(summary.from).getTime()
+  // `to` is the range's last millisecond, so a 7-day week measures 1ms short
+  // of 7 steps; rounding lands on the bucket count the calendar actually has.
+  const spanMs = Math.max(stepMs, new Date(summary.to).getTime() - start)
+  const count = Math.round(spanMs / stepMs)
 
   const out: TimeBucket[] = []
   for (let i = 0; i < count; i++) {
-    const date = new Date(start.getTime() + i * stepMs)
-    out.push({ key: bucketKeyFor(hourly ? "hour" : "day", date, offsetMs), date })
+    const date = new Date(start + i * stepMs)
+    out.push({ key: bucketKeyFor(summary.grain, date, offsetMs), date })
   }
   return out
 }
@@ -147,7 +104,7 @@ export function timeBuckets(summary: UsageSummary): TimeBucket[] {
  * surface names a model the same way the By-model table does, with no
  * friendly-name remap (docs/admin-ui.md § Overview page).
  */
-export function rankModels(
+function rankModels(
   summary: UsageSummary,
   metric: MetricId,
   otherLabel: string,
@@ -190,7 +147,7 @@ export function buildMetricSeries(
   const models = rankModels(summary, metric, otherLabel)
   const named = new Map(models.map((m) => [m.key, m]))
   const other = named.get(OTHER_KEY) ?? null
-  const hourly = isSummaryHourly(summary)
+  const hourly = summary.grain === "hour"
 
   const byBucket = new Map<string, Map<string, number>>()
   for (const p of summary.series) {
@@ -236,7 +193,7 @@ export function buildCacheSeries(
   labels: { cached: string; uncached: string },
   format: Formatters,
 ): MetricSeries {
-  const hourly = isSummaryHourly(summary)
+  const hourly = summary.grain === "hour"
   const byBucket = new Map<string, { cached: number; uncached: number }>()
   let cachedTotal = 0
   let uncachedTotal = 0

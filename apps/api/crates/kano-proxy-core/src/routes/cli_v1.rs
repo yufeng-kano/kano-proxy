@@ -4,9 +4,6 @@
 //! agent setup` — the key, model-group and catalog routes, which run the session
 //! routes' handler bodies behind the device authenticator. Token-authenticated
 //! (never session), no CORS — there are no browser callers.
-//!
-//! The pre-2.0 `/agent/v1` namespace answers `410` from `legacy_routes` so a 1.x
-//! binary prints why it stopped working.
 
 use std::net::SocketAddr;
 
@@ -35,10 +32,11 @@ use crate::db::cli::{
 };
 use crate::db::custom_providers::{count_custom_providers, get_custom_provider_by_slug, MAX_CUSTOM_PROVIDERS_PER_USER};
 use crate::db::keys::{create_key_for_device, delete_key_for_device};
+use crate::http::errors::{admin_error as error, internal_error};
 use crate::pool::StoredCredential;
 use crate::tunnel::protocol::{validate_models_report, CliProviderFormat};
 use crate::tunnel::registry::ConnectParams;
-use crate::utils::custom_provider::{is_custom_provider_format, validate_name, validate_slug};
+use crate::utils::custom_provider::{validate_name, validate_slug, CustomProviderFormat};
 use crate::AppState;
 
 use super::cli_shared::{list_cli_provider_items, remove_cli_provider};
@@ -59,26 +57,6 @@ pub fn routes() -> Router<AppState> {
         .route("/keys/{id}", axum::routing::delete(delete_key))
         .route("/model-groups", get(list_groups).post(create_group))
         .route("/model-groups/{id}", axum::routing::put(update_group).delete(delete_group))
-}
-
-/// What a kano-proxy 1.x binary gets on the namespace it was built for: a `410` whose body it
-/// prints verbatim, naming the fix. Not an alias — nothing here serves (docs/cli.md § Server
-/// routes); removed with the next major release.
-pub fn legacy_routes() -> Router<AppState> {
-    Router::new().fallback(|| async {
-        error(
-            StatusCode::GONE,
-            "this kano-proxy CLI release is no longer supported — run `kano-proxy update` (2.0 or newer)",
-        )
-    })
-}
-
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
-}
-
-fn internal_error() -> Response {
-    error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
 }
 
 fn unauthorized() -> Response {
@@ -288,9 +266,9 @@ async fn list_providers(State(state): State<AppState>, headers: HeaderMap) -> Re
     }
 }
 
-/// A bounded model list off the wire: absent is `Ok(None)`, a bad shape or an
-/// out-of-bounds entry is the caller's 400 (docs/cli.md § Model catalog).
-fn models_field(body: &Value, key: &str) -> Result<Option<Option<String>>, String> {
+/// A bounded model list off the wire as the stored JSON: absent or empty is `Ok(None)`, a
+/// bad shape or an out-of-bounds entry is the caller's 400 (docs/cli.md § Model catalog).
+fn models_field(body: &Value, key: &str) -> Result<Option<String>, String> {
     let Some(value) = body.get(key) else { return Ok(None) };
     let Some(items) = value.as_array() else {
         return Err(format!("{key} must be an array of model id strings"));
@@ -305,11 +283,7 @@ fn models_field(body: &Value, key: &str) -> Result<Option<Option<String>>, Strin
     let Some(validated) = validate_models_report(&models) else {
         return Err(format!("{key} entries are out of bounds"));
     };
-    Ok(Some(if validated.is_empty() {
-        None
-    } else {
-        Some(serde_json::to_string(&validated).expect("models serialize"))
-    }))
+    Ok((!validated.is_empty()).then(|| serde_json::to_string(&validated).expect("models serialize")))
 }
 
 async fn create_provider(State(state): State<AppState>, headers: HeaderMap, body: bytes::Bytes) -> Response {
@@ -324,11 +298,9 @@ async fn create_provider(State(state): State<AppState>, headers: HeaderMap, body
     if let Some(message) = validate_slug(&slug) {
         return error(StatusCode::BAD_REQUEST, &message);
     }
-    let format = body.get("format").cloned().unwrap_or(Value::Null);
-    if !is_custom_provider_format(&format) {
+    let Some(format) = body.get("format").and_then(Value::as_str).and_then(CustomProviderFormat::parse) else {
         return error(StatusCode::BAD_REQUEST, "format must be 'openai' or 'anthropic'");
-    }
-    let format = format.as_str().expect("checked above").to_string();
+    };
     let name = match trimmed_str(&body, "name") {
         "" => slug.clone(),
         value => value.to_string(),
@@ -340,11 +312,11 @@ async fn create_provider(State(state): State<AppState>, headers: HeaderMap, body
     // Expose whitelist and probe-failure manual seed share the report bounds; the
     // agent's first connect overwrites the seed.
     let model_filter_json = match models_field(&body, "expose") {
-        Ok(value) => value.flatten(),
+        Ok(value) => value,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
     let models_json = match models_field(&body, "initial_models") {
-        Ok(value) => value.flatten(),
+        Ok(value) => value,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
 
@@ -378,7 +350,7 @@ async fn create_provider(State(state): State<AppState>, headers: HeaderMap, body
             device_id: Some(&auth.device.id),
             slug: &slug,
             name: &name,
-            format: &format,
+            format: format.as_str(),
             models_json: models_json.as_deref(),
             model_filter_json: model_filter_json.as_deref(),
         },
@@ -425,17 +397,7 @@ async fn create_provider(State(state): State<AppState>, headers: HeaderMap, body
         return error(StatusCode::INTERNAL_SERVER_ERROR, "could not create the provider — try again");
     }
 
-    (
-        StatusCode::CREATED,
-        Json(json!({
-            "id": row.id,
-            "slug": row.slug,
-            "name": row.name,
-            "format": row.format,
-            "created_at": row.created_at,
-        })),
-    )
-        .into_response()
+    (StatusCode::CREATED, Json(json!({ "id": row.id, "slug": row.slug }))).into_response()
 }
 
 async fn delete_provider(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Response {
@@ -462,19 +424,14 @@ async fn delete_device(State(state): State<AppState>, headers: HeaderMap) -> Res
     }
 }
 
-/// `GET /models` — the user's catalog in the `GET /api/models` shape (minus the bases, which
-/// the CLI derives from its own `base_url`). What `agent setup` offers to pick from: the live
-/// list, so an unconnected provider contributes nothing and no id is ever invented.
+/// `GET /models` — the user's catalog, its `data` rows in the `GET /api/models` shape. What
+/// `agent setup` and `agent launch` pick from: the live list, so an unconnected provider
+/// contributes nothing and no id is ever invented.
 async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(auth) = authenticate_device(&state, &headers).await else { return unauthorized() };
     let catalog =
-        list_models_for_user(&state, &auth.claims.user_id, ListModelsOptions { available_only: false, force: false }).await;
-    let providers: Vec<Value> = catalog
-        .providers
-        .iter()
-        .map(|p| json!({ "provider": p.provider, "count": p.models.len(), "error": p.error, "cached": p.cached }))
-        .collect();
-    Json(json!({ "object": "list", "data": catalog.models, "providers": providers })).into_response()
+        list_models_for_user(&state, &auth.claims.user_id, ListModelsOptions::default()).await;
+    Json(json!({ "data": catalog.models })).into_response()
 }
 
 /// `POST /keys` — mint an API key for this device (docs/cli.md § Keys and groups). The row is an
@@ -538,7 +495,7 @@ async fn delete_group(State(state): State<AppState>, headers: HeaderMap, Path(id
 /// `GET /connect/:providerId` — the only WebSocket route. Everything the tunnel
 /// trusts is verified here first: token signature and expiry, a device that is not
 /// revoked, and a provider row belonging to the token's user. The registry never
-/// sees a token, exactly as the Durable Object never did.
+/// sees a token.
 async fn connect(
     State(state): State<AppState>,
     Path(provider_id): Path<String>,
@@ -569,7 +526,7 @@ async fn connect(
 
     let _ = touch_cli_device_last_seen(state.pool(), &auth.device.id).await;
 
-    // The access token's `exp` drives the revocation close, as the DO's alarm did.
+    // The access token's `exp` drives the revocation close.
     let params = ConnectParams {
         user_id: auth.claims.user_id.clone(),
         provider_id: row.id.clone(),
@@ -954,8 +911,8 @@ mod tests {
         assert!(body_json(over).await["error"].as_str().unwrap().contains("maximum"));
     }
 
-    /// The cap holds inside the INSERT even when the pre-check read was stale
-    /// (the TypeScript race test, exercised through the db seam it guards).
+    /// The cap holds inside the INSERT even when the pre-check read was stale,
+    /// exercised through the db seam it guards.
     #[tokio::test]
     async fn the_shared_cap_holds_inside_the_insert() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -1137,22 +1094,6 @@ mod tests {
         assert!(!state.tunnels().is_connected(&provider_id));
     }
 
-    /// The pre-2.0 namespace is gone, not aliased: every path under it is a `410` whose body a
-    /// 1.x binary prints verbatim before exiting (docs/cli.md § Server routes).
-    #[tokio::test]
-    async fn the_legacy_namespace_answers_410_with_the_upgrade_message() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, MockTransport::new());
-        for (method, path) in [("POST", "/agent/v1/login/start"), ("POST", "/agent/v1/token"), ("GET", "/agent/v1/providers"), ("GET", "/agent/v1/connect/cliprov_x")] {
-            let response = send(&state, json_req(method, path, Some(json!({})), &[])).await;
-            assert_eq!(response.status(), StatusCode::GONE, "{method} {path}");
-            let body = body_json(response).await;
-            assert!(body["error"].as_str().unwrap().contains("kano-proxy update"), "{body}");
-        }
-        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cli_login_requests").fetch_one(state.pool()).await.unwrap();
-        assert_eq!(rows, 0, "the 410 serves nothing");
-    }
-
     /// `agent setup`'s key: minted with the device id, listed on `/api/keys` with the device's
     /// name, revocable through the device path only by the device that minted it, and never a
     /// way to revoke the user's other keys (docs/cli.md § Keys and groups).
@@ -1286,8 +1227,8 @@ mod tests {
         assert!(body_json(send(&state, json_req("GET", "/cli/v1/model-groups", None, &auth)).await).await["groups"].as_array().unwrap().is_empty());
     }
 
-    /// `GET /models` is the user's live catalog in the `/api/models` shape: nothing bound means
-    /// nothing listed, and a CLI provider's stored report shows up like anywhere else.
+    /// `GET /models` is the user's live catalog: nothing bound means nothing listed, and a CLI
+    /// provider's stored report shows up like anywhere else.
     #[tokio::test]
     async fn models_lists_the_callers_catalog() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
@@ -1296,7 +1237,6 @@ mod tests {
         let tokens = sign_in_device(&state, &user, "my-mac").await;
         assert_eq!(send(&state, json_req("GET", "/cli/v1/models", None, &[])).await.status(), StatusCode::UNAUTHORIZED);
         let empty = body_json(send(&state, json_req("GET", "/cli/v1/models", None, &[("authorization", &auth_headers(&tokens))])).await).await;
-        assert_eq!(empty["object"], "list");
         assert!(empty["data"].as_array().unwrap().is_empty(), "no invented models for an account with nothing bound");
 
         let created = create(&state, &tokens, json!({ "slug": "my-mac", "format": "openai", "initial_models": ["llama3.3:70b"] })).await;
@@ -1304,6 +1244,5 @@ mod tests {
         let listed = body_json(send(&state, json_req("GET", "/cli/v1/models", None, &[("authorization", &auth_headers(&tokens))])).await).await;
         let ids: Vec<&str> = listed["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["my-mac/llama3.3:70b"]);
-        assert!(listed["providers"].as_array().unwrap().iter().any(|p| p["provider"] == "my-mac"));
     }
 }

@@ -1,14 +1,10 @@
 //! Streaming backpressure (docs/api.md § Streaming).
 //!
-//! The TypeScript helper adapts an imperative converter to a `ReadableStream` without an
-//! eager, unbounded downstream queue: the pump only reads upstream while the client has
-//! demand (`controller.desiredSize > 0`), and cancelling the outgoing stream cancels the
-//! upstream reader.
-//!
-//! The Rust equivalent is a bounded `tokio::sync::mpsc` channel plus a task running the pump:
+//! Adapts an imperative converter ("pump") to a response body without an unbounded downstream
+//! queue: a bounded `tokio::sync::mpsc` channel plus a task running the pump.
 //! `Emitter::enqueue` parks once [`OUTPUT_QUEUE_FRAMES`] frames are outstanding, so the pump
 //! cannot run ahead of the client, and dropping the returned stream aborts the pump, which
-//! drops the upstream body — the `cancel` path. Nothing is ever buffered whole.
+//! drops the upstream body. Nothing is ever buffered whole.
 
 use std::future::Future;
 use std::io;
@@ -19,20 +15,18 @@ use bytes::Bytes;
 use futures::stream::Stream;
 use tokio::sync::mpsc;
 
-/// Frames the converter may run ahead of the client. One in the channel plus the one a parked
-/// `send` holds; the TypeScript pump parks on the same `desiredSize <= 0` condition.
+/// Frames the converter may run ahead of the client: one in the channel plus the one a parked
+/// `send` holds.
 pub const OUTPUT_QUEUE_FRAMES: usize = 1;
 
-/// The pump's end of the bounded queue — the TypeScript `controller`, minus the unbounded
-/// enqueue. Every method parks while the client has no demand.
+/// The pump's end of the bounded queue. Every method parks while the client has no demand.
 #[derive(Clone)]
 pub struct Emitter {
     tx: mpsc::Sender<Result<Bytes, io::Error>>,
 }
 
 impl Emitter {
-    /// `controller.enqueue(value)`. `Err` means the client is gone (the TypeScript
-    /// `new Error("Stream cancelled")`); pumps propagate it with `?` and stop.
+    /// `Err` means the client is gone; pumps propagate it with `?` and stop.
     pub async fn enqueue(&self, value: Bytes) -> Result<(), io::Error> {
         self.tx.send(Ok(value)).await.map_err(|_| cancelled())
     }
@@ -52,10 +46,8 @@ fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "Stream cancelled")
 }
 
-/// `backpressuredStream(body, pump)`: runs `pump` against a bounded queue and streams what it
-/// emits. A pump error becomes the stream's terminal `Err` (`controller.error`); dropping the
-/// stream aborts the pump, releasing the upstream body.
-pub struct BackpressuredStream {
+/// What `pump` emits, as a stream; dropping it aborts the pump, releasing the upstream body.
+struct BackpressuredStream {
     rx: mpsc::Receiver<Result<Bytes, io::Error>>,
     pump: tokio::task::JoinHandle<()>,
 }
@@ -74,7 +66,10 @@ impl Stream for BackpressuredStream {
     }
 }
 
-pub fn backpressured_stream<F, Fut>(pump: F) -> BackpressuredStream
+/// Runs `pump` against a bounded queue and streams what it emits. A pump error becomes the
+/// stream's terminal `Err`, so the client sees the failure instead of a truncated, seemingly
+/// complete stream.
+pub fn backpressured_byte_stream<F, Fut>(pump: F) -> crate::upstream::transport::ByteStream
 where
     F: FnOnce(Emitter) -> Fut + Send + 'static,
     Fut: Future<Output = Result<(), io::Error>> + Send + 'static,
@@ -84,23 +79,11 @@ where
     let handle = tokio::spawn(async move {
         if let Err(err) = pump(emitter).await {
             if err.kind() != io::ErrorKind::BrokenPipe {
-                // `controller.error(error)` — the client sees the failure instead of a
-                // truncated, seemingly complete stream.
                 let _ = tx.send(Err(err)).await;
             }
         }
     });
-    BackpressuredStream { rx, pump: handle }
-}
-
-/// Boxed form for the seams that type response bodies as
-/// [`crate::upstream::transport::ByteStream`].
-pub fn backpressured_byte_stream<F, Fut>(pump: F) -> crate::upstream::transport::ByteStream
-where
-    F: FnOnce(Emitter) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<(), io::Error>> + Send + 'static,
-{
-    Box::pin(backpressured_stream(pump))
+    Box::pin(BackpressuredStream { rx, pump: handle })
 }
 
 #[cfg(test)]
@@ -112,7 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn relays_frames_in_order_and_closes() {
-        let mut out = backpressured_stream(|emitter| async move {
+        let mut out = backpressured_byte_stream(|emitter| async move {
             emitter.enqueue_str("a").await?;
             emitter.enqueue_str("b").await?;
             Ok(())
@@ -126,7 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pump_error_terminates_the_stream() {
-        let mut out = backpressured_stream(|emitter| async move {
+        let mut out = backpressured_byte_stream(|emitter| async move {
             emitter.enqueue_str("a").await?;
             Err(io::Error::other("boom"))
         });
@@ -139,7 +122,7 @@ mod tests {
     async fn does_not_drain_upstream_ahead_of_client_demand() {
         let served = Arc::new(AtomicUsize::new(0));
         let counter = served.clone();
-        let mut out = backpressured_stream(move |emitter| async move {
+        let mut out = backpressured_byte_stream(move |emitter| async move {
             loop {
                 counter.fetch_add(1, Ordering::SeqCst);
                 emitter.enqueue_str("chunk\n").await?;
@@ -155,7 +138,7 @@ mod tests {
     async fn dropping_the_stream_cancels_the_pump() {
         let running = Arc::new(AtomicUsize::new(0));
         let counter = running.clone();
-        let mut out = backpressured_stream(move |emitter| async move {
+        let mut out = backpressured_byte_stream(move |emitter| async move {
             loop {
                 counter.fetch_add(1, Ordering::SeqCst);
                 emitter.enqueue_str("x").await?;

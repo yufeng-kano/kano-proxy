@@ -1,4 +1,4 @@
-//! `/api/models` — the admin Models page's catalog (//! docs/admin-ui.md § Models page).
+//! `/api/models` — the admin Models page's catalog (docs/admin-ui.md § Models page).
 //!
 //! Models come from live upstream for the providers the user has bound; a provider with no
 //! public list (Codex) simply contributes none. Nothing here is hard-coded: an unreachable
@@ -7,13 +7,12 @@
 use std::collections::HashMap;
 
 use axum::extract::{Query, State};
-use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use crate::auth::session::{is_secure_request, SessionUser};
+use crate::auth::session::SessionUser;
 use crate::catalog::models::{list_models_for_user, ListModelsOptions};
 use crate::AppState;
 
@@ -21,63 +20,29 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/", get(list))
 }
 
-/// The public LLM base host the page shows: the request's own origin (custom domain or local
-/// server). The Worker read `new URL(c.req.url).origin`; an axum request carries the authority
-/// in `Host` instead, and a request with neither falls back to `APP_URL`.
-fn public_api_origin(state: &AppState, parts: &Parts) -> String {
-    if let (Some(scheme), Some(authority)) = (parts.uri.scheme_str(), parts.uri.authority()) {
-        return format!("{scheme}://{authority}");
-    }
-    let host = parts
-        .headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty());
-    match host {
-        Some(host) => {
-            let scheme = if is_secure_request(parts) { "https" } else { "http" };
-            format!("{scheme}://{host}")
-        }
-        None => state.config().app_url.trim_end_matches('/').to_string(),
-    }
-}
-
 async fn list(
     State(state): State<AppState>,
     session: SessionUser,
     Query(params): Query<HashMap<String, String>>,
-    request: axum::extract::Request,
 ) -> Response {
-    let (parts, _) = request.into_parts();
     let opts = ListModelsOptions {
         // `?refresh=true` bypasses the one-hour catalog cache.
         force: params.get("refresh").map(String::as_str) == Some("true"),
-        // `?available=1` is the API-shape filter; every returned model is available, so it
-        // narrows nothing today (catalog::models::ListModelsOptions).
-        available_only: params.get("available").map(String::as_str) == Some("1"),
     };
     let catalog = list_models_for_user(&state, &session.user.id, opts).await;
-    let origin = public_api_origin(&state, &parts);
     let providers: Vec<Value> = catalog
         .providers
         .iter()
-        .map(|p| json!({ "provider": p.provider, "count": p.models.len(), "error": p.error, "cached": p.cached }))
+        .map(|p| json!({ "provider": p.provider, "error": p.error }))
         .collect();
-    Json(json!({
-        "object": "list",
-        "data": catalog.models,
-        "providers": providers,
-        "openai_base": format!("{origin}/openai/v1"),
-        "anthropic_base": format!("{origin}/anthropic"),
-    }))
-    .into_response()
+    Json(json!({ "object": "list", "data": catalog.models, "providers": providers })).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::auth::session::create_session;
-    use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_router, test_state, TEST_APP_URL};
+    use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_router, test_state};
     use crate::upstream::{MockTransport, UpstreamResponse};
     use axum::body::Body;
     use axum::http::{header, Request, StatusCode};
@@ -119,19 +84,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unbound_user_gets_an_empty_catalog_and_the_public_bases() {
+    async fn an_unbound_user_gets_an_empty_catalog() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool, offline());
         let (_, cookie) = signed_in(&state, "models@example.com").await;
         let response = test_router(state.clone())
-            .oneshot(
-                Request::builder()
-                    .uri("/api/models")
-                    .header(header::COOKIE, &cookie)
-                    .header(header::HOST, "api.example.com")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/api/models").header(header::COOKIE, &cookie).body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -139,9 +97,7 @@ mod tests {
         assert_eq!(json["object"], "list");
         // Nothing is bound, so nothing is listed — an empty catalog, never a fabricated one.
         assert_eq!(json["data"], json!([]));
-        assert!(json["providers"].as_array().unwrap().iter().all(|p| p["count"] == 0));
-        assert_eq!(json["openai_base"], "http://api.example.com/openai/v1");
-        assert_eq!(json["anthropic_base"], "http://api.example.com/anthropic");
+        assert!(json["providers"].as_array().unwrap().iter().all(|p| p["error"].is_null()));
     }
 
     #[tokio::test]
@@ -198,30 +154,11 @@ mod tests {
             .unwrap();
         let json = body_json(response).await;
         let models = json["data"].as_array().unwrap();
-        // Since v4 each group is its own endpoint whose /models lists its names; the shared
-        // catalog carries no group section and never expands a group into its targets.
+        // Each group is its own endpoint whose /models lists its names, so the shared catalog
+        // carries no group section and never expands a group into its targets.
         assert!(models.iter().all(|m| m["id"] != "opus"));
         assert!(models.iter().all(|m| m["provider"] != "group"));
         assert!(json["providers"].as_array().unwrap().iter().all(|p| p["provider"] != "group"));
         assert!(models.iter().all(|m| m["id"] != "claude-code/claude-opus-5"));
-    }
-
-    #[tokio::test]
-    async fn the_origin_falls_back_to_app_url_without_a_host_header() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, offline());
-        let (_, cookie) = signed_in(&state, "origin@example.com").await;
-        let response = test_router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/models")
-                    .header(header::COOKIE, &cookie)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let json = body_json(response).await;
-        assert_eq!(json["openai_base"], format!("{TEST_APP_URL}/openai/v1"));
     }
 }

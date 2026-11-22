@@ -40,10 +40,9 @@ pub fn admin_cors(app_url: &str) -> CorsLayer {
         }))
 }
 
-/// Admin JSON is per-user and must not be held by a shared cache. The TypeScript relied on
-/// Hono's default (no `Cache-Control` at all); the header is set here because an admin
-/// response served from an intermediary cache would be a cross-account leak. The admin UI's
-/// own cache-first rules live in the client (docs/admin-ui.md) and are unaffected.
+/// Admin JSON is per-user and must not be held by a shared cache: an admin response served from
+/// an intermediary cache would be a cross-account leak. The admin UI's own cache-first rules
+/// live in the client (docs/admin-ui.md) and are unaffected.
 pub fn no_store_layer() -> SetResponseHeaderLayer<HeaderValue> {
     SetResponseHeaderLayer::overriding(header::CACHE_CONTROL, HeaderValue::from_static("no-store"))
 }

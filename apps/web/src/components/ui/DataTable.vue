@@ -34,7 +34,7 @@ export type Column<Row> = {
    * for a control column (Copy, Edit). Alignment belongs to the column, not
    * to a wrapper each page re-invents around its own button.
    */
-  align?: "start" | "end"
+  align?: "end"
   /** Plain-text value; also the mobile card's value when no slot is given. */
   value?: (row: Row) => string
   /** Hidden on mobile cards — for columns that only add noise there. */

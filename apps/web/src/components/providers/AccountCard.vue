@@ -90,7 +90,7 @@ const identity = computed(() => {
   if (email) return email
   if (username && !GENERIC_LABELS.has(username)) return username
   if (label && !GENERIC_LABELS.has(label)) return label
-  return email || username || label || a.id.slice(0, 12)
+  return username || label || a.id.slice(0, 12)
 })
 
 /** A user's own name wins the title; the identity below keeps it traceable. */
@@ -196,7 +196,7 @@ const reauth = computed(() => props.account.status === "reauth" && !share.value)
  * only in that state, and never on a shared row.
  */
 const signInEnds = computed(() =>
-  !share.value && !reauth.value ? (props.account.sign_in_expires_at ?? null) : null,
+  !share.value && !reauth.value ? props.account.sign_in_expires_at : null,
 )
 
 /**
@@ -490,11 +490,11 @@ watch(
     <div v-if="showEdits" class="edits">
       <span class="edits-title">{{ t("providers.edits.accountTitle") }}</span>
       <RequestEditSwitches
-        :strip-fast-mode="!!account.strip_fast_mode"
-        :strip-claude-code-line="!!account.strip_claude_code_line"
+        :strip-fast-mode="account.strip_fast_mode"
+        :strip-claude-code-line="account.strip_claude_code_line"
         :fast-mode-hint="fastModeHint"
         :line-hint="lineHint"
-        :force-cache-ttl1h="!!account.force_cache_ttl_1h"
+        :force-cache-ttl1h="account.force_cache_ttl_1h"
         :cache-hint="provider === 'claude-code' ? t('providers.edits.cacheHint') : undefined"
         :busy="busy"
         @change="emit('edits', $event)"

@@ -1,7 +1,7 @@
-//! In-process TTL cache replacing the Worker's KV `CACHE` namespace (docs/rust-server.md
-//! § Storage). Keys keep their KV shapes (`models:v1:<user>:<provider>`, `pricing:litellm:v1`,
-//! `changelog:v1`, replay caches) so the documented lifetimes carry over. Values are
-//! bounded by the callers (replay caches cap at 256 KiB).
+//! In-process TTL cache (docs/rust-server.md § Storage): model catalogs
+//! (`models:v1:<user>:<provider>`), the price table (`pricing:litellm:v1`), the changelog
+//! (`changelog:v1`) and the reasoning replay caches, each with its documented lifetime. Values
+//! are bounded by the callers (replay caches cap at 256 KiB).
 
 use std::time::Duration;
 
@@ -53,12 +53,6 @@ impl Cache {
         serde_json::from_slice(&b).ok()
     }
 
-    pub async fn get_text(&self, key: &str) -> Option<String> {
-        let b = self.get(key).await?;
-        String::from_utf8(b.to_vec()).ok()
-    }
-
-    /// `ttl` mirrors KV `expirationTtl` (seconds).
     pub async fn put(&self, key: &str, value: Bytes, ttl: Duration) {
         self.inner.insert(key.to_string(), Entry { ttl, value }).await;
     }
@@ -68,6 +62,7 @@ impl Cache {
         self.put(key, Bytes::from(b), ttl).await;
     }
 
+    #[cfg(test)]
     pub async fn put_text(&self, key: &str, value: &str, ttl: Duration) {
         self.put(key, Bytes::copy_from_slice(value.as_bytes()), ttl).await;
     }
@@ -93,8 +88,8 @@ mod tests {
     async fn round_trip_and_expiry() {
         let c = Cache::new();
         c.put_text("k", "v", Duration::from_millis(50)).await;
-        assert_eq!(c.get_text("k").await.as_deref(), Some("v"));
+        assert_eq!(c.get("k").await.as_deref(), Some(&b"v"[..]));
         tokio::time::sleep(Duration::from_millis(80)).await;
-        assert_eq!(c.get_text("k").await, None);
+        assert_eq!(c.get("k").await, None);
     }
 }

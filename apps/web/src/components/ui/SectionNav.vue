@@ -1,15 +1,10 @@
 <!--
-  In-page navigation: tabs that switch a view, or anchors that scroll a
-  section into the content region.
+  In-page navigation: tabs that switch a view.
 
   This is how a page with several sections stays navigable without the user
   scrolling to find anything (docs/admin-ui.md § Anti-scroll rules). An
   optional count sits on each item so "which of these has anything in it" is
   answerable without visiting them.
-
-  `mode="tabs"` shows one panel at a time and gets full tab semantics;
-  `mode="anchors"` keeps every section mounted and scrolls to the chosen one,
-  which suits sections a user compares side by side.
 -->
 
 <!-- A plain block, not a second `<script setup>`: only one setup block is
@@ -24,35 +19,26 @@ export type SectionItem = {
 </script>
 
 <script setup lang="ts">
-withDefaults(
-  defineProps<{
-    items: SectionItem[]
-    active: string
-    label: string
-    mode?: "tabs" | "anchors"
-  }>(),
-  { mode: "tabs" },
-)
+defineProps<{
+  items: SectionItem[]
+  active: string
+  label: string
+}>()
 
 defineEmits<{ select: [string] }>()
 </script>
 
 <template>
-  <div
-    class="section-nav"
-    :role="mode === 'tabs' ? 'tablist' : undefined"
-    :aria-label="label"
-  >
+  <div class="section-nav" role="tablist" :aria-label="label">
     <button
       v-for="item in items"
       :key="item.id"
       type="button"
       class="item"
       :class="{ active: item.id === active }"
-      :role="mode === 'tabs' ? 'tab' : undefined"
-      :aria-selected="mode === 'tabs' ? item.id === active : undefined"
-      :aria-current="mode === 'anchors' && item.id === active ? 'true' : undefined"
-      :aria-controls="mode === 'tabs' ? `panel-${item.id}` : undefined"
+      role="tab"
+      :aria-selected="item.id === active"
+      :aria-controls="`panel-${item.id}`"
       @click="$emit('select', item.id)"
     >
       <span class="item-label">{{ item.label }}</span>

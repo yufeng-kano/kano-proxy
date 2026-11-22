@@ -1,17 +1,23 @@
-//! Codex token counting (docs/api.md § count_tokens,
-//! docs/codex-relay.md § Token counting).
+//! Codex token counting (docs/api.md § count_tokens).
 //!
-//! This server owns the Anthropic-body → text serialization *and* the tokenizer: the Cloud
-//! Run relay that hosted `o200k_base` only existed because a Worker isolate could not carry
-//! the multi-MB ranks, and it is retired in the Rust edition (docs/rust-server.md). Counting
-//! is therefore in-process through `tiktoken_rs`, with the same degrade contract: any
-//! failure returns `None`, which the route answers as the sentinel `{"input_tokens": 0}`.
+//! The Anthropic body is serialized to text and counted in-process with `tiktoken_rs`'s
+//! `o200k_base`. Any failure returns `None`, which the route answers as the sentinel
+//! `{"input_tokens": 0}`.
 //! A failed count must never surface as an error status, because that sends Claude Code into
 //! a parallel `max_tokens: 1` probe burst against the real upstream (measured 2026-08-22).
 
 use serde_json::Value;
 
 use crate::proxy::anthropic_client_tools;
+
+/// A `content` (or `system`) value: a non-empty string, or an array of blocks.
+fn push_content(out: &mut Vec<String>, content: Option<&Value>) {
+    match content {
+        Some(Value::String(text)) if !text.is_empty() => out.push(text.clone()),
+        Some(Value::Array(blocks)) => blocks.iter().for_each(|block| push_block_text(out, block)),
+        _ => {}
+    }
+}
 
 fn push_block_text(out: &mut Vec<String>, block: &Value) {
     if let Some(text) = block.as_str() {
@@ -36,19 +42,7 @@ fn push_block_text(out: &mut Vec<String>, block: &Value) {
         }
     }
     if block_type == Some("tool_result") {
-        match b.get("content") {
-            Some(Value::String(content)) => {
-                if !content.is_empty() {
-                    out.push(content.clone());
-                }
-            }
-            Some(Value::Array(items)) => {
-                for item in items {
-                    push_block_text(out, item);
-                }
-            }
-            _ => {}
-        }
+        push_content(out, b.get("content"));
     }
 }
 
@@ -56,35 +50,11 @@ fn push_block_text(out: &mut Vec<String>, block: &Value) {
 /// (text / thinking / tool_use / tool_result) and tool declarations. Images and redacted
 /// thinking are skipped — no honest text length exists for either. This is deliberately an
 /// approximation of the upstream's own prompt framing.
-pub fn anthropic_count_texts(body: &Value) -> Vec<String> {
+fn anthropic_count_texts(body: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    match body.get("system") {
-        Some(Value::String(system)) => {
-            if !system.is_empty() {
-                out.push(system.clone());
-            }
-        }
-        Some(Value::Array(blocks)) => {
-            for block in blocks {
-                push_block_text(&mut out, block);
-            }
-        }
-        _ => {}
-    }
+    push_content(&mut out, body.get("system"));
     for message in body.get("messages").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
-        match message.get("content") {
-            Some(Value::String(content)) => {
-                if !content.is_empty() {
-                    out.push(content.clone());
-                }
-            }
-            Some(Value::Array(blocks)) => {
-                for block in blocks {
-                    push_block_text(&mut out, block);
-                }
-            }
-            _ => {}
-        }
+        push_content(&mut out, message.get("content"));
     }
     for tool in body.get("tools").and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]) {
         let Some(tool) = tool.as_object() else { continue };
@@ -105,7 +75,7 @@ pub fn anthropic_count_texts(body: &Value) -> Vec<String> {
 
 /// `o200k_base` (the gpt-4o/o1/gpt-5 family encoding) over already-serialized segments.
 /// `None` when the tokenizer is unavailable, so every caller degrades rather than errors.
-pub fn count_texts_o200k(texts: &[String]) -> Option<u64> {
+fn count_texts_o200k(texts: &[String]) -> Option<u64> {
     /// Loaded once per process: the ranks are a multi-MB parse, and a codex stream must
     /// never pay for them, so nothing but the first count touches this.
     static O200K: once_cell::sync::Lazy<Option<tiktoken_rs::CoreBPE>> =
@@ -203,24 +173,6 @@ mod tests {
             Some(4)
         );
         assert_eq!(count_texts_o200k(&[]), Some(0));
-    }
-
-    #[test]
-    fn counts_a_whole_anthropic_body_through_its_serialization() {
-        let body = json!({
-            "system": "be terse",
-            "messages": [{ "role": "user", "content": "hello" }],
-            "tools": [{ "name": "get_weather", "description": "weather", "input_schema": { "type": "object" } }],
-        });
-        let expected = count_texts_o200k(&[
-            "be terse".to_string(),
-            "hello".to_string(),
-            "get_weather".to_string(),
-            "weather".to_string(),
-            r#"{"type":"object"}"#.to_string(),
-        ]);
-        assert_eq!(count_anthropic_tokens(&body), expected);
-        assert!(count_anthropic_tokens(&body).unwrap() > 0);
     }
 
     #[test]

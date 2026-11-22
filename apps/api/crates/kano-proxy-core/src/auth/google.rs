@@ -22,7 +22,8 @@ pub struct GoogleLogin {
     pub state: String,
 }
 
-fn form(pairs: &[(&str, &str)]) -> String {
+/// `application/x-www-form-urlencoded` pairs, for a query string or a token-exchange body.
+pub(super) fn form(pairs: &[(&str, &str)]) -> String {
     let mut ser = url::form_urlencoded::Serializer::new(String::new());
     for (k, v) in pairs {
         ser.append_pair(k, v);
@@ -72,18 +73,17 @@ struct UserInfo {
 }
 
 /// Consumes the state row, exchanges the code and returns the Google profile. The state row
-/// is deleted before the exchange so a replayed callback cannot mint a second session, and an
-/// expired state is refused rather than trusted.
+/// is claimed and deleted in one statement before the exchange, so a replayed or concurrent
+/// callback cannot mint a second session, and an expired state is refused rather than trusted.
 pub async fn complete_google_login(state: &AppState, code: &str, login_state: &str) -> anyhow::Result<GoogleProfile> {
-    let row = oauth_states::get_google_state(state.pool(), login_state).await?;
-    let fresh = row
-        .as_ref()
-        .and_then(|r| crate::db::accounts::parse_iso_ms(&r.expires_at))
+    let expires_at = oauth_states::take_google_state(state.pool(), login_state).await?;
+    let fresh = expires_at
+        .as_deref()
+        .and_then(crate::db::accounts::parse_iso_ms)
         .is_some_and(|at| at >= state.now_ms());
     if !fresh {
         anyhow::bail!("Invalid or expired OAuth state");
     }
-    oauth_states::delete_state(state.pool(), login_state).await?;
 
     let (Some(client_id), Some(client_secret)) =
         (state.config().google_client_id.as_deref(), state.config().google_client_secret.as_deref())
@@ -150,7 +150,7 @@ mod tests {
             assert!(login.url.contains(expected), "missing {expected} in {}", login.url);
         }
         assert!(login.url.contains(&format!("state={}", login.state)));
-        assert!(oauth_states::get_google_state(state.pool(), &login.state).await.unwrap().is_some());
+        assert!(oauth_states::take_google_state(state.pool(), &login.state).await.unwrap().is_some());
     }
 
     #[tokio::test]

@@ -81,8 +81,8 @@ pub fn decrypt_json<T: DeserializeOwned>(encryption_key_b64: Option<&str>, blob:
 mod tests {
     use super::*;
 
-    // Produced with Node's WebCrypto running the TypeScript algorithm verbatim
-    // (see docs/rust-server.md § Compatibility fixtures). Key: base64 of 32 bytes 0x00..0x1f.
+    // Produced with an independent implementation (Node's WebCrypto) of the stored layout
+    // (docs/rust-server.md § Persisted formats). Key: base64 of 32 bytes 0x00..0x1f.
     const KEY_B64: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
     const FIXTURE_JS: &str = "AAAAAAAAAAAAAAAAdZ7UvdZJ8M5X3MZefUKzo/AiNDAKrUJBoqSC/oI5MjMOgdW2kuv0ieEqYjo=";
 

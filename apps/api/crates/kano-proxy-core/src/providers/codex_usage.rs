@@ -2,10 +2,7 @@
 //!
 //! Codex subscription usage. `/codex/usage` carries a path-level bot rule of its own, while
 //! the `/wham/usage` alias passes, so the preferred alias is tried first and a `403` HTML
-//! challenge on one alias never aborts the other. Egress is direct from this server (the
-//! Cloud Run relay is retired, docs/rust-server.md), so the Worker-specific `CF-Worker`
-//! header wall no longer applies; the alias order and the edge-blocked classification stay
-//! as documented because the path rule is upstream's, not Cloudflare's.
+//! challenge on one alias never aborts the other.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -14,75 +11,56 @@ use crate::db::accounts::iso_from_ms;
 use crate::upstream::UpstreamRequest;
 use crate::AppState;
 
-use super::codex_models::CODEX_CLIENT_VERSION;
 use super::types::UsageWindow;
 
-pub const CODEX_CLI_UA: &str = "codex_cli_rs/0.165.0";
+/// The CLI identity, version tracking [`super::codex_models::CODEX_CLIENT_VERSION`].
+const CODEX_CLI_UA: &str = "codex_cli_rs/0.165.0";
 const CODEX_BASE: &str = "https://chatgpt.com/backend-api";
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CodexRateWindow {
-    #[serde(default)]
     pub used_percent: Option<f64>,
-    #[serde(default)]
     pub limit_window_seconds: Option<i64>,
-    #[serde(default)]
-    pub reset_after_seconds: Option<i64>,
-    #[serde(default)]
     pub reset_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CodexRateLimit {
-    #[serde(default)]
-    pub allowed: Option<bool>,
-    #[serde(default)]
-    pub limit_reached: Option<bool>,
-    #[serde(default)]
     pub primary_window: Option<CodexRateWindow>,
-    #[serde(default)]
     pub secondary_window: Option<CodexRateWindow>,
 }
 
+/// The parts of the usage answer this server reads: `email` and `plan_type` for the account
+/// facts, the windows and credits for routing and the bars.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CodexUsagePayload {
-    #[serde(default)]
     pub email: Option<String>,
-    #[serde(default)]
     pub plan_type: Option<String>,
-    #[serde(default)]
-    pub user_id: Option<String>,
-    #[serde(default)]
-    pub account_id: Option<String>,
-    #[serde(default)]
     pub rate_limit: Option<CodexRateLimit>,
     /// `credits: {has_credits, unlimited, balance, …} | null` (docs/providers.md § Codex
     /// "Credit spillover"). Kept as raw JSON so an unexpected field type never fails the whole
     /// usage parse; [`credits_meta`] reads it leniently.
-    #[serde(default)]
     pub credits: Option<Value>,
 }
 
+/// `payload` is set exactly when the read succeeded.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CodexUsageResult {
-    pub ok: bool,
-    pub status: u16,
     pub payload: Option<CodexUsagePayload>,
     /// True when edge bot-challenged or transient; the account is still usable for chat.
     pub edge_blocked: bool,
     pub error: Option<String>,
 }
 
-pub fn codex_usage_headers(access_token: &str, account_id: &str) -> Vec<(&'static str, String)> {
-    vec![
-        ("authorization", format!("Bearer {access_token}")),
-        ("chatgpt-account-id", account_id.to_string()),
-        ("openai-beta", "responses=experimental".to_string()),
-        ("originator", "codex_cli_rs".to_string()),
-        ("accept", "application/json".to_string()),
-        ("user-agent", CODEX_CLI_UA.to_string()),
-        ("accept-language", "en-US,en;q=0.9".to_string()),
-    ]
+fn usage_request(path: &str, access_token: &str, account_id: &str) -> UpstreamRequest {
+    UpstreamRequest::get(format!("{CODEX_BASE}{path}"))
+        .header("authorization", &format!("Bearer {access_token}"))
+        .header("chatgpt-account-id", account_id)
+        .header("openai-beta", "responses=experimental")
+        .header("originator", "codex_cli_rs")
+        .header("accept", "application/json")
+        .header("user-agent", CODEX_CLI_UA)
+        .header("accept-language", "en-US,en;q=0.9")
 }
 
 fn looks_html(text: &str) -> bool {
@@ -95,13 +73,7 @@ fn looks_html(text: &str) -> bool {
 
 pub async fn fetch_codex_usage_json(cx: &AppState, access_token: &str, account_id: &str) -> CodexUsageResult {
     if account_id.is_empty() {
-        return CodexUsageResult {
-            ok: false,
-            status: 0,
-            payload: None,
-            edge_blocked: false,
-            error: Some("missing chatgpt account id".to_string()),
-        };
+        return CodexUsageResult { payload: None, edge_blocked: false, error: Some("missing chatgpt account id".to_string()) };
     }
 
     let mut last_status = 0u16;
@@ -109,11 +81,7 @@ pub async fn fetch_codex_usage_json(cx: &AppState, access_token: &str, account_i
     let mut saw_html_challenge = false;
 
     for path in ["/wham/usage", "/codex/usage"] {
-        let mut req = UpstreamRequest::get(format!("{CODEX_BASE}{path}"));
-        for (name, value) in codex_usage_headers(access_token, account_id) {
-            req = req.header(name, &value);
-        }
-        let res = match cx.transport().send(req).await {
+        let res = match cx.transport().send(usage_request(path, access_token, account_id)).await {
             Ok(res) => res,
             Err(e) => {
                 last_body = e.to_string();
@@ -133,16 +101,8 @@ pub async fn fetch_codex_usage_json(cx: &AppState, access_token: &str, account_i
 
         if status.is_success() {
             return match serde_json::from_str::<CodexUsagePayload>(&text) {
-                Ok(payload) => CodexUsageResult {
-                    ok: true,
-                    status: last_status,
-                    payload: Some(payload),
-                    edge_blocked: false,
-                    error: None,
-                },
+                Ok(payload) => CodexUsageResult { payload: Some(payload), edge_blocked: false, error: None },
                 Err(_) => CodexUsageResult {
-                    ok: false,
-                    status: last_status,
                     payload: None,
                     edge_blocked: false,
                     error: Some("usage JSON parse failed".to_string()),
@@ -169,14 +129,14 @@ pub async fn fetch_codex_usage_json(cx: &AppState, access_token: &str, account_i
         let suffix = if last_body.is_empty() { String::new() } else { format!(": {last_body}") };
         format!("usage {status}{suffix}")
     };
-    CodexUsageResult { ok: false, status: last_status, payload: None, edge_blocked, error: Some(error) }
+    CodexUsageResult { payload: None, edge_blocked, error: Some(error) }
 }
 
 /// `used_percent` is a percent (0–100), never a 0–1 fraction — the admin UI renders it as
 /// given (docs/admin-ui.md).
 pub fn windows_from_codex_payload(payload: &CodexUsagePayload) -> Vec<UsageWindow> {
-    let rate_limit = payload.rate_limit.clone().unwrap_or_default();
-    [rate_limit.primary_window, rate_limit.secondary_window]
+    let Some(rate_limit) = &payload.rate_limit else { return Vec::new() };
+    [&rate_limit.primary_window, &rate_limit.secondary_window]
         .into_iter()
         .flatten()
         .map(|w| UsageWindow {
@@ -203,7 +163,7 @@ pub fn credits_meta(payload: &CodexUsagePayload) -> Value {
     serde_json::json!({ "has_credits": flag("has_credits"), "unlimited": flag("unlimited"), "balance": balance })
 }
 
-pub fn window_label(seconds: Option<i64>) -> String {
+fn window_label(seconds: Option<i64>) -> String {
     let Some(seconds) = seconds.filter(|s| *s != 0) else { return "window".to_string() };
     if seconds == 604_800 {
         return "Week".to_string();
@@ -220,11 +180,6 @@ pub fn window_label(seconds: Option<i64>) -> String {
 /// The usage payload as the generic JSON the identity helper reads.
 pub fn usage_payload_value(payload: &CodexUsagePayload) -> Value {
     serde_json::to_value(payload).unwrap_or(Value::Null)
-}
-
-/// Kept so the module's CLI identity stays tied to one constant.
-pub fn codex_cli_user_agent() -> String {
-    format!("codex_cli_rs/{CODEX_CLIENT_VERSION}")
 }
 
 #[cfg(test)]
@@ -265,7 +220,7 @@ mod tests {
 
         let result = fetch_codex_usage_json(&cx, "tok_test", "acct_test").await;
 
-        assert!(result.ok);
+        assert!(result.payload.is_some());
         assert_eq!(result.payload, Some(payload(valid_usage())));
         let urls: Vec<String> = mock.requests().iter().map(|r| r.url.clone()).collect();
         assert_eq!(urls, vec!["https://chatgpt.com/backend-api/wham/usage".to_string()]);
@@ -282,7 +237,7 @@ mod tests {
 
         let result = fetch_codex_usage_json(&cx, "tok_test", "acct_test").await;
 
-        assert!(result.ok);
+        assert!(result.payload.is_some());
         assert_eq!(result.payload, Some(payload(valid_usage())));
         let urls: Vec<String> = mock.requests().iter().map(|r| r.url.clone()).collect();
         assert_eq!(
@@ -304,7 +259,7 @@ mod tests {
         let result = fetch_codex_usage_json(&cx, "tok_test", "acct_test").await;
 
         assert_eq!(mock.requests().len(), 2);
-        assert!(!result.ok);
+        assert!(result.payload.is_none());
         assert!(result.edge_blocked);
         assert_eq!(result.error.as_deref(), Some("usage edge blocked (403 bot challenge)"));
     }
@@ -319,13 +274,7 @@ mod tests {
 
         assert_eq!(
             result,
-            CodexUsageResult {
-                ok: false,
-                status: 200,
-                payload: None,
-                edge_blocked: false,
-                error: Some("usage JSON parse failed".into()),
-            }
+            CodexUsageResult { payload: None, edge_blocked: false, error: Some("usage JSON parse failed".into()) }
         );
         assert_eq!(mock.requests().len(), 1);
     }
@@ -339,30 +288,19 @@ mod tests {
         assert!(mock.requests().is_empty());
     }
 
-    // --- windowsFromCodexPayload: window mapping and the utilization scale contract ---
+    // --- windows_from_codex_payload: window mapping and the utilization scale contract ---
 
     fn windows(value: Value) -> Vec<UsageWindow> {
         windows_from_codex_payload(&payload(value))
     }
 
     #[test]
-    fn regression_used_percent_one_stays_one() {
-        // The exact value a removed frontend heuristic once rescaled to 100%.
-        let w = windows(json!({ "rate_limit": { "primary_window": {
-            "used_percent": 1, "limit_window_seconds": 18000, "reset_at": 1_780_000_000u64 } } }));
-        assert_eq!(w[0].utilization, Some(1.0));
-    }
-
-    #[test]
-    fn mid_range_and_full_percentages_pass_through_unchanged() {
-        let w = windows(json!({ "rate_limit": { "primary_window": { "used_percent": 73, "limit_window_seconds": 18000 } } }));
-        assert_eq!(w[0].utilization, Some(73.0));
-        let w = windows(json!({ "rate_limit": { "primary_window": { "used_percent": 100, "limit_window_seconds": 604800 } } }));
-        assert_eq!(w[0].utilization, Some(100.0));
-    }
-
-    #[test]
-    fn a_window_without_used_percent_maps_to_null_not_zero() {
+    fn used_percent_passes_through_as_a_percent_and_absent_is_null_not_zero() {
+        // 1 is the value a 0–1 heuristic would rescale to 100%.
+        for percent in [1, 73, 100] {
+            let w = windows(json!({ "rate_limit": { "primary_window": { "used_percent": percent, "limit_window_seconds": 18000 } } }));
+            assert_eq!(w[0].utilization, Some(f64::from(percent)));
+        }
         let w = windows(json!({ "rate_limit": { "primary_window": { "limit_window_seconds": 18000 } } }));
         assert_eq!(w[0].utilization, None);
     }
@@ -432,6 +370,6 @@ mod tests {
 
     #[test]
     fn the_cli_user_agent_tracks_the_single_client_version_constant() {
-        assert_eq!(codex_cli_user_agent(), CODEX_CLI_UA);
+        assert_eq!(CODEX_CLI_UA, format!("codex_cli_rs/{}", super::super::codex_models::CODEX_CLIENT_VERSION));
     }
 }

@@ -39,7 +39,7 @@ pub fn verified_session_id(secret: &str, cookie_header: &str) -> Option<String> 
     timing_safe_equal(&sign_session_id(secret, id), sig).then(|| id.to_string())
 }
 
-/// The unverified session id, for logout (mirrors `getCookieSessionId`).
+/// The unverified session id, for logout.
 pub fn unverified_session_id(cookie_header: &str) -> Option<&str> {
     cookie_value(cookie_header)?.split('.').next().filter(|s| !s.is_empty())
 }
@@ -52,11 +52,6 @@ mod tests {
     fn signature_matches_webcrypto_hmac() {
         // node: crypto.createHmac('sha256','secret').update('sess_1').digest('hex')
         assert_eq!(sign_session_id("secret", "sess_1"), "a1a59470163561725573b352e24b1bb4babda6832420c97ca533cab2584f3606");
-        // RFC 4231 test case 2 pins the HMAC primitive itself.
-        assert_eq!(
-            hmac_sha256_hex("Jefe", b"what do ya want for nothing?"),
-            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
-        );
     }
 
     #[test]

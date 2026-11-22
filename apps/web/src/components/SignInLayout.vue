@@ -14,13 +14,10 @@ import { SITE } from "@/config/site"
 import { useWebExtensions } from "@/extensions"
 import { useI18n } from "@/i18n"
 
-withDefaults(
-  defineProps<{
-    /** A wider column for prose (the notice) than for a single button (sign-in). */
-    wide?: boolean
-  }>(),
-  { wide: false },
-)
+defineProps<{
+  /** A wider column for prose (the notice) than for a single button (sign-in). */
+  wide?: boolean
+}>()
 
 const { t } = useI18n()
 /** The edition's landing page and footer links (docs/cloud-edition.md § Web shell); the standalone build has neither. */
@@ -93,7 +90,7 @@ body:has(.login-page) {
 
 <style scoped>
 /*
- * The document itself no longer scrolls (`html, body { height: 100%; overflow:
+ * The document itself does not scroll (`html, body { height: 100%; overflow:
  * hidden }` in styles.css), so this page is its own scroll container: it fills
  * the frame exactly and takes the overflow itself when a short window — a
  * laptop at 600px tall, a phone in landscape — can't hold the panel.

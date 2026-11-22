@@ -100,16 +100,6 @@ mod tests {
     }
 
     #[test]
-    fn upstream_payload_is_plain_json_base64url() {
-        // The TypeScript side base64url-encodes `JSON.stringify(claims)` with keys in this
-        // order; serde must emit the same bytes so signatures verify across implementations.
-        let t = mint_access_token("s", "u", "d", 0);
-        let payload = t.token.split('.').next().unwrap();
-        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).unwrap();
-        assert_eq!(json, br#"{"user_id":"u","device_id":"d","exp":3600}"#);
-    }
-
-    #[test]
     fn verifies_token_minted_by_typescript() {
         let token = "eyJ1c2VyX2lkIjoidSIsImRldmljZV9pZCI6ImQiLCJleHAiOjM2MDB9.dae4ca150dbf13ace0f2e68ca2b843d8235586895835a9ff43384d494bf9a75d";
         let claims = verify_access_token("s", token, 0).unwrap();

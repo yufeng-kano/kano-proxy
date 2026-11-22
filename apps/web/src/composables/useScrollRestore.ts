@@ -13,7 +13,7 @@
  * docs/admin-ui.md § View preferences.
  */
 
-import { nextTick, onBeforeUnmount, onMounted, ref } from "vue"
+import { nextTick, onBeforeUnmount, onMounted } from "vue"
 import { useRoute } from "vue-router"
 import { getScroll, setScroll } from "@/services/prefs"
 import { getScrollRegion } from "@/services/scrollRegion"
@@ -22,7 +22,7 @@ export function useScrollRestore() {
   const route = useRoute()
   const path = route.path
   /** Set once the offset has been applied — or abandoned. Restore is a one-shot. */
-  const settled = ref(false)
+  let settled = false
   let saveTimer: number | null = null
   let region: HTMLElement | null = null
 
@@ -41,7 +41,7 @@ export function useScrollRestore() {
    * position; honour it instead of yanking the page out from under them.
    */
   function onUserScroll() {
-    if (!settled.value) settled.value = true
+    settled = true
     persist()
   }
 
@@ -66,9 +66,9 @@ export function useScrollRestore() {
    * the region is genuinely tall enough for it.
    */
   async function markReady() {
-    if (settled.value) return
+    if (settled) return
     const offset = getScroll(path)
-    settled.value = true
+    settled = true
     if (offset <= 0) return
     await nextTick()
     const el = region ?? getScrollRegion()

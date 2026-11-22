@@ -4,10 +4,10 @@
  * `localStorage`, like services/cache.ts — but a separate module on purpose.
  * That one holds server payloads: user-id-scoped, wrapped in versioned data
  * envelopes, swept on logout. This one holds only enum-ish UI choices and
- * integers — last route, scroll offsets, the Overview range / chart view /
- * table toggle, the Models and Logs provider filters — under a single unscoped
- * key that survives sign-out, so a reopened tab lands where the user left off
- * (see docs/admin-ui.md § View preferences).
+ * integers — last route, scroll offsets, the Overview range and chart view,
+ * the Providers tab, the Models and Logs provider filters, the Logs columns —
+ * under a single unscoped key that survives sign-out, so a reopened tab lands
+ * where the user left off (see docs/admin-ui.md § View preferences).
  *
  * Nothing user-identifying goes in here: no tokens, no session state, no
  * email, no server response. That is why it needs neither the user-id scoping
@@ -27,7 +27,7 @@ import {
   type LogColumnKey,
   type PickerView,
 } from "@/services/logsView"
-import type { UsageDays, UsageRangeKind } from "@/types"
+import type { UsageRangeKind } from "@/types"
 
 const PREFS_KEY = "kano-proxy:prefs"
 
@@ -35,25 +35,21 @@ const PREFS_KEY = "kano-proxy:prefs"
 export type ChartView = "tokens" | "requests" | "cache" | "models"
 
 const CHART_VIEWS: ChartView[] = ["tokens", "requests", "cache", "models"]
-const USAGE_DAYS: UsageDays[] = [1, 7, 30]
 const USAGE_RANGE_KINDS: UsageRangeKind[] = ["day", "week", "month"]
 /** "YYYY-MM-DD" (Day/Week) or "YYYY-MM" (Month) — shape only; the range module owns the calendar validation. */
 const ANCHOR_RE = /^\d{4}-\d{2}(-\d{2})?$/
 
-export type Prefs = {
+type Prefs = {
   /** Router path to restore on next boot, e.g. "/overview". */
   lastPath: string | null
   /** Scroll offset of the shell's content region, in px, keyed by router path. */
   scroll: Record<string, number>
   overview: {
-    days: UsageDays
     rangeKind: UsageRangeKind
     /**
      * The past day / week / month the user pinned: "YYYY-MM-DD" for Day and
      * Week (the week's Monday), "YYYY-MM" for Month. null = follow today, the
-     * value for any selection that covers today. Replaces the earlier
-     * `anchor` key, which stored today's date too and so froze a reopened tab
-     * on yesterday; that key is deliberately not read.
+     * value for any selection that covers today.
      */
     pinnedAnchor: string | null
     chartView: ChartView
@@ -82,8 +78,7 @@ function defaults(): Prefs {
   return {
     lastPath: null,
     scroll: {},
-    // `days` and `rangeKind` are two views of one choice — keep them in step.
-    overview: { days: 7, rangeKind: "week", pinnedAnchor: null, chartView: "tokens" },
+    overview: { rangeKind: "week", pinnedAnchor: null, chartView: "tokens" },
     models: { provider: null },
     providers: { tab: null },
     logs: { provider: null, view: "model", hidden: [], widths: {} },
@@ -106,6 +101,15 @@ function readScroll(raw: unknown): Record<string, number> {
   return out
 }
 
+/**
+ * A provider slug is user-defined, so there is no enum to check against — only a
+ * shape and a length bound. One deleted since it was written resolves to "all"
+ * at the page, not to an empty list.
+ */
+function readSlug(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= 64 ? value : null
+}
+
 function parse(raw: string): Prefs {
   const base = defaults()
   const parsed: unknown = JSON.parse(raw)
@@ -118,20 +122,9 @@ function parse(raw: string): Prefs {
   base.scroll = readScroll(parsed.scroll)
 
   if (isRecord(parsed.overview)) {
-    const { days, rangeKind, pinnedAnchor, chartView } = parsed.overview
-    if (USAGE_DAYS.includes(days as UsageDays)) base.overview.days = days as UsageDays
-    // The pre-2.1 "cache-rate" value (and the removed showTable flag) simply
-    // fail these checks and fall back — exactly the degradation this parser
-    // promises for a stale schema. A pre-Day/Week/Month blob has no rangeKind
-    // at all, so its `days` names the granularity it meant.
+    const { rangeKind, pinnedAnchor, chartView } = parsed.overview
     if (USAGE_RANGE_KINDS.includes(rangeKind as UsageRangeKind)) {
       base.overview.rangeKind = rangeKind as UsageRangeKind
-    } else if (days === 1) {
-      base.overview.rangeKind = "day"
-    } else if (days === 7) {
-      base.overview.rangeKind = "week"
-    } else if (days === 30) {
-      base.overview.rangeKind = "month"
     }
     if (typeof pinnedAnchor === "string" && ANCHOR_RE.test(pinnedAnchor)) {
       base.overview.pinnedAnchor = pinnedAnchor
@@ -141,30 +134,12 @@ function parse(raw: string): Prefs {
     }
   }
 
-  if (isRecord(parsed.models)) {
-    const { provider } = parsed.models
-    // A slug is user-defined, so there is no enum to check against — only a
-    // shape and a length bound. A provider deleted since this was written
-    // resolves to "all" at the page, not to an empty catalog.
-    if (typeof provider === "string" && provider.length > 0 && provider.length <= 64) {
-      base.models.provider = provider
-    }
-  }
-
-  if (isRecord(parsed.providers)) {
-    const { tab } = parsed.providers
-    if (typeof tab === "string" && tab.length > 0 && tab.length <= 64) {
-      base.providers.tab = tab
-    }
-  }
+  if (isRecord(parsed.models)) base.models.provider = readSlug(parsed.models.provider)
+  if (isRecord(parsed.providers)) base.providers.tab = readSlug(parsed.providers.tab)
 
   if (isRecord(parsed.logs)) {
     const { provider, view, hidden, widths } = parsed.logs
-    // Same shape-and-length check as models.provider: a slug is user-defined,
-    // and one deleted since this was written resolves to "all" at the page.
-    if (typeof provider === "string" && provider.length > 0 && provider.length <= 64) {
-      base.logs.provider = provider
-    }
+    base.logs.provider = readSlug(provider)
     if (view === "model" || view === "alias") base.logs.view = view
     if (Array.isArray(hidden)) {
       base.logs.hidden = LOG_COLUMN_KEYS.filter(
@@ -215,7 +190,7 @@ export function resetPrefs(): void {
 }
 
 /** Read-modify-write so two independent callers (router, page) never clobber each other's slice. */
-export function patchPrefs(patch: (current: Prefs) => Prefs): void {
+function patchPrefs(patch: (current: Prefs) => Prefs): void {
   write(patch(readPrefs()))
 }
 

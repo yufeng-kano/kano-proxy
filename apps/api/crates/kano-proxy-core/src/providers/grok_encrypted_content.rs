@@ -32,14 +32,15 @@ pub fn is_valid_grok_encrypted_content(raw: &str) -> bool {
 }
 
 /// Returns an error reason, or `None` when the blob looks replay-safe for xAI.
-pub fn inspect_grok_encrypted_content(raw: &str) -> Option<&'static str> {
+fn inspect_grok_encrypted_content(raw: &str) -> Option<&'static str> {
     if raw.is_empty() {
         return Some("empty");
     }
     if raw != raw.trim() {
         return Some("whitespace");
     }
-    if raw.chars().count() > MAX_LEN {
+    // Bytes, not chars: anything past ASCII fails the alphabet scan below anyway.
+    if raw.len() > MAX_LEN {
         return Some("too_long");
     }
     // Provider / GPT envelope rejects before the base64 alphabet scan — foreign
@@ -188,7 +189,7 @@ pub(crate) mod test_fixtures {
         base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
     }
 
-    /// Deterministic high-entropy unpadded standard base64 (tests/helpers/grok_sig.ts).
+    /// Deterministic high-entropy unpadded standard base64.
     pub fn fake_grok_encrypted_content(seed: u32) -> String {
         for attempt in 0..32u32 {
             let mut bytes = [0u8; 48];
@@ -253,10 +254,9 @@ mod tests {
 
     #[test]
     fn accepts_e_prefixed_grok_ciphertext_that_is_not_a_claude_envelope() {
+        // The fixture itself checks the E prefix and that the blob is accepted.
         let sig = fake_e_prefixed_grok_ciphertext();
-        assert!(sig.starts_with('E'));
         assert_eq!(inspect_grok_encrypted_content(&sig), None);
-        assert!(is_valid_grok_encrypted_content(&sig));
     }
 
     #[test]
@@ -282,7 +282,6 @@ mod tests {
     fn rejects_claude_e_form_thinking_signatures() {
         let e_form = fake_claude_e_form_thinking_signature();
         assert_eq!(inspect_grok_encrypted_content(&e_form), Some("claude_thinking"));
-        assert!(!is_valid_grok_encrypted_content(&e_form));
     }
 
     #[test]

@@ -230,8 +230,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// The TypeScript "constructing two apps must not leak" contract: extensions and state are composition-time, never a module-level
-    /// registry, so two routers in one process share nothing.
+    /// Extensions and state are composition-time, never a module-level registry, so two routers
+    /// in one process share nothing.
     #[tokio::test]
     async fn two_apps_built_in_one_process_share_no_state() {
         let Some(pool_a) = test_pool().await else { return skip_without_db() };

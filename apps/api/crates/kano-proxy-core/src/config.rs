@@ -1,7 +1,4 @@
-//! Process configuration from environment variables. Names match the Worker `Env`
-//! so an operator's existing secret names carry over unchanged;
-//! the Cloudflare bindings (`DB`, `CACHE`, `AGENT_TUNNEL`) become `DATABASE_URL` and
-//! in-process state.
+//! Process configuration from environment variables (docs/deployment.md).
 
 use std::env;
 use std::net::SocketAddr;

@@ -6,9 +6,10 @@
  *   click any date to view that day's 24-hour hourly curve.
  * - Week mode: 30/31-day monthly grid, this week marked, continuous 7-day selection
  *   strip (Mon–Sun), click any week to view that 7-day daily curve.
- * Cells have no hover styling (docs/admin-ui.md § Overview page).
  * - Month mode: 12-month annual grid (3×4), this month marked, selected month highlighted,
  *   future months disabled, click any month to view that month's daily curve.
+ *
+ * Cells have no hover styling (docs/admin-ui.md § Overview page).
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
@@ -140,7 +141,6 @@ function jumpCurrent() {
 // ---------------------------------------------------------------------------
 type DayCell = {
   date: Date
-  dayNumber: number
   isOtherMonth: boolean
   isToday: boolean
   isSelectedDay: boolean
@@ -150,77 +150,32 @@ type DayCell = {
   isWeekEnd: boolean
 }
 
+/** Whole Monday-first weeks covering the viewed month, padded with the neighbours' days. */
 const calendarDays = computed<DayCell[]>(() => {
   const year = viewYear.value
   const month = viewMonth.value
-
-  const firstDay = new Date(year, month, 1)
-  const firstDayWeekday = (firstDay.getDay() + 6) % 7 // 0 = Mon, ..., 6 = Sun
-  const daysInMonth = new Date(year, month + 1, 0).getDate()
-  const daysInPrevMonth = new Date(year, month, 0).getDate()
-
-  const cells: DayCell[] = []
   const todayStart = getStartOfDay(today.value)
 
-  // Prev month padding
-  for (let i = firstDayWeekday - 1; i >= 0; i--) {
-    const d = new Date(year, month - 1, daysInPrevMonth - i)
-    const dStart = getStartOfDay(d)
-    const isFuture = dStart > todayStart
-    cells.push({
+  const leading = (new Date(year, month, 1).getDay() + 6) % 7 // days before the 1st, Mon-first
+  const daysInMonth = new Date(year, month + 1, 0).getDate()
+  const total = Math.ceil((leading + daysInMonth) / 7) * 7
+
+  // Day 1 - leading is a date in the previous month; `Date` rolls it, and the
+  // last cells past `daysInMonth` into the next month, the same way.
+  return Array.from({ length: total }, (_, i) => {
+    const d = new Date(year, month, 1 - leading + i)
+    const weekday = (d.getDay() + 6) % 7
+    return {
       date: d,
-      dayNumber: d.getDate(),
-      isOtherMonth: true,
+      isOtherMonth: d.getMonth() !== month,
       isToday: isSameDay(d, today.value),
       isSelectedDay: isSameDay(d, props.selectedDate),
       isSelectedWeek: isSameWeek(d, props.selectedDate),
-      isFuture,
-      isWeekStart: (d.getDay() + 6) % 7 === 0,
-      isWeekEnd: (d.getDay() + 6) % 7 === 6,
-    })
-  }
-
-  // Current month
-  for (let i = 1; i <= daysInMonth; i++) {
-    const d = new Date(year, month, i)
-    const dStart = getStartOfDay(d)
-    const isFuture = dStart > todayStart
-    cells.push({
-      date: d,
-      dayNumber: i,
-      isOtherMonth: false,
-      isToday: isSameDay(d, today.value),
-      isSelectedDay: isSameDay(d, props.selectedDate),
-      isSelectedWeek: isSameWeek(d, props.selectedDate),
-      isFuture,
-      isWeekStart: (d.getDay() + 6) % 7 === 0,
-      isWeekEnd: (d.getDay() + 6) % 7 === 6,
-    })
-  }
-
-  // Next month padding to fill complete rows of 7
-  const remainder = cells.length % 7
-  if (remainder > 0) {
-    const fillCount = 7 - remainder
-    for (let i = 1; i <= fillCount; i++) {
-      const d = new Date(year, month + 1, i)
-      const dStart = getStartOfDay(d)
-      const isFuture = dStart > todayStart
-      cells.push({
-        date: d,
-        dayNumber: i,
-        isOtherMonth: true,
-        isToday: isSameDay(d, today.value),
-        isSelectedDay: isSameDay(d, props.selectedDate),
-        isSelectedWeek: isSameWeek(d, props.selectedDate),
-        isFuture,
-        isWeekStart: (d.getDay() + 6) % 7 === 0,
-        isWeekEnd: (d.getDay() + 6) % 7 === 6,
-      })
+      isFuture: d > todayStart,
+      isWeekStart: weekday === 0,
+      isWeekEnd: weekday === 6,
     }
-  }
-
-  return cells
+  })
 })
 
 function selectDate(date: Date) {
@@ -403,7 +358,6 @@ onBeforeUnmount(() => {
           class="day-cell"
           :class="{
             'other-month': cell.isOtherMonth,
-            'is-today': cell.isToday,
             'selected-day': kind === 'day' && cell.isSelectedDay,
             'selected-week': kind === 'week' && cell.isSelectedWeek,
             'week-start': cell.isWeekStart,
@@ -416,7 +370,7 @@ onBeforeUnmount(() => {
           :aria-current="cell.isToday ? 'date' : undefined"
           @click="onDayClick(cell)"
         >
-          <span class="day-number" aria-hidden="true">{{ cell.dayNumber }}</span>
+          <span class="day-number" aria-hidden="true">{{ cell.date.getDate() }}</span>
           <span v-if="cell.isToday && !cell.isSelectedDay" class="today-dot" />
         </button>
       </div>
@@ -431,7 +385,6 @@ onBeforeUnmount(() => {
         class="month-cell"
         :class="{
           'selected-month': isMonthSelected(idx),
-          'this-month': isMonthThisMonth(idx),
           'disabled': isMonthFuture(idx),
         }"
         :disabled="isMonthFuture(idx)"

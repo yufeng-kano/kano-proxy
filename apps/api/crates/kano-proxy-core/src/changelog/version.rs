@@ -1,8 +1,6 @@
-//! SemVer comparison for the running-version badge (//! docs/admin-ui.md § Changelog).
+//! SemVer comparison for the running-version badge (docs/admin-ui.md § Changelog).
 //!
 //! Pure — no server APIs — so the update-available rules stay unit-testable.
-
-use std::cmp::Ordering;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -16,28 +14,17 @@ pub fn parse_semver(v: &str) -> Option<(u64, u64, u64)> {
     Some((caps[1].parse().ok()?, caps[2].parse().ok()?, caps[3].parse().ok()?))
 }
 
-/// Numeric per-component compare, so `1.10.0` sorts above `1.9.0` (a string compare would get
-/// that backwards). Unparseable input compares [`Ordering::Equal`] — the caller cannot act on
-/// an ordering it cannot trust, and [`is_update_available`] turns that into "no update".
-pub fn compare_semver(a: &str, b: &str) -> Ordering {
-    match (parse_semver(a), parse_semver(b)) {
-        (Some(pa), Some(pb)) => pa.cmp(&pb),
-        _ => Ordering::Equal,
-    }
-}
-
-/// True only when `current` is strictly behind `latest`.
+/// True only when `current` is strictly behind `latest`, compared per numeric component (so
+/// `1.10.0` sorts above `1.9.0`). Unparseable input is never an update: the caller cannot act
+/// on an ordering it cannot trust.
 ///
 /// A local version *ahead* of the newest release is the normal state between a version bump
 /// and its release, so it must not read as "update available".
 pub fn is_update_available(current: &str, latest: Option<&str>) -> bool {
-    let Some(latest) = latest else {
-        return false;
-    };
-    if parse_semver(current).is_none() || parse_semver(latest).is_none() {
-        return false;
+    match (parse_semver(current), latest.and_then(parse_semver)) {
+        (Some(current), Some(latest)) => current < latest,
+        _ => false,
     }
-    compare_semver(current, latest) == Ordering::Less
 }
 
 #[cfg(test)]
@@ -54,30 +41,23 @@ mod tests {
     }
 
     #[test]
-    fn true_only_when_current_is_strictly_behind_latest() {
-        assert!(is_update_available("1.10.0", Some("1.11.0")));
-        assert!(!is_update_available("1.11.0", Some("1.11.0")));
-        assert!(!is_update_available("1.12.0", Some("1.11.0")));
-    }
-
-    #[test]
-    fn compares_numerically_not_lexically() {
-        assert!(is_update_available("1.9.0", Some("1.10.0")));
-        assert!(!is_update_available("1.10.0", Some("1.9.0")));
-        assert_eq!(compare_semver("1.10.0", "1.9.0"), Ordering::Greater);
-    }
-
-    #[test]
-    fn is_false_for_unparseable_input() {
-        assert!(!is_update_available("banana", Some("1.11.0")));
-        assert!(!is_update_available("1.11.0", Some("banana")));
-        assert!(!is_update_available("1.11.0", None));
-        assert_eq!(compare_semver("banana", "1.11.0"), Ordering::Equal);
-    }
-
-    #[test]
-    fn matches_a_v_prefixed_tag_against_the_bare_version() {
-        assert!(!is_update_available("1.11.0", Some("v1.11.0")));
-        assert!(is_update_available("1.10.0", Some("v1.11.0")));
+    fn an_update_is_available_only_when_current_is_strictly_behind_latest() {
+        for (current, latest, expected) in [
+            ("1.10.0", Some("1.11.0"), true),
+            ("1.11.0", Some("1.11.0"), false),
+            ("1.12.0", Some("1.11.0"), false),
+            // Numeric, not lexical.
+            ("1.9.0", Some("1.10.0"), true),
+            ("1.10.0", Some("1.9.0"), false),
+            // A v-prefixed tag against the bare version.
+            ("1.11.0", Some("v1.11.0"), false),
+            ("1.10.0", Some("v1.11.0"), true),
+            // Unparseable or absent input is never an update.
+            ("banana", Some("1.11.0"), false),
+            ("1.11.0", Some("banana"), false),
+            ("1.11.0", None, false),
+        ] {
+            assert_eq!(is_update_available(current, latest), expected, "{current} vs {latest:?}");
+        }
     }
 }

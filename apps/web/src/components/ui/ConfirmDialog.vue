@@ -29,12 +29,7 @@ watch(() => route.fullPath, () => settleConfirm(false))
     <p class="message">{{ pendingConfirm.message }}</p>
     <template #footer>
       <AppButton @click="settleConfirm(false)">{{ t("action.cancel") }}</AppButton>
-      <AppButton
-        :variant="pendingConfirm.tone === 'default' ? 'primary' : 'destructive'"
-        @click="settleConfirm(true)"
-      >
-        {{ pendingConfirm.confirmLabel }}
-      </AppButton>
+      <AppButton variant="destructive" @click="settleConfirm(true)">{{ pendingConfirm.confirmLabel }}</AppButton>
     </template>
   </Modal>
 </template>

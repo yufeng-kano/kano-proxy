@@ -11,7 +11,8 @@ use serde_json::{json, Map, Value};
 
 use crate::auth::session::SessionUser;
 use crate::auth::spend_limit::{is_spend_limit_interval, key_window_spend, SpendKey};
-use crate::db::keys::{create_key, delete_key, list_keys, list_keys_with_devices, update_key, ApiKeyRow, SpendLimitFields};
+use crate::db::keys::{create_key, delete_key, list_keys_with_devices, update_key, ApiKeyRow, SpendLimitFields};
+use crate::http::errors::admin_error as error;
 use crate::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -20,14 +21,9 @@ pub fn routes() -> Router<AppState> {
         .route("/{id}", patch(update).delete(remove))
 }
 
-fn error(status: StatusCode, code: &str) -> Response {
-    (status, Json(json!({ "error": code }))).into_response()
-}
-
 /// Validated limit fields off a request body. `Ok(None)` means the body did not speak to
 /// limits at all; an explicit `spend_limit: null` clears the limit. `Err(())` is a bad shape.
-#[allow(clippy::result_unit_err)]
-pub fn parse_limit_fields(body: &Map<String, Value>) -> Result<Option<SpendLimitFields>, ()> {
+fn parse_limit_fields(body: &Map<String, Value>) -> Result<Option<SpendLimitFields>, ()> {
     let has_any = body.contains_key("spend_limit")
         || body.contains_key("spend_limit_interval")
         || body.contains_key("spend_limit_include_oauth");
@@ -93,8 +89,7 @@ async fn list(State(state): State<AppState>, session: SessionUser) -> Response {
     Json(json!({ "keys": out })).into_response()
 }
 
-/// A body that is absent or unparsable reads as `{}`, exactly as the TypeScript's
-/// `c.req.json().catch(() => ({}))` did.
+/// A body that is absent or unparsable reads as `{}`.
 fn object_body(body: Option<Json<Value>>) -> Map<String, Value> {
     match body {
         Some(Json(Value::Object(map))) => map,
@@ -141,15 +136,9 @@ async fn update(
         return error(StatusCode::BAD_REQUEST, "invalid_spend_limit");
     };
     match update_key(state.pool(), &session.user.id, &id, name.as_deref(), limits).await {
-        Ok(false) => error(StatusCode::NOT_FOUND, "not found"),
+        Ok(Some(updated)) => Json(key_json(&updated)).into_response(),
+        Ok(None) => error(StatusCode::NOT_FOUND, "not found"),
         Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-        Ok(true) => match list_keys(state.pool(), &session.user.id).await {
-            Ok(keys) => match keys.iter().find(|k| k.id == id) {
-                Some(updated) => Json(key_json(updated)).into_response(),
-                None => Json(json!({ "ok": true })).into_response(),
-            },
-            Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-        },
     }
 }
 
@@ -165,6 +154,7 @@ async fn remove(State(state): State<AppState>, session: SessionUser, Path(id): P
 mod tests {
     use super::*;
     use crate::auth::session::create_session;
+    use crate::db::keys::list_keys;
     use crate::db::request_logs::{insert_request_log, RequestLogEntry};
     use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_router, test_state};
     use crate::upstream::MockTransport;

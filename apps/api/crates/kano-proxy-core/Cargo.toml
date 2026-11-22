@@ -10,22 +10,17 @@ repository.workspace = true
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
-dashmap.workspace = true
 futures.workspace = true
 http.workspace = true
-http-body.workspace = true
 http-body-util.workspace = true
 indexmap.workspace = true
-mime.workspace = true
 moka.workspace = true
 once_cell.workspace = true
 percent-encoding.workspace = true
-pin-project-lite.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 tiktoken-rs.workspace = true
 tokio-stream.workspace = true
-tokio-util.workspace = true
 url.workspace = true
 anyhow.workspace = true
 axum.workspace = true
@@ -42,10 +37,9 @@ sqlx.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
-tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["test-util"] }
 tokio-tungstenite.workspace = true
+tower.workspace = true

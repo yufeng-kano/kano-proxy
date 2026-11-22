@@ -17,13 +17,14 @@ use std::io;
 use rand::RngCore;
 use serde_json::{json, Map, Value};
 
+use crate::app::now_seconds;
 use crate::proxy::anthropic_client_tools;
 use crate::proxy::backpressure::{backpressured_byte_stream, Emitter};
 use crate::proxy::sse_lines::read_sse_lines_default;
 use crate::upstream::transport::ByteStream;
 
 // ---------------------------------------------------------------------------
-// Shared value helpers (JavaScript coercions the TypeScript relies on)
+// Shared value helpers (JavaScript-style coercions of client JSON)
 // ---------------------------------------------------------------------------
 
 /// JavaScript truthiness: `undefined`/`null`/`false`/`0`/`""` are falsy.
@@ -38,7 +39,7 @@ fn truthy(value: Option<&Value>) -> bool {
 }
 
 /// `String(value)` for the shapes these converters actually see.
-fn js_string(value: Option<&Value>) -> String {
+pub(crate) fn js_string(value: Option<&Value>) -> String {
     match value {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(s)) => s.clone(),
@@ -72,28 +73,16 @@ fn block_type(block: &Value) -> &str {
     block.get("type").and_then(Value::as_str).unwrap_or("")
 }
 
-/// `{...object, key: value}` — an existing key keeps its position, a new one is appended, which
-/// is what the JSON the clients compare depends on.
-fn with_key(source: &Map<String, Value>, key: &str, value: Value) -> Map<String, Value> {
-    let mut out = source.clone();
-    out.insert(key.to_string(), value);
-    out
-}
-
-/// A JSON number that came from a JavaScript number literal.
+/// A JSON number from an `f64`; a non-finite value becomes `null`.
 fn number(value: f64) -> Value {
     serde_json::Number::from_f64(value).map(Value::Number).unwrap_or(Value::Null)
 }
 
-/// `crypto.randomUUID().replace(/-/g, "").slice(0, 24)`.
+/// 24 random hex characters.
 fn random_id_suffix() -> String {
     let mut bytes = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
-}
-
-fn now_seconds() -> i64 {
-    crate::app::now_ms() / 1000
 }
 
 // ---------------------------------------------------------------------------
@@ -101,27 +90,25 @@ fn now_seconds() -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Deep-drop every `cache_control` key. Used only on Anthropic→OpenAI convert.
-pub fn strip_cache_control(value: &Value) -> Value {
+pub(crate) fn strip_cache_control(value: &Value) -> Value {
     match value {
         Value::Array(items) => Value::Array(items.iter().map(strip_cache_control).collect()),
-        Value::Object(map) => {
-            let mut out = Map::new();
-            for (key, v) in map {
-                if key == "cache_control" {
-                    continue;
-                }
-                out.insert(key.clone(), strip_cache_control(v));
-            }
-            Value::Object(out)
-        }
+        Value::Object(map) => Value::Object(strip_cache_control_map(map)),
         other => other.clone(),
     }
 }
 
+fn strip_cache_control_map(map: &Map<String, Value>) -> Map<String, Value> {
+    map.iter()
+        .filter(|(key, _)| *key != "cache_control")
+        .map(|(key, value)| (key.clone(), strip_cache_control(value)))
+        .collect()
+}
+
 /// The client's structured-output request, from either Anthropic spelling: `output_config.format`
 /// (current) wins over the retired top-level `output_format`, which Anthropic itself now rejects
-/// but older SDKs and proxies still emit. Shared by every Anthropic-ingress converter.
-pub fn anthropic_output_format(body: &Map<String, Value>) -> Option<&Value> {
+/// but older SDKs and proxies still emit.
+pub(crate) fn anthropic_output_format(body: &Map<String, Value>) -> Option<&Value> {
     if let Some(config) = body.get("output_config").filter(|v| v.is_object()) {
         if let Some(format) = config.get("format").filter(|v| v.is_object() || v.is_array()) {
             return Some(format);
@@ -133,25 +120,32 @@ pub fn anthropic_output_format(body: &Map<String, Value>) -> Option<&Value> {
 /// Native-passthrough normalization: a retired top-level `output_format` moves to
 /// `output_config.format` when the body has no current-spelling format of its own. Anthropic
 /// `400`s the old field, and clients on older SDKs / proxies still send it. Returns the input
-/// borrowed when nothing moves (the TypeScript returns the same object).
+/// borrowed when nothing moves.
 pub fn move_retired_output_format(body: &Map<String, Value>) -> Cow<'_, Map<String, Value>> {
     let Some(legacy) = body.get("output_format").filter(|v| v.is_object() || v.is_array()) else {
         return Cow::Borrowed(body);
     };
+    let has_current = body.get("output_config").and_then(|c| c.get("format")).is_some_and(Value::is_object);
     let legacy = legacy.clone();
-    let config = body
-        .get("output_config")
-        .filter(|v| v.is_object())
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
     let mut rest = body.clone();
     rest.remove("output_format");
-    if config.get("format").map(Value::is_object).unwrap_or(false) {
-        return Cow::Owned(rest);
+    if !has_current {
+        set_output_config_format(&mut rest, legacy);
     }
-    rest.insert("output_config".to_string(), Value::Object(with_key(&config, "format", legacy)));
     Cow::Owned(rest)
+}
+
+/// `output_config.format = format`; a missing or non-object `output_config` becomes
+/// `{ format }`.
+fn set_output_config_format(body: &mut Map<String, Value>, format: Value) {
+    match body.get_mut("output_config") {
+        Some(Value::Object(config)) => {
+            config.insert("format".into(), format);
+        }
+        _ => {
+            body.insert("output_config".into(), json!({ "format": format }));
+        }
+    }
 }
 
 /// Anthropic `metadata.user_id` → the internal request's `prompt_cache_key` (codex-only effect;
@@ -187,7 +181,7 @@ pub struct AnthropicToOpenAiChat {
     pub stop: Option<Vec<String>>,
 }
 
-/// `contentToText(content)`.
+/// Text of a string or text-part content; other parts contribute nothing.
 fn content_to_text(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(s)) => s.clone(),
@@ -207,7 +201,7 @@ fn content_to_text(content: Option<&Value>) -> String {
     }
 }
 
-/// `anthropicBlocksToOpenAIContent(blocks)`: a plain string when every block was text, an
+/// Anthropic content blocks → OpenAI content: a plain string when every block was text, an
 /// OpenAI content-part array otherwise.
 fn anthropic_blocks_to_openai_content(blocks: &[Value]) -> Value {
     let mut parts: Vec<Value> = Vec::new();
@@ -300,7 +294,7 @@ fn tool_result_to_openai(tool_use_id: Option<&Value>, content: Option<&Value>) -
     (Value::Object(tool_message), Some(image_message))
 }
 
-/// `mapAnthropicToolChoice(tc)`.
+/// Anthropic `tool_choice` → OpenAI spelling.
 fn map_anthropic_tool_choice(tool_choice: &Value) -> Value {
     let Some(map) = tool_choice.as_object() else { return tool_choice.clone() };
     match map.get("type").and_then(Value::as_str) {
@@ -318,8 +312,7 @@ fn map_anthropic_tool_choice(tool_choice: &Value) -> Value {
 /// Anthropic Messages request → OpenAI Chat Completions fields. Strips all `cache_control`.
 /// Does not invent affinity headers.
 pub fn anthropic_to_openai_chat_request(body: &Map<String, Value>) -> AnthropicToOpenAiChat {
-    let cleaned_value = strip_cache_control(&Value::Object(body.clone()));
-    let cleaned = cleaned_value.as_object().cloned().unwrap_or_default();
+    let cleaned = strip_cache_control_map(body);
     let mut messages: Vec<Value> = Vec::new();
 
     match cleaned.get("system") {
@@ -342,7 +335,7 @@ pub fn anthropic_to_openai_chat_request(body: &Map<String, Value>) -> AnthropicT
         _ => {}
     }
 
-    for message in array(cleaned.get("messages")).cloned().unwrap_or_default() {
+    for message in array(cleaned.get("messages")).into_iter().flatten() {
         let role = js_string(message.get("role"));
         let content = message.get("content");
         if role == "assistant" {
@@ -360,21 +353,7 @@ pub fn anthropic_to_openai_chat_request(body: &Map<String, Value>) -> AnthropicT
                     // reasoning_content field before replay upstream. redacted_thinking has no
                     // plaintext to round-trip and is dropped, not an error.
                     "thinking" => reasoning.push_str(&js_string(block.get("thinking"))),
-                    "tool_use" => {
-                        let mut call = Map::new();
-                        if let Some(id) = block.get("id") {
-                            call.insert("id".into(), id.clone());
-                        }
-                        call.insert("type".into(), json!("function"));
-                        let mut function = Map::new();
-                        if let Some(name) = block.get("name") {
-                            function.insert("name".into(), name.clone());
-                        }
-                        let input = block.get("input").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| json!({}));
-                        function.insert("arguments".into(), Value::String(input.to_string()));
-                        call.insert("function".into(), Value::Object(function));
-                        tool_calls.push(Value::Object(call));
-                    }
+                    "tool_use" => tool_calls.push(openai_tool_call(block)),
                     _ => {}
                 }
             }
@@ -564,35 +543,9 @@ pub fn openai_to_anthropic_message(completion: &Map<String, Value>, model: &str)
         content.push(json!({ "type": "text", "text": text }));
     }
     if let Some(tool_calls) = array(message.and_then(|m| m.get("tool_calls"))) {
-        for call in tool_calls {
-            let function = call.get("function");
-            let arguments = as_str(function.and_then(|f| f.get("arguments")));
-            let input = match arguments.filter(|a| !a.is_empty()) {
-                Some(raw) => serde_json::from_str::<Value>(raw).unwrap_or_else(|_| {
-                    let mut fallback = Map::new();
-                    fallback.insert("raw".into(), json!(raw));
-                    Value::Object(fallback)
-                }),
-                None => json!({}),
-            };
-            let mut block = Map::new();
-            block.insert("type".into(), json!("tool_use"));
-            if let Some(id) = call.get("id") {
-                block.insert("id".into(), id.clone());
-            }
-            if let Some(name) = function.and_then(|f| f.get("name")) {
-                block.insert("name".into(), name.clone());
-            }
-            block.insert("input".into(), input);
-            content.push(Value::Object(block));
-        }
+        content.extend(tool_calls.iter().map(tool_use_block));
     }
-    let finish = as_str(choice.and_then(|c| c.get("finish_reason")));
-    let stop_reason = match finish {
-        Some("tool_calls") => "tool_use",
-        Some("length") => "max_tokens",
-        _ => "end_turn",
-    };
+    let stop_reason = anthropic_stop_reason(as_str(choice.and_then(|c| c.get("finish_reason"))));
 
     let usage = completion.get("usage").filter(|u| truthy(Some(u)));
     let mut out = Map::new();
@@ -622,11 +575,69 @@ pub fn openai_to_anthropic_message(completion: &Map<String, Value>, model: &str)
     out
 }
 
+/// OpenAI `tool_calls[]` entry → Anthropic `tool_use` block. Arguments that are not JSON reach
+/// the client as `{"raw": …}` instead of failing the turn.
+fn tool_use_block(call: &Value) -> Value {
+    let function = call.get("function");
+    let input = match as_str(function.and_then(|f| f.get("arguments"))).filter(|a| !a.is_empty()) {
+        Some(raw) => serde_json::from_str::<Value>(raw).unwrap_or_else(|_| json!({ "raw": raw })),
+        None => json!({}),
+    };
+    let mut block = Map::new();
+    block.insert("type".into(), json!("tool_use"));
+    if let Some(id) = call.get("id") {
+        block.insert("id".into(), id.clone());
+    }
+    if let Some(name) = function.and_then(|f| f.get("name")) {
+        block.insert("name".into(), name.clone());
+    }
+    block.insert("input".into(), input);
+    Value::Object(block)
+}
+
+/// Anthropic `tool_use` block → OpenAI `tool_calls[]` entry.
+fn openai_tool_call(block: &Value) -> Value {
+    let mut call = Map::new();
+    if let Some(id) = block.get("id") {
+        call.insert("id".into(), id.clone());
+    }
+    call.insert("type".into(), json!("function"));
+    let mut function = Map::new();
+    if let Some(name) = block.get("name") {
+        function.insert("name".into(), name.clone());
+    }
+    let arguments = match block.get("input").filter(|v| !v.is_null()) {
+        Some(input) => input.to_string(),
+        None => "{}".to_string(),
+    };
+    function.insert("arguments".into(), Value::String(arguments));
+    call.insert("function".into(), Value::Object(function));
+    Value::Object(call)
+}
+
+/// OpenAI `finish_reason` → Anthropic `stop_reason`.
+fn anthropic_stop_reason(finish_reason: Option<&str>) -> &'static str {
+    match finish_reason {
+        Some("tool_calls") => "tool_use",
+        Some("length") => "max_tokens",
+        _ => "end_turn",
+    }
+}
+
+/// Anthropic `stop_reason` → OpenAI `finish_reason`.
+fn openai_finish_reason(stop_reason: Option<&str>) -> &'static str {
+    match stop_reason {
+        Some("tool_use") => "tool_calls",
+        Some("max_tokens") => "length",
+        _ => "stop",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI Chat Completions request → Anthropic Messages request
 // ---------------------------------------------------------------------------
 
-/// The fields `openaiToAnthropicMessages` reads off the internal chat request.
+/// The internal chat request fields [`openai_to_anthropic_messages`] reads.
 #[derive(Debug, Clone, Default)]
 pub struct AnthropicMessagesInput {
     pub model: String,
@@ -682,7 +693,7 @@ fn content_to_anthropic_blocks(content: Option<&Value>) -> Vec<Value> {
     }
 }
 
-/// `/^data:([^;]+);base64,(.+)$/`.
+/// `data:<media type>;base64,<data>` → `(media type, data)`; both parts non-empty.
 fn parse_data_url(url: &str) -> Option<(&str, &str)> {
     let rest = url.strip_prefix("data:")?;
     let (media_type, rest) = rest.split_once(';')?;
@@ -696,7 +707,7 @@ fn parse_data_url(url: &str) -> Option<(&str, &str)> {
     Some((media_type, data))
 }
 
-/// `mapToolChoice(tc)` — OpenAI spelling → Anthropic spelling.
+/// OpenAI `tool_choice` → Anthropic spelling.
 fn map_tool_choice(tool_choice: &Value) -> Value {
     if let Some(name) = tool_choice.as_str() {
         return match name {
@@ -747,28 +758,7 @@ pub fn openai_to_anthropic_messages(input: &AnthropicMessagesInput) -> Map<Strin
                 blocks.push(json!({ "type": "text", "text": text }));
             }
             if let Some(tool_calls) = array(message.get("tool_calls")) {
-                for call in tool_calls {
-                    let function = call.get("function");
-                    let arguments = as_str(function.and_then(|f| f.get("arguments")));
-                    let args = match arguments.filter(|a| !a.is_empty()) {
-                        Some(raw) => serde_json::from_str::<Value>(raw).unwrap_or_else(|_| {
-                            let mut fallback = Map::new();
-                            fallback.insert("raw".into(), json!(raw));
-                            Value::Object(fallback)
-                        }),
-                        None => json!({}),
-                    };
-                    let mut block = Map::new();
-                    block.insert("type".into(), json!("tool_use"));
-                    if let Some(id) = call.get("id") {
-                        block.insert("id".into(), id.clone());
-                    }
-                    if let Some(name) = function.and_then(|f| f.get("name")) {
-                        block.insert("name".into(), name.clone());
-                    }
-                    block.insert("input".into(), args);
-                    blocks.push(Value::Object(block));
-                }
+                blocks.extend(tool_calls.iter().map(tool_use_block));
             }
             let content = if blocks.is_empty() { Value::String(text) } else { Value::Array(blocks) };
             messages.push(json!({ "role": "assistant", "content": content }));
@@ -846,10 +836,7 @@ pub fn openai_to_anthropic_messages(input: &AnthropicMessagesInput) -> Map<Strin
             {
                 // `output_config.format` is the current Anthropic field; the retired top-level
                 // `output_format` is a hard 400 ("This field is deprecated").
-                let existing =
-                    body.get("output_config").and_then(Value::as_object).cloned().unwrap_or_default();
-                let format = json!({ "type": "json_schema", "schema": schema });
-                body.insert("output_config".into(), Value::Object(with_key(&existing, "format", format)));
+                set_output_config_format(&mut body, json!({ "type": "json_schema", "schema": schema }));
             }
         }
         // json_object: best-effort, not always supported; left as an instruction-free skip.
@@ -873,30 +860,33 @@ fn cache_marker(one_hour: bool) -> Value {
     }
 }
 
-/// Copy of `message` with `marker` on its last cacheable block; `None` when it has none.
-fn mark_last_cacheable_block(message: &Value, marker: &Value) -> Option<Value> {
-    let map = message.as_object()?;
-    match map.get("content") {
-        Some(Value::String(text)) => {
+/// Puts `marker` on the message's last cacheable block; `false` when it has none.
+fn mark_last_cacheable_block(message: &mut Map<String, Value>, marker: &Value) -> bool {
+    let Some(content) = message.get_mut("content") else { return false };
+    match content {
+        Value::String(text) => {
             if text.is_empty() {
-                return None;
+                return false;
             }
-            let block = json!({ "type": "text", "text": text, "cache_control": marker });
-            Some(Value::Object(with_key(map, "content", json!([block]))))
+            let text = std::mem::take(text);
+            *content = json!([{ "type": "text", "text": text, "cache_control": marker }]);
+            true
         }
-        Some(Value::Array(content)) => {
-            let mut blocks = content.clone();
-            for index in (0..blocks.len()).rev() {
-                let Some(block) = blocks[index].as_object() else { continue };
-                if !CACHEABLE_BLOCK_TYPES.contains(&js_string(block.get("type")).as_str()) {
-                    continue;
+        Value::Array(blocks) => {
+            let last_cacheable = blocks
+                .iter_mut()
+                .rev()
+                .filter_map(Value::as_object_mut)
+                .find(|block| CACHEABLE_BLOCK_TYPES.contains(&block.get("type").and_then(Value::as_str).unwrap_or("")));
+            match last_cacheable {
+                Some(block) => {
+                    block.insert("cache_control".into(), marker.clone());
+                    true
                 }
-                blocks[index] = Value::Object(with_key(block, "cache_control", marker.clone()));
-                return Some(Value::Object(with_key(map, "content", Value::Array(blocks))));
+                None => false,
             }
-            None
         }
-        _ => None,
+        _ => false,
     }
 }
 
@@ -907,63 +897,48 @@ fn mark_last_cacheable_block(message: &Value, marker: &Value) -> Option<Value> {
 /// then the tails of the last two user turns. Message markers get the 1h TTL only when the
 /// client declared a multi-request conversation via `prompt_cache_key`. Explicit block markers
 /// only, never the top-level automatic field. Longer-TTL entries always precede shorter ones.
-/// Call it after any system prepend. Pure: the input body is not mutated.
-pub fn add_conversion_cache_control(body: &Map<String, Value>, conversation: bool) -> Map<String, Value> {
+/// Call it after any system prepend.
+pub fn add_conversion_cache_control(mut body: Map<String, Value>, conversation: bool) -> Map<String, Value> {
     let static_marker = cache_marker(true);
     let turn_marker = cache_marker(conversation);
-    let mut out = body.clone();
 
-    if let Some(tools) = out.get("tools").and_then(Value::as_array).filter(|t| !t.is_empty()) {
-        let mut tools = tools.clone();
-        let last = tools.len() - 1;
-        if let Some(map) = tools[last].as_object() {
-            tools[last] = Value::Object(with_key(map, "cache_control", static_marker.clone()));
-            out.insert("tools".into(), Value::Array(tools));
+    if let Some(Value::Object(last)) = body.get_mut("tools").and_then(Value::as_array_mut).and_then(|t| t.last_mut()) {
+        last.insert("cache_control".into(), static_marker.clone());
+    }
+
+    if let Some(system) = body.get_mut("system") {
+        match system {
+            Value::String(text) if !text.is_empty() => {
+                let text = std::mem::take(text);
+                *system = json!([{ "type": "text", "text": text, "cache_control": static_marker }]);
+            }
+            Value::Array(blocks) => {
+                if let Some(Value::Object(last)) = blocks.last_mut() {
+                    last.insert("cache_control".into(), static_marker);
+                }
+            }
+            _ => {}
         }
     }
 
-    match out.get("system").cloned() {
-        Some(Value::String(system)) => {
-            if !system.is_empty() {
-                out.insert(
-                    "system".into(),
-                    json!([{ "type": "text", "text": system, "cache_control": static_marker }]),
-                );
-            }
-        }
-        Some(Value::Array(blocks)) if !blocks.is_empty() => {
-            let mut blocks = blocks;
-            let last = blocks.len() - 1;
-            if let Some(map) = blocks[last].as_object() {
-                blocks[last] = Value::Object(with_key(map, "cache_control", static_marker.clone()));
-                out.insert("system".into(), Value::Array(blocks));
-            }
-        }
-        _ => {}
-    }
-
-    if let Some(messages) = out.get("messages").and_then(Value::as_array) {
-        let mut messages = messages.clone();
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
         let mut marked = 0usize;
-        for index in (0..messages.len()).rev() {
+        for message in messages.iter_mut().rev() {
             if marked >= 2 {
                 break;
             }
-            let Some(map) = messages[index].as_object() else { continue };
+            let Some(map) = message.as_object_mut() else { continue };
             // First marker: the last message, whatever its role. Second: the previous user
             // turn's tail — the last request's own breakpoint.
             if marked == 1 && map.get("role").and_then(Value::as_str) != Some("user") {
                 continue;
             }
-            let Some(next) = mark_last_cacheable_block(&messages[index], &turn_marker) else { continue };
-            messages[index] = next;
-            marked += 1;
-        }
-        if marked > 0 {
-            out.insert("messages".into(), Value::Array(messages));
+            if mark_last_cacheable_block(map, &turn_marker) {
+                marked += 1;
+            }
         }
     }
-    out
+    body
 }
 
 // ---------------------------------------------------------------------------
@@ -977,30 +952,12 @@ pub fn anthropic_to_openai_response(message: &Map<String, Value>, model: &str) -
         for block in content {
             match block_type(block) {
                 "text" => text.push_str(&js_string(block.get("text"))),
-                "tool_use" => {
-                    let mut call = Map::new();
-                    if let Some(id) = block.get("id") {
-                        call.insert("id".into(), id.clone());
-                    }
-                    call.insert("type".into(), json!("function"));
-                    let mut function = Map::new();
-                    if let Some(name) = block.get("name") {
-                        function.insert("name".into(), name.clone());
-                    }
-                    let input = block.get("input").filter(|v| !v.is_null()).cloned().unwrap_or_else(|| json!({}));
-                    function.insert("arguments".into(), Value::String(input.to_string()));
-                    call.insert("function".into(), Value::Object(function));
-                    tool_calls.push(Value::Object(call));
-                }
+                "tool_use" => tool_calls.push(openai_tool_call(block)),
                 _ => {}
             }
         }
     }
-    let finish = match as_str(message.get("stop_reason")) {
-        Some("tool_use") => "tool_calls",
-        Some("max_tokens") => "length",
-        _ => "stop",
-    };
+    let finish = openai_finish_reason(as_str(message.get("stop_reason")));
 
     let mut choice_message = Map::new();
     choice_message.insert("role".into(), json!("assistant"));
@@ -1082,7 +1039,7 @@ struct OpenAiToAnthropic {
     stopped: bool,
     saw_tool_call: bool,
     /// finish_reason seen, mapped to an Anthropic stop_reason; `None` until then.
-    stop_reason: Option<String>,
+    stop_reason: Option<&'static str>,
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
     cache_read_input_tokens: Option<i64>,
@@ -1451,7 +1408,7 @@ impl OpenAiToAnthropic {
         Ok(())
     }
 
-    async fn finish(&mut self, stop_reason: &str) -> Result<(), io::Error> {
+    async fn finish(&mut self) -> Result<(), io::Error> {
         if self.stopped {
             return Ok(());
         }
@@ -1489,7 +1446,10 @@ impl OpenAiToAnthropic {
             self.emit_block_stop(index).await?;
         }
         // Prefer tool_use if we streamed any tools even when finish_reason was missing.
-        let reason = if stop_reason == "end_turn" && self.saw_tool_call { "tool_use" } else { stop_reason };
+        let reason = match self.stop_reason.unwrap_or("end_turn") {
+            "end_turn" if self.saw_tool_call => "tool_use",
+            reason => reason,
+        };
         // Anthropic input_tokens excludes cached reads; OpenAI prompt_tokens does not.
         let input_tokens = self.input_tokens();
         let mut usage = Map::new();
@@ -1517,8 +1477,8 @@ impl OpenAiToAnthropic {
         self.emit_event("message_stop", &json!({ "type": "message_stop" })).await
     }
 
-    /// `Math.max(1, Math.ceil(text.length / 4))` — the character estimate used when the upstream
-    /// reports no usage at all.
+    /// `max(1, ceil(chars / 4))` — the character estimate used when the upstream reports no
+    /// usage at all.
     fn estimate_tokens(text: &str) -> i64 {
         let len = text.chars().count() as u64;
         std::cmp::max(1, len.div_ceil(4)) as i64
@@ -1526,18 +1486,14 @@ impl OpenAiToAnthropic {
 
     async fn handle_line(&mut self, line: &str) -> Result<(), io::Error> {
         let Some(rest) = line.strip_prefix("data:") else { return Ok(()) };
-        let data = rest.trim().to_string();
+        let data = rest.trim();
         if data.is_empty() {
             return Ok(());
         }
         if data == "[DONE]" {
-            let reason = self
-                .stop_reason
-                .clone()
-                .unwrap_or_else(|| if self.saw_tool_call { "tool_use".into() } else { "end_turn".into() });
-            return self.finish(&reason).await;
+            return self.finish().await;
         }
-        let Ok(json) = serde_json::from_str::<Value>(&data) else { return Ok(()) };
+        let Ok(json) = serde_json::from_str::<Value>(data) else { return Ok(()) };
         if self.stopped {
             return Ok(());
         }
@@ -1573,44 +1529,41 @@ impl OpenAiToAnthropic {
                 self.cache_creation_input_tokens = Some(value);
             }
         }
-        let Some(choice) = array(json.get("choices")).and_then(|c| c.first()).cloned() else { return Ok(()) };
+        let Some(choice) = array(json.get("choices")).and_then(|c| c.first()) else { return Ok(()) };
         // The turn is over once finish_reason lands; anything after it would have to be emitted
         // past message_stop.
-        if self.stop_reason.is_some() || self.stopped {
+        if self.stop_reason.is_some() {
             return Ok(());
         }
         let delta = choice.get("delta");
         // Reasoning (grok include_reasoning / codex reasoning summary) arrives before real
         // content — see append_thinking above.
         if let Some(reasoning) = as_str(delta.and_then(|d| d.get("reasoning_content"))).filter(|r| !r.is_empty()) {
-            let reasoning = reasoning.to_string();
-            self.output_tokens += Self::estimate_tokens(&reasoning);
-            self.append_thinking(&reasoning).await?;
+            self.output_tokens += Self::estimate_tokens(reasoning);
+            self.append_thinking(reasoning).await?;
         }
         if let Some(content) = as_str(delta.and_then(|d| d.get("content"))).filter(|c| !c.is_empty()) {
-            let content = content.to_string();
-            self.output_tokens += Self::estimate_tokens(&content);
-            self.append_text(&content).await?;
+            self.output_tokens += Self::estimate_tokens(content);
+            self.append_text(content).await?;
         }
 
-        if let Some(tool_calls) = array(delta.and_then(|d| d.get("tool_calls"))).cloned() {
+        if let Some(tool_calls) = array(delta.and_then(|d| d.get("tool_calls"))) {
             for call in tool_calls {
                 let openai_index = as_i64(call.get("index")).unwrap_or(0);
                 let function = call.get("function");
-                let id = as_str(call.get("id")).map(str::to_string);
-                let name = as_str(function.and_then(|f| f.get("name"))).map(str::to_string);
-                let args = as_str(function.and_then(|f| f.get("arguments"))).map(str::to_string);
+                let id = as_str(call.get("id"));
+                let name = as_str(function.and_then(|f| f.get("name")));
+                let args = as_str(function.and_then(|f| f.get("arguments")));
                 // A name with no id yet is not enough to open a block: doing so burns a fallback
                 // id that the real id would then have to supersede with a second, empty block.
                 if id.is_some() || args.is_some() {
-                    if let Some(args) = args.as_deref().filter(|a| !a.is_empty()) {
+                    if let Some(args) = args.filter(|a| !a.is_empty()) {
                         self.output_tokens += Self::estimate_tokens(args);
                     }
-                    self.route_tool_fragment(openai_index, id.as_deref(), name.as_deref(), args.as_deref())
-                        .await?;
+                    self.route_tool_fragment(openai_index, id, name, args).await?;
                 } else if let Some(name) = name.filter(|n| !n.is_empty()) {
                     // Name alone cannot open a block yet; remember it for the fragment that can.
-                    self.pending_tool_names.insert(openai_index, name);
+                    self.pending_tool_names.insert(openai_index, name.to_string());
                 }
             }
         }
@@ -1618,14 +1571,7 @@ impl OpenAiToAnthropic {
         if let Some(finish_reason) = choice.get("finish_reason").filter(|f| truthy(Some(f))) {
             // Record it, but do not close the message yet: the usage chunk rides after this one,
             // before [DONE].
-            self.stop_reason = Some(
-                match finish_reason.as_str() {
-                    Some("tool_calls") => "tool_use",
-                    Some("length") => "max_tokens",
-                    _ => "end_turn",
-                }
-                .to_string(),
-            );
+            self.stop_reason = Some(anthropic_stop_reason(finish_reason.as_str()));
         }
         Ok(())
     }
@@ -1641,14 +1587,8 @@ pub fn openai_sse_to_anthropic_stream(body: ByteStream, model: &str) -> ByteStre
         while let Some(line) = lines.next().await {
             converter.handle_line(&line?).await?;
         }
-        if !converter.stopped {
-            let reason = converter
-                .stop_reason
-                .clone()
-                .unwrap_or_else(|| if converter.saw_tool_call { "tool_use".into() } else { "end_turn".into() });
-            converter.finish(&reason).await?;
-        }
-        Ok(())
+        // An upstream that ends without [DONE] still gets a well-formed message end.
+        converter.finish().await
     })
 }
 
@@ -1661,7 +1601,7 @@ struct AnthropicToOpenAi {
     model: String,
     id: String,
     sent_role: bool,
-    finish_reason: Option<String>,
+    finish_reason: Option<&'static str>,
     /// Anthropic content block index → OpenAI `tool_calls` index (only tool_use blocks).
     tool_index_by_block: HashMap<i64, i64>,
     next_tool_index: i64,
@@ -1724,20 +1664,20 @@ impl AnthropicToOpenAi {
     }
 
     async fn handle_line(&mut self, line: &str) -> Result<(), io::Error> {
+        if self.stopped {
+            return Ok(());
+        }
         if let Some(rest) = line.strip_prefix("event:") {
-            self.event = rest.trim().to_string();
+            self.event.clear();
+            self.event.push_str(rest.trim());
             return Ok(());
         }
         let Some(rest) = line.strip_prefix("data:") else { return Ok(()) };
-        let data = rest.trim().to_string();
+        let data = rest.trim();
         if data.is_empty() {
             return Ok(());
         }
-        if let Ok(json) = serde_json::from_str::<Value>(&data) {
-            if self.stopped {
-                self.event = String::new();
-                return Ok(());
-            }
+        if let Ok(json) = serde_json::from_str::<Value>(data) {
             match self.event.as_str() {
                 "message_start" => {
                     if let Some(usage) = json.get("message").and_then(|m| m.get("usage")).filter(|u| truthy(Some(u)))
@@ -1783,14 +1723,12 @@ impl AnthropicToOpenAi {
                     let delta_type = as_str(delta.and_then(|d| d.get("type")));
                     if delta_type == Some("text_delta") {
                         if let Some(text) = as_str(delta.and_then(|d| d.get("text"))).filter(|t| !t.is_empty()) {
-                            let text = text.to_string();
                             self.ensure_role().await?;
                             let chunk = self.chunk(json!({ "content": text }), Value::Null);
                             self.emit(&chunk).await?;
                         }
                     } else if delta_type == Some("input_json_delta") {
                         if let Some(partial) = as_str(delta.and_then(|d| d.get("partial_json"))) {
-                            let partial = partial.to_string();
                             let tool_index = self.tool_index_by_block.get(&block_index).copied().unwrap_or(0);
                             self.ensure_role().await?;
                             let chunk = self.chunk(
@@ -1802,11 +1740,9 @@ impl AnthropicToOpenAi {
                     }
                 }
                 "message_delta" => {
-                    match as_str(json.get("delta").and_then(|d| d.get("stop_reason"))) {
-                        Some("tool_use") => self.finish_reason = Some("tool_calls".into()),
-                        Some("max_tokens") => self.finish_reason = Some("length".into()),
-                        Some(reason) if !reason.is_empty() => self.finish_reason = Some("stop".into()),
-                        _ => {}
+                    let stop_reason = as_str(json.get("delta").and_then(|d| d.get("stop_reason")));
+                    if let Some(reason) = stop_reason.filter(|r| !r.is_empty()) {
+                        self.finish_reason = Some(openai_finish_reason(Some(reason)));
                     }
                     if let Some(usage) = json.get("usage").filter(|u| truthy(Some(u))) {
                         if let Some(output) = as_i64(usage.get("output_tokens")) {
@@ -1834,9 +1770,7 @@ impl AnthropicToOpenAi {
                     }
                 }
                 "message_stop" => {
-                    let finish = self.finish_reason.clone().unwrap_or_else(|| "stop".into());
-                    let mut payload =
-                        self.chunk(json!({}), Value::String(finish)).as_object().cloned().unwrap_or_default();
+                    let mut payload = self.chunk(json!({}), json!(self.finish_reason.unwrap_or("stop")));
                     // Usage rides on the finish chunk, only when some count was actually seen.
                     if self.saw_usage {
                         let prompt = self.prompt_tokens.unwrap_or(0);
@@ -1853,9 +1787,9 @@ impl AnthropicToOpenAi {
                                 json!(self.cache_creation_input_tokens.unwrap_or(0)),
                             );
                         }
-                        payload.insert("usage".into(), Value::Object(usage));
+                        payload["usage"] = Value::Object(usage);
                     }
-                    self.emit(&Value::Object(payload)).await?;
+                    self.emit(&payload).await?;
                     self.emitter.enqueue_str("data: [DONE]\n\n").await?;
                     self.stopped = true;
                 }
@@ -1871,7 +1805,7 @@ impl AnthropicToOpenAi {
                 _ => {}
             }
         }
-        self.event = String::new();
+        self.event.clear();
         Ok(())
     }
 }

@@ -1,6 +1,5 @@
-//! the model-group virtual endpoints
-//! (docs/api.md § Group endpoints): every group is served at `/g/{slug}/openai/v1/…` and
-//! `/g/{slug}/anthropic/v1/…`, mirroring the shared bases.
+//! The model-group virtual endpoints (docs/api.md § Group endpoints): every group is served at
+//! `/g/{slug}/openai/v1/…` and `/g/{slug}/anthropic/v1/…`, mirroring the shared bases.
 //!
 //! The POST handlers are the shared-surface ones — they branch on the `slug` param inside
 //! `resolve_request_model` — so only the per-group `/models` catalogs live here. The table is
@@ -14,7 +13,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde_json::{json, Value};
 
-use crate::db::model_groups::{get_group_by_slug, list_models_for_group, ModelGroupRow};
+use crate::db::model_groups::{get_group_by_slug, list_models_for_group, ModelGroupModelRow};
 use crate::extensions::ApiKeyIdentity;
 use crate::http::errors::ApiError;
 use crate::AppState;
@@ -30,13 +29,14 @@ pub fn routes() -> Router<AppState> {
         .route("/{slug}/anthropic/v1/messages/count_tokens", post(super::anthropic::group_count_tokens))
 }
 
-/// The caller's group behind the path slug, or `None` (the route's 404).
-async fn group_for_request(
+/// The models of the caller's group behind the path slug, or `None` (the route's 404).
+async fn group_models(
     state: &AppState,
     id: &ApiKeyIdentity,
     slug: &str,
-) -> Result<Option<ModelGroupRow>, ApiError> {
-    Ok(get_group_by_slug(state.pool(), &id.user_id, slug).await?)
+) -> Result<Option<Vec<ModelGroupModelRow>>, ApiError> {
+    let Some(group) = get_group_by_slug(state.pool(), &id.user_id, slug).await? else { return Ok(None) };
+    Ok(Some(list_models_for_group(state.pool(), &group.id).await?))
 }
 
 /// A group's own catalog: exactly its model names, listed regardless of current target
@@ -46,8 +46,8 @@ async fn openai_models(
     Extension(id): Extension<ApiKeyIdentity>,
     Path(slug): Path<String>,
 ) -> Response {
-    let group = match group_for_request(&state, &id, &slug).await {
-        Ok(Some(group)) => group,
+    let models = match group_models(&state, &id, &slug).await {
+        Ok(Some(models)) => models,
         Ok(None) => {
             return ApiError::openai(
                 StatusCode::NOT_FOUND,
@@ -58,10 +58,6 @@ async fn openai_models(
             .into_response()
         }
         Err(err) => return err.into_response(),
-    };
-    let models = match list_models_for_group(state.pool(), &group.id).await {
-        Ok(models) => models,
-        Err(err) => return ApiError::from(err).into_response(),
     };
     let data: Vec<Value> = models
         .iter()
@@ -75,8 +71,8 @@ async fn anthropic_models(
     Extension(id): Extension<ApiKeyIdentity>,
     Path(slug): Path<String>,
 ) -> Response {
-    let group = match group_for_request(&state, &id, &slug).await {
-        Ok(Some(group)) => group,
+    let models = match group_models(&state, &id, &slug).await {
+        Ok(Some(models)) => models,
         Ok(None) => {
             return ApiError::anthropic(
                 StatusCode::NOT_FOUND,
@@ -86,10 +82,6 @@ async fn anthropic_models(
             .into_response()
         }
         Err(err) => return err.into_response(),
-    };
-    let models = match list_models_for_group(state.pool(), &group.id).await {
-        Ok(models) => models,
-        Err(err) => return ApiError::from(err).into_response(),
     };
     let data: Vec<Value> =
         models.iter().map(|m| json!({ "id": m.name, "display_name": m.name, "type": "model" })).collect();

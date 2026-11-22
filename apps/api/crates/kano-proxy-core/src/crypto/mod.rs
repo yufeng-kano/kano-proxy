@@ -1,6 +1,6 @@
-//! Byte-for-byte compatible with the Worker's WebCrypto code paths (docs/auth.md,
-//! docs/rust-server.md § Compatibility): existing API keys, session cookies, encrypted
-//! upstream credentials and CLI device tokens keep working after cutover.
+//! The fixed byte layouts of every stored row and issued credential (docs/auth.md,
+//! docs/rust-server.md § Persisted formats): API keys, session cookies, encrypted upstream
+//! credentials and CLI device tokens already in production must keep verifying.
 
 pub mod cli_tokens;
 pub mod keys;

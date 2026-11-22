@@ -15,12 +15,11 @@
     plot carries no information of its own.
 
   The viewBox is measured (one unit = one CSS pixel) and the plot height is
-  fixed, never an aspect ratio — the two rules the previous chart established
-  and this one keeps.
+  fixed, never an aspect ratio.
 -->
 
 <script lang="ts">
-export type BarSegment = {
+type BarSegment = {
   /** Series id — stable across buckets; also the stack and legend identity. */
   key: string
   label: string
@@ -44,23 +43,18 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { useI18n } from "@/i18n"
 import ChartTooltip, { type TooltipRow } from "./ChartTooltip.vue"
 
-const props = withDefaults(
-  defineProps<{
-    buckets: BarBucket[]
-    /** Formats a y value for ticks, the tooltip, and aria text. */
-    formatValue: (n: number) => string
-    mini?: boolean
-    /** Chart title for assistive tech (full mode). */
-    title?: string
-    /** Tooltip total row label; omitted = no total row. */
-    totalLabel?: string
-    /** Tooltip body when the hovered bucket is empty. */
-    emptyText?: string
-    /** Legend entries under the plot (full mode). */
-    legend?: { key: string; label: string; color: string }[]
-  }>(),
-  { mini: false },
-)
+const props = defineProps<{
+  buckets: BarBucket[]
+  /** Formats a y value for ticks, the tooltip, and aria text. */
+  formatValue: (n: number) => string
+  mini?: boolean
+  /** Chart title for assistive tech (full mode). */
+  title?: string
+  /** Tooltip total row label; omitted = no total row. */
+  totalLabel?: string
+  /** Legend entries under the plot (full mode). */
+  legend?: { key: string; label: string; color: string }[]
+}>()
 
 const { t } = useI18n()
 
@@ -98,13 +92,6 @@ let resizeObserver: ResizeObserver | undefined
 // watch the live element instead and re-clamp on every content/size change.
 const tooltipRef = ref<{ rootEl?: HTMLElement } | null>(null)
 const tooltipW = ref(0)
-let tooltipResizeObserver: ResizeObserver | undefined
-
-function measureTooltip(): void {
-  const el = tooltipRef.value?.rootEl
-  if (!el) return
-  tooltipW.value = el.offsetWidth
-}
 
 onMounted(() => {
   const el = root.value
@@ -119,29 +106,26 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
-  tooltipResizeObserver?.disconnect()
 })
 
 /**
- * Set up / tear down the tooltip's own ResizeObserver as the tooltip appears
- * and as its content (rows, total, footer) changes between buckets. A single
- * observer attached at first mount is not enough: its entries only fire on
- * size changes, and two buckets can render the same width but a third wider —
- * the observer does catch that, but the imperative remeasure here also
- * covers the initial render and any change that happens to land on the same
- * pixel width (keeping `tooltipW` in sync with whichever bucket is shown).
+ * Measure the tooltip as soon as it renders, then keep measuring it while it
+ * stays up: its rows change with the hovered bucket, and the observer is what
+ * reports the new width. The watcher's cleanup disconnects the observer when
+ * the tooltip goes away or the component unmounts.
  */
 watch(
   () => tooltipRef.value?.rootEl,
   (el, _prev, onCleanup) => {
-    tooltipResizeObserver?.disconnect()
     tooltipW.value = 0
     if (!el) return
-    measureTooltip()
+    tooltipW.value = el.offsetWidth
     if (typeof ResizeObserver === "undefined") return
-    tooltipResizeObserver = new ResizeObserver(() => measureTooltip())
-    tooltipResizeObserver.observe(el)
-    onCleanup(() => tooltipResizeObserver?.disconnect())
+    const observer = new ResizeObserver(() => {
+      tooltipW.value = el.offsetWidth
+    })
+    observer.observe(el)
+    onCleanup(() => observer.disconnect())
   },
   { flush: "post" },
 )
@@ -315,7 +299,7 @@ function bucketAriaLabel(group: Group): string {
           :title="hoveredGroup.bucket.fullLabel"
           :rows="tooltipRows"
           :total="tooltipTotal"
-          :empty="emptyText ?? t('overview.chart.emptyBucket')"
+          :empty="t('overview.chart.emptyBucket')"
         />
 
         <svg

@@ -33,7 +33,7 @@ The request had no key, or the key is wrong or revoked. Send it as `Authorizatio
 
 ### 400 `invalid_model`
 
-Message `model must be provider/model (e.g. claude-code/claude-opus-5)`, or on a group endpoint a message naming the group's model list.
+Message starting `model must be provider/model`, or on a group endpoint a message naming the group's model list.
 
 The model id has no provider prefix, names a provider you have not connected, or is not one of the group's model names. Copy an id from **Models**, or a model name from the group on **Groups**.
 
@@ -75,19 +75,19 @@ The conversation ends with the same tool call, with the same arguments, at least
 
 ### 400 `unsupported_field`
 
-The `/responses` request uses a feature that needs stored server state or a part the proxy cannot convert: `previous_response_id`, `conversation`, `background`, `item_reference`, `input_file`, or `input_audio`. Send the full conversation in each request instead.
+The `/responses` request uses a feature that needs stored server state or a part the proxy cannot convert: `previous_response_id`, `conversation`, `background`, `item_reference`, `input_file`, `input_audio`, or an `input_image` without an `image_url`, such as a `file_id` reference. Send the full conversation, with images inline or as URLs, in each request instead.
 
 ### 400 `unsupported_modality` or `unsupported_audio_format`
 
 The request carries audio the target cannot take: audio sent to a provider without audio input, or a transcription request to a provider other than an OpenAI-format custom endpoint. `unsupported_audio_format` means the audio `format` value is not recognized. See [Audio](/reference/endpoints#audio).
 
-### 413 `request_too_large`
+### 413 Request body too large
 
-The request body is too large for the Codex upstream. Shorten the conversation, or start a new session. Separately, any body over 512 MiB is refused with a plain-text `413` before the key is checked.
+Any request body over 512 MiB is refused with a plain-text `413` once the key has been checked, before anything is sent to a provider. Shorten the conversation, or start a new session. A `413` from the provider itself is an upstream error, below.
 
 ### An upstream error, `upstream_error`
 
-Any other error status from the provider, for example a `400` for a request the model does not accept, is passed back with the provider's status. On the OpenAI base the code is `upstream_error`. The headers `x-kano-upstream-provider` and `x-kano-upstream-model` name the provider and model that refused it. Read the message: it comes from the provider.
+Any other error status from the provider, for example a `400` for a request the model does not accept, is passed back with the provider's status and message. The headers `x-kano-upstream-provider` and `x-kano-upstream-model` name the provider and model that refused it. Read the message: it comes from the provider. In a stream the same error arrives as an `upstream_error` event instead, see below.
 
 ### 500 `internal_error`
 
@@ -110,7 +110,7 @@ event: error
 data: {"type":"error","error":{"type":"api_error","message":"upstream_unavailable"}}
 ```
 
-`no_upstream_account`, `upstream_unavailable`, `upstream_error`, and `request_too_large` can all arrive this way. One error exists only in a stream:
+`no_upstream_account`, `upstream_unavailable`, and `upstream_error` can all arrive this way. One error exists only in a stream:
 
 - **`upstream_stall`.** The provider sent nothing for 120 seconds, so the proxy ended the stream with `upstream stalled: no data received for 120s`. On the Anthropic base the type is `overloaded_error`. Retry the request.
 
@@ -119,7 +119,7 @@ Errors that are known before the stream starts, such as `invalid_api_key`, `inva
 ## Retry hints
 
 - `Retry-After` is set on `503 upstream_unavailable` when the proxy knows when an account frees up.
-- `x-should-retry: false` marks errors where retrying cannot help: `invalid_model`, `not_found`, `no_upstream_account`, `loop_detected`, `unsupported_field`, `unsupported_modality`, `request_too_large`, and `spend_limit_exceeded`.
+- `x-should-retry: false` marks errors where retrying cannot help: `invalid_model`, `not_found`, `no_upstream_account`, `loop_detected`, `unsupported_field`, `unsupported_modality`, and `spend_limit_exceeded`.
 - `x-should-retry: true` marks `503 upstream_unavailable`.
 
 Claude Code reads `x-should-retry`. Other clients may ignore it.

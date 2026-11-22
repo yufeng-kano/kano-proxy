@@ -17,21 +17,22 @@
  */
 
 import { computed, ref } from "vue"
+import type { ProviderId } from "@/types"
 import { en } from "./en"
 
 /** Every locale this build ships. Add a catalog here to add a language. */
-export const LOCALES = ["en"] as const
+const LOCALES = ["en"] as const
 
-export type Locale = (typeof LOCALES)[number]
+type Locale = (typeof LOCALES)[number]
 
-export const DEFAULT_LOCALE: Locale = "en"
+const DEFAULT_LOCALE: Locale = "en"
 
 /**
  * English is the reference catalog: it defines the key union, so a new locale
  * that omits a key (or invents one) fails to typecheck rather than rendering a
  * blank label at runtime.
  */
-export type CatalogKey = keyof typeof en
+type CatalogKey = keyof typeof en
 
 /**
  * The base of a plural family, recovered from its own `_one` / `_other`
@@ -60,9 +61,9 @@ const CATALOGS: Record<Locale, Catalog> = { en }
  * the active locale on the way in, so a caller never has to pre-format —
  * passing a raw `Date` or `number` is the intended path.
  */
-export type InterpolationValue = string | number | Date
+type InterpolationValue = string | number | Date
 
-export type Interpolations = Record<string, InterpolationValue>
+type Interpolations = Record<string, InterpolationValue>
 
 const locale = ref<Locale>(DEFAULT_LOCALE)
 
@@ -139,7 +140,7 @@ function resolve(key: string, count: number | undefined, tag: string): string {
   return fallback ?? key
 }
 
-export type TranslateOptions = Interpolations & {
+type TranslateOptions = Interpolations & {
   /** Selects the plural form and is itself available as `{count}`. */
   count?: number
 }
@@ -153,9 +154,27 @@ export type TranslateOptions = Interpolations & {
  * t("models.count", { count: models.length })
  * ```
  */
-export function translate(key: MessageKey, options?: TranslateOptions): string {
+function translate(key: MessageKey, options?: TranslateOptions): string {
   const active = tag()
   return interpolate(resolve(key, options?.count, active), options, active)
+}
+
+/**
+ * Builtin provider copy: `PROVIDERS` carries only wire ids, and these name each
+ * id's catalog keys, spelled out so a renamed key fails the build here.
+ */
+export const PROVIDER_NAME_KEY: Record<ProviderId, MessageKey> = {
+  "claude-code": "provider.claude-code.name",
+  codex: "provider.codex.name",
+  grok: "provider.grok.name",
+  antigravity: "provider.antigravity.name",
+}
+
+export const PROVIDER_BLURB_KEY: Record<ProviderId, MessageKey> = {
+  "claude-code": "provider.claude-code.blurb",
+  codex: "provider.codex.blurb",
+  grok: "provider.grok.blurb",
+  antigravity: "provider.antigravity.blurb",
 }
 
 /**
@@ -202,12 +221,12 @@ function makeFormatters() {
       }).format(usd)
     },
     /** Ratio 0..1 as a percent: 0.734 → "73.4%". */
-    percent(ratio: number | null | undefined, digits = 1): string {
+    percent(ratio: number | null | undefined): string {
       if (ratio == null || Number.isNaN(ratio)) return EM_DASH
       return new Intl.NumberFormat(tag(), {
         style: "percent",
-        minimumFractionDigits: digits,
-        maximumFractionDigits: digits,
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
       }).format(ratio)
     },
     /** Whole-percent value already on a 0–100 scale (upstream usage windows). */
@@ -373,7 +392,6 @@ export function useI18n() {
   return {
     t: translate,
     locale: computed(() => locale.value),
-    setLocale,
     format: formatters,
   }
 }

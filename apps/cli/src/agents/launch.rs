@@ -11,7 +11,6 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -22,7 +21,6 @@ use super::doc::Doc;
 use super::{claude_code, codex, group_models, now_stamp, provider_ids, AgentKind, EFFORTS, KEY_PLACEHOLDER, MAX_GROUP_MODELS};
 use crate::api::{self, CatalogModel, Group, GroupModel, GroupTarget};
 use crate::state::StateFile;
-use crate::tunnel::TokenCache;
 
 /// The environment variable Codex reads the launch's key from (`env_key`).
 pub const CODEX_KEY_ENV: &str = "KANO_PROXY_API_KEY";
@@ -134,10 +132,9 @@ pub async fn run(file: &StateFile, kind: AgentKind, args: LaunchArgs) -> Result<
     // revoked. Until there is a key, a signal simply cancels.
     let mut signals = signals::Signals::install()?;
 
-    let tokens = TokenCache::new(Arc::new(StateFile::new(file.path.clone())));
     // Not cancellable: a rotation cut short can leave a refresh token the server has
     // already superseded. It is bounded on its own.
-    let access = tokens.get(false).await?;
+    let access = api::fresh_access_token(file).await?;
     // Absolute: Codex reads its catalog path against its own directory, not this one.
     let dir = launch_dir(&file.path);
     let dir = std::path::absolute(&dir).unwrap_or(dir);
@@ -281,7 +278,7 @@ pub async fn run(file: &StateFile, kind: AgentKind, args: LaunchArgs) -> Result<
     // short — the Ctrl-C that ended the agent is often still on its way here — so it is
     // bounded instead: when it cannot be done now the record stays, and the next launch
     // revokes.
-    let revoked = revoke(file, &tokens, &record.body, &key.id).await;
+    let revoked = revoke(file, &record.body, &key.id).await;
     record.finish(revoked.is_ok());
     match &revoked {
         Ok(Gone::Revoked) => say(format_args!("✓ revoked key \"{}\"", key.name)),
@@ -304,14 +301,14 @@ enum Gone {
 /// Revoke the launch's key when the agent has exited. The token is refreshed now, never
 /// reused: the session may have outlived the one it started with (a laptop that slept
 /// does not notice), and a `401` on the delete itself must not be read as "already gone".
-async fn revoke(file: &StateFile, tokens: &TokenCache, body: &RecordBody, key_id: &str) -> std::result::Result<Gone, String> {
+async fn revoke(file: &StateFile, body: &RecordBody, key_id: &str) -> std::result::Result<Gone, String> {
     let state = file.load().map_err(|e| format!("{e:#}"))?;
     if state.base_url != body.base_url || state.device_id.as_deref() != Some(body.device_id.as_str()) {
         // Signed out (or in again as another device) during the session: nothing here
         // can revoke the key any more, and nothing needs to if the device is gone.
         return Ok(Gone::WithDevice);
     }
-    let access = match tokens.get(true).await {
+    let access = match api::fresh_access_token(file).await {
         Ok(access) => access,
         Err(e) if api::is_auth_rejection(&e) => return Ok(Gone::WithDevice),
         Err(e) => return Err(format!("{e:#}")),

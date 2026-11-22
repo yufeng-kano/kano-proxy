@@ -15,10 +15,8 @@ export interface ConfirmOptions {
   title: string
   /** The consequence, without repeating the question. */
   message: string
-  /** The verb the confirm button performs — never "OK". */
+  /** The verb the confirm button performs — never "OK". It always destroys something. */
   confirmLabel: string
-  /** `danger` (the default) fires something irreversible. */
-  tone?: "danger" | "default"
 }
 
 interface Pending extends ConfirmOptions {

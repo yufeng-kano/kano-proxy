@@ -2,6 +2,8 @@
 //! routing, pool and providers; the single-flight locks and the edge-timeout strike counter
 //! are compare-and-swap statements, so concurrent requests cannot both win.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sqlx::PgPool;
@@ -9,7 +11,7 @@ use sqlx::PgPool;
 use crate::ids::{iso_ms, new_id, now_iso};
 
 /// `provider` is a builtin `ProviderId` or a custom/CLI provider slug.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct AccountRow {
     pub id: String,
     pub user_id: String,
@@ -71,6 +73,29 @@ pub async fn list_accounts(db: &PgPool, user_id: &str, provider: &str) -> Result
     .await
 }
 
+/// [`list_accounts`] for several providers in one query, grouped by provider in the same order —
+/// what a list page of custom or CLI providers reads instead of one query per row.
+pub async fn list_accounts_by_provider(
+    db: &PgPool,
+    user_id: &str,
+    providers: &[&str],
+) -> Result<HashMap<String, Vec<AccountRow>>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, AccountRow>(
+        "SELECT * FROM upstream_accounts
+         WHERE user_id = $1 AND provider = ANY($2)
+         ORDER BY priority DESC, created_at DESC",
+    )
+    .bind(user_id)
+    .bind(providers)
+    .fetch_all(db)
+    .await?;
+    let mut grouped: HashMap<String, Vec<AccountRow>> = HashMap::new();
+    for row in rows {
+        grouped.entry(row.provider.clone()).or_default().push(row);
+    }
+    Ok(grouped)
+}
+
 pub async fn get_account(db: &PgPool, user_id: &str, account_id: &str) -> Result<Option<AccountRow>, sqlx::Error> {
     sqlx::query_as::<_, AccountRow>("SELECT * FROM upstream_accounts WHERE id = $1 AND user_id = $2")
         .bind(account_id)
@@ -115,8 +140,9 @@ pub async fn record_edge_timeout_strike(
     Ok(strikes == Some(0))
 }
 
-/// Sets or clears the user-owned display name without changing upstream identity. Unlike the
-/// COALESCE convention of [`update_account_identity`], `None` here is an explicit clear.
+/// Sets or clears the user-owned display name, the label half of [`update_account_settings`];
+/// `None` is an explicit clear.
+#[cfg(test)]
 pub async fn set_account_custom_label(
     db: &PgPool,
     user_id: &str,
@@ -269,30 +295,18 @@ pub async fn update_account_payload(
     encrypted_payload: &str,
     meta: Option<AccountIdentity<'_>>,
 ) -> Result<(), sqlx::Error> {
-    let ts = now_iso();
-    match meta {
-        Some(meta) => {
-            sqlx::query(
-                "UPDATE upstream_accounts SET encrypted_payload = $1, label = COALESCE($2, label),
-                 account_meta_json = COALESCE($3, account_meta_json), updated_at = $4 WHERE id = $5",
-            )
-            .bind(encrypted_payload)
-            .bind(meta.label)
-            .bind(meta.account_meta_json)
-            .bind(&ts)
-            .bind(account_id)
-            .execute(db)
-            .await?;
-        }
-        None => {
-            sqlx::query("UPDATE upstream_accounts SET encrypted_payload = $1, updated_at = $2 WHERE id = $3")
-                .bind(encrypted_payload)
-                .bind(&ts)
-                .bind(account_id)
-                .execute(db)
-                .await?;
-        }
-    }
+    let meta = meta.unwrap_or_default();
+    sqlx::query(
+        "UPDATE upstream_accounts SET encrypted_payload = $1, label = COALESCE($2, label),
+         account_meta_json = COALESCE($3, account_meta_json), updated_at = $4 WHERE id = $5",
+    )
+    .bind(encrypted_payload)
+    .bind(meta.label)
+    .bind(meta.account_meta_json)
+    .bind(now_iso())
+    .bind(account_id)
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -527,26 +541,6 @@ pub async fn update_account_identity(
     Ok(())
 }
 
-pub async fn promote_account(db: &PgPool, user_id: &str, account_id: &str) -> Result<bool, sqlx::Error> {
-    let Some(row) = get_account(db, user_id, account_id).await? else {
-        return Ok(false);
-    };
-    let max: i32 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(priority), 0) FROM upstream_accounts WHERE user_id = $1 AND provider = $2",
-    )
-    .bind(user_id)
-    .bind(&row.provider)
-    .fetch_one(db)
-    .await?;
-    sqlx::query("UPDATE upstream_accounts SET priority = $1, updated_at = $2 WHERE id = $3")
-        .bind(max + 1)
-        .bind(now_iso())
-        .bind(account_id)
-        .execute(db)
-        .await?;
-    Ok(true)
-}
-
 /// Writes one priority per own row in a single transaction, so a reorder lands whole or not at
 /// all. Rows that are not the user's are left alone.
 pub async fn set_account_priorities(db: &PgPool, user_id: &str, priorities: &[(String, i32)]) -> Result<(), sqlx::Error> {
@@ -573,31 +567,15 @@ pub async fn remove_account(db: &PgPool, user_id: &str, account_id: &str) -> Res
     Ok(r.rows_affected() > 0)
 }
 
-pub async fn user_has_provider(db: &PgPool, user_id: &str, provider: &str) -> Result<bool, sqlx::Error> {
-    let row: Option<i32> =
-        sqlx::query_scalar("SELECT 1 FROM upstream_accounts WHERE user_id = $1 AND provider = $2 LIMIT 1")
-            .bind(user_id)
-            .bind(provider)
-            .fetch_optional(db)
-            .await?;
-    Ok(row.is_some())
-}
-
-/// Bulk-deletes every account row for one (user, provider) — used when a custom provider is
-/// removed (its accounts have no FK to cascade on). Returns the deleted rows so callers can
-/// best-effort clear their bench state.
-pub async fn delete_accounts_for_provider(
-    db: &PgPool,
-    user_id: &str,
-    provider: &str,
-) -> Result<Vec<AccountRow>, sqlx::Error> {
-    let rows = list_accounts(db, user_id, provider).await?;
-    sqlx::query("DELETE FROM upstream_accounts WHERE user_id = $1 AND provider = $2")
+/// Bulk-deletes every account row for one (user, provider) — used when a custom or CLI
+/// provider is removed (its accounts have no FK to cascade on). Returns how many rows went.
+pub async fn delete_accounts_for_provider(db: &PgPool, user_id: &str, provider: &str) -> Result<u64, sqlx::Error> {
+    let done = sqlx::query("DELETE FROM upstream_accounts WHERE user_id = $1 AND provider = $2")
         .bind(user_id)
         .bind(provider)
         .execute(db)
         .await?;
-    Ok(rows)
+    Ok(done.rows_affected())
 }
 
 #[cfg(test)]
@@ -660,7 +638,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn insert_list_promote_delete() {
+    async fn accounts_by_provider_groups_each_providers_rows_in_list_order() {
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let user = insert_user(&pool, "grouped@example.com").await;
+        let other = insert_user(&pool, "other@example.com").await;
+        let a1 = seed(&pool, &user.id, "ep-a").await;
+        let a2 = seed(&pool, &user.id, "ep-a").await;
+        let b1 = seed(&pool, &user.id, "ep-b").await;
+        seed(&pool, &user.id, "ep-c").await;
+        seed(&pool, &other.id, "ep-a").await;
+
+        let grouped = list_accounts_by_provider(&pool, &user.id, &["ep-a", "ep-b", "ep-none"]).await.unwrap();
+        let ids = |p: &str| grouped[p].iter().map(|r| r.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids("ep-a"), vec![a2.id, a1.id], "same order as list_accounts, own rows only");
+        assert_eq!(ids("ep-b"), vec![b1.id]);
+        assert_eq!(grouped.len(), 2, "unasked and empty providers are absent");
+    }
+
+    #[tokio::test]
+    async fn insert_list_delete() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let user = insert_user(&pool, "acc@example.com").await;
         let first = seed(&pool, &user.id, "codex").await;
@@ -670,12 +666,6 @@ mod tests {
         let rows = list_accounts(&pool, &user.id, "codex").await.unwrap();
         assert_eq!(rows.iter().map(|r| r.id.clone()).collect::<Vec<_>>(), vec![second.id.clone(), first.id.clone()]);
 
-        assert!(promote_account(&pool, &user.id, &first.id).await.unwrap());
-        assert_eq!(list_accounts(&pool, &user.id, "codex").await.unwrap()[0].id, first.id);
-        assert!(!promote_account(&pool, "someone-else", &first.id).await.unwrap());
-
-        assert!(user_has_provider(&pool, &user.id, "codex").await.unwrap());
-        assert!(!user_has_provider(&pool, &user.id, "grok").await.unwrap());
         assert!(get_account(&pool, "someone-else", &first.id).await.unwrap().is_none());
 
         assert!(set_account_custom_label(&pool, &user.id, &first.id, Some("mine")).await.unwrap());
@@ -685,8 +675,7 @@ mod tests {
 
         assert!(!remove_account(&pool, "someone-else", &first.id).await.unwrap());
         assert!(remove_account(&pool, &user.id, &first.id).await.unwrap());
-        let deleted = delete_accounts_for_provider(&pool, &user.id, "codex").await.unwrap();
-        assert_eq!(deleted.len(), 1);
+        assert_eq!(delete_accounts_for_provider(&pool, &user.id, "codex").await.unwrap(), 1);
         assert!(list_accounts(&pool, &user.id, "codex").await.unwrap().is_empty());
     }
 

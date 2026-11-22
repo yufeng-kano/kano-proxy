@@ -21,15 +21,8 @@ pub struct UpstreamUrlCheckOpts {
     pub field_name: Option<String>,
 }
 
-impl UpstreamUrlCheckOpts {
-    pub fn field(name: &str) -> Self {
-        Self { field_name: Some(name.to_string()), ..Self::default() }
-    }
-}
-
 static IPV4_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$").expect("ipv4 regex"));
-static TRAILING_SLASHES_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"/+$").expect("trailing slash regex"));
 static IPV6_LINK_LOCAL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^fe[89ab]").expect("ipv6 link-local regex"));
 static IPV6_UNIQUE_LOCAL_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^f[cd]").expect("ipv6 ULA regex"));
 
@@ -65,7 +58,7 @@ pub fn validate_upstream_base_url(input: &str, opts: &UpstreamUrlCheckOpts) -> R
 
     // Strip trailing slash(es): endpoints are built by literal concatenation
     // (`{base}/chat/completions`), so a stored trailing slash would double up.
-    Ok(TRAILING_SLASHES_RE.replace(url.as_str(), "").into_owned())
+    Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
 fn check_hostname(hostname: &str, opts: &UpstreamUrlCheckOpts, field: &str) -> Option<String> {
@@ -235,7 +228,7 @@ mod tests {
 
     #[test]
     fn uses_the_field_name_in_error_messages_and_keeps_the_host_guard() {
-        let opts = UpstreamUrlCheckOpts::field("count_tokens_url");
+        let opts = UpstreamUrlCheckOpts { field_name: Some("count_tokens_url".into()), ..Default::default() };
         assert_eq!(
             validate_upstream_base_url("http://api.example.com/v1", &opts),
             Err("count_tokens_url must use https".into())

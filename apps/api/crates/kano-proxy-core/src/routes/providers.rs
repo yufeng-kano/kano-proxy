@@ -1,6 +1,6 @@
-//! `/api/providers`, the session-authenticated
-//! surface behind the admin Providers page (docs/admin-ui.md § Providers page) and the
-//! provider login flows (docs/auth.md § Provider accounts).
+//! `/api/providers`, the session-authenticated surface behind the admin Providers page
+//! (docs/admin-ui.md § Providers page) and the provider login flows (docs/auth.md § Provider
+//! accounts).
 //!
 //! Three things live here and nowhere else: the account list with its computed status dot,
 //! the OAuth login start/complete handlers for the four builtin providers, and the pool's
@@ -28,7 +28,7 @@ use crate::auth::session::SessionUser;
 use crate::crypto::token_crypto::encrypt_json;
 use crate::db::accounts::{
     account_profile_meta, acquire_usage_lock, get_account, insert_account, is_usage_fresh, iso_from_ms, list_accounts,
-    parse_iso_ms, promote_account, read_usage_snapshot, remove_account, replace_account_credential,
+    parse_iso_ms, read_usage_snapshot, remove_account, replace_account_credential,
     set_account_priorities, update_account_settings, AccountRow, AccountSettingsUpdate, NewAccount,
 };
 use crate::db::oauth_states::{
@@ -38,6 +38,7 @@ use crate::db::oauth_states::{
 use crate::db::provider_settings::{get_provider_strategy, set_provider_strategy};
 use crate::db::cli::get_cli_provider_by_slug;
 use crate::db::custom_providers::get_custom_provider_by_slug;
+use crate::http::errors::{admin_error as error, internal_error};
 use crate::ids::{new_id, now_iso};
 use crate::pool::bench::{bench_until_from_row, clear_bench};
 use crate::pool::extension::ListSharedOptions;
@@ -72,31 +73,21 @@ pub fn routes() -> Router<AppState> {
         .route("/{provider}/accounts/import", post(import_account))
         .route("/{provider}/accounts/order", put(reorder))
         .route("/{provider}/accounts/{id}", patch(patch_account).delete(delete_account))
-        .route("/{provider}/accounts/{id}/promote", post(promote))
         .route("/{provider}/accounts/{id}/unpause", post(unpause))
         .route("/{provider}/login", post(login))
         .route("/{provider}/login/{id}/complete", post(login_complete))
-}
-
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
-}
-
-fn internal_error() -> Response {
-    error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
 }
 
 fn invalid_provider() -> Response {
     error(StatusCode::BAD_REQUEST, "invalid provider")
 }
 
-/// The request body as JSON, or `None` when it is absent or unparsable — the `try { await
-/// c.req.json() } catch` the TypeScript wrote around every one of these handlers.
+/// The request body as JSON, or `None` when it is absent or unparsable.
 fn parse_body(bytes: &Bytes) -> Option<Value> {
     serde_json::from_slice(bytes).ok()
 }
 
-/// A body that is absent or unparsable reads as `{}`, as `c.req.json().catch(() => ({}))` did.
+/// A body that is absent, unparsable or not an object reads as `{}`.
 fn object_body(bytes: &Bytes) -> Map<String, Value> {
     match parse_body(bytes) {
         Some(Value::Object(map)) => map,
@@ -117,15 +108,6 @@ async fn shared_accounts(
     ext.list_shared(cx, user_id, provider, options).await.unwrap_or_default()
 }
 
-/// One row the viewer borrows rather than owns — mutating it is the owner's right alone (403),
-/// except promote.
-async fn find_shared(cx: &AppState, user_id: &str, provider: Option<ProviderId>, account_id: &str) -> bool {
-    shared_accounts(cx, user_id, provider, ListSharedOptions::default())
-        .await
-        .iter()
-        .any(|s| s.account.id == account_id)
-}
-
 // --------------------------------------------------------------- GET /:provider/accounts
 
 #[derive(Debug, Deserialize, Default)]
@@ -136,7 +118,6 @@ struct AccountsQuery {
 /// One row of `GET /:provider/accounts`, before the status pass rewrites `status`.
 struct AccountView {
     id: String,
-    priority: i32,
     status: &'static str,
     label: String,
     custom_label: Option<String>,
@@ -146,7 +127,6 @@ struct AccountView {
     /// Always `None` on an own row, whose credits ride in `account`.
     usage_credits: Option<Value>,
     error: Option<String>,
-    stale: bool,
     share: Option<crate::pool::ShareInfo>,
     /// The row's own opt-in; always `false` on a shared row (the owner's setting).
     allow_credits: bool,
@@ -165,13 +145,20 @@ struct AccountView {
     /// (docs/providers.md § Sign-in state): when requests through this account stop. Own rows
     /// only.
     sign_in_expires_at: Option<String>,
+    // Routing facts behind the dot, never serialized: the router's merge key (the row's
+    // priority in the viewer's pool, then created_at), the end of the limit that reads
+    // "limited" (computed before any edition bar is added, so those never colour the dot), and
+    // whether the seat can serve Fable at all (always true for adapters without a rule).
+    priority: i32,
+    created_at: String,
+    limited_until: Option<i64>,
+    fable_eligible: bool,
 }
 
 impl AccountView {
     fn to_json(&self) -> Value {
         let mut out = json!({
             "id": self.id,
-            "priority": self.priority,
             "status": self.status,
             "label": self.label,
             "custom_label": self.custom_label,
@@ -181,7 +168,6 @@ impl AccountView {
                 None => json!({ "windows": w }),
             }),
             "error": self.error,
-            "stale": self.stale,
             "allow_credits": self.allow_credits,
             "on_credits": self.on_credits,
             "strip_fast_mode": self.strip_fast_mode,
@@ -214,26 +200,17 @@ fn stated_sign_in_end(state: &AppState, provider: ProviderId, row: &AccountRow, 
     sign_in_end_notice(&credential, now_ms)
 }
 
-/// `401|invalid token|unauthorized` in the stored error text, the signal the TypeScript's
-/// `/401|invalid.?token|unauthorized/i` regex looked for.
+/// `401`, `unauthorized` or `invalid.?token` ("invalid token", "invalid_token",
+/// "invalidtoken"), case-insensitively, in the stored usage error text.
 fn looks_unauthorized(error: &str) -> bool {
     let lower = error.to_ascii_lowercase();
-    if lower.contains("401") || lower.contains("unauthorized") {
-        return true;
-    }
-    // `invalid.?token`: "invalid token", "invalid_token", "invalidtoken".
-    let bytes = lower.as_bytes();
-    let needle = b"invalid";
-    for start in 0..bytes.len() {
-        if !bytes[start..].starts_with(needle) {
-            continue;
-        }
-        let rest = &lower[start + needle.len()..];
-        if rest.starts_with("token") || (rest.len() > 1 && rest[1..].starts_with("token")) {
-            return true;
-        }
-    }
-    false
+    lower.contains("401")
+        || lower.contains("unauthorized")
+        || lower.match_indices("invalid").any(|(at, needle)| {
+            let rest = &lower[at + needle.len()..];
+            // The one optional character between the words may be multi-byte.
+            rest.starts_with("token") || rest.chars().next().is_some_and(|c| rest[c.len_utf8()..].starts_with("token"))
+        })
 }
 
 /// The display label precedence the Providers page shows: the user's own name first, then the
@@ -249,6 +226,19 @@ fn display_label(row: &AccountRow, meta: Option<&Map<String, Value>>) -> String 
         .or_else(|| row.label.as_deref().filter(|s| !s.is_empty()))
         .unwrap_or(&row.id)
         .to_string()
+}
+
+/// The row's `account_meta_json` object, without the usage snapshot's newer facts.
+fn meta_object(row: &AccountRow) -> Option<Map<String, Value>> {
+    let raw = row.account_meta_json.as_deref()?;
+    match serde_json::from_str(raw) {
+        Ok(Value::Object(map)) => Some(map),
+        _ => None,
+    }
+}
+
+fn windows_json(windows: &[UsageWindow]) -> Vec<Value> {
+    windows.iter().map(|w| serde_json::to_value(w).expect("usage window serializes")).collect()
 }
 
 fn merged_meta(base: Option<Map<String, Value>>, extra: Option<&Map<String, Value>>) -> Option<Map<String, Value>> {
@@ -285,8 +275,8 @@ async fn account_usage(
     }
 
     // Sign-in expired (docs/providers.md § Usage cache): an unauthorized usage error, whether
-    // or not old windows survived the snapshot merge — a dead refresh token keeps them, which
-    // is what used to make this row read active. Wins over benched; a bot-wall never counts.
+    // or not old windows survived the snapshot merge — a dead refresh token keeps them, and
+    // they must not make the row read active. Wins over benched; a bot-wall never counts.
     let mark_reauth = |view: &mut AccountView, error: Option<&str>, edge_blocked: bool| {
         if !edge_blocked && error.is_some_and(looks_unauthorized) {
             view.status = "reauth";
@@ -294,13 +284,10 @@ async fn account_usage(
     };
 
     if let Some(cached) = cached {
-        view.usage_windows = Some(cached.windows.clone());
+        mark_reauth(view, cached.error.as_deref(), cached.edge_blocked);
+        view.usage_windows = Some(cached.windows);
         view.account = merged_meta(view.account.take(), cached.account.as_ref());
-        // Anything served past its TTL is flagged stale, even though the in-flight fetch that
-        // beat us here will refresh it shortly.
-        view.stale = cached.stale || !fresh;
-        view.error = cached.error.clone();
-        mark_reauth(view, view.error.clone().as_deref(), cached.edge_blocked);
+        view.error = cached.error;
         return;
     }
     let Some(lock_token) = lock_token else { return };
@@ -309,24 +296,22 @@ async fn account_usage(
     // itself lives in `usage_refresh`, never duplicated here.
     match fetch_and_persist_usage(cx, row, adapter.as_ref(), &lock_token).await {
         Ok(snap) => {
-            view.usage_windows = Some(snap.windows.clone());
-            view.account = merged_meta(view.account.take(), snap.account.as_ref());
-            view.stale = snap.stale;
-            view.error = snap.error.clone();
             // A usage 403 bot-wall must NOT mark the account reauth — chat can still work.
             mark_reauth(view, snap.error.as_deref(), snap.edge_blocked);
+            view.usage_windows = Some(snap.windows);
+            view.account = merged_meta(view.account.take(), snap.account.as_ref());
+            view.error = snap.error;
         }
         Err(error) => {
-            view.error = Some(error.clone());
-            view.stale = true;
             // Serve the unchanged snapshot too: one upstream hiccup must not blank the usage
             // bars for the request that encountered it.
             let prior = read_usage_snapshot(row);
-            if let Some(prior) = &prior {
-                view.usage_windows = Some(prior.windows.clone());
+            mark_reauth(view, Some(error.as_str()), prior.as_ref().is_some_and(|p| p.edge_blocked));
+            if let Some(prior) = prior {
+                view.usage_windows = Some(prior.windows);
                 view.account = merged_meta(view.account.take(), prior.account.as_ref());
             }
-            mark_reauth(view, Some(error.as_str()), prior.is_some_and(|p| p.edge_blocked));
+            view.error = Some(error);
         }
     }
 }
@@ -350,33 +335,18 @@ async fn list_accounts_route(
     let now = state.now_ms();
 
     let mut accounts: Vec<AccountView> = Vec::with_capacity(rows.len());
-    // Parallel to `accounts`: the routing fact behind a "limited" dot, computed from the
-    // snapshot each row actually returns rather than re-read off the row.
-    let mut limited_until: Vec<Option<i64>> = Vec::new();
-    // Parallel too: the row's `created_at`, needed to walk the rows in the router's merged
-    // order below when shared rows are in play.
-    let mut created_at: Vec<String> = Vec::new();
-    // Parallel too: whether the row's seat can serve Fable at all, from the same merged
-    // profile facts the router reads. Always true for adapters without a rule.
-    let mut fable_eligible: Vec<bool> = Vec::new();
-
     for row in &rows {
         let benched = bench_until_from_row(row, now).is_some();
         // An expired sign-in is read off the row's recorded sign-in failures, which outlive the
         // bench: the row keeps reading `reauth` after its 401 bench runs out, until a request
-        // or a refresh succeeds or the operator signs in again. The bench reason still counts
-        // for a row benched by a build that did not record them.
+        // or a refresh succeeds or the operator signs in again. A 401 bench reads `reauth` on
+        // its own too, since recording the refusal beside it is best-effort.
         let sign_in = sign_in_state(row, now);
         let provisional = match (sign_in, benched, row.bench_reason.as_deref()) {
             (SignIn::Expired, _, _) | (_, true, Some("401")) => "reauth",
             (_, true, _) => "benched",
             (_, false, _) => "standby",
         };
-        let meta = row
-            .account_meta_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-            .and_then(|v| v.as_object().cloned());
         let mut view = AccountView {
             id: row.id.clone(),
             priority: row.priority,
@@ -385,11 +355,10 @@ async fn list_accounts_route(
             status: provisional,
             label: String::new(),
             custom_label: row.custom_label.clone(),
-            account: meta,
+            account: meta_object(row),
             usage_windows: None,
             usage_credits: None,
             error: None,
-            stale: false,
             share: None,
             allow_credits: row.allow_credits,
             strip_fast_mode: row.strip_fast_mode,
@@ -403,6 +372,9 @@ async fn list_accounts_route(
                 SignIn::Ok => stated_sign_in_end(&state, provider, row, now).map(iso_from_ms),
                 SignIn::Expired => None,
             },
+            created_at: row.created_at.clone(),
+            limited_until: None,
+            fable_eligible: true,
         };
         account_usage(&state, row, &adapter, force, &mut view).await;
         view.label = display_label(row, view.account.as_ref());
@@ -412,9 +384,8 @@ async fn list_accounts_route(
         // the router applies (routing::facts::usage_window_unusable_until).
         let exhausted = view.usage_windows.as_ref().and_then(|w| windows_unusable_until(w, None, now));
         view.on_credits = exhausted.is_some() && row.allow_credits && credits_usable(view.account.as_ref());
-        limited_until.push(if view.on_credits { None } else { exhausted });
-        created_at.push(row.created_at.clone());
-        fable_eligible.push(adapter.supports_model(view.account.as_ref(), FABLE_MODEL_PREFIX));
+        view.limited_until = if view.on_credits { None } else { exhausted };
+        view.fable_eligible = adapter.supports_model(view.account.as_ref(), FABLE_MODEL_PREFIX);
         accounts.push(view);
     }
 
@@ -428,8 +399,7 @@ async fn list_accounts_route(
                 ext.own_bars(&state, user_id, provider, &ids).await.unwrap_or_default();
             for account in &mut accounts {
                 let Some(bars) = extra.get(&account.id).filter(|b| !b.is_empty()) else { continue };
-                let mut windows: Vec<Value> =
-                    bars.iter().map(|w| serde_json::to_value(w).expect("usage window serializes")).collect();
+                let mut windows = windows_json(bars);
                 windows.extend(account.usage_windows.take().unwrap_or_default());
                 account.usage_windows = Some(windows);
             }
@@ -454,39 +424,32 @@ async fn list_accounts_route(
         let limited = usage_window_unusable_until(row, None, now);
         let exhausted = read_usage_snapshot(row).and_then(|s| windows_unusable_until(&s.windows, None, now));
         let on_credits = usage_credits.is_some() && exhausted.is_some() && limited.is_none();
+        let benched = bench_until_from_row(row, now).is_some();
         accounts.push(AccountView {
             id: row.id.clone(),
             priority: shared.priority,
-            status: if bench_until_from_row(row, now).is_some() { "benched" } else { "standby" },
-            label: row
-                .custom_label
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .or_else(|| row.label.as_deref().filter(|s| !s.is_empty()))
-                .unwrap_or(&row.id)
-                .to_string(),
+            status: if benched { "benched" } else { "standby" },
+            // No identity blob of the owner's: the row's own names only.
+            label: display_label(row, None),
             custom_label: row.custom_label.clone(),
             account: None,
             // The extension's own bars for the borrower (an allowance), and the account's stored
             // windows only where the edition shows them.
-            usage_windows: shared.usage.as_ref().map(|u| {
-                u.windows.iter().map(|w| serde_json::to_value(w).expect("usage window serializes")).collect()
-            }),
+            usage_windows: shared.usage.as_ref().map(|u| windows_json(&u.windows)),
             usage_credits,
             error: None,
-            stale: false,
             share: Some(shared.share.clone()),
             allow_credits: false,
             strip_fast_mode: row.strip_fast_mode,
             strip_claude_code_line: row.strip_claude_code_line,
             force_cache_ttl_1h: row.force_cache_ttl_1h,
             on_credits,
-            benched: bench_until_from_row(row, now).is_some(),
+            benched,
             sign_in_expires_at: None,
+            created_at: row.created_at.clone(),
+            limited_until: limited,
+            fable_eligible: adapter.supports_model(None, FABLE_MODEL_PREFIX),
         });
-        limited_until.push(limited);
-        created_at.push(row.created_at.clone());
-        fable_eligible.push(adapter.supports_model(None, FABLE_MODEL_PREFIX));
     }
 
     // The dot says where a request goes right now, so it is the router's own walk over the
@@ -497,7 +460,7 @@ async fn list_accounts_route(
     // `(priority DESC, created_at DESC)`, so the dot has to be assigned in that order.
     let mut route_order: Vec<usize> = (0..accounts.len()).collect();
     route_order.sort_by(|&x, &y| {
-        accounts[y].priority.cmp(&accounts[x].priority).then_with(|| created_at[y].cmp(&created_at[x]))
+        accounts[y].priority.cmp(&accounts[x].priority).then_with(|| accounts[y].created_at.cmp(&accounts[x].created_at))
     });
     let mut routed = false;
     let mut fable_routed = false;
@@ -507,11 +470,11 @@ async fn list_accounts_route(
             accounts[i].on_credits = false;
             continue;
         }
-        if limited_until[i].is_some() {
+        if accounts[i].limited_until.is_some() {
             accounts[i].status = "limited";
             continue;
         }
-        let fable = fable_eligible[i];
+        let fable = accounts[i].fable_eligible;
         if !routed {
             routed = true;
             fable_routed = fable;
@@ -535,8 +498,7 @@ async fn list_accounts_route(
     // The list is returned in that same merged order, so the page's list-position assumptions
     // (first row is Primary) match where traffic goes.
     let ordered: Vec<Value> = route_order.iter().map(|&i| accounts[i].to_json()).collect();
-    Json(json!({ "available": true, "accounts": ordered, "models": [], "error": null, "strategy": strategy }))
-        .into_response()
+    Json(json!({ "accounts": ordered, "strategy": strategy })).into_response()
 }
 
 // ---------------------------------------------------------------- PATCH /:provider
@@ -605,23 +567,22 @@ async fn patch_account(
     if custom_label.is_none() && flags.iter().all(Option::is_none) {
         return error(StatusCode::BAD_REQUEST, "nothing to update");
     }
+    let builtin = ProviderId::parse(&provider);
     // Spillover spends paid credits and needs the adapter's stored `credits` fact, so only an
     // adapter that declares it may opt in (docs/providers.md § Codex "Credit spillover").
-    if allow_credits.is_some()
-        && !ProviderId::parse(&provider).is_some_and(|p| get_adapter(p).supports_credit_spillover())
-    {
+    if allow_credits.is_some() && !builtin.is_some_and(|p| get_adapter(p).supports_credit_spillover()) {
         return error(StatusCode::BAD_REQUEST, "allow_credits is not supported for this provider");
     }
     // Both adapters build the upstream body field by field and never carry a fast-mode field,
     // so the switch would promise something it cannot do (docs/providers.md § Request edits).
-    if strip_fast_mode.is_some() && matches!(ProviderId::parse(&provider), Some(ProviderId::Grok | ProviderId::Antigravity)) {
+    if strip_fast_mode.is_some() && matches!(builtin, Some(ProviderId::Grok | ProviderId::Antigravity)) {
         return error(StatusCode::BAD_REQUEST, "strip_fast_mode is not supported for this provider");
     }
     // Only an upstream that reads Anthropic `cache_control` gets anything from the cache TTL: a
     // conversion to any other wire drops the markers (docs/providers.md § Request edits). A slug
     // that is not one of the caller's endpoints or CLI providers goes on to the row's 404.
     if force_cache_ttl_1h.is_some() {
-        let anthropic = match ProviderId::parse(&provider) {
+        let anthropic = match builtin {
             Some(builtin) => builtin == ProviderId::ClaudeCode,
             None => {
                 let user_id = &session.user.id;
@@ -668,51 +629,14 @@ async fn patch_account(
     }
 }
 
+/// For an id that is not the caller's own: a row the viewer borrows rather than owns is the
+/// owner's alone to change (403); anything else is a 404.
 async fn forbidden_or_not_found(state: &AppState, user_id: &str, provider: &str, id: &str) -> Response {
-    if find_shared(state, user_id, ProviderId::parse(provider), id).await {
+    let shared = shared_accounts(state, user_id, ProviderId::parse(provider), ListSharedOptions::default()).await;
+    if shared.iter().any(|s| s.account.id == id) {
         return error(StatusCode::FORBIDDEN, "forbidden");
     }
     error(StatusCode::NOT_FOUND, "not found")
-}
-
-// ------------------------------------------------ POST /:provider/accounts/:id/promote
-
-/// Promote is the one mutation a borrower may make on a shared row: it reorders that row
-/// inside **the viewer's own** merged pool, never the owner's (docs/cloud-edition.md § "Pool
-/// extension"), so it delegates to `set_shared_priority` with one above the current maximum
-/// across both kinds.
-async fn promote(
-    State(state): State<AppState>,
-    session: SessionUser,
-    Path((provider, id)): Path<(String, String)>,
-) -> Response {
-    let user_id = &session.user.id;
-    match promote_account(state.pool(), user_id, &id).await {
-        Err(_) => return internal_error(),
-        Ok(true) => return Json(json!({ "ok": true })).into_response(),
-        Ok(false) => {}
-    }
-
-    let provider = ProviderId::parse(&provider);
-    let shared = shared_accounts(&state, user_id, provider, ListSharedOptions::default()).await;
-    if !shared.iter().any(|s| s.account.id == id) {
-        return error(StatusCode::NOT_FOUND, "not found");
-    }
-    let Some(provider) = provider else { return error(StatusCode::NOT_FOUND, "not found") };
-    let Ok(own) = list_accounts(state.pool(), user_id, provider.as_str()).await else {
-        return internal_error();
-    };
-    let max = own
-        .iter()
-        .map(|a| a.priority)
-        .chain(shared.iter().map(|s| s.priority))
-        .fold(0, i32::max);
-    let Some(ext) = state.pool_extension() else { return error(StatusCode::NOT_FOUND, "not found") };
-    match ext.set_shared_priority(&state, user_id, &id, max + 1).await {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
-        Ok(false) => error(StatusCode::NOT_FOUND, "not found"),
-        Err(_) => internal_error(),
-    }
 }
 
 // ------------------------------------------------------- PUT /:provider/accounts/order
@@ -799,11 +723,21 @@ async fn delete_account(
     session: SessionUser,
     Path((provider, id)): Path<(String, String)>,
 ) -> Response {
-    match remove_account(state.pool(), &session.user.id, &id).await {
+    let Some(provider) = ProviderId::parse(&provider) else { return invalid_provider() };
+    let user_id = &session.user.id;
+    // A custom endpoint's or CLI provider's key row is removed with its provider, never here.
+    let owned = match get_account(state.pool(), user_id, &id).await {
+        Ok(row) => row.is_some_and(|r| r.provider == provider.as_str()),
+        Err(_) => return internal_error(),
+    };
+    if !owned {
+        // Only the owner can unbind an account the viewer merely borrows.
+        return forbidden_or_not_found(&state, user_id, provider.as_str(), &id).await;
+    }
+    match remove_account(state.pool(), user_id, &id).await {
         Err(_) => internal_error(),
         Ok(true) => Json(json!({ "ok": true })).into_response(),
-        // Only the owner can unbind an account the viewer merely borrows.
-        Ok(false) => forbidden_or_not_found(&state, &session.user.id, &provider, &id).await,
+        Ok(false) => forbidden_or_not_found(&state, user_id, provider.as_str(), &id).await,
     }
 }
 
@@ -865,9 +799,9 @@ async fn import_account(
 
 // ------------------------------------------------------------- POST /:provider/login
 
-fn login_expiry(state: &AppState) -> String {
-    iso_from_ms(state.now_ms() + LOGIN_STATE_TTL_MS)
-}
+/// What one provider's login start produced: the pending payload `complete` reads back, and the
+/// response fields besides `login_id` (an object). `Err` is the refusal's status and message.
+type Started = Result<(Value, Value), (StatusCode, String)>;
 
 async fn login(
     State(state): State<AppState>,
@@ -891,71 +825,64 @@ async fn login(
             Ok(_) => return forbidden_or_not_found(&state, &session.user.id, provider.as_str(), id).await,
         }
     }
-    let reconnect = reconnect.as_deref();
-    let login_id = new_id("login");
-    let expires = login_expiry(&state);
 
     // Also opportunistically pruned here on the same path that adds new rows, ahead of
     // whatever the next daily retention sweep does (docs/logging.md).
     let _ = delete_expired_states(state.pool(), &now_iso()).await;
 
-    match provider {
-        ProviderId::ClaudeCode => claude_login(&state, &session, provider, &login_id, &expires, reconnect).await,
-        ProviderId::Codex => codex_login(&state, &session, provider, &login_id, &expires, reconnect).await,
-        ProviderId::Antigravity => antigravity_login(&state, &session, provider, &login_id, &expires, reconnect).await,
-        ProviderId::Grok => grok_login(&state, &session, provider, &login_id, &expires, reconnect).await,
-    }
-}
-
-/// `reconnect` rides in the payload as `reconnect_account_id`; every complete path either
-/// deserializes into a struct that ignores unknown keys or reads named fields off the `Value`.
-async fn store_pending(
-    state: &AppState,
-    session: &SessionUser,
-    provider: ProviderId,
-    login_id: &str,
-    mut payload: Value,
-    expires: &str,
-    reconnect: Option<&str>,
-) -> Option<Response> {
-    if let (Some(id), Some(map)) = (reconnect, payload.as_object_mut()) {
+    let started = match provider {
+        ProviderId::ClaudeCode => Ok(claude_login(&state)),
+        ProviderId::Codex => codex_login(&state).await,
+        ProviderId::Antigravity => antigravity_login(&state),
+        ProviderId::Grok => grok_login(&state).await,
+    };
+    let (mut payload, fields) = match started {
+        Ok(started) => started,
+        Err((status, message)) => return error(status, &message),
+    };
+    // Every complete path either deserializes the payload into a struct that ignores unknown
+    // keys or reads named fields off the `Value`, so the reconnect id rides along unseen.
+    if let (Some(id), Some(map)) = (&reconnect, payload.as_object_mut()) {
         map.insert("reconnect_account_id".into(), json!(id));
     }
-    insert_provider_state(state.pool(), login_id, &session.user.id, provider.as_str(), &payload.to_string(), expires)
-        .await
-        .err()
-        .map(|_| internal_error())
+    let login_id = new_id("login");
+    let expires = iso_from_ms(state.now_ms() + LOGIN_STATE_TTL_MS);
+    let stored = insert_provider_state(
+        state.pool(),
+        &login_id,
+        &session.user.id,
+        provider.as_str(),
+        &payload.to_string(),
+        &expires,
+    )
+    .await;
+    if stored.is_err() {
+        return internal_error();
+    }
+    let mut out = json!({ "login_id": login_id });
+    if let (Some(out), Value::Object(fields)) = (out.as_object_mut(), fields) {
+        out.extend(fields);
+    }
+    Json(out).into_response()
 }
 
-async fn claude_login(
-    state: &AppState,
-    session: &SessionUser,
-    provider: ProviderId,
-    login_id: &str,
-    expires: &str,
-    reconnect: Option<&str>,
-) -> Response {
+fn claude_login(state: &AppState) -> (Value, Value) {
     let begun = begin_claude_authorization(state.config().claude_code_oauth_client_id.as_deref());
     let payload = serde_json::to_value(&begun.pending).expect("pending serializes");
-    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
-        return failed;
-    }
-    Json(json!({
-        "login_id": login_id,
-        "authorization_url": begun.authorization_url,
-        "instructions": "Open authorization_url, approve, then paste code#state from the Anthropic callback page.",
-    }))
-    .into_response()
+    (payload, json!({ "authorization_url": begun.authorization_url }))
 }
 
-async fn codex_login(
-    state: &AppState,
-    session: &SessionUser,
-    provider: ProviderId,
-    login_id: &str,
-    expires: &str,
-    reconnect: Option<&str>,
-) -> Response {
+/// `HTTP <status>` when an upstream failure carried no text of its own.
+fn failure_detail(status: StatusCode, text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        format!("HTTP {}", status.as_u16())
+    } else {
+        text.to_string()
+    }
+}
+
+async fn codex_login(state: &AppState) -> Started {
     let client_id = state
         .config()
         .codex_oauth_client_id
@@ -969,20 +896,19 @@ async fn codex_login(
         .json(&json!({ "client_id": client_id }));
     let response = match state.transport().send(request).await {
         Ok(response) => response,
-        Err(e) => return error(StatusCode::BAD_GATEWAY, &format!("device code failed: {e}")),
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("device code failed: {e}"))),
     };
     if !response.status.is_success() {
-        let status = response.status.as_u16();
-        let detail = response.text().await.unwrap_or_default().trim().to_string();
-        let detail = if detail.is_empty() { format!("HTTP {status}") } else { detail };
-        return error(StatusCode::BAD_GATEWAY, &format!("device code failed: {detail}"));
+        let status = response.status;
+        let detail = failure_detail(status, &response.text().await.unwrap_or_default());
+        return Err((StatusCode::BAD_GATEWAY, format!("device code failed: {detail}")));
     }
     let device = response.json_value().await.unwrap_or(Value::Null);
     let Some(device_auth_id) = device.get("device_auth_id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
-        return error(StatusCode::BAD_GATEWAY, "device code response missing device_auth_id");
+        return Err((StatusCode::BAD_GATEWAY, "device code response missing device_auth_id".into()));
     };
     let Some(user_code) = device.get("user_code").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
-        return error(StatusCode::BAD_GATEWAY, "device code response missing user_code");
+        return Err((StatusCode::BAD_GATEWAY, "device code response missing user_code".into()));
     };
     // `interval` arrives as a number or a numeric string; anything else falls back to 5.
     let interval = match device.get("interval") {
@@ -990,64 +916,32 @@ async fn codex_login(
         Some(Value::String(s)) => s.trim().parse::<f64>().ok().filter(|v| v.is_finite()).unwrap_or(5.0),
         _ => 5.0,
     };
-    // JavaScript has one number type, so a whole interval went out as `7`, not `7.0`.
-    let interval =
-        if interval.fract() == 0.0 { Value::from(interval as i64) } else { Value::from(interval) };
+    // A whole interval goes out as an integer (`7`, not `7.0`).
+    let interval = if interval.fract() == 0.0 { Value::from(interval as i64) } else { Value::from(interval) };
 
     let payload = json!({ "client_id": client_id, "device_auth_id": device_auth_id, "user_code": user_code });
-    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
-        return failed;
-    }
-    Json(json!({
-        "login_id": login_id,
-        "user_code": user_code,
-        "verification_uri": CODEX_VERIFICATION_URI,
-        "interval": interval,
-    }))
-    .into_response()
+    Ok((payload, json!({ "user_code": user_code, "verification_uri": CODEX_VERIFICATION_URI, "interval": interval })))
 }
 
-async fn antigravity_login(
-    state: &AppState,
-    session: &SessionUser,
-    provider: ProviderId,
-    login_id: &str,
-    expires: &str,
-    reconnect: Option<&str>,
-) -> Response {
+fn antigravity_login(state: &AppState) -> Started {
     // Unlike the other three, this provider ships with no built-in client: it needs an OAuth
     // client *secret*, which is never committed here (docs/auth.md § Antigravity). Refuse
     // plainly instead of starting a flow that cannot finish.
     let Some((client_id, _)) = antigravity_oauth_client(state) else {
-        return error(
+        return Err((
             StatusCode::BAD_REQUEST,
-            "Antigravity is not configured on this deploy: set ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET.",
-        );
+            "Antigravity is not configured on this deploy: set ANTIGRAVITY_OAUTH_CLIENT_ID and ANTIGRAVITY_OAUTH_CLIENT_SECRET.".into(),
+        ));
     };
     // Google only accepts this client's own registered localhost redirect, so the proxy cannot
     // host a callback: the user approves, lands on a page that does not load, and pastes the
     // URL (or the bare code) back.
     let begun = begin_antigravity_authorization(&client_id);
     let payload = serde_json::to_value(&begun.pending).expect("pending serializes");
-    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
-        return failed;
-    }
-    Json(json!({
-        "login_id": login_id,
-        "authorization_url": begun.authorization_url,
-        "instructions": "Open authorization_url, approve, then paste the localhost callback URL (or just its code) from the browser.",
-    }))
-    .into_response()
+    Ok((payload, json!({ "authorization_url": begun.authorization_url })))
 }
 
-async fn grok_login(
-    state: &AppState,
-    session: &SessionUser,
-    provider: ProviderId,
-    login_id: &str,
-    expires: &str,
-    reconnect: Option<&str>,
-) -> Response {
+async fn grok_login(state: &AppState) -> Started {
     let client_id = state
         .config()
         .grok_oauth_client_id
@@ -1061,28 +955,23 @@ async fn grok_login(
         .body(form.into());
     let response = match state.transport().send(request).await {
         Ok(response) => response,
-        Err(e) => return error(StatusCode::BAD_GATEWAY, &format!("device code failed: {e}")),
+        Err(e) => return Err((StatusCode::BAD_GATEWAY, format!("device code failed: {e}"))),
     };
     if !response.status.is_success() {
         let status = response.status.as_u16();
         let text = response.text().await.unwrap_or_default();
-        return error(StatusCode::BAD_GATEWAY, &format!("device code failed: {status} {text}"));
+        return Err((StatusCode::BAD_GATEWAY, format!("device code failed: {status} {text}")));
     }
     let device = response.json_value().await.unwrap_or(Value::Null);
     let device_code = device.get("device_code").and_then(Value::as_str).unwrap_or_default();
-    let payload =
-        json!({ "client_id": client_id, "device_code": device_code, "token_endpoint": GROK_TOKEN_URL });
-    if let Some(failed) = store_pending(state, session, provider, login_id, payload, expires, reconnect).await {
-        return failed;
-    }
-    Json(json!({
-        "login_id": login_id,
+    let payload = json!({ "client_id": client_id, "device_code": device_code });
+    let fields = json!({
         "user_code": device.get("user_code").cloned().unwrap_or(Value::Null),
         "verification_uri": device.get("verification_uri").cloned().unwrap_or(Value::Null),
         "verification_uri_complete": device.get("verification_uri_complete").cloned().unwrap_or(Value::Null),
         "interval": device.get("interval").cloned().unwrap_or(json!(5)),
-    }))
-    .into_response()
+    });
+    Ok((payload, fields))
 }
 
 fn form_encode(pairs: &[(&str, &str)]) -> String {
@@ -1142,18 +1031,17 @@ async fn finish_login(
     state: &AppState,
     user_id: &str,
     provider: ProviderId,
-    state_row_id: &str,
-    payload_json: &str,
+    pending: &OAuthLoginStateRow,
     bound: BoundAccount<'_>,
 ) -> Response {
     let Ok(encrypted) = encrypt_json(state.config().token_encryption_key.as_deref(), &bound.credential) else {
         return error(StatusCode::BAD_REQUEST, "TOKEN_ENCRYPTION_KEY not configured");
     };
-    let reconnect = serde_json::from_str::<Value>(payload_json)
+    let reconnect = serde_json::from_str::<Value>(&pending.payload_json)
         .ok()
         .and_then(|p| p.get("reconnect_account_id").and_then(Value::as_str).map(str::to_string));
     if let Some(account_id) = reconnect {
-        return reconnect_account(state, user_id, provider, state_row_id, &account_id, &encrypted, bound).await;
+        return reconnect_account(state, user_id, provider, &pending.id, &account_id, &encrypted, bound).await;
     }
     let BoundAccount { label, external_account_id, meta, .. } = bound;
     let meta_json = meta.to_string();
@@ -1174,7 +1062,7 @@ async fn finish_login(
         Ok(row) => row,
         Err(_) => return internal_error(),
     };
-    let _ = delete_state(state.pool(), state_row_id).await;
+    let _ = delete_state(state.pool(), &pending.id).await;
     Json(json!({ "ok": true, "token_id": row.id, "label": label })).into_response()
 }
 
@@ -1199,12 +1087,7 @@ async fn reconnect_account(
     };
     let Some(row) = row else { return removed() };
 
-    let mut stored_meta = row
-        .account_meta_json
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
+    let mut stored_meta = meta_object(&row).unwrap_or_default();
     let email = |m: &Map<String, Value>| m.get("email").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
     let old_email = email(&stored_meta);
     let new_email = meta.as_object().and_then(email);
@@ -1262,14 +1145,7 @@ async fn login_complete(
 ) -> Response {
     let Some(provider) = ProviderId::parse(&provider) else { return invalid_provider() };
     let body = object_body(&body);
-    let raw = body
-        .get("code")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .or_else(|| body.get("value").and_then(Value::as_str))
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let raw = body.get("code").and_then(Value::as_str).unwrap_or("").trim().to_string();
 
     match provider {
         ProviderId::ClaudeCode => claude_complete(&state, &session, &login_id, &raw).await,
@@ -1315,7 +1191,7 @@ async fn claude_complete(state: &AppState, session: &SessionUser, login_id: &str
     };
     let meta = json!({ "email": identity.email, "display_name": identity.display_name });
     let bound = BoundAccount { credential, label, external_account_id: None, meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
+    finish_login(state, &session.user.id, provider, &state_row, bound).await
 }
 
 async fn codex_complete(state: &AppState, session: &SessionUser, login_id: &str) -> Response {
@@ -1350,8 +1226,7 @@ async fn codex_complete(state: &AppState, session: &SessionUser, login_id: &str)
         return error(StatusCode::BAD_REQUEST, &format!("token {}", token_status.as_u16()));
     }
     if !token_status.is_success() {
-        let detail = device_error.map(str::to_string).unwrap_or_else(|| token_text.trim().to_string());
-        let detail = if detail.is_empty() { format!("HTTP {}", token_status.as_u16()) } else { detail };
+        let detail = failure_detail(token_status, device_error.unwrap_or(&token_text));
         return error(StatusCode::BAD_REQUEST, &format!("Codex device token failed: {detail}"));
     }
     let Some(authorization_code) =
@@ -1380,9 +1255,8 @@ async fn codex_complete(state: &AppState, session: &SessionUser, login_id: &str)
         Err(e) => return error(StatusCode::BAD_REQUEST, &format!("Codex OAuth token exchange failed: {e}")),
     };
     if !exchange_response.status.is_success() {
-        let status = exchange_response.status.as_u16();
-        let detail = exchange_response.text().await.unwrap_or_default().trim().to_string();
-        let detail = if detail.is_empty() { format!("HTTP {status}") } else { detail };
+        let status = exchange_response.status;
+        let detail = failure_detail(status, &exchange_response.text().await.unwrap_or_default());
         return error(StatusCode::BAD_REQUEST, &format!("Codex OAuth token exchange failed: {detail}"));
     }
     let tokens: OAuthTokens = match exchange_response.json_value().await.map(serde_json::from_value) {
@@ -1401,12 +1275,12 @@ async fn codex_complete(state: &AppState, session: &SessionUser, login_id: &str)
             .map(usage_payload_value),
         _ => None,
     };
-    let identity = codex_identity(&tokens.access_token, account_id.as_deref(), usage_payload.as_ref());
+    let identity = codex_identity(&tokens.access_token, usage_payload.as_ref());
     let fallback = match account_id.as_deref() {
         Some(id) => format!("codex:{}", id.chars().take(8).collect::<String>()),
         None => "codex".to_string(),
     };
-    let label = pick_account_label(identity.email.as_deref(), identity.display_name.as_deref(), &fallback);
+    let label = pick_account_label(identity.email.as_deref(), None, &fallback);
     let credential = StoredCredential {
         access_token: tokens.access_token.clone(),
         refresh_token: tokens.refresh_token.clone(),
@@ -1418,7 +1292,7 @@ async fn codex_complete(state: &AppState, session: &SessionUser, login_id: &str)
     };
     let meta = json!({ "email": identity.email, "plan_type": identity.plan, "account_id": account_id });
     let bound = BoundAccount { credential, label, external_account_id: account_id.as_deref(), meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
+    finish_login(state, &session.user.id, provider, &state_row, bound).await
 }
 
 async fn antigravity_complete(state: &AppState, session: &SessionUser, login_id: &str, raw: &str) -> Response {
@@ -1459,16 +1333,15 @@ async fn antigravity_complete(state: &AppState, session: &SessionUser, login_id:
     if let Some(project) = &project {
         let mut extra = Map::new();
         extra.insert("project_id".into(), json!(project.project_id));
-        extra.insert("tier_id".into(), json!(project.tier_id));
         credential.extra = Some(extra);
     }
     let meta = json!({
         "email": identity.email,
         "display_name": identity.display_name,
-        "plan_type": project.as_ref().and_then(|p| p.tier_id.clone()),
+        "plan_type": project.as_ref().map(|p| p.tier_id.clone()),
     });
     let bound = BoundAccount { credential, label, external_account_id: None, meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
+    finish_login(state, &session.user.id, provider, &state_row, bound).await
 }
 
 async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) -> Response {
@@ -1478,21 +1351,13 @@ async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) 
     };
     let payload: Value = serde_json::from_str(&state_row.payload_json).unwrap_or(Value::Null);
     let field = |key: &str| payload.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
-    let token_endpoint = {
-        let stored = field("token_endpoint");
-        if stored.is_empty() {
-            GROK_TOKEN_URL.to_string()
-        } else {
-            stored
-        }
-    };
     let client_id = field("client_id");
     let form = form_encode(&[
         ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ("device_code", &field("device_code")),
         ("client_id", &client_id),
     ]);
-    let request = UpstreamRequest::post(token_endpoint.clone())
+    let request = UpstreamRequest::post(GROK_TOKEN_URL)
         .header("content-type", "application/x-www-form-urlencoded")
         .body(form.into());
     let response = match state.transport().send(request).await {
@@ -1521,15 +1386,14 @@ async fn grok_complete(state: &AppState, session: &SessionUser, login_id: &str) 
         refresh_token: tokens.refresh_token.clone(),
         expires_at: expiry_from_tokens(&tokens, state.now_ms()),
         client_id: (!client_id.is_empty()).then_some(client_id),
-        token_endpoint: Some(token_endpoint),
+        token_endpoint: Some(GROK_TOKEN_URL.to_string()),
         email: identity.email.clone(),
         ..Default::default()
     };
     let meta = json!({ "email": identity.email, "display_name": identity.display_name });
     let bound = BoundAccount { credential, label, external_account_id: None, meta };
-    finish_login(state, &session.user.id, provider, &state_row.id, &state_row.payload_json, bound).await
+    finish_login(state, &session.user.id, provider, &state_row, bound).await
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1584,8 +1448,8 @@ mod tests {
         test_router(state.clone()).oneshot(req).await.unwrap()
     }
 
-    /// `seedAccount` from the vitest suite: one `upstream_accounts` row with a known payload,
-    /// a stored upstream label, and whatever profile facts the case needs.
+    /// One `upstream_accounts` row with a known payload, a stored upstream label, and whatever
+    /// profile facts the case needs.
     async fn seed_account(pool: &PgPool, user_id: &str, id: &str, provider: &str, priority: i32, meta: Value) {
         seed_account_at(pool, user_id, id, provider, priority, meta, NOW).await
     }
@@ -1652,7 +1516,7 @@ mod tests {
         }
     }
 
-    /// The fixed 10%-utilization stub, the suite's `stubClaudeUsage`.
+    /// The fixed 10%-utilization stub.
     fn stub_claude_usage(transport: &Arc<MockTransport>, rounds: usize, email: &str) -> Arc<AtomicUsize> {
         let calls = Arc::new(AtomicUsize::new(0));
         stub_claude(
@@ -1665,8 +1529,7 @@ mod tests {
         calls
     }
 
-    /// `countingClaudeUsage`: utilization varies per call so a cached response is
-    /// distinguishable from a fresh one.
+    /// Utilization varies per call so a cached response is distinguishable from a fresh one.
     fn counting_claude_usage(transport: &Arc<MockTransport>, rounds: usize) -> Arc<AtomicUsize> {
         let calls = Arc::new(AtomicUsize::new(0));
         stub_claude(
@@ -1681,6 +1544,23 @@ mod tests {
 
     async fn stored_row(pool: &PgPool, user_id: &str, id: &str) -> AccountRow {
         get_account(pool, user_id, id).await.unwrap().unwrap()
+    }
+
+    #[test]
+    fn looks_unauthorized_matches_the_sign_in_signals_and_never_panics_on_multibyte_text() {
+        for (text, expected) in [
+            ("usage 401", true),
+            ("Unauthorized", true),
+            ("invalid token", true),
+            ("INVALID_TOKEN", true),
+            ("invalidtoken", true),
+            ("invalid\u{2026}token", true),
+            ("invalid \u{2026}token", false),
+            ("invalid\u{2026}", false),
+            ("usage 429", false),
+        ] {
+            assert_eq!(looks_unauthorized(text), expected, "{text}");
+        }
     }
 
     // ------------------------------------------- PATCH /:provider/accounts/:id custom_label
@@ -2270,7 +2150,6 @@ mod tests {
         let after = claude_accounts(&state, &cookie, false).await;
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(after["accounts"][0]["usage"]["windows"][0]["utilization"], 20.0);
-        assert_eq!(after["accounts"][0]["stale"], false);
     }
 
     async fn age_usage(pool: &PgPool, id: &str, by_ms: i64) {
@@ -2321,7 +2200,6 @@ mod tests {
         let res = claude_accounts(&state, &cookie, false).await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(res["accounts"][0]["usage"]["windows"][0]["utilization"], 10.0);
-        assert_eq!(res["accounts"][0]["stale"], true);
     }
 
     #[tokio::test]
@@ -2367,7 +2245,6 @@ mod tests {
         // One hiccup must not blank the bars for every device sharing this cache, and must not
         // leave the lock held.
         assert_eq!(res["accounts"][0]["usage"]["windows"][0]["utilization"], 10.0);
-        assert_eq!(res["accounts"][0]["stale"], true);
         let row = stored_row(&pool, &user.id, "acc_1").await;
         assert_eq!(read_usage_snapshot(&row).unwrap().windows[0]["utilization"], 10.0);
         assert!(row.usage_fetching_at.is_none());
@@ -2725,7 +2602,7 @@ mod tests {
         // Another user's benched account stays benched.
         let other = insert_user(&pool, "user_2@example.com").await;
         seed_account(&pool, &other.id, "acc_user_2", "claude-code", 7, account_meta("o@example.com")).await;
-        crate::pool::bench::mark_benched(&pool, &other.id, "claude-code", "acc_user_2", None, None, now).await.unwrap();
+        crate::pool::bench::mark_benched(&pool, &other.id, "claude-code", "acc_user_2", 300_000, "429", now).await.unwrap();
         let theirs =
             call(&state, request("POST", "/api/providers/claude-code/accounts/acc_user_2/unpause", Some(&cookie), None)).await;
         assert_eq!(theirs.status(), StatusCode::NOT_FOUND);
@@ -2733,7 +2610,7 @@ mod tests {
 
         // A row whose provider does not match the path stays benched too.
         seed_account(&pool, &user.id, "acc_grok", "grok", 7, account_meta("g@example.com")).await;
-        crate::pool::bench::mark_benched(&pool, &user.id, "grok", "acc_grok", None, None, now).await.unwrap();
+        crate::pool::bench::mark_benched(&pool, &user.id, "grok", "acc_grok", 300_000, "429", now).await.unwrap();
         let mismatched =
             call(&state, request("POST", "/api/providers/claude-code/accounts/acc_grok/unpause", Some(&cookie), None)).await;
         assert_eq!(mismatched.status(), StatusCode::NOT_FOUND);
@@ -2748,7 +2625,7 @@ mod tests {
         let (user, cookie) = signed_in(&state, "user_1@example.com").await;
         let now = state.now_ms();
         seed_account(&pool, &user.id, "acc_1", "claude-code", 7, account_meta("stored@example.com")).await;
-        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_1", None, None, now).await.unwrap();
+        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_1", 300_000, "429", now).await.unwrap();
         assert!(crate::pool::bench::is_benched(&pool, &user.id, "acc_1", now).await.unwrap());
 
         let uri = "/api/providers/claude-code/accounts/acc_1/unpause";
@@ -2778,97 +2655,63 @@ mod tests {
         json!({ "email": "seat@example.com", "plan_type": plan_type, "rate_limit_tier": tier })
     }
 
-    /// The profile stub carries no organization, so the seeded plan facts are what the route
-    /// reads — the shape of a cached snapshot in production.
-    async fn fable_statuses(state: &AppState, transport: &Arc<MockTransport>, cookie: &str, rows: usize) -> Vec<(String, String)> {
-        stub_claude_usage(transport, rows, "upstream@example.com");
-        let json = claude_accounts(state, cookie, false).await;
-        json["accounts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| (a["id"].as_str().unwrap().to_string(), a["status"].as_str().unwrap().to_string()))
-            .collect()
-    }
-
     fn pairs(rows: &[(&str, &str)]) -> Vec<(String, String)> {
         rows.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
     }
 
+    /// The profile stub carries no organization, so the seeded plan facts are what the route
+    /// reads — the shape of a cached snapshot in production.
     #[tokio::test]
-    async fn a_first_seat_without_fable_reads_active_no_fable_and_the_next_eligible_one_active_fable() {
+    async fn the_claude_code_dot_carries_the_fable_route() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let transport = MockTransport::new();
         let state = test_state(pool.clone(), transport.clone());
-        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
-        seed_account(&pool, &user.id, "acc_team", "claude-code", 15, plan("claude_team", TEAM_STANDARD)).await;
-        seed_account(&pool, &user.id, "acc_max_a", "claude-code", 14, plan("claude_max", TEAM_PREMIUM)).await;
-        seed_account(&pool, &user.id, "acc_max_b", "claude-code", 11, plan("claude_max", TEAM_PREMIUM)).await;
-
-        assert_eq!(
-            fable_statuses(&state, &transport, &cookie, 3).await,
-            pairs(&[("acc_team", "active_no_fable"), ("acc_max_a", "active_fable"), ("acc_max_b", "standby")])
-        );
-    }
-
-    #[tokio::test]
-    async fn a_first_seat_with_fable_is_plain_active_and_nothing_below_it_is_active_fable() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let transport = MockTransport::new();
-        let state = test_state(pool.clone(), transport.clone());
-        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
-        seed_account(&pool, &user.id, "acc_premium", "claude-code", 15, plan("claude_team", TEAM_PREMIUM)).await;
-        seed_account(&pool, &user.id, "acc_max", "claude-code", 14, plan("claude_max", TEAM_PREMIUM)).await;
-
-        assert_eq!(
-            fable_statuses(&state, &transport, &cookie, 2).await,
-            pairs(&[("acc_premium", "active"), ("acc_max", "standby")])
-        );
-    }
-
-    #[tokio::test]
-    async fn a_paused_fable_seat_never_takes_active_fable() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let transport = MockTransport::new();
-        let state = test_state(pool.clone(), transport.clone());
-        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
-        seed_account(&pool, &user.id, "acc_team", "claude-code", 15, plan("claude_team", TEAM_STANDARD)).await;
-        seed_account(&pool, &user.id, "acc_max_a", "claude-code", 14, plan("claude_max", TEAM_PREMIUM)).await;
-        seed_account(&pool, &user.id, "acc_max_b", "claude-code", 11, plan("claude_max", TEAM_PREMIUM)).await;
-        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_max_a", Some(60_000), Some("429"), state.now_ms())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            fable_statuses(&state, &transport, &cookie, 3).await,
-            pairs(&[("acc_team", "active_no_fable"), ("acc_max_a", "benched"), ("acc_max_b", "active_fable")])
-        );
-    }
-
-    #[tokio::test]
-    async fn a_pool_with_no_fable_seat_shows_active_no_fable_and_no_purple_row() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let transport = MockTransport::new();
-        let state = test_state(pool.clone(), transport.clone());
-        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
-        seed_account(&pool, &user.id, "acc_team_a", "claude-code", 15, plan("claude_team", TEAM_STANDARD)).await;
-        seed_account(&pool, &user.id, "acc_team_b", "claude-code", 14, plan("claude_team", TEAM_STANDARD)).await;
-
-        assert_eq!(
-            fable_statuses(&state, &transport, &cookie, 2).await,
-            pairs(&[("acc_team_a", "active_no_fable"), ("acc_team_b", "standby")])
-        );
-    }
-
-    #[tokio::test]
-    async fn a_seat_with_no_stored_plan_facts_fails_open_to_plain_active() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let transport = MockTransport::new();
-        let state = test_state(pool.clone(), transport.clone());
-        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
-        seed_account(&pool, &user.id, "acc_fresh", "claude-code", 15, account_meta("stored@example.com")).await;
-
-        assert_eq!(fable_statuses(&state, &transport, &cookie, 1).await, pairs(&[("acc_fresh", "active")]));
+        let standard = plan("claude_team", TEAM_STANDARD);
+        let max = plan("claude_max", TEAM_PREMIUM);
+        let premium_team = plan("claude_team", TEAM_PREMIUM);
+        let no_plan = account_meta("stored@example.com");
+        // (case, rows in priority order as (id, plan facts, paused), the statuses they read)
+        let cases = [
+            (
+                "a first seat without Fable, then the next eligible one",
+                vec![("team", &standard, false), ("max_a", &max, false), ("max_b", &max, false)],
+                vec!["active_no_fable", "active_fable", "standby"],
+            ),
+            (
+                "a first seat with Fable is plain active, nothing below it active_fable",
+                vec![("premium", &premium_team, false), ("max", &max, false)],
+                vec!["active", "standby"],
+            ),
+            (
+                "a paused Fable seat never takes active_fable",
+                vec![("team", &standard, false), ("max_a", &max, true), ("max_b", &max, false)],
+                vec!["active_no_fable", "benched", "active_fable"],
+            ),
+            (
+                "a pool with no Fable seat has no purple row",
+                vec![("team_a", &standard, false), ("team_b", &standard, false)],
+                vec!["active_no_fable", "standby"],
+            ),
+            ("no stored plan facts fails open to plain active", vec![("fresh", &no_plan, false)], vec!["active"]),
+        ];
+        for (n, (case, rows, expected)) in cases.into_iter().enumerate() {
+            let (user, cookie) = signed_in(&state, &format!("fable_{n}@example.com")).await;
+            for (i, (id, meta, paused)) in rows.iter().enumerate() {
+                let id = format!("{n}_{id}");
+                seed_account(&pool, &user.id, &id, "claude-code", 15 - i as i32, (*meta).clone()).await;
+                if *paused {
+                    crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", &id, 60_000, "429", state.now_ms())
+                        .await
+                        .unwrap();
+                }
+            }
+            stub_claude_usage(&transport, rows.len(), "upstream@example.com");
+            let json = claude_accounts(&state, &cookie, false).await;
+            let read: Vec<(String, String)> = statuses(&json);
+            let want: Vec<(String, String)> =
+                rows.iter().zip(expected.iter()).map(|((id, _, _), status)| (format!("{n}_{id}"), status.to_string())).collect();
+            assert_eq!(read, want, "{case}");
+        }
     }
 
     // --------------------------------------------------------------- Antigravity login
@@ -2986,7 +2829,9 @@ mod tests {
         // Project id rides inside the encrypted payload — no new column.
         let extra = credential.extra.unwrap();
         assert_eq!(extra["project_id"], "proj-42");
-        assert_eq!(extra["tier_id"], "pro-tier");
+        // The tier is a display fact: it lands in the account meta, not the credential.
+        let meta: Value = serde_json::from_str(rows[0].account_meta_json.as_deref().unwrap()).unwrap();
+        assert_eq!(meta["plan_type"], "pro-tier");
         // The pending state is consumed, not left behind for replay.
         let states: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM oauth_login_states").fetch_one(&pool).await.unwrap();
         assert_eq!(states, 0);
@@ -3172,7 +3017,6 @@ mod tests {
         row.strip_fast_mode = true;
         let ext = Arc::new(FakeExtension {
             shared: vec![SharedAccount { account: row, priority: 3, share: share_info(), usage: None }],
-            set_shared_priority_ok: true,
             ..Default::default()
         });
         let state = state_with_extension(pool.clone(), transport.clone(), ext);
@@ -3183,7 +3027,6 @@ mod tests {
         let json = grok_accounts(&state, &cookie).await;
         assert_eq!(json["accounts"].as_array().unwrap().len(), 1);
         assert_eq!(json["accounts"][0]["id"], "shared_1");
-        assert_eq!(json["accounts"][0]["priority"], 3);
         assert_eq!(json["accounts"][0]["label"], "owner-seat");
         assert_eq!(json["accounts"][0]["usage"], Value::Null);
         assert_eq!(json["accounts"][0]["error"], Value::Null);
@@ -3216,7 +3059,6 @@ mod tests {
                 share: share_info(),
                 usage: Some(AccountUsage { windows: windows.clone(), show_credits: false }),
             }]),
-            set_shared_priority_ok: true,
             ..Default::default()
         });
         let recorder = ext.clone();
@@ -3328,7 +3170,7 @@ mod tests {
             value: Some("100 / 100".into()),
             scope: None,
         };
-        let ext = Arc::new(FakeExtension { bars: vec![bar.clone()], set_shared_priority_ok: true, ..Default::default() });
+        let ext = Arc::new(FakeExtension { bars: vec![bar.clone()], ..Default::default() });
         let recorder = ext.clone();
         let state = state_with_extension(pool.clone(), transport.clone(), ext);
         let (user, cookie) = signed_in(&state, "user_1@example.com").await;
@@ -3349,7 +3191,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_list_follows_the_routers_merged_order_with_a_promoted_shared_row_first() {
+    async fn the_list_follows_the_routers_merged_order_with_a_higher_shared_row_first() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let transport = MockTransport::new();
         for _ in 0..6 {
@@ -3365,7 +3207,6 @@ mod tests {
                 share: share_info(),
                 usage: None,
             }],
-            set_shared_priority_ok: true,
             ..Default::default()
         });
         let state = state_with_extension(pool.clone(), transport.clone(), ext);
@@ -3420,34 +3261,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn promote_delegates_to_set_shared_priority_one_above_the_merged_maximum() {
+    async fn delete_removes_only_an_own_row_of_the_paths_builtin_provider() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
-        let ext = borrowing_extension(true);
-        let recorder = ext.clone();
-        let state = state_with_extension(pool.clone(), MockTransport::new(), ext);
+        let state = test_state(pool.clone(), MockTransport::new());
         let (user, cookie) = signed_in(&state, "user_1@example.com").await;
-        seed_account(&pool, &user.id, "own_1", "grok", 9, account_meta("own@example.com")).await;
+        seed_account(&pool, &user.id, "acc_grok", "grok", 1, json!({})).await;
+        seed_account(&pool, &user.id, "acc_endpoint", "my-endpoint", 1, json!({})).await;
+        let remaining = |pool: PgPool, user_id: String| async move {
+            let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM upstream_accounts WHERE user_id = $1 ORDER BY id")
+                .bind(user_id)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+            ids
+        };
 
-        let res = call(&state, request("POST", "/api/providers/grok/accounts/shared_1/promote", Some(&cookie), None)).await;
-        assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(body_json(res).await, json!({ "ok": true }));
-        assert!(recorder.calls.lock().unwrap().iter().any(|(name, viewer, priority)| {
-            name == "set_shared_priority:shared_1" && viewer == &user.id && *priority == 10
-        }));
-        // The owner's row is never rewritten by a borrower's promote.
-        let ids: Vec<String> =
-            list_accounts(&pool, &user.id, "grok").await.unwrap().into_iter().map(|r| r.id).collect();
-        assert_eq!(ids, vec!["own_1".to_string()]);
-    }
+        // A custom endpoint's key row is not a builtin account.
+        let custom = call(&state, request("DELETE", "/api/providers/my-endpoint/accounts/acc_endpoint", Some(&cookie), None)).await;
+        assert_eq!(custom.status(), StatusCode::BAD_REQUEST);
+        // Nor is it reachable through a builtin path, and neither is another provider's row.
+        for path in ["/api/providers/grok/accounts/acc_endpoint", "/api/providers/codex/accounts/acc_grok"] {
+            let res = call(&state, request("DELETE", path, Some(&cookie), None)).await;
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(remaining(pool.clone(), user.id.clone()).await, ["acc_endpoint", "acc_grok"]);
 
-    #[tokio::test]
-    async fn promote_is_404_when_the_extension_refuses() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = state_with_extension(pool.clone(), MockTransport::new(), borrowing_extension(false));
-        let (_, cookie) = signed_in(&state, "user_1@example.com").await;
-
-        let res = call(&state, request("POST", "/api/providers/grok/accounts/shared_1/promote", Some(&cookie), None)).await;
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let ok = call(&state, request("DELETE", "/api/providers/grok/accounts/acc_grok", Some(&cookie), None)).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(remaining(pool.clone(), user.id.clone()).await, ["acc_endpoint"]);
     }
 
     // ------------------------------------------------------ PUT /:provider/accounts/order
@@ -3499,11 +3340,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_standalone_install_sees_no_shared_rows_at_all() {
+    async fn reorder_is_a_conflict_when_the_extension_no_longer_shares_the_row() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool.clone(), MockTransport::new());
-        let (_, cookie) = signed_in(&state, "user_1@example.com").await;
-        assert_eq!(grok_accounts(&state, &cookie).await["accounts"].as_array().unwrap().len(), 0);
+        let ext = borrowing_extension(false);
+        let recorder = ext.clone();
+        let state = state_with_extension(pool.clone(), MockTransport::new(), ext);
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        seed_account(&pool, &user.id, "own_1", "grok", 9, account_meta("one@example.com")).await;
+
+        // The share was withdrawn between the pool read and the write: the client must reload,
+        // not believe the borrowed row moved.
+        let body = json!({ "ids": ["shared_1", "own_1"] });
+        let res = call(&state, request("PUT", "/api/providers/grok/accounts/order", Some(&cookie), Some(body))).await;
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(body_json(res).await, json!({ "error": "the pool changed; reload and try again" }));
+        assert!(recorder.calls.lock().unwrap().iter().any(|(name, _, _)| name == "set_shared_priority:shared_1"));
     }
 
     // ---------------------------------------------------- POST /:provider/accounts/import
@@ -3596,7 +3447,7 @@ mod tests {
             seed_account(&pool, &user.id, id, "claude-code", priority, account_meta("seat@example.com")).await;
             seed_snapshot(&pool, id, json!([]), None, false).await;
             if !reason.is_empty() {
-                crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", id, Some(60_000), Some(reason), now)
+                crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", id, 60_000, reason, now)
                     .await
                     .unwrap();
             }
@@ -3640,7 +3491,7 @@ mod tests {
         }
         crate::pool::sign_in::mark_sign_in_rejected(&pool, &user.id, "claude-code", "acc_dead", now).await.unwrap();
         // The bench that came with the 401 is already over.
-        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_dead", Some(300_000), Some("401"), now - 400_000)
+        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_dead", 300_000, "401", now - 400_000)
             .await
             .unwrap();
 
@@ -3650,7 +3501,7 @@ mod tests {
         assert_eq!(json["accounts"][0]["sign_in_expires_at"], Value::Null);
 
         // Upstream refuses it again: still reauth, and now there is a bench to resume.
-        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_dead", Some(300_000), Some("401"), now)
+        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_dead", 300_000, "401", now)
             .await
             .unwrap();
         let json = claude_accounts(&state, &cookie, false).await;
@@ -3776,7 +3627,7 @@ mod tests {
         let now = state.now_ms();
         seed_account(&pool, &user.id, "acc_1", "claude-code", 7, plan("team", TEAM_PREMIUM)).await;
         set_account_custom_label(&pool, &user.id, "acc_1", Some("Work")).await.unwrap();
-        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_1", Some(60_000), Some("401"), now)
+        crate::pool::bench::mark_benched(&pool, &user.id, "claude-code", "acc_1", 60_000, "401", now)
             .await
             .unwrap();
         seed_snapshot(&pool, "acc_1", json!([{ "label": "5h", "utilization": 10 }]), Some("usage 401"), false).await;

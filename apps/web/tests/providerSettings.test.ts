@@ -27,9 +27,9 @@ function endpoint(overrides: Partial<CustomProvider> = {}): CustomProvider {
     key_mask: "sk-abc…f3a2",
     account_id: "acct-1",
     status: "active",
-    sort_order: 0,
-    created_at: "2026-11-08T00:00:00Z",
-    updated_at: "2026-11-08T00:00:00Z",
+    strip_fast_mode: false,
+    strip_claude_code_line: false,
+    force_cache_ttl_1h: false,
     ...overrides,
   }
 }
@@ -37,18 +37,19 @@ function endpoint(overrides: Partial<CustomProvider> = {}): CustomProvider {
 function account(overrides: Partial<ProviderAccount> = {}): ProviderAccount {
   return {
     id: "acct-1",
-    priority: 0,
     status: "active",
     label: "owner@example.com",
     custom_label: null,
     account: { email: "owner@example.com", plan_type: "claude_max" },
     usage: { windows: [{ label: "5h", utilization: 40, resets_at: null }] },
     error: null,
-    stale: false,
     allow_credits: false,
     on_credits: false,
     strip_fast_mode: false,
     strip_claude_code_line: false,
+    force_cache_ttl_1h: false,
+    benched: false,
+    sign_in_expires_at: null,
     ...overrides,
   }
 }
@@ -178,12 +179,6 @@ it("shows a shared row the owner's switches as tags and gives it no block", asyn
   })
   expect(html).toContain("Claude Code identity hidden")
   expect(html).not.toContain("Request edits for this account")
-})
-
-it("reads an endpoint cached before the switches existed as both off", async () => {
-  const html = await render(CustomProviderCard, { provider: endpoint(), editing: true })
-  expect(html).not.toContain("Fast mode removed")
-  expect(html).not.toContain("checked")
 })
 
 it("sends only the switch that changed, to that account's own row", async () => {

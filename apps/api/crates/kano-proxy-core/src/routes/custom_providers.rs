@@ -1,5 +1,4 @@
-//! `/api/custom-providers`, the
-//! session-authenticated CRUD behind the admin's BYO endpoints
+//! `/api/custom-providers`, the session-authenticated CRUD behind the admin's BYO endpoints
 //! (docs/providers.md § Custom providers).
 //!
 //! Every user-supplied URL passes the SSRF/loop guard on create, update and test; the stored
@@ -16,7 +15,7 @@ use serde_json::{json, Value};
 use crate::auth::session::SessionUser;
 use crate::crypto::token_crypto::{decrypt_json, encrypt_json};
 use crate::db::accounts::{
-    delete_accounts_for_provider, insert_account, list_accounts, update_account_payload, AccountIdentity, AccountRow,
+    delete_accounts_for_provider, insert_account, list_accounts, list_accounts_by_provider, update_account_payload, AccountIdentity, AccountRow,
     NewAccount,
 };
 use crate::db::cli::{count_cli_providers, get_cli_provider_by_slug};
@@ -24,15 +23,16 @@ use crate::db::custom_providers::{
     count_custom_providers, delete_custom_provider, get_custom_provider_by_id, get_custom_provider_by_slug,
     insert_custom_provider, list_custom_providers, rename_custom_provider_slug, reorder_custom_providers,
     update_custom_provider_fields, CustomProviderPatch, CustomProviderRow, NewCustomProvider, SlugRename,
+    MAX_CUSTOM_PROVIDERS_PER_USER,
 };
+use crate::http::errors::{admin_error as error, internal_error, not_found};
 use crate::pool::bench::{bench_until_from_row, clear_bench};
 use crate::pool::extension::{ListSharedOptions, SharedCustomProvider};
 use crate::routing::candidates::viewer_shared_custom;
 use crate::pool::StoredCredential;
 use crate::utils::custom_provider::{
-    is_custom_provider_format, is_models_mode, mask_api_key, parse_manual_models, validate_api_key,
+    is_models_mode, mask_api_key, parse_manual_models, validate_api_key,
     validate_base_url_length, validate_manual_models, validate_name, CustomProviderFormat,
-    MAX_CUSTOM_PROVIDERS_PER_USER,
 };
 use crate::utils::upstream_url::{validate_upstream_base_url, UpstreamUrlCheckOpts};
 use crate::upstream::UpstreamRequest;
@@ -50,18 +50,6 @@ pub fn routes() -> Router<AppState> {
         .route("/{id}/unpause", post(unpause))
 }
 
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
-}
-
-fn internal_error() -> Response {
-    error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
-}
-
-fn not_found() -> Response {
-    error(StatusCode::NOT_FOUND, "not found")
-}
-
 fn bad_request(message: &str) -> Response {
     error(StatusCode::BAD_REQUEST, message)
 }
@@ -70,8 +58,7 @@ fn invalid_json() -> Response {
     bad_request("invalid JSON")
 }
 
-/// `try { await c.req.json() } catch { return 400 "invalid JSON" }`, the guard every writing
-/// handler here opened with.
+/// The request body as JSON, or `None` (every writing handler's `400 invalid JSON`).
 fn parse_body(bytes: &Bytes) -> Option<Value> {
     serde_json::from_slice(bytes).ok()
 }
@@ -108,8 +95,13 @@ fn key_mask_from_account(row: Option<&AccountRow>) -> Option<String> {
 
 async fn to_list_item(state: &AppState, user_id: &str, row: &CustomProviderRow) -> Result<Value, sqlx::Error> {
     let accounts = list_accounts(state.pool(), user_id, &row.slug).await?;
+    Ok(list_item(row, &accounts, state.now_ms()))
+}
+
+/// One provider's read shape, from its account rows (`list_accounts` order).
+fn list_item(row: &CustomProviderRow, accounts: &[AccountRow], now_ms: i64) -> Value {
     let account = accounts.first();
-    Ok(json!({
+    json!({
         "id": row.id,
         "slug": row.slug,
         "name": row.name,
@@ -118,29 +110,25 @@ async fn to_list_item(state: &AppState, user_id: &str, row: &CustomProviderRow) 
         "count_tokens_url": row.count_tokens_url,
         "models_mode": row.models_mode,
         "manual_models": parse_manual_models(row.manual_models_json.as_deref()),
-        "sort_order": row.sort_order,
         "key_mask": key_mask_from_account(account),
         // The provider's single upstream_accounts row (its stored API key) — lets the Groups
         // picker pin a target to this endpoint's key like any other account (docs/auth.md).
         // null if the account row is somehow missing.
         "account_id": account.map(|a| a.id.clone()),
-        "status": compute_status(&accounts, state.now_ms()),
+        "status": compute_status(accounts, now_ms),
         // The request-edit switches on that account row (docs/providers.md § Request edits),
         // written through `PATCH /api/providers/:slug/accounts/:account_id`.
         "strip_fast_mode": account.is_some_and(|a| a.strip_fast_mode),
         "strip_claude_code_line": account.is_some_and(|a| a.strip_claude_code_line),
         "force_cache_ttl_1h": account.is_some_and(|a| a.force_cache_ttl_1h),
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-    }))
+    })
 }
 
 async fn list_items(state: &AppState, user_id: &str, rows: &[CustomProviderRow]) -> Result<Vec<Value>, sqlx::Error> {
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        out.push(to_list_item(state, user_id, row).await?);
-    }
-    Ok(out)
+    let slugs: Vec<&str> = rows.iter().map(|row| row.slug.as_str()).collect();
+    let accounts = list_accounts_by_provider(state.pool(), user_id, &slugs).await?;
+    let now_ms = state.now_ms();
+    Ok(rows.iter().map(|row| list_item(row, accounts.get(&row.slug).map_or(&[], Vec::as_slice), now_ms)).collect())
 }
 
 // ------------------------------------------------------------------------------- GET /
@@ -208,12 +196,10 @@ async fn create(
     let count_tokens_url_raw = text("count_tokens_url").trim().to_string();
     let api_key = text("api_key").to_string();
     let models_mode = body.get("models_mode").cloned().unwrap_or(json!("auto"));
-    let format_value = body.get("format").cloned().unwrap_or(Value::Null);
 
-    if !is_custom_provider_format(&format_value) {
+    let Some(format) = body.get("format").and_then(Value::as_str).and_then(CustomProviderFormat::parse) else {
         return bad_request("format must be 'openai' or 'anthropic'");
-    }
-    let format = format_value.as_str().expect("checked above").to_string();
+    };
     if let Some(err) = crate::utils::custom_provider::validate_slug(&slug) {
         return bad_request(&err);
     }
@@ -244,7 +230,7 @@ async fn create(
     // field there is rejected rather than silently stored.
     let mut count_tokens_url: Option<String> = None;
     if !count_tokens_url_raw.is_empty() {
-        if format != "openai" {
+        if format != CustomProviderFormat::Openai {
             return bad_request("count_tokens_url is only supported when format is \"openai\"");
         }
         if let Some(err) = validate_base_url_length(&count_tokens_url_raw, "count_tokens_url") {
@@ -266,7 +252,7 @@ async fn create(
     };
     let cap_message =
         format!("maximum of {MAX_CUSTOM_PROVIDERS_PER_USER} providers reached (custom + CLI)");
-    if custom_count + cli_count >= MAX_CUSTOM_PROVIDERS_PER_USER as i64 {
+    if custom_count + cli_count >= MAX_CUSTOM_PROVIDERS_PER_USER {
         return bad_request(&cap_message);
     }
 
@@ -290,7 +276,7 @@ async fn create(
             user_id: &session.user.id,
             slug: &slug,
             name: &name,
-            format: &format,
+            format: format.as_str(),
             base_url: &base_url,
             count_tokens_url: count_tokens_url.as_deref(),
             models_mode: models_mode.as_str().unwrap_or("auto"),
@@ -346,13 +332,11 @@ async fn create(
 async fn reorder(State(state): State<AppState>, session: SessionUser, body: Bytes) -> Response {
     let Some(body) = parse_body(&body) else { return invalid_json() };
     let Value::Object(body) = body else { return bad_request("body must be an object") };
-    let Some(Value::Array(ids)) = body.get("ids") else {
-        return bad_request("ids must be an array of strings");
-    };
-    if ids.iter().any(|id| !id.is_string()) {
-        return bad_request("ids must be an array of strings");
-    }
-    let ids: Vec<String> = ids.iter().map(|id| id.as_str().unwrap_or_default().to_string()).collect();
+    let ids: Option<Vec<String>> = body
+        .get("ids")
+        .and_then(Value::as_array)
+        .and_then(|ids| ids.iter().map(|id| id.as_str().map(str::to_string)).collect());
+    let Some(ids) = ids else { return bad_request("ids must be an array of strings") };
 
     let Ok(rows) = list_custom_providers(state.pool(), &session.user.id).await else {
         return internal_error();
@@ -571,15 +555,12 @@ async fn remove(State(state): State<AppState>, session: SessionUser, Path(id): P
 
     // Accounts first: if this crashes partway, a leftover account row without a provider row is
     // unreachable dead data — the reverse order would leave it silently acquirable by the pool.
-    let Ok(removed) = delete_accounts_for_provider(state.pool(), &session.user.id, &existing.slug).await else {
-        return internal_error();
-    };
-    if delete_custom_provider(state.pool(), &session.user.id, &id).await.is_err() {
+    // The bench is two columns on the account row, so deleting the row clears it.
+    if delete_accounts_for_provider(state.pool(), &session.user.id, &existing.slug).await.is_err() {
         return internal_error();
     }
-    for account in &removed {
-        // Best-effort: the rows are already gone, so a failed bench clear changes nothing.
-        let _ = clear_bench(state.pool(), &session.user.id, &existing.slug, &account.id).await;
+    if delete_custom_provider(state.pool(), &session.user.id, &id).await.is_err() {
+        return internal_error();
     }
     Json(json!({ "ok": true })).into_response()
 }
@@ -606,7 +587,7 @@ async fn unpause(State(state): State<AppState>, session: SessionUser, Path(id): 
 // ----------------------------------------------------------------------------- POST /test
 
 /// GET the models endpoint for a format and map the outcome. Never echoes the key or body.
-pub async fn test_custom_provider_connection(
+async fn test_custom_provider_connection(
     state: &AppState,
     format: CustomProviderFormat,
     base_url: &str,
@@ -696,11 +677,10 @@ async fn test_connection(
             api_key = credential.access_token;
         }
         None => {
-            let format_value = body.get("format").cloned().unwrap_or(Value::Null);
-            if !is_custom_provider_format(&format_value) {
+            let Some(parsed) = body.get("format").and_then(Value::as_str).and_then(CustomProviderFormat::parse) else {
                 return bad_request("format must be 'openai' or 'anthropic'");
-            }
-            format = CustomProviderFormat::parse(format_value.as_str().unwrap_or_default()).expect("checked above");
+            };
+            format = parsed;
             base_url = body.get("base_url").and_then(Value::as_str).unwrap_or("").trim().to_string();
             api_key = body.get("api_key").and_then(Value::as_str).unwrap_or("").to_string();
             if api_key.is_empty() {
@@ -870,19 +850,21 @@ mod tests {
     async fn create_stores_manual_models_and_appends_new_providers_last() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool.clone(), MockTransport::new());
-        let (_, cookie) = signed_in(&state, "user_1@example.com").await;
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
 
         let manual =
             created(&state, &cookie, json!({ "models_mode": "manual", "manual_models": ["model-a", "model-b"] })).await;
         assert_eq!(manual["manual_models"], json!(["model-a", "model-b"]));
-        assert_eq!(manual["sort_order"], 0);
 
-        let second = created(&state, &cookie, json!({ "slug": "second-endpoint", "name": "Second" })).await;
-        assert_eq!(second["sort_order"], 1);
+        created(&state, &cookie, json!({ "slug": "second-endpoint", "name": "Second" })).await;
         let json = listed(&state, &cookie).await;
         let slugs: Vec<&str> =
             json["providers"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap()).collect();
         assert_eq!(slugs, vec!["my-endpoint", "second-endpoint"]);
+        // Appended by position, not by the created_at tie-break.
+        let orders: Vec<i32> =
+            list_custom_providers(&pool, &user.id).await.unwrap().iter().map(|r| r.sort_order).collect();
+        assert_eq!(orders, vec![0, 1]);
     }
 
     #[tokio::test]
@@ -910,6 +892,37 @@ mod tests {
     // ------------------------------------------------------------------ GET / (list)
 
     #[tokio::test]
+    async fn rows_with_an_equal_sort_order_list_by_created_at() {
+        // Persisted rows share sort_order 0 (the column default and every user's first
+        // endpoint), so the created_at tie-break decides their order.
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let state = test_state(pool.clone(), MockTransport::new());
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
+        for (id, slug, created_at) in [
+            ("cprov_later", "later-endpoint", "2026-01-02T00:00:00.000Z"),
+            ("cprov_earlier", "earlier-endpoint", "2026-01-01T00:00:00.000Z"),
+        ] {
+            sqlx::query(
+                "INSERT INTO custom_providers (id, user_id, slug, name, format, base_url, count_tokens_url,
+                 models_mode, manual_models_json, sort_order, created_at, updated_at)
+                 VALUES ($1, $2, $3, $3, 'openai', 'https://x.example.com/v1', NULL, 'auto', NULL, 0, $4, $4)",
+            )
+            .bind(id)
+            .bind(&user.id)
+            .bind(slug)
+            .bind(created_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let json = listed(&state, &cookie).await;
+        let slugs: Vec<&str> =
+            json["providers"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap()).collect();
+        assert_eq!(slugs, vec!["earlier-endpoint", "later-endpoint"]);
+    }
+
+    #[tokio::test]
     async fn the_list_is_per_user_masked_and_reports_the_bench_state() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let state = test_state(pool.clone(), MockTransport::new());
@@ -927,7 +940,7 @@ mod tests {
         assert!(!json.to_string().contains(API_KEY));
 
         let account_id = stored_accounts(&pool, &user.id, "my-endpoint").await[0].id.clone();
-        crate::pool::bench::mark_benched(&pool, &user.id, "my-endpoint", &account_id, None, None, state.now_ms())
+        crate::pool::bench::mark_benched(&pool, &user.id, "my-endpoint", &account_id, 300_000, "429", state.now_ms())
             .await
             .unwrap();
         assert_eq!(listed(&state, &cookie).await["providers"][0]["status"], "benched");
@@ -1008,7 +1021,7 @@ mod tests {
         let Some((state, _, lent)) = lending_state().await else { return skip_without_db() };
         let (_, cookie) = signed_in(&state, "borrower@example.com").await;
         let team = &lent[0];
-        crate::pool::bench::mark_benched(state.pool(), &team.provider.user_id, "team-gw", &team.account.id, None, None, state.now_ms())
+        crate::pool::bench::mark_benched(state.pool(), &team.provider.user_id, "team-gw", &team.account.id, 300_000, "429", state.now_ms())
             .await
             .unwrap();
         let id = &team.provider.id;
@@ -1034,35 +1047,6 @@ mod tests {
         assert!(bench_until_from_row(&account, state.now_ms()).is_some(), "the owner's bench is theirs to clear");
     }
 
-    #[tokio::test]
-    async fn legacy_rows_with_a_zero_sort_order_fall_back_to_created_at() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool.clone(), MockTransport::new());
-        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
-        for (id, slug, created_at) in [
-            ("cprov_later", "later-endpoint", "2026-01-02T00:00:00.000Z"),
-            ("cprov_earlier", "earlier-endpoint", "2026-01-01T00:00:00.000Z"),
-        ] {
-            sqlx::query(
-                "INSERT INTO custom_providers (id, user_id, slug, name, format, base_url, count_tokens_url,
-                 models_mode, manual_models_json, sort_order, created_at, updated_at)
-                 VALUES ($1, $2, $3, $3, 'openai', 'https://x.example.com/v1', NULL, 'auto', NULL, 0, $4, $4)",
-            )
-            .bind(id)
-            .bind(&user.id)
-            .bind(slug)
-            .bind(created_at)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-
-        let json = listed(&state, &cookie).await;
-        let slugs: Vec<&str> =
-            json["providers"].as_array().unwrap().iter().map(|p| p["slug"].as_str().unwrap()).collect();
-        assert_eq!(slugs, vec!["earlier-endpoint", "later-endpoint"]);
-    }
-
     // ------------------------------------------------------------------ PUT /order
 
     #[tokio::test]
@@ -1073,7 +1057,7 @@ mod tests {
         let anon = call(&state, request("PUT", "/api/custom-providers/order", None, Some(json!({ "ids": [] })))).await;
         assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
 
-        let (_, cookie) = signed_in(&state, "user_1@example.com").await;
+        let (user, cookie) = signed_in(&state, "user_1@example.com").await;
         let first = created(&state, &cookie, json!({ "slug": "first-endpoint", "name": "first" })).await["id"]
             .as_str()
             .unwrap()
@@ -1092,8 +1076,9 @@ mod tests {
         let json = body_json(res).await;
         let ids: Vec<&str> = json["providers"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
         assert_eq!(ids, vec![second.as_str(), first.as_str()]);
-        let orders: Vec<i64> =
-            json["providers"].as_array().unwrap().iter().map(|p| p["sort_order"].as_i64().unwrap()).collect();
+        // Renumbered densely, in the requested order.
+        let orders: Vec<i32> =
+            list_custom_providers(&pool, &user.id).await.unwrap().iter().map(|r| r.sort_order).collect();
         assert_eq!(orders, vec![0, 1]);
         let slugs: Vec<String> = listed(&state, &cookie).await["providers"]
             .as_array()
@@ -1544,7 +1529,7 @@ mod tests {
 
         let id = created(&state, &cookie, json!({})).await["id"].as_str().unwrap().to_string();
         let account = stored_accounts(&pool, &user.id, "my-endpoint").await.remove(0);
-        crate::pool::bench::mark_benched(&pool, &user.id, "my-endpoint", &account.id, None, None, now).await.unwrap();
+        crate::pool::bench::mark_benched(&pool, &user.id, "my-endpoint", &account.id, 300_000, "429", now).await.unwrap();
         assert_eq!(listed(&state, &cookie).await["providers"][0]["status"], "benched");
 
         // Another user's provider id is a 404 and leaves the bench alone.

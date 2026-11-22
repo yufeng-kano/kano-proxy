@@ -178,7 +178,7 @@ cp .env.example .env     # fill it in: domain, ACME email, Google OAuth client, 
 docker compose up -d --build
 ```
 
-Point your domain's DNS at the machine and open ports 80 and 443. Caddy fetches a certificate on the first request, and the server applies its migrations at start. If you already run a reverse proxy, drop the `caddy` service and route the API paths yourself, as [the deployment doc](./docs/deployment.md) describes.
+Point your domain's DNS at the machine and open ports 80 and 443. Caddy obtains the certificate itself, and the server applies its migrations at start. If you already run a reverse proxy, drop the `caddy` service and route the API paths yourself, as [the deployment doc](./docs/deployment.md) describes.
 
 To work on the code, see [Testing](./docs/testing.md). Each app under `apps/` builds and tests on its own.
 

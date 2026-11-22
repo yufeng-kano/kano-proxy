@@ -64,7 +64,7 @@ const form = reactive({
   count_tokens_url: props.provider?.count_tokens_url ?? "",
   models_mode: (props.provider?.models_mode ?? "auto") as CustomProviderModelsMode,
 })
-const manualModelsText = ref(props.provider?.manual_models?.join("\n") ?? "")
+const manualModelsText = ref(props.provider?.manual_models.join("\n") ?? "")
 
 const slugTouched = ref(false)
 /**
@@ -262,7 +262,7 @@ async function runTest() {
         base_url: form.base_url.trim(),
         api_key: form.api_key,
       })
-    } else if (isEdit.value && props.provider) {
+    } else if (props.provider) {
       testResult.value = await testCustomProvider({
         id: props.provider.id,
         base_url: form.base_url.trim() || undefined,
@@ -284,7 +284,7 @@ async function submit() {
   }
 
   // A changed prefix is confirmed before it is sent; the confirm step's own
-  // button comes back here with `confirmed` set.
+  // button comes back here with `step` already on "confirm".
   if (slugChanged.value && step.value === "form") {
     step.value = "confirm"
     void loadAffectedGroups(savedSlug.value)
@@ -293,7 +293,7 @@ async function submit() {
 
   saving.value = true
   try {
-    if (isEdit.value && props.provider) {
+    if (props.provider) {
       const body: Parameters<typeof updateCustomProvider>[1] = {
         name: form.name.trim(),
         slug: form.slug.trim(),
@@ -307,9 +307,6 @@ async function submit() {
       // field is always sent and an empty string is what clears a stored value.
       if (showCountTokensUrl.value) body.count_tokens_url = form.count_tokens_url.trim()
       await updateCustomProvider(props.provider.id, body)
-      emit("saved", { slugChanged: slugChanged.value })
-      emit("close")
-      return
     } else {
       await createCustomProvider({
         name: form.name.trim(),
@@ -326,7 +323,8 @@ async function submit() {
         manual_models: form.models_mode === "manual" ? manualModelsList.value : undefined,
       })
     }
-    emit("saved", { slugChanged: false })
+    // Always false on create: there is no saved prefix to have changed.
+    emit("saved", { slugChanged: slugChanged.value })
     emit("close")
   } catch (e) {
     // The one server refusal the user can act on from here: the new prefix is

@@ -2,25 +2,30 @@
 
 ## Cost safety (hard rule)
 
-Real upstream traffic is real money. **Never** debug, reproduce, bisect, or benchmark by sending real requests through the deployed proxy or directly to paid upstreams — verification is unit tests with stubbed `fetch`. A live smoke test requires the operator's explicit per-instance approval and must be minimal (tiny prompt, `max_tokens` ≤ 32, no long-context/`[1M]` variants, never in a loop or size sweep). For production failures, use free evidence first: the `request_logs` table and the server's own logs.
+Real upstream traffic is real money. **Never** debug, reproduce, bisect, or benchmark by sending real requests through the deployed proxy or directly to paid upstreams — verification is unit tests against a stubbed upstream transport (`MockTransport`). A live smoke test requires the operator's explicit per-instance approval and must be minimal (tiny prompt, `max_tokens` ≤ 32, no long-context/`[1M]` variants, never in a loop or size sweep). For production failures, use free evidence first: the `request_logs` table and the server's own logs.
 
 ## Layers
 
-1. **Unit** — pure adapters (OpenAI↔Anthropic and Gemini↔OpenAI/Anthropic mapping, reasoning_effort map + custom-openai effort-rejection parsers / `nearestReasoningEffort`, antigravity's 429 classifier, model parse, key hash).
-2. **Pool** — acquire/bench/promote against a throwaway database.
+1. **Unit** — pure adapters (OpenAI↔Anthropic and Gemini↔OpenAI/Anthropic mapping, reasoning_effort map + custom-openai effort-rejection parsers / `nearest_reasoning_effort`, antigravity's 429 classifier, model parse, key hash).
+2. **Pool** — acquire and bench against a throwaway database.
 3. **Route** — the router built in-process and driven with real requests; the upstream transport is stubbed.
 4. **Manual / local** — run the server against a local database and curl the OpenAI/Anthropic surfaces.
 5. **No real secrets in CI** — fixtures only.
 
 ## Commands
 
+The full check, run before every release and in CI (`ci.yml`):
+
 ```bash
-cd apps/api && cargo test --workspace   # the core crate and the server binary
-cd apps/cli    && cargo test               # kano-proxy CLI
-cd apps/web    && pnpm install && pnpm test
+cd apps/api  && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings
+cd apps/web  && pnpm install && pnpm test && pnpm typecheck && pnpm build
+cd apps/docs && pnpm install && pnpm build
+cd apps/cli  && cargo test
 ```
 
-Database-backed tests read `KANO_TEST_DATABASE_URL` (a throwaway PostgreSQL; CI starts one), give each test its own database, and skip themselves when none is reachable.
+CI also runs two jobs that need its runners: `cli-targets` builds the CLI release binary for each of its five targets (macOS arm64 and x64, Linux musl arm64 and x64 through `cross`, Windows x64), and `images` builds the three deploy images (`deploy/api`, `deploy/web`, `deploy/caddy`).
+
+Database-backed tests connect to the throwaway PostgreSQL at `KANO_TEST_DATABASE_URL` (default `postgres://postgres:test@127.0.0.1:55432/postgres`; CI starts one there), give each test its own database, and skip themselves when it is unreachable.
 
 Every app carries its own manifest and lockfile, so each one installs where it lives; there is no repository-wide `pnpm test`.
 

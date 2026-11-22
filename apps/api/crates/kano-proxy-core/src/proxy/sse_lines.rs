@@ -3,10 +3,8 @@
 //! Splits a byte stream into SSE lines incrementally: each byte is scanned once, each line
 //! joined once, unterminated EOF lines included, and no more than one line is ever held in
 //! memory. A line longer than `MAX_SSE_LINE_BYTES` fails the stream instead of buffering it.
-//!
-//! The TypeScript reader is demand-driven through `DemandReader.ready()`; a Rust `Stream` is
-//! pull-based by construction, so the adapter inherits that flow control for free — nothing
-//! is read from the upstream until the consumer polls.
+//! The splitter is a pull-based `Stream`: nothing is read from the upstream until the consumer
+//! polls.
 
 use std::collections::VecDeque;
 use std::io;
@@ -19,23 +17,21 @@ use futures::stream::Stream;
 /// Parsed SSE lines have a finite byte budget; native byte passthrough does not use this reader.
 pub const MAX_SSE_LINE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Message of the TypeScript `SseLineTooLargeError`, kept verbatim so callers (and tests) can
-/// recognize the failure through the `io::Error` the stream yields.
-pub const SSE_LINE_TOO_LARGE_MESSAGE: &str = "Upstream SSE event exceeds the 16 MiB parsing limit";
+/// What a line past the budget fails the stream with.
+const SSE_LINE_TOO_LARGE_MESSAGE: &str = "Upstream SSE event exceeds the 16 MiB parsing limit";
 
-/// The error a line past the budget yields; `SseLineTooLargeError` has no Rust equivalent, so
-/// the stream's own error type carries it.
-pub fn sse_line_too_large_error() -> io::Error {
+fn sse_line_too_large_error() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, SSE_LINE_TOO_LARGE_MESSAGE)
 }
 
-/// True when `err` is the line-budget failure (matching `instanceof SseLineTooLargeError`).
-pub fn is_sse_line_too_large(err: &io::Error) -> bool {
+/// True when `err` is the line-budget failure.
+#[cfg(test)]
+pub(crate) fn is_sse_line_too_large(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::InvalidData && err.to_string() == SSE_LINE_TOO_LARGE_MESSAGE
 }
 
-/// Line splitter over a byte stream. Lines exclude the `\n`; a trailing `\r` is kept, exactly
-/// as the TypeScript reader does (callers `trim()` the payload themselves).
+/// Line splitter over a byte stream. Lines exclude the `\n`; a trailing `\r` is kept (callers
+/// `trim()` the payload themselves).
 pub struct SseLines<S> {
     source: S,
     /// Bytes of the line being assembled; decoded once, at the delimiter.
@@ -45,7 +41,7 @@ pub struct SseLines<S> {
     pending: VecDeque<String>,
 }
 
-/// `readSseLines(source, maxBytes)`.
+/// Lines of `source`, each at most `max_bytes`.
 pub fn read_sse_lines<S>(source: S, max_bytes: usize) -> SseLines<S>
 where
     S: Stream<Item = Result<Bytes, io::Error>> + Unpin,
@@ -53,7 +49,7 @@ where
     SseLines { source, line: Vec::new(), max_bytes, done: false, pending: VecDeque::new() }
 }
 
-/// `readSseLines(source)` with the default 16 MiB budget.
+/// [`read_sse_lines`] with the default 16 MiB budget.
 pub fn read_sse_lines_default<S>(source: S) -> SseLines<S>
 where
     S: Stream<Item = Result<Bytes, io::Error>> + Unpin,
@@ -128,9 +124,10 @@ where
     }
 }
 
-/// Test/stub helper: a byte stream that serves `text` in `size`-byte chunks, so converters can
-/// be fed on awkward boundaries the way the vitest suites do.
-pub fn chunked_bytes(text: &str, size: usize) -> crate::upstream::transport::ByteStream {
+/// A byte stream that serves `text` in `size`-byte chunks, so converters can be fed on awkward
+/// boundaries.
+#[cfg(test)]
+pub(crate) fn chunked_bytes(text: &str, size: usize) -> crate::upstream::transport::ByteStream {
     let bytes = Bytes::copy_from_slice(text.as_bytes());
     let mut chunks: Vec<Bytes> = Vec::new();
     let mut offset = 0usize;

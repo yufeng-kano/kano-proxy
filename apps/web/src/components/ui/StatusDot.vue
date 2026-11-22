@@ -3,19 +3,12 @@
  * Status indicator. The dot is never alone — it always ships with its label,
  * because color-only status fails both colorblind users and screen readers
  * (docs/admin-ui.md § Accessibility floor).
- *
- * `labelOnly` hides the text visually for dense rows where a neighbouring
- * column already spells the status out; the accessible name stays.
  */
 import { computed } from "vue"
 import { useI18n } from "@/i18n"
 import type { AccountStatus } from "@/types"
 
-const props = defineProps<{
-  status: AccountStatus
-  /** Visually hide the label, keeping it for assistive tech. */
-  labelOnly?: boolean
-}>()
+const props = defineProps<{ status: AccountStatus }>()
 
 const { t } = useI18n()
 
@@ -44,7 +37,7 @@ const label = computed(() => {
 <template>
   <span class="status" :class="status">
     <span class="dot" aria-hidden="true" />
-    <span :class="labelOnly ? 'sr-only' : 'label'">{{ label }}</span>
+    <span class="label">{{ label }}</span>
   </span>
 </template>
 
@@ -96,10 +89,7 @@ const label = computed(() => {
 /* Limited and benched share the warn tone: both mean "usable again later,
    nothing to fix". The label is what separates them — the dot never carries a
    status on its own (docs/admin-ui.md § Accessibility floor). */
-.limited .dot {
-  background: var(--warn);
-}
-
+.limited .dot,
 .benched .dot {
   background: var(--warn);
 }

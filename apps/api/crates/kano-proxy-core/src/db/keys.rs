@@ -1,13 +1,14 @@
 //! `api_keys` rows. Keys are stored hashed with a 20-character
 //! display prefix; the plaintext exists only in the create response (docs/auth.md).
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
 use sqlx::{PgExecutor, PgPool};
 
 use crate::crypto::keys::create_api_key_material;
 use crate::ids::{new_id, now_iso};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct ApiKeyRow {
     pub id: String,
     pub user_id: String,
@@ -72,9 +73,16 @@ pub async fn list_keys_with_devices(db: &PgPool, user_id: &str) -> Result<Vec<Ap
     .await
 }
 
-/// How many keys a device minted that still exist — what the revoke confirmation names.
-pub async fn count_keys_for_device(db: &PgPool, device_id: &str) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE device_id = $1").bind(device_id).fetch_one(db).await
+/// How many keys each of the user's devices minted that still exist — what the revoke
+/// confirmation names. A device with none is absent from the map.
+pub async fn key_counts_by_device(db: &PgPool, user_id: &str) -> Result<HashMap<String, i64>, sqlx::Error> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT device_id, COUNT(*) FROM api_keys WHERE user_id = $1 AND device_id IS NOT NULL GROUP BY device_id",
+    )
+    .bind(user_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
 }
 
 /// Takes any executor — the pool, or a caller's transaction so the key commits or rolls back
@@ -143,39 +151,36 @@ pub async fn create_key_for_device(
     })
 }
 
-/// Rename and/or replace the limit fields. Unlike the COALESCE convention elsewhere, the
-/// limit fields are written verbatim when `limits` is given — `spend_limit: None` must
-/// *clear* a limit, which COALESCE cannot express. `false` means no such key for this user.
+/// Rename and/or replace the limit fields in one statement, returning the stored row. Unlike
+/// the COALESCE convention elsewhere, the limit fields are written verbatim when `limits` is
+/// given — `spend_limit: None` must *clear* a limit, which COALESCE cannot express. `None`
+/// means no such key for this user.
 pub async fn update_key(
     db: &PgPool,
     user_id: &str,
     key_id: &str,
     name: Option<&str>,
     limits: Option<SpendLimitFields>,
-) -> Result<bool, sqlx::Error> {
-    let existing: Option<String> = sqlx::query_scalar("SELECT id FROM api_keys WHERE id = $1 AND user_id = $2")
-        .bind(key_id)
-        .bind(user_id)
-        .fetch_optional(db)
-        .await?;
-    if existing.is_none() {
-        return Ok(false);
-    }
-    if let Some(name) = name {
-        sqlx::query("UPDATE api_keys SET name = $1 WHERE id = $2").bind(name).bind(key_id).execute(db).await?;
-    }
-    if let Some(limits) = limits {
-        sqlx::query(
-            "UPDATE api_keys SET spend_limit = $1, spend_limit_interval = $2, spend_limit_include_oauth = $3 WHERE id = $4",
-        )
-        .bind(limits.spend_limit)
-        .bind(&limits.spend_limit_interval)
-        .bind(i32::from(limits.spend_limit_include_oauth))
-        .bind(key_id)
-        .execute(db)
-        .await?;
-    }
-    Ok(true)
+) -> Result<Option<ApiKeyRow>, sqlx::Error> {
+    sqlx::query_as::<_, ApiKeyRow>(
+        "UPDATE api_keys SET
+           name = COALESCE($1, name),
+           spend_limit = CASE WHEN $2 THEN $3 ELSE spend_limit END,
+           spend_limit_interval = CASE WHEN $2 THEN $4 ELSE spend_limit_interval END,
+           spend_limit_include_oauth = CASE WHEN $2 THEN $5 ELSE spend_limit_include_oauth END
+         WHERE id = $6 AND user_id = $7
+         RETURNING id, user_id, name, key_prefix, key_hash, created_at, last_used_at,
+                   spend_limit, spend_limit_interval, spend_limit_include_oauth, device_id",
+    )
+    .bind(name)
+    .bind(limits.is_some())
+    .bind(limits.as_ref().and_then(|l| l.spend_limit))
+    .bind(limits.as_ref().map(|l| l.spend_limit_interval.as_str()))
+    .bind(limits.as_ref().map(|l| i32::from(l.spend_limit_include_oauth)))
+    .bind(key_id)
+    .bind(user_id)
+    .fetch_optional(db)
+    .await
 }
 
 pub async fn delete_key(db: impl PgExecutor<'_>, user_id: &str, key_id: &str) -> Result<bool, sqlx::Error> {
@@ -206,7 +211,7 @@ pub async fn find_key_by_hash(db: &PgPool, hash: &str) -> Result<Option<ApiKeyRo
         .await
 }
 
-/// Stamps `last_used_at`; runs off the request path (a background task, the `waitUntil`).
+/// Stamps `last_used_at`; runs off the request path, in a background task.
 pub async fn touch_key(db: &PgPool, key_id: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE api_keys SET last_used_at = $1 WHERE id = $2")
         .bind(now_iso())
@@ -241,7 +246,7 @@ mod tests {
 
         // Limits are written verbatim: an explicit None clears.
         let limits = SpendLimitFields { spend_limit: Some(25.0), spend_limit_interval: "weekly".into(), spend_limit_include_oauth: false };
-        assert!(update_key(&pool, &user.id, &created.row.id, Some("renamed"), Some(limits)).await.unwrap());
+        assert!(update_key(&pool, &user.id, &created.row.id, Some("renamed"), Some(limits)).await.unwrap().is_some());
         let rows = list_keys(&pool, &user.id).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "renamed");
@@ -253,7 +258,7 @@ mod tests {
 
         // Another user's key is invisible to both update and delete.
         let other = insert_user(&pool, "other@example.com").await;
-        assert!(!update_key(&pool, &other.id, &created.row.id, Some("hijack"), None).await.unwrap());
+        assert!(update_key(&pool, &other.id, &created.row.id, Some("hijack"), None).await.unwrap().is_none());
         assert!(!delete_key(&pool, &other.id, &created.row.id).await.unwrap());
         assert_eq!(list_keys(&pool, &user.id).await.unwrap()[0].name, "renamed");
         assert!(delete_key(&pool, &user.id, &created.row.id).await.unwrap());
@@ -277,8 +282,9 @@ mod tests {
         let by_id = |id: &str| listed.iter().find(|k| k.key.id == id).unwrap();
         assert_eq!(by_id(&minted.row.id).device_name.as_deref(), Some("my-mac"));
         assert_eq!(by_id(&manual.row.id).device_name, None);
-        assert_eq!(count_keys_for_device(&pool, &device.id).await.unwrap(), 1);
-        assert_eq!(count_keys_for_device(&pool, &other.id).await.unwrap(), 0);
+        let counts = key_counts_by_device(&pool, &user.id).await.unwrap();
+        assert_eq!(counts.get(&device.id), Some(&1));
+        assert_eq!(counts.get(&other.id), None);
 
         // Only the minting device may delete it through the device path; a manual key never.
         assert!(!delete_key_for_device(&pool, &user.id, &other.id, &minted.row.id).await.unwrap());

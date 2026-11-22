@@ -16,7 +16,7 @@ Proxy 不會儲存 prompt 或回應內容。每一列只有中繼資料：誰送
 頁首有這些控制項：
 
 - **Model**：**All models**，或單一模型、單一別名。清單列出你今天用過的項目，每項附上今天的請求數和費用。**By model** 列出模型；**By alias** 列出 [model group](/zh-TW/app/groups) 名稱，外加 **No alias**。切換時，每一列開頭顯示的名稱也會跟著換。
-- **Provider**：**All providers**，或單一內建供應商、自訂端點，附上類型和今天的請求數、費用。選了之後，Model 清單只留這個供應商的項目。
+- **Provider**：**All providers**，或單一內建供應商、自訂端點、CLI 供應商，附上類型和今天的請求數、費用。選了之後，Model 清單只留這個供應商的項目。
 - **Show**：**All** 或 **Errors**。選 **Errors** 只留下失敗的請求。
 - **Columns**：選擇要顯示哪些欄位。**Reset** 會恢復所有欄位和預設寬度。
 - 重新整理按鈕：載入最新的紀錄。

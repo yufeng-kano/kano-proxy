@@ -5,7 +5,7 @@
 //! binaries keep talking to this server unchanged. Both ends enforce the
 //! byte/path bounds — this module is the server half.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 pub const TUNNEL_PROTO: u32 = 1;
 
@@ -26,45 +26,31 @@ pub const FIRST_RES_TIMEOUT_MS: u64 = 120_000;
 
 pub const CLOSE_REPLACED: u16 = 4001;
 pub const CLOSE_TOKEN_EXPIRED: u16 = 4003;
-/// Retryable server-side failure (e.g. a models-report write). The Worker was limited to
-/// 1000/3000-4999 close codes; the code stays 4008 because released CLIs treat it as retryable.
+/// Retryable server-side failure (e.g. a models-report write); released CLIs treat 4008 as retryable.
 pub const CLOSE_RETRY: u16 = 4008;
 
 /// Agent-reported catalog bounds mirror the custom manual-list rules (docs/cli.md § Model catalog).
-pub const MAX_REPORTED_MODELS: usize = 100;
-pub const MAX_REPORTED_MODEL_ID_LENGTH: usize = 128;
+const MAX_REPORTED_MODELS: usize = 100;
+const MAX_REPORTED_MODEL_ID_LENGTH: usize = 128;
 
 const OPENAI_PATHS: [&str; 3] = ["/chat/completions", "/models", "/audio/transcriptions"];
 const ANTHROPIC_PATHS: [&str; 3] = ["/v1/messages", "/v1/messages/count_tokens", "/v1/models"];
 
 /// `cli_providers.format`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CliProviderFormat {
     OpenAI,
     Anthropic,
 }
 
 impl CliProviderFormat {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CliProviderFormat::OpenAI => "openai",
-            CliProviderFormat::Anthropic => "anthropic",
-        }
-    }
-    /// `null` for anything but the two known formats, as the Worker's header check was.
+    /// `None` for anything but the two known formats.
     pub fn parse(value: &str) -> Option<CliProviderFormat> {
         match value {
             "openai" => Some(CliProviderFormat::OpenAI),
             "anthropic" => Some(CliProviderFormat::Anthropic),
             _ => None,
         }
-    }
-}
-
-impl std::fmt::Display for CliProviderFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
     }
 }
 
@@ -116,7 +102,7 @@ pub fn fault_from_res_err_reason(reason: &str) -> TunnelFaultReason {
 }
 
 /// Wire-identical to the CLI's `ControlFrame` (`apps/cli/src/protocol.rs`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "t")]
 pub enum ControlFrame {
     #[serde(rename = "hello")]
@@ -126,7 +112,6 @@ pub enum ControlFrame {
         id: u32,
         method: String,
         path: String,
-        #[serde(default)]
         headers: std::collections::BTreeMap<String, String>,
     },
     #[serde(rename = "req_end")]
@@ -135,7 +120,6 @@ pub enum ControlFrame {
     Res {
         id: u32,
         status: u16,
-        #[serde(default)]
         headers: std::collections::BTreeMap<String, String>,
     },
     #[serde(rename = "res_end")]
@@ -173,10 +157,9 @@ fn frame_headers(value: &serde_json::Value) -> std::collections::BTreeMap<String
         .unwrap_or_default()
 }
 
-/// Parses a CLI → server control frame, tolerating the same sloppiness the
-/// TypeScript `parseControlFrame` did: unknown frame types, wrong field types
-/// and non-string header/model entries are dropped rather than throwing.
-/// Server → CLI frames (`hello`, `req`) are not accepted from the wire.
+/// Parses a CLI → server control frame leniently: unknown frame types and wrong
+/// field types yield `None`, non-string header/model entries are dropped.
+/// Server → CLI frames (`hello`, `req`, `req_end`) are not accepted from the wire.
 pub fn parse_control_frame(text: &str) -> Option<ControlFrame> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     if !value.is_object() {
@@ -193,7 +176,6 @@ pub fn parse_control_frame(text: &str) -> Option<ControlFrame> {
         }
         "res_end" => Some(ControlFrame::ResEnd { id: frame_id(&value)? }),
         "cancel" => Some(ControlFrame::Cancel { id: frame_id(&value)? }),
-        "req_end" => Some(ControlFrame::ReqEnd { id: frame_id(&value)? }),
         "res_err" => Some(ControlFrame::ResErr {
             id: frame_id(&value)?,
             reason: value.get("reason")?.as_str()?.to_string(),
@@ -259,7 +241,6 @@ pub fn validate_models_report(models: &[String]) -> Option<Vec<String>> {
 mod tests {
     use super::*;
 
-    /// tunnel_mux.test.ts § "binary framing".
     #[test]
     fn binary_frames_round_trip_and_reject_truncation() {
         let encoded = encode_binary_frame(70000, BODY_KIND_RESPONSE, b"hello");
@@ -270,7 +251,6 @@ mod tests {
         assert!(decode_binary_frame(&[0, 0, 0]).is_none());
     }
 
-    /// tunnel_mux.test.ts § "control frame parsing".
     #[test]
     fn parses_known_frames_and_rejects_junk() {
         let res = parse_control_frame(r#"{"t":"res","id":1,"status":200,"headers":{"content-type":"a"}}"#).unwrap();
@@ -289,6 +269,7 @@ mod tests {
         // Server → CLI frames are never accepted from the wire.
         assert!(parse_control_frame(r#"{"t":"hello","proto":1,"slug":"x"}"#).is_none());
         assert!(parse_control_frame(r#"{"t":"req","id":1,"method":"POST","path":"/models"}"#).is_none());
+        assert!(parse_control_frame(r#"{"t":"req_end","id":1}"#).is_none());
         // Non-string header values and model entries are dropped, not fatal.
         let res = parse_control_frame(r#"{"t":"res","id":1,"status":200,"headers":{"a":1,"b":"ok"}}"#).unwrap();
         assert!(matches!(res, ControlFrame::Res { ref headers, .. } if headers.len() == 1));
@@ -317,7 +298,6 @@ mod tests {
         assert_eq!(encode_control_frame(&ControlFrame::Cancel { id: 3 }), r#"{"t":"cancel","id":3}"#);
     }
 
-    /// tunnel_mux.test.ts § "models report validation".
     #[test]
     fn bounds_model_reports_like_the_custom_manual_list() {
         let ok = vec!["llama3.3:70b".to_string(), "org/model".to_string()];
@@ -332,7 +312,7 @@ mod tests {
         assert_eq!(validate_models_report(&["x".repeat(128)]), Some(vec!["x".repeat(128)]));
     }
 
-    /// cli/protocol.rs § "allowlist_by_format" — both ends enforce the same list.
+    /// Both ends enforce the same list (apps/cli/src/protocol.rs).
     #[test]
     fn path_allowlist_by_format() {
         use CliProviderFormat::{Anthropic, OpenAI};

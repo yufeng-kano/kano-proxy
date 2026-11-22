@@ -41,7 +41,7 @@ impl Surface {
 
 /// A JSON error response. `code` is the OpenAI-surface `error.code` (also the
 /// `request_logs.error_code` vocabulary where one applies); `should_retry` sets the
-/// `x-should-retry` header when present; `retry_after` sets `Retry-After` seconds.
+/// `x-should-retry` header when present.
 #[derive(Debug, Clone)]
 pub struct ApiError {
     pub status: StatusCode,
@@ -50,8 +50,6 @@ pub struct ApiError {
     pub message: String,
     pub code: Option<String>,
     pub should_retry: Option<bool>,
-    pub retry_after: Option<u64>,
-    pub headers: Vec<(header::HeaderName, HeaderValue)>,
 }
 
 impl ApiError {
@@ -63,8 +61,6 @@ impl ApiError {
             message: message.to_string(),
             code: None,
             should_retry: None,
-            retry_after: None,
-            headers: Vec::new(),
         }
     }
     pub fn openai(status: StatusCode, message: &str, error_type: &str, code: &str) -> Self {
@@ -81,23 +77,9 @@ impl ApiError {
         self.should_retry = Some(retry);
         self
     }
-    pub fn retry_after(mut self, seconds: u64) -> Self {
-        self.retry_after = Some(seconds);
-        self
-    }
-    pub fn header(mut self, name: header::HeaderName, value: HeaderValue) -> Self {
-        self.headers.push((name, value));
-        self
-    }
     /// Admin `/api/*` errors: OpenAI-shaped `{"error":{"message","type","code"}}`.
     pub fn admin(status: StatusCode, code: &str, message: &str) -> Self {
         Self::openai(status, message, admin_type(status), code)
-    }
-    pub fn unauthorized(surface: Surface) -> Self {
-        match surface {
-            Surface::OpenAI => Self::openai(StatusCode::UNAUTHORIZED, "Unauthorized", "authentication_error", "unauthorized"),
-            Surface::Anthropic => Self::anthropic(StatusCode::UNAUTHORIZED, "authentication_error", "Unauthorized"),
-        }
     }
     pub fn body(&self) -> Value {
         self.surface.envelope(&self.message, &self.error_type, self.code.as_deref())
@@ -121,12 +103,6 @@ impl IntoResponse for ApiError {
         if let Some(retry) = self.should_retry {
             headers.insert("x-should-retry", HeaderValue::from_static(if retry { "true" } else { "false" }));
         }
-        if let Some(seconds) = self.retry_after {
-            headers.insert(header::RETRY_AFTER, HeaderValue::from_str(&seconds.to_string()).expect("digits"));
-        }
-        for (name, value) in &self.headers {
-            headers.insert(name.clone(), value.clone());
-        }
         (self.status, headers, self.body().to_string()).into_response()
     }
 }
@@ -138,6 +114,21 @@ impl std::fmt::Display for ApiError {
 }
 
 impl std::error::Error for ApiError {}
+
+/// The session and CLI management routes' plain `{"error": message}` body (docs/auth.md).
+pub fn admin_error(status: StatusCode, message: &str) -> Response {
+    (status, axum::Json(json!({ "error": message }))).into_response()
+}
+
+/// `500 {"error":"internal_error"}` on the management routes.
+pub fn internal_error() -> Response {
+    admin_error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+}
+
+/// `404 {"error":"not found"}` on the management routes.
+pub fn not_found() -> Response {
+    admin_error(StatusCode::NOT_FOUND, "not found")
+}
 
 /// Storage or other infrastructure failure inside a route: `500 internal_error`. Route
 /// handlers return `Result<_, ApiError>`, so `?` on a `sqlx::Error` works.

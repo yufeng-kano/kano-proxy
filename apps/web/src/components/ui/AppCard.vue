@@ -18,12 +18,6 @@ defineProps<{
   title?: string
   flush?: boolean
   fill?: boolean
-  /**
-   * Paints the toolbar on the `--surface-2` wash, at body padding: for a block
-   * of section settings (Providers' strategy and switches) rather than a
-   * filter, so it reads as part of the section and not as its first row.
-   */
-  toolbarWash?: boolean
 }>()
 
 /**
@@ -48,7 +42,11 @@ defineSlots<{
   heading?: () => unknown
   /** Right side of the header — filters, view switchers, a primary action. */
   actions?: () => unknown
-  /** Below the header, outside the padded body: a search field, a legend. */
+  /**
+   * Below the header, outside the padded body, on the `--surface-2` wash at
+   * body padding: a block of section settings (Providers' strategy and
+   * switches), so it reads as part of the section and not as its first row.
+   */
   toolbar?: () => unknown
 }>()
 </script>
@@ -67,7 +65,7 @@ defineSlots<{
       </div>
     </header>
 
-    <div v-if="$slots.toolbar" class="card-toolbar" :class="{ wash: toolbarWash }">
+    <div v-if="$slots.toolbar" class="card-toolbar">
       <slot name="toolbar" />
     </div>
 
@@ -138,12 +136,8 @@ defineSlots<{
 }
 
 .card-toolbar {
-  padding: var(--space-3) var(--space-5);
-  border-bottom: 1px solid var(--border);
-}
-
-.card-toolbar.wash {
   padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
   background: var(--surface-2);
 }
 
@@ -193,7 +187,6 @@ defineSlots<{
   }
 
   .card-toolbar,
-  .card-toolbar.wash,
   .card-body {
     padding: var(--space-4);
   }

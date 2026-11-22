@@ -47,7 +47,6 @@ export type UsageWindow = {
 
 export type ProviderAccount = {
   id: string
-  priority: number
   status: AccountStatus
   /** Display name — already the custom one when the user set it. */
   label: string | null
@@ -61,7 +60,6 @@ export type ProviderAccount = {
    */
   usage: { windows: UsageWindow[]; credits?: CodexCredits | null } | null
   error: string | null
-  stale: boolean
   /**
    * Present only on a row the viewer borrows from another user, on editions
    * that installed a pool extension (docs/admin-ui.md § Providers page). Such
@@ -85,25 +83,24 @@ export type ProviderAccount = {
   on_credits: boolean
   /**
    * The account's request-edit switches (docs/providers.md § Request edits).
-   * On a shared row they are the owner's, shown as tags only. Optional: a
-   * cache entry written before the fields existed reads as off.
+   * On a shared row they are the owner's, shown as tags only.
    */
-  strip_fast_mode?: boolean
-  strip_claude_code_line?: boolean
-  force_cache_ttl_1h?: boolean
+  strip_fast_mode: boolean
+  strip_claude_code_line: boolean
+  force_cache_ttl_1h: boolean
   /**
    * A bench is running on the row right now, whatever `status` says: an expired
    * sign-in reads `reauth` with or without one, and Resume is offered only while
    * there is a bench to clear.
    */
-  benched?: boolean
+  benched: boolean
   /**
    * When requests through an own row stop unless the operator signs in again
    * (docs/providers.md § Sign-in state): the end the provider stated for the
    * sign-in, once it is a week or less away, or the access token's expiry while
    * the refresh token has been refused. Null otherwise.
    */
-  sign_in_expires_at?: string | null
+  sign_in_expires_at: string | null
 }
 
 /**
@@ -125,23 +122,16 @@ export type CodexCredits = {
  */
 export type RoutingStrategy = "ordered"
 
-/** What the server falls back to, and what a payload without the field means. */
+/** What the server falls back to, and what a new group or a pool not yet loaded shows. */
 export const DEFAULT_ROUTING_STRATEGY: RoutingStrategy = "ordered"
 
 /** Every strategy the UI offers, in display order. */
 export const ROUTING_STRATEGIES: RoutingStrategy[] = ["ordered"]
 
 export type AccountsResponse = {
-  available: boolean
   accounts: ProviderAccount[]
-  models: string[]
-  error: string | null
-  /**
-   * The pool's routing strategy. Optional because a cache entry written before
-   * the field existed has none — absent reads as `ordered`, which is what the
-   * server would have answered anyway.
-   */
-  strategy?: RoutingStrategy
+  /** The pool's routing strategy. */
+  strategy: RoutingStrategy
 }
 
 /**
@@ -170,7 +160,6 @@ export type ApiKey = {
   id: string
   name: string
   key_prefix: string
-  created_at: string
   last_used_at: string | null
   /** USD ceiling per window; null = unlimited. */
   spend_limit: number | null
@@ -179,9 +168,11 @@ export type ApiKey = {
   spend_limit_include_oauth: boolean
   /** Estimated USD spent in the current window — GET /api/keys only; null when unreadable. */
   window_spend?: number | null
-  /** The CLI device that minted the key (docs/cli.md § Keys and groups); null for a key created here. */
-  device_id?: string | null
-  /** That device's current name — GET /api/keys only, resolved at read time. */
+  /**
+   * The CLI device that minted the key (docs/cli.md § Keys and groups), by its
+   * current name — GET /api/keys only, resolved at read time; null for a key
+   * created here.
+   */
   device_name?: string | null
 }
 
@@ -224,24 +215,15 @@ export type CatalogModel = {
   id: string
   /** Builtin `ProviderId`, or a custom provider's slug. */
   provider: string
-  upstream: string
   display_name: string
-  available: boolean
-  owned_by: string
-  object: "model"
 }
 
 export type ModelsResponse = {
-  object: "list"
   data: CatalogModel[]
-  providers?: Array<{
+  providers: Array<{
     provider: string
-    count: number
     error: string | null
-    cached: boolean
   }>
-  openai_base?: string
-  anthropic_base?: string
 }
 
 /** Wire format a custom endpoint speaks. Immutable after creation. */
@@ -250,9 +232,8 @@ export type CustomProviderFormat = "openai" | "anthropic"
 export type CustomProviderModelsMode = "auto" | "manual"
 
 /** Only two states surfaced for custom cards — no standby/unusable nuance. */
-export type CustomProviderStatus = "active" | "benched"
+type CustomProviderStatus = "active" | "benched"
 
-/** User-defined BYO OpenAI-/Anthropic-compatible upstream. `GET /api/custom-providers` item shape. */
 /** One machine signed in with `kano-proxy login` (docs/cli.md). */
 export type CliDevice = {
   id: string
@@ -269,34 +250,27 @@ export type CliProvider = {
   slug: string
   name: string
   format: CustomProviderFormat
-  /** Live tunnel state, read through the AgentTunnel DO at request time. */
+  /** Live tunnel state, read from the server's tunnel registry at request time. */
   connected: boolean
   /** The internal pool-state row — what a model-group target pins to (docs/admin-ui.md § Groups page). */
   account_id: string | null
   /** The exposed model ids — the agent report with the whitelist applied. */
   models: string[]
-  models_reported: number
-  model_filter: string[]
   models_updated_at: string | null
-  device_id: string | null
   device_name: string | null
-  /** The switches on its account row; absent (old cache entry) reads as off. */
-  strip_fast_mode?: boolean
-  strip_claude_code_line?: boolean
-  force_cache_ttl_1h?: boolean
-  created_at: string
-  updated_at: string
+  /** The switches on its account row; off when it has none (`account_id` null). */
+  strip_fast_mode: boolean
+  strip_claude_code_line: boolean
+  force_cache_ttl_1h: boolean
 }
 
 /** A pending `kano-proxy login` login, as the authorize view reads it. */
 export type CliLoginRequest = {
-  id: string
   device_name: string
-  expires_at: string
   approved: boolean
-  used: boolean
 }
 
+/** User-defined BYO OpenAI-/Anthropic-compatible upstream. `GET /api/custom-providers` item shape. */
 export type CustomProvider = {
   id: string
   slug: string
@@ -322,14 +296,10 @@ export type CustomProvider = {
    */
   account_id: string | null
   status: CustomProviderStatus
-  /** Display-only position in the user's list. The server returns items pre-sorted by it. */
-  sort_order: number
-  /** The switches on its account row; absent (old cache entry) reads as off. */
-  strip_fast_mode?: boolean
-  strip_claude_code_line?: boolean
-  force_cache_ttl_1h?: boolean
-  created_at: string
-  updated_at: string
+  /** The switches on its account row; off when it has none (`account_id` null). */
+  strip_fast_mode: boolean
+  strip_claude_code_line: boolean
+  force_cache_ttl_1h: boolean
 }
 
 /**
@@ -382,7 +352,7 @@ export type ModelGroupTarget = {
 }
 
 /** Why a target cannot take a request right now; `null` while it can. */
-export type ModelGroupTargetReason = "benched" | "limit" | "unresolved" | "no_account"
+type ModelGroupTargetReason = "benched" | "limit" | "unresolved" | "no_account"
 
 /**
  * One target's live routing state, index-aligned with `targets`.
@@ -402,7 +372,7 @@ export type ModelGroupTargetRouting = {
  * stored facts dispatch uses. `current_target_index` is `null` when no target
  * is usable.
  */
-export type ModelGroupRouting = {
+type ModelGroupRouting = {
   current_target_index: number | null
   targets: ModelGroupTargetRouting[]
 }
@@ -416,16 +386,12 @@ export type ModelGroupModel = {
   name: string
   /** Ordered targets — array order **is** priority. */
   targets: ModelGroupTarget[]
-  /**
-   * Live routing state per target. Optional because a cache entry written
-   * before the field existed has none — the rows then render without the
-   * current/unusable markers rather than breaking.
-   */
-  routing?: ModelGroupRouting
+  /** Live routing state per target. */
+  routing: ModelGroupRouting
 }
 
 /**
- * A user-defined model group — since v4 a **virtual endpoint**: a URL slug
+ * A user-defined model group — a **virtual endpoint**: a URL slug
  * under `/g/` plus the models callable on it. `GET /api/model-groups` item
  * shape — see docs/providers.md § Model groups.
  */
@@ -437,14 +403,13 @@ export type ModelGroup = {
   slug: string
   /** The models callable on this endpoint, each with its own target list. */
   models: ModelGroupModel[]
-  /** How the group orders its targets. Absent (old cache entry) reads as `ordered`. */
-  strategy?: RoutingStrategy
-  created_at: string
+  /** How the group orders its targets. */
+  strategy: RoutingStrategy
   updated_at: string
 }
 
 /** What a write sends per target: the label is read-only, so it never goes back up. */
-export type ModelGroupTargetInput = {
+type ModelGroupTargetInput = {
   model: string
   account_id: string | null
 }
@@ -472,8 +437,8 @@ export type CustomProviderTestResult = {
   error?: string
 }
 
-// Usage dashboard — GET /api/usage/summary. See docs/admin-ui.md
-// (Dashboard page) and docs/database.md (request_logs NULL token semantics).
+// Overview — GET /api/usage/summary. See docs/admin-ui.md
+// (§ Overview page) and docs/database.md (request_logs NULL token semantics).
 
 /** Range picker granularity: Day (hourly) / Week (daily) / Month (daily). */
 export type UsageRangeKind = "day" | "week" | "month"
@@ -492,23 +457,10 @@ export type UsageRange = {
   offsetMinutes: number
 }
 
-/** Legacy range picker options: 24h / 7d / 30d. */
-export type UsageDays = 1 | 7 | 30
-
-export type UsageTotals = {
+type UsageTotals = {
   requests: number
   errors: number
   avg_latency_ms: number | null
-  prompt_tokens: number
-  completion_tokens: number
-  cache_read_input_tokens: number
-  cache_creation_input_tokens: number
-  /** Σcache_read_input_tokens / Σprompt_tokens over cache-known rows; null when none are cache-known. */
-  cache_rate: number | null
-  /** Requests with non-null token fields (used in the token aggregates). */
-  usage_known_requests: number
-  /** Requests with non-null cache_read_input_tokens (used in cache_rate). */
-  cache_known_requests: number
   /** Estimated USD over priced rows; null when none is priced (docs/pricing.md). */
   cost: number | null
   /** Rows contributing to `cost` — lets the UI annotate partial coverage. */
@@ -536,15 +488,14 @@ export type ModelUsageRow = {
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
   cache_rate: number | null
-  usage_known_requests: number
   cache_known_requests: number
   cost: number | null
-  cost_known_requests: number
 }
 
 /**
  * One (bucket, provider, model) group. `bucket` is an hour key
- * ("YYYY-MM-DDTHH") when days=1, else a day key ("YYYY-MM-DD"); both UTC.
+ * ("YYYY-MM-DDTHH") on the `hour` grain, else a day key ("YYYY-MM-DD"), both in
+ * the calendar `offset` names.
  * Sparse in both dimensions — a bucket carries one point per model that had
  * traffic, and the client zero-fills the bucket grid. A bucket's totals are
  * the sum over its own model points (see docs/admin-ui.md § Series shape).
@@ -557,22 +508,19 @@ export type UsageSeriesPoint = {
   prompt_tokens: number
   completion_tokens: number
   cache_read_input_tokens: number
-  /** Requests here with non-null cache_read_input_tokens — separates "0% cached" from "not reported". */
-  cache_known_requests: number
   /** Estimated USD over this group's priced rows; null when none is. */
   cost: number | null
 }
 
 export type UsageSummary = {
-  days: number
   /** ISO UTC inclusive lower bound of the queried range. */
   from: string
   /** ISO UTC inclusive upper bound of the queried range. */
-  to?: string
+  to: string
   /** Aggregation grain: "hour" for single days, "day" for multi-day ranges. */
-  grain?: "hour" | "day"
-  /** Minutes east of UTC the server bucketed in; absent or 0 means UTC keys. */
-  offset?: number
+  grain: "hour" | "day"
+  /** Minutes east of UTC the server bucketed in; 0 means UTC keys. */
+  offset: number
   totals: UsageTotals
   /** Sorted by total tokens desc (server-side). */
   models: ModelUsageRow[]
@@ -586,7 +534,7 @@ export type UsageSummary = {
  * (`oauth`) or a custom endpoint (`api`). Derived server-side from the
  * provider, never stored — so the client keeps no builtin list of its own.
  */
-export type LogUsageType = "oauth" | "api"
+type LogUsageType = "oauth" | "api"
 
 /**
  * One `request_logs` row, as the log explorer reads it.
@@ -676,7 +624,7 @@ export type ChangelogRelease = {
 }
 
 export type ChangelogResponse = {
-  /** Running Worker version, bare SemVer with no "v" prefix, e.g. "1.11.0". */
+  /** Running server version, bare SemVer with no "v" prefix, e.g. "1.11.0". */
   current: string
   /** Newest published tag, e.g. "v1.11.0" — MAY carry a leading "v". */
   latest: string | null
@@ -686,8 +634,4 @@ export type ChangelogResponse = {
   releases: ChangelogRelease[]
   /** False when GITHUB_REPO is unset/misconfigured — `current` is still valid. */
   available: boolean
-  cached: boolean
-  /** Last good data served after a failed refetch (deliberate stale-serve). */
-  stale: boolean
-  error: string | null
 }

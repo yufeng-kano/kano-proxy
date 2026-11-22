@@ -23,21 +23,11 @@ pub fn is_grok_opaque_decode_failure(body_text: &str) -> bool {
     DECODE_FAILURE_MARKERS.iter().any(|m| lower.contains(m))
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct StripOpaqueResult {
-    pub body: Value,
-    /// True when at least one `reasoning.encrypted_content` or compaction item was removed.
-    pub changed: bool,
-}
-
-/// Remove opaque replay state from a Responses request body.
+/// Remove opaque replay state from a Responses request body, or `None` when it carries none.
 /// - reasoning: drop `encrypted_content`; drop the item entirely if nothing readable remains
 /// - compaction: drop the whole item (ciphertext is the only payload)
-pub fn strip_responses_opaque_state(body: &Value) -> StripOpaqueResult {
-    let input = match body.get("input").and_then(Value::as_array) {
-        Some(input) if !input.is_empty() => input,
-        _ => return StripOpaqueResult { body: body.clone(), changed: false },
-    };
+pub fn strip_responses_opaque_state(body: &Value) -> Option<Value> {
+    let input = body.get("input").and_then(Value::as_array)?;
 
     let mut changed = false;
     let mut next: Vec<Value> = Vec::with_capacity(input.len());
@@ -77,30 +67,14 @@ pub fn strip_responses_opaque_state(body: &Value) -> StripOpaqueResult {
     }
 
     if !changed {
-        return StripOpaqueResult { body: body.clone(), changed: false };
+        return None;
     }
     let mut out = body.as_object().cloned().unwrap_or_default();
     out.insert("input".to_string(), Value::Array(next));
-    StripOpaqueResult { body: Value::Object(out), changed: true }
+    Some(Value::Object(out))
 }
 
-/// Drop `prompt_cache_key` so a session-reset retry cannot reattach sticky cache.
-pub fn strip_prompt_cache_key(body: &Value) -> Value {
-    match body.as_object() {
-        Some(obj) if obj.contains_key("prompt_cache_key") => {
-            let mut next = obj.clone();
-            next.remove("prompt_cache_key");
-            Value::Object(next)
-        }
-        _ => body.clone(),
-    }
-}
-
-pub fn affinity_present(affinity: Option<&AffinityIds>) -> bool {
-    let a = match affinity {
-        Some(a) => a,
-        None => return false,
-    };
+pub fn affinity_present(a: &AffinityIds) -> bool {
     [&a.conv_id, &a.session_id, &a.turn_idx]
         .into_iter()
         .any(|v| v.as_deref().is_some_and(|s| !s.trim().is_empty()))
@@ -141,52 +115,55 @@ mod tests {
 
     #[test]
     fn removes_encrypted_content_and_drops_empty_reasoning_items() {
-        let result = strip_responses_opaque_state(&json!({
+        let body = strip_responses_opaque_state(&json!({
             "model": "grok-4.5",
             "input": [
                 { "type": "reasoning", "summary": [], "content": null, "encrypted_content": "abc" },
                 { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }
             ]
-        }));
-        assert!(result.changed);
+        }))
+        .expect("changed");
+        assert_eq!(body["model"], "grok-4.5");
         assert_eq!(
-            result.body["input"],
+            body["input"],
             json!([{ "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hi" }] }])
         );
     }
 
     #[test]
+    fn leaves_a_body_without_opaque_state_alone() {
+        let plain = json!({ "input": [{ "type": "reasoning", "summary": [{ "type": "summary_text", "text": "plan" }] }] });
+        assert_eq!(strip_responses_opaque_state(&plain), None);
+        assert_eq!(strip_responses_opaque_state(&json!({ "input": [] })), None);
+        assert_eq!(strip_responses_opaque_state(&json!({ "model": "m" })), None);
+    }
+
+    #[test]
     fn keeps_reasoning_items_that_still_have_readable_summary_text() {
-        let result = strip_responses_opaque_state(&json!({
+        let body = strip_responses_opaque_state(&json!({
             "input": [
                 { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "plan" }], "encrypted_content": "abc" }
             ]
-        }));
-        assert!(result.changed);
+        }))
+        .expect("changed");
         assert_eq!(
-            result.body["input"],
+            body["input"],
             json!([{ "type": "reasoning", "summary": [{ "type": "summary_text", "text": "plan" }] }])
         );
     }
 
     #[test]
     fn drops_compaction_items_entirely() {
-        let result = strip_responses_opaque_state(&json!({
+        let body = strip_responses_opaque_state(&json!({
             "input": [
                 { "type": "compaction", "encrypted_content": "opaque" },
                 { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "after" }] }
             ]
-        }));
-        assert!(result.changed);
-        let input = result.body["input"].as_array().unwrap();
+        }))
+        .expect("changed");
+        let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "message");
-    }
-
-    #[test]
-    fn removes_prompt_cache_key_when_present() {
-        assert_eq!(strip_prompt_cache_key(&json!({ "prompt_cache_key": "s", "model": "m" })), json!({ "model": "m" }));
-        assert_eq!(strip_prompt_cache_key(&json!({ "model": "m" })), json!({ "model": "m" }));
     }
 
     #[test]
@@ -194,9 +171,10 @@ mod tests {
         let conv = AffinityIds { conv_id: Some("c".into()), ..Default::default() };
         let session = AffinityIds { session_id: Some("s".into()), ..Default::default() };
         let empty = AffinityIds::default();
-        assert!(affinity_present(Some(&conv)));
-        assert!(affinity_present(Some(&session)));
-        assert!(!affinity_present(Some(&empty)));
-        assert!(!affinity_present(None));
+        let blank = AffinityIds { conv_id: Some("  ".into()), ..Default::default() };
+        assert!(affinity_present(&conv));
+        assert!(affinity_present(&session));
+        assert!(!affinity_present(&empty));
+        assert!(!affinity_present(&blank));
     }
 }

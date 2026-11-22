@@ -16,17 +16,17 @@ use axum::body::Body;
 use axum::response::Response;
 use bytes::Bytes;
 use http::{header, HeaderMap, StatusCode};
-use rand::RngCore;
 use serde_json::{json, Map, Value};
 
 use crate::db::accounts::iso_from_ms;
+use crate::ids::random_uuid;
 use crate::pool::{AcquiredAccount, StoredCredential};
 use crate::providers::grok_reasoning_cache::{
     delete_grok_reasoning_replay, grok_reasoning_replay_session_key, hash_assistant_text, read_grok_reasoning_replay,
     write_grok_reasoning_replay, GrokReasoningReplayEntry,
 };
 use crate::providers::grok_reasoning_recovery::{
-    affinity_present, is_grok_opaque_decode_failure, strip_prompt_cache_key, strip_responses_opaque_state,
+    affinity_present, is_grok_opaque_decode_failure, strip_responses_opaque_state,
 };
 use crate::providers::refresh::{refresh_oauth_credential, RefreshError};
 use crate::providers::types::{
@@ -34,6 +34,7 @@ use crate::providers::types::{
     ProviderAdapter, UpstreamModel, UsageWindow,
 };
 use crate::providers::ProviderId;
+use crate::proxy::dispatch::json_response;
 use crate::proxy::grok_anthropic::{
     anthropic_to_grok_responses, collect_grok_responses_sse_to_anthropic, grok_responses_sse_to_anthropic_stream,
     last_assistant_text_from_anthropic_messages, GrokStreamOptions, GrokTurnOutcome,
@@ -64,16 +65,6 @@ fn grok_workspace_user_agent() -> String {
     format!("xai-grok-workspace/{GROK_WORKSPACE_VERSION}")
 }
 
-/// `crypto.randomUUID()` — a v4 uuid for `x-grok-req-id`.
-fn random_uuid() -> String {
-    let mut b = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h = hex::encode(b);
-    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
-}
-
 fn with_chat_completions_headers(req: UpstreamRequest, access_token: &str) -> UpstreamRequest {
     req.header("authorization", &format!("Bearer {access_token}"))
         .header("user-agent", &grok_user_agent())
@@ -81,25 +72,14 @@ fn with_chat_completions_headers(req: UpstreamRequest, access_token: &str) -> Up
 }
 
 fn with_responses_headers(req: UpstreamRequest, access_token: &str, affinity: Option<&AffinityIds>) -> UpstreamRequest {
-    let mut req = req
+    let req = req
         .header("authorization", &format!("Bearer {access_token}"))
         .header("content-type", "application/json")
         .header("accept", "text/event-stream")
         .header("user-agent", &grok_workspace_user_agent())
         .header("x-grok-client-version", GROK_WORKSPACE_VERSION)
         .header("x-xai-token-auth", "xai-grok-cli");
-    if let Some(aff) = affinity {
-        if let Some(v) = non_empty(aff.conv_id.as_deref()) {
-            req = req.header("x-grok-conv-id", v);
-        }
-        if let Some(v) = non_empty(aff.session_id.as_deref()) {
-            req = req.header("x-grok-session-id", v);
-        }
-        if let Some(v) = non_empty(aff.turn_idx.as_deref()) {
-            req = req.header("x-grok-turn-idx", v);
-        }
-    }
-    req
+    apply_affinity_headers(req, affinity)
 }
 
 fn non_empty(v: Option<&str>) -> Option<&str> {
@@ -118,13 +98,9 @@ fn affinity_from_headers(headers: &HeaderMap) -> AffinityIds {
     }
 }
 
+/// Config values are already trimmed and never empty (`config::opt`).
 fn client_id(cx: &AppState) -> String {
-    cx.config()
-        .grok_oauth_client_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(DEFAULT_CLIENT_ID)
-        .to_string()
+    cx.config().grok_oauth_client_id.clone().unwrap_or_else(|| DEFAULT_CLIENT_ID.to_string())
 }
 
 /// Refresh an hour before expiry (or when the stored credential carries no expiry at all),
@@ -184,15 +160,6 @@ async fn refresh_grok(cx: &AppState, account: AcquiredAccount) -> AcquiredAccoun
         },
     )
     .await
-}
-
-fn json_response(status: StatusCode, value: &Value) -> Response {
-    let body = serde_json::to_vec(value).expect("json response serializes");
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .expect("json response builds")
 }
 
 /// Forward an upstream response verbatim, streaming its body. Framing headers are dropped:
@@ -352,7 +319,7 @@ impl ProviderAdapter for GrokAdapter {
     }
 
     /// Anthropic surface: Messages ↔ cli-chat-proxy Responses with encrypted reasoning.
-    /// The caller's api-key id isolates the replay cache.
+    /// The caller's api-key id (`extras.api_key_id`) isolates the replay cache.
     async fn messages(
         &self,
         cx: &AppState,
@@ -364,15 +331,8 @@ impl ProviderAdapter for GrokAdapter {
         let acc = refresh_grok(cx, account.clone()).await;
 
         let affinity = affinity_from_headers(headers);
-        let api_key_id = extras
-            .api_key_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .or_else(|| header_str(headers, "x-kano-api-key-id").map(str::trim).filter(|s| !s.is_empty()))
-            .unwrap_or("")
-            .to_string();
-        let session_key = grok_reasoning_replay_session_key(Some(&affinity)).unwrap_or_default();
+        let api_key_id = extras.api_key_id.as_deref().map(str::trim).unwrap_or("").to_string();
+        let session_key = grok_reasoning_replay_session_key(&affinity).unwrap_or_default();
         let raw_model = body.get("model").and_then(Value::as_str).unwrap_or("");
         // Routing already rewrote model to the bare upstream id for native adapters; keep a
         // display id if the client sent provider/model.
@@ -392,7 +352,6 @@ impl ProviderAdapter for GrokAdapter {
         if cacheable {
             let disabled = body
                 .get("thinking")
-                .filter(|t| t.is_object())
                 .and_then(|t| t.get("type"))
                 .and_then(Value::as_str)
                 .map(|t| t.to_lowercase() == "disabled")
@@ -427,8 +386,10 @@ impl ProviderAdapter for GrokAdapter {
         // Opaque-state decode recovery (compaction / encrypted_content 400):
         // 1) clear the replay cache entry for this session
         // 2) strip reasoning.encrypted_content (+ drop compaction items), retry
-        // 3) if still decode-fail and affinity was set, drop sticky headers + prompt_cache_key
-        // On unrecovered failure, return the *original* upstream 400 body.
+        // 3) if still decode-fail and affinity was set, retry without the sticky headers
+        // On unrecovered failure, return the *original* upstream 400 body. The converted body
+        // never carries `prompt_cache_key` or `previous_response_id`, so the headers are the
+        // only session state left to drop.
         let mut res = post_responses(cx, &acc.credential.access_token, &converted.body, Some(&affinity), extras).await?;
         if !res.status.is_success() {
             let original_status = res.status;
@@ -441,9 +402,8 @@ impl ProviderAdapter for GrokAdapter {
                     delete_grok_reasoning_replay(cx.cache(), &api_key_id, &upstream_model, &session_key).await;
                 }
 
-                let stripped = strip_responses_opaque_state(&converted.body);
-                if stripped.changed {
-                    let retry = post_responses(cx, &acc.credential.access_token, &stripped.body, Some(&affinity), extras).await?;
+                if let Some(stripped) = strip_responses_opaque_state(&converted.body) {
+                    let retry = post_responses(cx, &acc.credential.access_token, &stripped, Some(&affinity), extras).await?;
                     if retry.status.is_success() {
                         recovered = Some(retry);
                     } else {
@@ -451,27 +411,14 @@ impl ProviderAdapter for GrokAdapter {
                         let retry_text = retry.text().await.unwrap_or_default();
                         if retry_status == StatusCode::BAD_REQUEST
                             && is_grok_opaque_decode_failure(&retry_text)
-                            && affinity_present(Some(&affinity))
-                            && !has_key(&stripped.body, "previous_response_id")
+                            && affinity_present(&affinity)
                         {
-                            let stateless = strip_prompt_cache_key(&stripped.body);
-                            let reset = post_responses(cx, &acc.credential.access_token, &stateless, None, extras).await?;
-                            if reset.status.is_success() {
-                                recovered = Some(reset);
-                            } else {
-                                let _ = reset.bytes().await;
-                            }
+                            recovered = post_stateless(cx, &acc.credential.access_token, &stripped, extras).await?;
                         }
                     }
-                } else if affinity_present(Some(&affinity)) && !has_key(&converted.body, "previous_response_id") {
-                    // No ciphertext in the body — sticky session/cache alone may be bad.
-                    let stateless = strip_prompt_cache_key(&converted.body);
-                    let reset = post_responses(cx, &acc.credential.access_token, &stateless, None, extras).await?;
-                    if reset.status.is_success() {
-                        recovered = Some(reset);
-                    } else {
-                        let _ = reset.bytes().await;
-                    }
+                } else if affinity_present(&affinity) {
+                    // No ciphertext in the body — the sticky session alone may be bad.
+                    recovered = post_stateless(cx, &acc.credential.access_token, &converted.body, extras).await?;
                 }
             }
 
@@ -508,7 +455,7 @@ impl ProviderAdapter for GrokAdapter {
                     }
                     // Skip persisting tool-only (empty text) turns — a match would be ambiguous.
                     GrokTurnOutcome::Replayable { encrypted_content, assistant_text } => {
-                        if encrypted_content.is_empty() || assistant_text.is_empty() {
+                        if assistant_text.is_empty() {
                             return;
                         }
                         tokio::spawn(async move {
@@ -584,11 +531,10 @@ impl ProviderAdapter for GrokAdapter {
             let mut account = Map::new();
             account.insert("email".into(), email.map(Value::String).unwrap_or(Value::Null));
             return FetchedUsage {
-                windows: Vec::new(),
                 account,
                 stale: true,
                 error: Some(format!("billing {}", bill_res.status.as_u16())),
-                edge_blocked: false,
+                ..Default::default()
             };
         }
         let bill = match bill_res.json_value().await {
@@ -615,19 +561,29 @@ impl ProviderAdapter for GrokAdapter {
         FetchedUsage {
             windows: vec![UsageWindow { label: "Week".into(), utilization, resets_at, value: None, scope: None }],
             account,
-            stale: false,
-            error: None,
-            edge_blocked: false,
+            ..Default::default()
         }
     }
 }
 
 fn usage_failure(error: String) -> FetchedUsage {
-    FetchedUsage { windows: Vec::new(), account: Map::new(), stale: true, error: Some(error), edge_blocked: false }
+    FetchedUsage { stale: true, error: Some(error), ..Default::default() }
 }
 
-fn has_key(body: &Value, key: &str) -> bool {
-    body.as_object().is_some_and(|o| o.contains_key(key))
+/// The session-reset retry: no sticky headers. `Some` only on success; a failure's body is
+/// drained and the caller returns the original error instead.
+async fn post_stateless(
+    cx: &AppState,
+    access_token: &str,
+    body: &Value,
+    extras: &CallExtras,
+) -> Result<Option<UpstreamResponse>, TransportError> {
+    let reset = post_responses(cx, access_token, body, None, extras).await?;
+    if reset.status.is_success() {
+        return Ok(Some(reset));
+    }
+    let _ = reset.bytes().await;
+    Ok(None)
 }
 
 fn apply_affinity_headers(mut req: UpstreamRequest, affinity: Option<&AffinityIds>) -> UpstreamRequest {
@@ -692,7 +648,6 @@ mod tests {
 
     fn chat_request() -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: "grok/grok-4.5".into(),
             raw_model: "grok/grok-4.5".into(),
             upstream_model: "grok-4.5".into(),
             messages: vec![json!({ "role": "user", "content": "hi" })],
@@ -719,7 +674,7 @@ mod tests {
         serde_json::from_str(&body_text(res).await).expect("json body")
     }
 
-    // ── chatCompletions — reasoning + sampling ─────────────────────────────
+    // ── chat_completions — reasoning + sampling ────────────────────────────
 
     #[tokio::test]
     async fn always_sends_include_reasoning_true() {
@@ -731,41 +686,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn defaults_temperature_to_one_when_the_client_sent_none() {
+    async fn temperature_defaults_to_one_and_client_sampling_is_forwarded_as_sent() {
         if test_pool().await.is_none() {
             return skip_without_db();
         }
         let (body, _) = captured_body(chat_request()).await;
         assert_eq!(body["temperature"].as_f64(), Some(1.0));
-    }
-
-    #[tokio::test]
-    async fn forwards_a_client_supplied_temperature() {
-        if test_pool().await.is_none() {
-            return skip_without_db();
+        assert!(body.get("top_p").is_none());
+        // Zero is a value, not an absence.
+        for temperature in [0.2, 0.0] {
+            let (body, _) = captured_body(ChatCompletionRequest { temperature: Some(temperature), ..chat_request() }).await;
+            assert_eq!(body["temperature"].as_f64(), Some(temperature));
         }
-        let (body, _) = captured_body(ChatCompletionRequest { temperature: Some(0.2), ..chat_request() }).await;
-        assert_eq!(body["temperature"].as_f64(), Some(0.2));
-    }
-
-    #[tokio::test]
-    async fn forwards_top_p_only_when_the_client_sent_it() {
-        if test_pool().await.is_none() {
-            return skip_without_db();
-        }
-        let (with_top_p, _) = captured_body(ChatCompletionRequest { top_p: Some(0.9), ..chat_request() }).await;
-        assert_eq!(with_top_p["top_p"].as_f64(), Some(0.9));
-        let (without_top_p, _) = captured_body(chat_request()).await;
-        assert!(without_top_p.get("top_p").is_none());
-    }
-
-    #[tokio::test]
-    async fn temperature_zero_is_forwarded_as_is() {
-        if test_pool().await.is_none() {
-            return skip_without_db();
-        }
-        let (body, _) = captured_body(ChatCompletionRequest { temperature: Some(0.0), ..chat_request() }).await;
-        assert_eq!(body["temperature"].as_f64(), Some(0.0));
+        let (body, _) = captured_body(ChatCompletionRequest { top_p: Some(0.9), ..chat_request() }).await;
+        assert_eq!(body["top_p"].as_f64(), Some(0.9));
     }
 
     #[tokio::test]
@@ -792,7 +726,6 @@ mod tests {
         let (cx, account) = state_with(pool, transport.clone()).await;
 
         let mut headers = HeaderMap::new();
-        headers.insert("x-kano-api-key-id", "key_1".parse().unwrap());
         headers.insert("x-kano-raw-model", "grok/grok-4.5".parse().unwrap());
         headers.insert("x-grok-conv-id", "conv_1".parse().unwrap());
 
@@ -809,7 +742,7 @@ mod tests {
                     "messages": [{ "role": "user", "content": "hi" }],
                 }),
                 &headers,
-                &CallExtras::default(),
+                &keyed_extras(),
             )
             .await
             .expect("messages");
@@ -866,11 +799,15 @@ mod tests {
         assert!(body.get("reasoning").is_none());
     }
 
-    // ── messages — opaque decode recovery (grok_reasoning_recovery.test.ts) ─
+    // ── messages — opaque decode recovery ──────────────────────────────────
+
+    /// What dispatch hands every `/anthropic` call: the caller's api-key id.
+    fn keyed_extras() -> CallExtras {
+        CallExtras { api_key_id: Some("key_1".into()), ..Default::default() }
+    }
 
     fn recovery_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert("x-kano-api-key-id", "key_1".parse().unwrap());
         headers.insert("x-kano-raw-model", "grok/grok-4.5".parse().unwrap());
         headers.insert("x-grok-conv-id", "conv_bad".parse().unwrap());
         headers
@@ -909,7 +846,7 @@ mod tests {
                 &account,
                 &recovery_body("plan", &fake_grok_encrypted_content(7)),
                 &recovery_headers(),
-                &CallExtras::default(),
+                &keyed_extras(),
             )
             .await
             .expect("messages");
@@ -949,7 +886,7 @@ mod tests {
                 &account,
                 &recovery_body("", &fake_grok_encrypted_content(11)),
                 &recovery_headers(),
-                &CallExtras::default(),
+                &keyed_extras(),
             )
             .await
             .expect("messages");
@@ -960,7 +897,7 @@ mod tests {
         assert_eq!(transport.requests().len(), 3);
     }
 
-    // ── fetchUsage — window mapping and the utilization scale contract ──────
+    // ── fetch_usage — window mapping and the utilization scale contract ─────
 
     async fn fetch_usage_with(bill: Value, bill_status: StatusCode) -> FetchedUsage {
         let Some(pool) = test_pool().await else { panic!("no database") };
@@ -971,63 +908,24 @@ mod tests {
         GrokAdapter.fetch_usage(&cx, &account).await
     }
 
+    /// `creditUsagePercent` is already a percent: 1 stays 1 (a regression once scaled it), and a
+    /// missing one or a period with no end maps to `None`, never 0.
     #[tokio::test]
-    async fn regression_credit_usage_percent_one_stays_one() {
+    async fn credit_usage_percent_maps_to_the_week_window_unscaled() {
         if test_pool().await.is_none() {
             return skip_without_db();
         }
-        let usage =
-            fetch_usage_with(json!({ "config": { "creditUsagePercent": 1, "currentPeriod": { "end": "2026-08-10T00:00:00Z" } } }), StatusCode::OK)
-                .await;
-        assert_eq!(
-            usage.windows,
-            vec![UsageWindow {
-                label: "Week".into(),
-                utilization: Some(1.0),
-                resets_at: Some("2026-08-10T00:00:00Z".into()),
-                value: None,
-                scope: None,
-            }]
-        );
-    }
-
-    #[tokio::test]
-    async fn a_mid_range_percent_passes_through_unchanged() {
-        if test_pool().await.is_none() {
-            return skip_without_db();
+        let end = "2026-08-10T00:00:00Z";
+        for (config, utilization, resets_at) in [
+            (json!({ "creditUsagePercent": 1, "currentPeriod": { "end": end } }), Some(1.0), Some(end)),
+            (json!({ "creditUsagePercent": 73 }), Some(73.0), None),
+            (json!({ "creditUsagePercent": 100 }), Some(100.0), None),
+            (json!({}), None, None),
+        ] {
+            let usage = fetch_usage_with(json!({ "config": config }), StatusCode::OK).await;
+            let window = UsageWindow { label: "Week".into(), utilization, resets_at: resets_at.map(Into::into), value: None, scope: None };
+            assert_eq!(usage.windows, vec![window], "{config}");
         }
-        let usage = fetch_usage_with(json!({ "config": { "creditUsagePercent": 73 } }), StatusCode::OK).await;
-        assert_eq!(usage.windows[0].utilization, Some(73.0));
-    }
-
-    #[tokio::test]
-    async fn one_hundred_passes_through_unchanged() {
-        if test_pool().await.is_none() {
-            return skip_without_db();
-        }
-        let usage = fetch_usage_with(json!({ "config": { "creditUsagePercent": 100 } }), StatusCode::OK).await;
-        assert_eq!(usage.windows[0].utilization, Some(100.0));
-    }
-
-    #[tokio::test]
-    async fn a_missing_percent_maps_to_none_not_zero() {
-        if test_pool().await.is_none() {
-            return skip_without_db();
-        }
-        let usage = fetch_usage_with(json!({ "config": {} }), StatusCode::OK).await;
-        assert_eq!(
-            usage.windows,
-            vec![UsageWindow { label: "Week".into(), utilization: None, resets_at: None, value: None, scope: None }]
-        );
-    }
-
-    #[tokio::test]
-    async fn resets_at_is_none_when_the_period_has_no_end() {
-        if test_pool().await.is_none() {
-            return skip_without_db();
-        }
-        let usage = fetch_usage_with(json!({ "config": { "creditUsagePercent": 5 } }), StatusCode::OK).await;
-        assert_eq!(usage.windows[0].resets_at, None);
     }
 
     #[tokio::test]
@@ -1065,7 +963,7 @@ mod tests {
         assert!(usage.error.expect("error").contains("network down"));
     }
 
-    // ── listModels ─────────────────────────────────────────────────────────
+    // ── list_models ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn list_models_maps_ids_and_reports_a_non_ok_status() {

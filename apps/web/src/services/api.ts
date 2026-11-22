@@ -1,7 +1,6 @@
 import type {
   AccountsResponse,
   ApiKey,
-  CatalogModel,
   ChangelogResponse,
   CliDevice,
   CliLoginRequest,
@@ -23,7 +22,6 @@ import type {
   RequestEdits,
   RoutingStrategy,
   SpendLimitInterval,
-  UsageDays,
   UsageNotice,
   UsageSummary,
   User,
@@ -36,19 +34,19 @@ import type {
  */
 const API_ORIGIN = (import.meta.env.VITE_API_ORIGIN as string | undefined)?.replace(/\/$/, "") ?? ""
 
+/** Every caller passes an absolute path (`/api/...`). */
 function apiUrl(path: string): string {
-  if (path.startsWith("http")) return path
-  return `${API_ORIGIN}${path.startsWith("/") ? path : `/${path}`}`
+  return `${API_ORIGIN}${path}`
 }
 
-/**
- * Client-facing LLM base URLs for the current deployment host.
- * Local: VITE_API_ORIGIN (Worker). Production same-hostname: window origin.
- */
+/** The host clients call: VITE_API_ORIGIN locally, the page's own origin in production. */
+function clientOrigin(): string {
+  return API_ORIGIN || (typeof window !== "undefined" ? window.location.origin : "")
+}
+
+/** Client-facing LLM base URLs for the current deployment host. */
 export function clientBaseUrls(): { openai: string; anthropic: string } {
-  const origin =
-    API_ORIGIN ||
-    (typeof window !== "undefined" ? window.location.origin : "")
+  const origin = clientOrigin()
   return {
     openai: `${origin}/openai/v1`,
     anthropic: `${origin}/anthropic`,
@@ -60,15 +58,12 @@ export function clientBaseUrls(): { openai: string; anthropic: string } {
  * client's `base_url` is set to for that group's virtual endpoint.
  */
 export function groupBaseUrls(slug: string): { openai: string; anthropic: string } {
-  const origin =
-    API_ORIGIN ||
-    (typeof window !== "undefined" ? window.location.origin : "")
+  const origin = clientOrigin()
   return {
     openai: `${origin}/g/${slug}/openai/v1`,
     anthropic: `${origin}/g/${slug}/anthropic`,
   }
 }
-
 
 export class ApiError extends Error {
   status: number
@@ -127,7 +122,7 @@ function failure(status: number, data: unknown): ApiError {
   return new ApiError(status, msg, data)
 }
 
-export type Me = { user: User; notice: UsageNotice }
+type Me = { user: User; notice: UsageNotice }
 
 export async function fetchMe(): Promise<Me | null> {
   try {
@@ -152,7 +147,7 @@ export async function logout(): Promise<void> {
 }
 
 export function loginUrl(): string {
-  // Full API origin so Google OAuth starts (and cookie is set) on the Worker host.
+  // Full API origin so Google OAuth starts (and the cookie is set) on the API host.
   return apiUrl("/api/auth/login")
 }
 
@@ -167,8 +162,6 @@ export async function listModels(opts?: {
   const q = opts?.refresh ? "?refresh=true" : ""
   return request<ModelsResponse>(`/api/models${q}`)
 }
-
-export type { CatalogModel }
 
 /** Optional per-key spend-limit fields (docs/pricing.md); `spend_limit: null` = unlimited. */
 export type KeyLimitFields = {
@@ -238,7 +231,7 @@ export async function reorderAccounts(
   })
 }
 
-/** Clears the KV bench so the account is eligible again. Not a lock. */
+/** Clears the bench so the account is eligible again. Not a lock. */
 export async function unpauseAccount(
   provider: ProviderId,
   id: string,
@@ -323,11 +316,11 @@ export async function startLogin(provider: ProviderId, accountId?: string): Prom
 export async function completeLogin(
   provider: ProviderId,
   loginId: string,
-  body?: { code?: string; value?: string },
-): Promise<{ ok: boolean; token_id?: string; reconnected?: boolean }> {
-  return request(`/api/providers/${provider}/login/${encodeURIComponent(loginId)}/complete`, {
+  body: { code?: string },
+): Promise<void> {
+  await request<{ ok: boolean }>(`/api/providers/${provider}/login/${encodeURIComponent(loginId)}/complete`, {
     method: "POST",
-    body: JSON.stringify(body ?? {}),
+    body: JSON.stringify(body),
   })
 }
 
@@ -336,13 +329,10 @@ export async function importAccount(
   body: {
     access_token: string
     refresh_token?: string
-    expires_at?: string
-    account_id?: string
-    email?: string
     label?: string
   },
-): Promise<{ ok: boolean; id: string }> {
-  return request(`/api/providers/${provider}/accounts/import`, {
+): Promise<void> {
+  await request<{ ok: boolean; id: string }>(`/api/providers/${provider}/accounts/import`, {
     method: "POST",
     body: JSON.stringify(body),
   })
@@ -352,8 +342,7 @@ export async function importAccount(
 // Session-cookie auth, same as the routes above. See docs/auth.md.
 
 export async function listCustomProviders(): Promise<CustomProvidersResponse> {
-  const data = await request<CustomProvidersResponse>("/api/custom-providers")
-  return { providers: data.providers, shared: data.shared ?? [] }
+  return request<CustomProvidersResponse>("/api/custom-providers")
 }
 
 export async function createCustomProvider(body: {
@@ -419,7 +408,7 @@ export async function deleteCustomProvider(id: string): Promise<void> {
   })
 }
 
-/** Clears the KV bench so the endpoint is eligible again. Not a lock. */
+/** Clears the bench so the endpoint is eligible again. Not a lock. */
 export async function unpauseCustomProvider(id: string): Promise<void> {
   await request<{ ok: boolean }>(
     `/api/custom-providers/${encodeURIComponent(id)}/unpause`,
@@ -560,42 +549,28 @@ export async function deleteModelGroup(id: string): Promise<void> {
   })
 }
 
-// Usage dashboard — session auth, same as the routes above. See docs/admin-ui.md.
+// Overview — session auth, same as the routes above. See docs/admin-ui.md § Overview page.
 
-/** Aggregates over `request_logs` for a date range or trailing `days` window. */
-export async function getUsageSummary(
-  params:
-    | {
-        from?: string
-        to?: string
-        grain?: "hour" | "day"
-        /** Bucket calendar, minutes east of UTC — see docs/admin-ui.md. */
-        offsetMinutes?: number
-        days?: UsageDays
-      }
-    | UsageDays = 7,
-): Promise<UsageSummary> {
-  if (typeof params === "number") {
-    return request<UsageSummary>(`/api/usage/summary?days=${params}`)
-  }
-  const q = new URLSearchParams()
-  if (params.from) q.set("from", params.from)
-  if (params.to) q.set("to", params.to)
-  if (params.grain) q.set("grain", params.grain)
-  if (params.offsetMinutes !== undefined) q.set("offset", String(params.offsetMinutes))
-  if (params.days !== undefined && !params.from) q.set("days", String(params.days))
-  const qs = q.toString()
-  return request<UsageSummary>(`/api/usage/summary${qs ? `?${qs}` : ""}`)
+/** Aggregates over `request_logs` for one local-calendar date range. */
+export async function getUsageSummary(range: {
+  from: string
+  to: string
+  grain: "hour" | "day"
+  /** Bucket calendar, minutes east of UTC — see docs/admin-ui.md. */
+  offsetMinutes: number
+}): Promise<UsageSummary> {
+  const q = new URLSearchParams({
+    from: range.from,
+    to: range.to,
+    grain: range.grain,
+    offset: String(range.offsetMinutes),
+  })
+  return request<UsageSummary>(`/api/usage/summary?${q.toString()}`)
 }
 
 // Request logs — session auth. See docs/admin-ui.md § Logs page.
 
-/**
- * One page of the caller's own `request_logs` rows, newest first. `cursor` is
- * the previous page's `next_cursor` and is passed straight back — it is opaque
- * by contract, so nothing here reads inside it.
- */
-export type LogsFilterParams = {
+type LogsFilterParams = {
   /** Exact provider slug; omitted = every provider, including deleted ones. */
   provider?: string
   /** Exact model, exact alias, or no alias. */
@@ -613,6 +588,11 @@ function setLogsFilters(q: URLSearchParams, params: LogsFilterParams | undefined
   if (params?.errorsOnly) q.set("errors", "1")
 }
 
+/**
+ * One page of the caller's own `request_logs` rows, newest first. `cursor` is
+ * the previous page's `next_cursor` and is passed straight back — it is opaque
+ * by contract, so nothing here reads inside it.
+ */
 export async function listLogs(
   params?: LogsFilterParams & { limit?: number; cursor?: string },
 ): Promise<LogsResponse> {
@@ -684,7 +664,7 @@ export async function downloadLogsExport(
 
 // Changelog — session auth. See docs/changelog.md.
 
-/** Running version + published GitHub Releases. `?refresh=true` bypasses the 1h server-side KV freshness window. */
+/** Running version + published GitHub Releases. `?refresh=true` bypasses the server's 1h changelog cache. */
 export async function getChangelog(opts?: {
   refresh?: boolean
 }): Promise<ChangelogResponse> {

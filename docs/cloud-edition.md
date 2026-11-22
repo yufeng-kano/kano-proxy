@@ -2,89 +2,76 @@
 
 ## Contract
 
-The existing self-hosted product remains fully open source and independently runnable. The private repository is named kano-proxy-cloud. It composes the public API and web through supported entry points, pins the public source to a Git submodule commit, and owns subscriptions and request allowance accounting. Never commit commercial implementation to this public repository.
+This repository is the open-source product and stays independently runnable. The private repository, kano-proxy-cloud, pins it as a Git submodule, composes the API and web through the entry points below, and owns subscriptions, request allowance accounting, teams and the official deployment. Never commit commercial implementation to this repository.
 
-Public releases retain verification and independent CLI distribution. The public production deploy workflow is disabled during the transition. The private repository takes over production deployment only after compatibility, migration and release checks pass. Releases remain the only production deployment trigger; no push deploys.
+This repository verifies, releases and distributes the CLI; it has no production deploy workflow, and a public Release deploys nothing. Subscription, allowance and team policy is specified in the private repository.
 
 ## Module boundaries
 
-- The public core crate exports a router factory, configuration types and explicit extension traits. Its own standalone binary remains the reference self-hosted deployment.
-- Public web exports a bootstrap/router factory and explicit route, navigation and account-menu extension contracts. The existing entry point remains the standalone web app.
+- The core crate exports a router factory, configuration types and explicit extension traits. Its standalone binary is the reference self-hosted deployment.
+- The web app exports a bootstrap/router factory and explicit route, navigation and account-menu extension contracts. Its own entry point is the standalone web app.
 - Extensions are passed at composition time; no global mutable plugin registry. Constructing two apps must not leak routes, middleware, or policies between them.
 - Authentication establishes the caller. Subscription policy runs after authentication without replacing the caller identity. Credentials are never returned to clients.
-- Personal pools remain isolated by default. Cross-user account access exists only through the explicit pool extension below; unrestricted cross-tenant lookup is forbidden.
+- Personal pools are isolated by default. Cross-user account access exists only through the explicit pool extension below; unrestricted cross-tenant lookup is forbidden. Teams, sharing, member roles and budgets are edition features built on it; the core carries no team concept.
 - An edition that must change its own rows and an API key together passes its transaction to the core's key functions (`create_key`, `create_key_for_device`, `delete_key` accept any Postgres executor, [auth.md](./auth.md) § Client API keys). The key commits or rolls back with the edition's rows.
-- Public migrations remain immutable. Cloud migrations have distinct names and a documented unified application order. Preserve existing user/key/session IDs, credential encryption keys and AgentTunnel identity on production cutover.
-
-## Cloud product specification
-
-Subscription entitlement belongs to the signed-in user. A subscription provides a request allowance per billing period. Users bring their own upstream accounts and pay upstream costs themselves.
-
-Count one client model request once, regardless of upstream retries. Rejects, catalog reads and failures before useful output do not count. Streaming output followed by disconnect counts. Quotas require atomic reservation before dispatch and idempotent completion; crashes cannot silently restore already consumed credit.
-
-Teams, model sharing, member roles and USD budgets are private-edition features built on the pool extension below; the core carries no team concept. Subscription cancellation preserves paid access until the paid-through date. Expiry falls back to Free without resetting earlier Free usage. Account management and export/revocation remain accessible. Configuration and personal resources are retained.
-
-Payment setup must use the operator's real merchant account and configured price identifiers. Never invent production products, prices, customers or entitlements. Use verified webhooks, deduplication and out-of-order reconciliation. Payment credentials stay in secrets. Paddle Billing is the operator-selected external payment exception. Application compute and storage run on the operator's own server.
-
-## Verification and cutover gates
-
-1. Standalone public API/web retain their existing behavior; full tests, typecheck and site build pass.
-2. Cloud composes the same source revision and runs independently; tests cover isolation of separately constructed apps and all protocol routes.
-3. Subscription tests cover signature validation, replay, ordering, renewal, cancellation, failure, concurrent request limits and settlement.
-4. Hosted policy tests cover every model request surface, user isolation, subscription UI and allowance display.
-5. Cloud CI checks a clean checkout with recursive submodules and frozen dependencies; artifacts and migration plans identify both cloud and core revisions.
-6. Production configuration, existing encrypted data compatibility, backup and rollback strategy are verified before release. No paid upstream test without specific approval.
-
-## Implementation status
-
-The reusable API/web entry points are implemented and merged. The standalone application remains supported. The public production workflow is retired: it has no Release trigger and its remaining manual job is skipped. Public CI and independent CLI releases remain enabled. Private implementation, launch checks and deployment status are maintained in the private repository; a public Release does not deploy the official website.
-
-## Launch policy (operator update)
-
-Every user, including existing users, starts with Free: 10,000 successful model requests per UTC calendar month. Paddle is selected for optional paid subscriptions; payment keys remain unset for the initial launch. Paid checkout is unavailable until real Paddle credentials and configured price IDs exist. Missing or expired paid access falls back to the user's existing Free period without resetting earlier Free usage.
+- Core migrations are immutable. Edition migrations have distinct names and their own history table, and apply after the core's ([database.md](./database.md) § Migrations).
 
 ## Pool extension (composition-time, optional)
 
-An edition may pass `poolExtension` in `ApplicationOptions`. Standalone installs pass none and behave exactly as before. The extension is the only sanctioned cross-user path; the core never looks up another user's rows on its own.
+An edition passes a `PoolExtension` (`pool/extension.rs`) with `AppStateBuilder::pool_extension`. Standalone installs pass none, and nothing is ever shared. The extension is the only sanctioned cross-user path; the core never looks up another user's rows on its own.
 
-```ts
-export interface SharedAccount {
-  account: AccountRow            // another user's upstream_accounts row of a builtin provider
-  priority: number               // the viewer's own ordering; merged with the viewer's rows by (priority DESC, created_at DESC)
-  share: { teamId: string; teamName: string; ownerLabel: string }
+```rust
+pub struct ShareInfo { pub team_id: String, pub team_name: String, pub owner_label: String }
+pub struct SharedAccount {
+    pub account: AccountRow,          // another user's upstream_accounts row of a builtin provider
+    pub priority: i32,                // the viewer's own ordering; merged with the viewer's rows by (priority DESC, created_at DESC)
+    pub share: ShareInfo,
+    pub usage: Option<AccountUsage>,  // only when asked with `usage: true` (the Providers page); routing never asks
 }
-export interface SharedCustomProvider {
-  provider: CustomProviderRow    // another user's custom_providers row
-  account: AccountRow            // that endpoint's one upstream_accounts row (the owner's user_id)
-  share: { teamId: string; teamName: string; ownerLabel: string }
-  usage?: { windows: UsageWindow[] } // only when asked with { usage: true } (the Providers page); routing never asks
+pub struct SharedCustomProvider {
+    pub provider: CustomProviderRow,  // another user's custom_providers row
+    pub account: AccountRow,          // that endpoint's one upstream_accounts row (the owner's user_id)
+    pub share: ShareInfo,
+    pub usage: Option<AccountUsage>,  // as above
 }
-export type AttemptLease = { settle(outcome: "consumed" | "released"): Promise<void> }
-export interface PoolExtension {
-  listShared(env: Env, viewerUserId: string, provider: ProviderId): Promise<SharedAccount[]>
-  /** Custom endpoints other users share with the viewer, every slug at most once. Optional; absent = none. */
-  listSharedCustom?(env: Env, viewerUserId: string, options?: { usage?: boolean }): Promise<SharedCustomProvider[]>
-  /** Every candidate attempt, own or shared. `null` = not governed; `{ skip: true }` = exhausted, move on; a lease = admitted. */
-  reserveAttempt(env: Env, ctx: { userId: string; apiKeyId: string | null; upstreamModel: string }, candidate: RoutingCandidate): Promise<AttemptLease | { skip: true } | null>
-  setSharedPriority(env: Env, viewerUserId: string, accountId: string, priority: number): Promise<boolean>
-  /** Names for borrowed accounts the viewer may still see: `GET /api/logs` asks for the account ids on the page that are not the viewer's own. Absent ids are treated as removed. */
-  labelShared?(env: Env, viewerUserId: string, accountIds: string[]): Promise<Map<string, { label: string; ownerLabel: string }>>
+pub enum LeaseOutcome { Consumed, Released }
+pub trait AttemptLease { async fn settle(&self, outcome: LeaseOutcome) -> anyhow::Result<()>; }
+pub enum ReserveOutcome {
+    Ungoverned,                       // not governed by the extension
+    Skip,                             // exhausted or uncovered: move on without using an attempt
+    Admitted(Box<dyn AttemptLease>),
+}
+
+pub trait PoolExtension {
+    async fn list_shared(&self, cx: &AppState, viewer_user_id: &str, provider: ProviderId, options: ListSharedOptions) -> anyhow::Result<Vec<SharedAccount>>;
+    /// Custom endpoints shared with the viewer, every slug at most once. Default: none.
+    async fn list_shared_custom(&self, cx: &AppState, viewer_user_id: &str, options: ListSharedOptions) -> anyhow::Result<Vec<SharedCustomProvider>>;
+    /// Every candidate attempt, own or shared.
+    async fn reserve_attempt(&self, cx: &AppState, ctx: ReserveContext<'_>, candidate: &RoutingCandidate) -> anyhow::Result<ReserveOutcome>;
+    /// Reorder a shared row inside the viewer's pool; `false` when the viewer may not (the order route answers 409, the pool changed).
+    async fn set_shared_priority(&self, cx: &AppState, viewer_user_id: &str, account_id: &str, priority: i32) -> anyhow::Result<bool>;
+    /// Extra bars for the viewer's own rows of one provider (Providers page only). Default: none.
+    async fn own_bars(&self, cx: &AppState, viewer_user_id: &str, provider: ProviderId, account_ids: &[String]) -> anyhow::Result<HashMap<String, Vec<UsageWindow>>>;
+    /// Names for borrowed accounts the viewer may still see (`GET /api/logs`). Default: none.
+    async fn label_shared(&self, cx: &AppState, viewer_user_id: &str, account_ids: &[String]) -> anyhow::Result<HashMap<String, SharedLabel>>;
 }
 ```
 
+`ReserveContext` carries `user_id` and `upstream_model`; `ListSharedOptions` carries `usage`; `AccountUsage` is `{ windows, show_credits }`; `SharedLabel` is `{ label, owner_label }`.
+
 Core obligations:
 
-- `routing/candidates.ts` merges `listShared` rows into unpinned builtin-pool candidates and into `GET /api/providers/:provider/accounts` in the same `(priority DESC, created_at DESC)` order (with the `share` descriptor; the core never includes the owner's upstream usage, but the route asks `listShared(…, { usage: true })` so the edition may attach its own `usage.windows` for the viewer, e.g. their remaining allowance, or the account's stored windows when its owner opted into showing them; with those, `usage.show_credits` asks the route to add a Codex account's stored `credits` facts as `usage.credits` and to report `on_credits` for the row, both read off the row's own stored facts so the edition never copies them — routing never asks) and to the catalog's bound-provider set. A pinned builtin group target whose id is not one of the viewer's own rows resolves through the same `listShared` list (validated at write time, re-resolved per request), so a viewer may order a teammate's account against their own; a row that stops being shared leaves the pin unresolved ([providers.md](./providers.md) § Model groups "Account pinning").
-- **Shared custom endpoints.** A model prefix resolves builtin → the caller's own custom slug → the caller's own CLI slug → a slug in `listSharedCustom` ([providers.md](./providers.md) § Custom endpoints "Shared endpoints"). The caller's own provider always wins, so a shared endpoint whose slug the viewer already uses is unreachable for them and is reported as `shadowed` wherever it is listed. A shared endpoint contributes exactly one candidate: the owner's `custom_providers` row builds the adapter, the owner's account row carries the key and the request-edit switches, and the candidate carries the `share` descriptor like a borrowed builtin row, so `reserveAttempt`, lease settlement, owner-scoped bench writes and the borrower-safe response headers apply unchanged. The same list feeds the catalog (one section per shared endpoint, fetched with the shared key, cached under the **owner's** user id and slug so owner and borrowers read one entry), `GET /api/custom-providers` (a separate `shared` array: name, slug, format, status, `share`, the edition's `usage`, `shadowed`, the owner's request-edit switches; never `base_url`, `count_tokens_url` or the key mask), the group-target validator (an unpinned target may name a shared slug; a pin never names a shared endpoint's key row, since the endpoint is one key and the unpinned target already means exactly it) and the Overview's live-provider set. Every write route looks a custom provider up by `(id, user_id)`, so a borrower's write on a shared endpoint is `404`. A `listSharedCustom` error is **propagated** where the shared endpoint may be the whole answer — request routing (direct and group targets, which ask at most once per request or per `GET /api/model-groups`, and only after a prefix missed the caller's own namespace) and the group-target validator (which asks only when a target's prefix missed the caller's own namespace, so a group of the caller's own providers never depends on the extension) — so the caller gets the same retryable `500` a storage error gives, never a misleading `400 invalid_model`; the display readers (`GET /api/custom-providers`, the catalog, the Overview) log it and read "nothing shared". A borrowed custom endpoint's response headers are reduced to `content-type` on every delivery path (an arbitrary gateway's headers can locate or identify it; the transport already decodes `content-encoding`), while a borrowed builtin row keeps the denylist above. A shared section's catalog error reaches a borrower as the fixed `models unavailable`, never the adapter's text (a connect error names the owner's base URL); the owner's own view of the same cache entry keeps the real text. CLI providers are never shared: a tunnel ends on one person's machine.
-- `dispatch_walk` calls `reserveAttempt` immediately before each attempt's acquire; a `skip` is not counted toward `MAX_ATTEMPTS`. A lease is settled exactly once, at the point the core already decides that attempt's `request_logs` row: `released` when the attempt was benched/retried, when a non-stream upstream error status is passed through, or when the row carries an `error_code` and no upstream bytes reached the client; `consumed` otherwise. "Output" is byte-level on purpose: the core does not parse protocol events to decide a lease, so an edition needing a protocol-aware rule applies it in its own `requestPolicy`. For streams that is the stream-close write, so a lease may outlive the returned `Response`.
-- Unpause/delete/patch on a shared row from a non-owner return 403. The two ordering writes are the exception: `POST …/:id/promote` and `PUT …/accounts/order` delegate a shared row to `setSharedPriority`, which orders it inside the viewer's own pool only.
+- `routing/candidates.rs` merges `list_shared` rows into unpinned builtin-pool candidates, and `GET /api/providers/:provider/accounts` lists them, in the same `(priority DESC, created_at DESC)` order (with the `share` descriptor; the core never includes the owner's upstream usage, but the route asks `list_shared` with `usage: true` so the edition may attach its own `usage.windows` for the viewer, e.g. their remaining allowance, or the account's stored windows when its owner opted into showing them; with those, `usage.show_credits` asks the route to add a Codex account's stored `credits` facts as `usage.credits` and to report `on_credits` for the row, both read off the row's own stored facts so the edition never copies them — routing never asks) and to the catalog's bound-provider set. A pinned builtin group target whose id is not one of the viewer's own rows resolves through the same `list_shared` list (validated at write time, re-resolved per request), so a viewer may order a teammate's account against their own; a row that stops being shared leaves the pin unresolved ([providers.md](./providers.md) § Model groups "Account pinning").
+- **Shared custom endpoints.** A model prefix resolves builtin → the caller's own custom slug → the caller's own CLI slug → a slug in `list_shared_custom` ([providers.md](./providers.md) § Custom endpoints "Shared endpoints"). The caller's own provider always wins, so a shared endpoint whose slug the viewer already uses is unreachable for them and is reported as `shadowed` wherever it is listed. A shared endpoint contributes exactly one candidate: the owner's `custom_providers` row builds the adapter, the owner's account row carries the key and the request-edit switches, and the candidate carries the `share` descriptor like a borrowed builtin row, so `reserve_attempt`, lease settlement, owner-scoped bench writes and the borrower-safe response headers apply unchanged. The same list feeds the catalog (one section per shared endpoint, fetched with the shared key, cached under the **owner's** user id and slug so owner and borrowers read one entry), `GET /api/custom-providers` (a separate `shared` array: name, slug, format, status, `share`, the edition's `usage`, `shadowed`, the owner's request-edit switches; never `base_url`, `count_tokens_url` or the key mask), the group-target validator (an unpinned target may name a shared slug; a pin never names a shared endpoint's key row, since the endpoint is one key and the unpinned target already means exactly it) and the Overview's live-provider set. Every write route looks a custom provider up by `(id, user_id)`, so a borrower's write on a shared endpoint is `404`. A `list_shared_custom` error is **propagated** where the shared endpoint may be the whole answer — request routing (direct and group targets, which ask at most once per request or per `GET /api/model-groups`, and only after a prefix missed the caller's own namespace) and the group-target validator (which asks only when a target's prefix missed the caller's own namespace, so a group of the caller's own providers never depends on the extension) — so the caller gets the same retryable `500` a storage error gives, never a misleading `400 invalid_model`; the display readers (`GET /api/custom-providers`, the catalog, the Overview) log it and read "nothing shared". A borrowed custom endpoint's response headers are reduced to `content-type` on every delivery path (an arbitrary gateway's headers can locate or identify it; the transport already decodes `content-encoding`), while a borrowed builtin row keeps the denylist above. A shared section's catalog error reaches a borrower as the fixed `models unavailable`, never the adapter's text (a connect error names the owner's base URL); the owner's own view of the same cache entry keeps the real text. CLI providers are never shared: a tunnel ends on one person's machine.
+- `dispatch_walk` calls `reserve_attempt` immediately before each attempt's acquire; a `Skip` is not counted toward `MAX_ATTEMPTS`. A lease is settled exactly once, at the point the core already decides that attempt's `request_logs` row: `released` when the attempt was benched/retried, when a non-stream upstream error status is passed through, or when the row carries an `error_code` and no upstream bytes reached the client; `consumed` otherwise. "Output" is byte-level on purpose: the core does not parse protocol events to decide a lease, so an edition needing a protocol-aware rule applies it in its own `request_policy`. For streams that is the stream-close write, so a lease may outlive the returned `Response`.
+- Unpause/delete/patch on a shared row from a non-owner return 403. The ordering write is the exception: `PUT …/accounts/order` delegates a shared row to `set_shared_priority`, which orders it inside the viewer's own pool only.
 - Credentials of shared accounts are decrypted only inside dispatch, as for own accounts, and never returned by any route.
-- A shared candidate's request edits ([providers.md](./providers.md) § Request edits) are the owner's switches on the row `listShared` handed over, and only those: the borrower's own accounts and settings never touch a lent account. The row is the owner's `upstream_accounts` row, so the switches ride on it and the extension needs nothing new. `GET …/accounts` reports them on the shared row as `strip_fast_mode` / `strip_claude_code_line`, and a borrower's `PATCH` on that row answers 403 like the other owner-only writes.
-- A borrowed row's upstream response headers are stripped of everything that states the **owner's** account rather than this request — rate-limit budgets and resets (`anthropic-ratelimit-*`, `x-ratelimit-*`, the internal `x-kano-ratelimit-reset`), `retry-after`, and any organization/account identifier — on every delivery path (non-stream passthrough, streamed passthrough, audio). Own rows and standalone installs are byte-identical to before.
+- A shared candidate's request edits ([providers.md](./providers.md) § Request edits) are the owner's switches on the row `list_shared` handed over, and only those: the borrower's own accounts and settings never touch a lent account. The row is the owner's `upstream_accounts` row, so the switches ride on it and the extension needs nothing new. `GET …/accounts` reports them on the shared row as `strip_fast_mode` / `strip_claude_code_line` / `force_cache_ttl_1h`, and a borrower's `PATCH` on that row answers 403 like the other owner-only writes.
+- A borrowed row's upstream response headers are stripped of everything that states the **owner's** account rather than this request — rate-limit budgets and resets (`anthropic-ratelimit-*`, `x-ratelimit-*`, the internal `x-kano-ratelimit-reset`), `retry-after`, and any organization/account identifier — on every delivery path (non-stream passthrough, streamed passthrough, audio). Own rows and standalone installs pass headers unchanged.
 
-An optional `labelShared(env, viewerUserId, accountIds)` lets the Logs page name a borrowed account: `routes/logs.ts` collects the page's `account_id`s that are not the viewer's own rows and asks the extension once; an id it returns renders as the label with a Shared tag and `account_shared_by` set to `ownerLabel`, an id it omits falls back to the label stored on the row at write time with the removed tag ([admin-ui.md](./admin-ui.md) § Logs page). The edition decides what "may still see" means — the cloud edition answers only for accounts currently shared with the viewer's team.
+The optional `label_shared` lets the Logs page name a borrowed account: `routes/logs.rs` collects the page's `account_id`s that are not the viewer's own rows and asks the extension once; an id it returns renders as the label with a Shared tag and `account_shared_by` set to its `owner_label`, an id it omits falls back to the label stored on the row at write time with the removed tag ([admin-ui.md](./admin-ui.md) § Logs page). The edition decides what "may still see" means — the cloud edition answers only for accounts currently shared with the viewer's team.
 
-An optional `ownBars(env, viewerUserId, provider, accountIds)` lets the edition put bars before the upstream windows on the viewer's own rows on the Providers page (their allowance on an account they lend out); those bars are added after the routing dot was decided and never reach `routing/facts`.
+The optional `own_bars` lets the edition put bars before the upstream windows on the viewer's own rows on the Providers page (their allowance on an account they lend out); those bars are added after the routing dot was decided and never reach `routing/facts`.
 
 Teams themselves (membership, limits, ledgers, UI) stay in the private edition.
 
@@ -99,7 +86,7 @@ export interface ShellOptions {
 }
 ```
 
-Both exist for a hosted edition whose release notes are written for its operator, not for the people signed in to it ([admin-ui.md](./admin-ui.md) § Layout: edition options). The API keeps serving `/api/changelog`; an edition that hides the page also leaves `GITHUB_REPO` unset so the route reports unavailable.
+Both exist for a hosted edition whose release notes are written for its operator, not for the people signed in to it ([admin-ui.md](./admin-ui.md) § Layout: the shell, "Edition options"). Hiding the page does not unmount `/api/changelog`: an edition that hides it lists that path in `Extensions::shadowed_paths` and answers it itself, or leaves `GITHUB_REPO` unset so the core's route reports unavailable.
 
 `settingsSections` adds sections to the Settings dialog after the core's General and Account ([admin-ui.md](./admin-ui.md) § Settings dialog):
 
@@ -109,7 +96,7 @@ export interface SettingsSection {
   label: string
   icon: Component
   component: Component  // renders the section's groups; the dialog draws its heading
-  clearQuery?: string[] // one-shot query keys this section reads, dropped when the dialog closes
+  clearQuery?: readonly string[] // one-shot query keys this section reads, dropped when the dialog closes
 }
 ```
 
@@ -129,6 +116,6 @@ Two more fields shape what a signed-out visitor meets. The standalone build sets
 
 ## Usage notice (composition-time, optional)
 
-The core asks every signed-in user to accept its usage notice before any session route answers ([auth.md](./auth.md) § Usage notice). An edition whose own terms the user accepts on the same page passes their date, `YYYY-MM-DD`, with `AppStateBuilder::terms_date` (or `Extensions::terms_date` for `AppState::new`). The stored version becomes `<notice date>+<terms date>`, so a new date on either side asks everyone again. The edition's routes that take `SessionUser` are gated like the core's; a page that must answer before acceptance takes `MaybeSessionUser`. A route that loads the session itself (`load_session_user`) is not gated: it checks `state.notice().accepted_by(&user)` and answers `403 {"error":"notice_required"}` until the user accepts. The edition changes the date in the same release as its terms text.
+The core asks every signed-in user to accept its usage notice before any session route answers ([auth.md](./auth.md) § Usage notice). An edition whose own terms the user accepts on the same page passes their date, `YYYY-MM-DD`, with `AppStateBuilder::terms_date` (any other shape panics at `build`). The stored version becomes `<notice date>+<terms date>`, so a new date on either side asks everyone again. The edition's routes that take `SessionUser` are gated like the core's; a page that must answer before acceptance takes `MaybeSessionUser`. A route that loads the session itself (`load_session_user`) is not gated: it checks `state.notice().accepted_by(&user)` and answers `403 {"error":"notice_required"}` until the user accepts. The edition changes the date in the same release as its terms text.
 
 The public documentation site is extended the same way, from the edition's own VitePress project ([docs-site.md](./docs-site.md) § Editions).

@@ -6,4 +6,4 @@ pub mod extension;
 pub mod sign_in;
 
 pub use acquire::{AcquiredAccount, StoredCredential};
-pub use extension::{AttemptLease, ListSharedOptions, PoolExtension, ReserveOutcome, SharedAccount, SharedCustomProvider, ShareInfo};
+pub use extension::{PoolExtension, SharedAccount, ShareInfo};

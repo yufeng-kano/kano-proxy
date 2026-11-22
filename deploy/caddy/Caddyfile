@@ -5,7 +5,7 @@
 
 {$DOMAIN} {
 	# The API owns these paths; everything else is the web app's.
-	@api path /api/* /openai/* /anthropic/* /g/* /cli/v1/* /agent/* /health
+	@api path /api/* /openai/* /anthropic/* /g/* /cli/v1/* /health
 	handle @api {
 		# Model streams and the CLI tunnel are long-lived: never buffer the response,
 		# and a ten-minute idle gap is normal on a quiet stream.

@@ -34,8 +34,11 @@ use crate::utils::model::logging_provider_from_raw_model;
 use crate::utils::reasoning::parse_reasoning_effort;
 use crate::AppState;
 
-use super::openai::{affinity_from, log_model, model_string, no_retry, spawn_log, CHAT_MODEL_EXAMPLE};
-use super::resolve_request::{resolve_request_model, RequestModelResolution};
+use super::openai::{
+    affinity_from, invalid_json, invalid_model_message, log_model, model_string, no_retry, number_as_u64, refusal,
+    spawn_log, CHAT_MODEL_EXAMPLE,
+};
+use super::resolve_request::{resolve_request_model, ResolutionFailure};
 
 /// What a pre-dispatch rejection records: the target it had resolved (or the raw string's own
 /// provider guess when resolution itself failed).
@@ -67,52 +70,43 @@ pub async fn handle_responses(
     raw_body: Bytes,
 ) -> Response {
     let started = now_ms();
-    let Ok(body) = read_proxy_json(&raw_body) else {
-        return ApiError::openai(StatusCode::BAD_REQUEST, "Invalid JSON", "invalid_request_error", "invalid_request")
-            .into_response();
-    };
+    let Some(body) = read_proxy_json(&raw_body) else { return invalid_json() };
     let model_raw = model_string(&body);
 
     let reject = |status: StatusCode, code: &str, message: &str, target: &RejectTarget| -> Response {
         spawn_log(
             cx,
             LogEntry {
-                user_id: id.user_id.clone(),
-                api_key_id: Some(id.api_key_id.clone()),
                 provider: target.provider.clone(),
                 model: log_model(&target.model),
-                status_code: status.as_u16() as i32,
-                latency_ms: now_ms() - started,
-                error_code: Some(code.to_string()),
                 group_name: target.group_name.clone(),
-                ..Default::default()
+                ..refusal(id, started, i32::from(status.as_u16()), code)
             },
         );
         no_retry(ApiError::openai(status, message, "invalid_request_error", code))
     };
 
     let resolved = match resolve_request_model(cx, &id.user_id, slug, &model_raw).await {
-        Ok(RequestModelResolution::Ok(resolution)) => resolution,
-        Ok(outcome) => {
+        Ok(Ok(resolution)) => resolution,
+        Ok(Err(failure)) => {
             let target = RejectTarget {
                 provider: logging_provider_from_raw_model(&model_raw),
                 model: model_raw.clone(),
                 group_name: None,
             };
-            return match outcome {
-                RequestModelResolution::GroupNotFound { slug } => reject(
+            return match failure {
+                ResolutionFailure::GroupNotFound { slug } => reject(
                     StatusCode::NOT_FOUND,
                     "group_not_found",
                     &format!("unknown group endpoint \"{slug}\""),
                     &target,
                 ),
-                RequestModelResolution::InvalidModel { group_slug } => reject(
+                ResolutionFailure::InvalidModel { group_slug } => reject(
                     StatusCode::BAD_REQUEST,
                     "invalid_model",
-                    &super::openai::invalid_model_message(group_slug.as_deref(), CHAT_MODEL_EXAMPLE),
+                    &invalid_model_message(group_slug.as_deref(), CHAT_MODEL_EXAMPLE),
                     &target,
                 ),
-                RequestModelResolution::Ok(_) => unreachable!("resolution succeeded"),
             };
         }
         Err(err) => return ApiError::from(err).into_response(),
@@ -155,12 +149,11 @@ pub async fn handle_responses(
     let stream = chat.get("stream") == Some(&Value::Bool(true));
 
     let req = ChatCompletionRequest {
-        model: model_raw.clone(),
         raw_model: model_raw.clone(),
         upstream_model: resolved.primary.upstream_model.clone(),
         messages,
         stream: Some(stream),
-        max_tokens: chat.get("max_tokens").and_then(Value::as_f64).filter(|n| n.is_finite() && *n >= 0.0).map(|n| n as u64),
+        max_tokens: number_as_u64(chat.get("max_tokens")),
         tools: chat.get("tools").cloned(),
         tool_choice: chat.get("tool_choice").cloned(),
         response_format: chat.get("response_format").cloned(),
@@ -170,7 +163,7 @@ pub async fn handle_responses(
         stop: None,
         prompt_cache_key: chat.get("prompt_cache_key").and_then(Value::as_str).map(str::to_string),
         affinity: Some(affinity_from(headers)),
-        responses_body: if native { Some(body.clone()) } else { None },
+        responses_body: native.then_some(body),
         raw_body: chat,
     };
 
@@ -180,13 +173,9 @@ pub async fn handle_responses(
             user_id: id.user_id.clone(),
             api_key_id: Some(id.api_key_id.clone()),
             provider: resolved.primary.provider.clone(),
-            adapter: Some(resolved.primary.adapter.clone()),
             req,
             group_name: resolved.group_name.clone(),
-            candidates: Some(resolved.candidates.clone()),
-            strategy: Some(resolved.strategy.clone()),
-            is_builtin: Some(resolved.primary.is_builtin),
-            custom_provider: resolved.primary.custom_provider.clone(),
+            candidates: resolved.candidates,
             ..Default::default()
         },
     )
@@ -226,34 +215,25 @@ pub async fn handle_responses(
         Ok(collected) => collected.to_bytes(),
         Err(_) => Bytes::new(),
     };
-    if !ok {
-        let mut response = Response::builder().status(status);
-        let content_type = upstream_headers
-            .get(header::CONTENT_TYPE)
-            .cloned()
-            .unwrap_or(HeaderValue::from_static("application/json"));
-        response = response.header(header::CONTENT_TYPE, content_type);
-        for name in ["x-should-retry", "retry-after"] {
-            if let Some(value) = upstream_headers.get(name) {
-                response = response.header(name, value.clone());
-            }
-        }
-        let mut response = response.body(Body::from(bytes)).expect("response builds");
-        copy_upstream_headers(&upstream_headers, response.headers_mut());
-        return response;
-    }
-    let mut response = match serde_json::from_slice::<Value>(&bytes) {
-        Ok(json) => Json(openai_to_responses_object(&json, &out_opts)).into_response(),
-        Err(_) => {
+    // A success converts; an error, or a success that is not JSON, passes through as received
+    // with its content type (and, for an error, its retry markers).
+    let chat = if ok { serde_json::from_slice::<Value>(&bytes).ok() } else { None };
+    let mut response = match chat {
+        Some(json) => Json(openai_to_responses_object(&json, &out_opts)).into_response(),
+        None => {
             let content_type = upstream_headers
                 .get(header::CONTENT_TYPE)
                 .cloned()
                 .unwrap_or(HeaderValue::from_static("application/json"));
-            Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, content_type)
-                .body(Body::from(bytes))
-                .expect("response builds")
+            let mut builder = Response::builder().status(status).header(header::CONTENT_TYPE, content_type);
+            if !ok {
+                for name in ["x-should-retry", "retry-after"] {
+                    if let Some(value) = upstream_headers.get(name) {
+                        builder = builder.header(name, value.clone());
+                    }
+                }
+            }
+            builder.body(Body::from(bytes)).expect("response builds")
         }
     };
     copy_upstream_headers(&upstream_headers, response.headers_mut());

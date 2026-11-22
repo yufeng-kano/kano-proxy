@@ -2,35 +2,31 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue"
 import { buildUsageRange, parseAnchor } from "@/components/overview/dateRange"
 import { getUsageSummary } from "@/services/api"
 import {
-  CACHE_TTL_MS,
   isUsageSummaryCacheFresh,
   readUsageSummaryCache,
   writeUsageSummaryCache,
 } from "@/services/cache"
 import { getOverviewPrefs, setOverviewPrefs } from "@/services/prefs"
-import type { UsageDays, UsageRange, UsageRangeKind, UsageSummary } from "@/types"
+import type { UsageRange, UsageRangeKind, UsageSummary } from "@/types"
 
 type UsageState = {
   data: UsageSummary | null
   loading: boolean
-  refreshing: boolean
   error: string | null
-  fromCache: boolean
 }
 
 function emptyState(): UsageState {
-  return {
-    data: null,
-    loading: false,
-    refreshing: false,
-    error: null,
-    fromCache: false,
-  }
+  return { data: null, loading: false, error: null }
 }
 
-// Module-level singleton: one state entry per rangeKey so switching ranges
+// Module-level singleton: one state entry per range key so switching ranges
 // repaints that range's cached data immediately instead of flashing a blank state.
 const byKey = reactive<Record<string, UsageState>>({})
+
+/** One cache and state entry per range, e.g. "day:2026-08-28". */
+function rangeKey(range: UsageRange): string {
+  return `${range.kind}:${range.anchor}`
+}
 
 function getOrInitState(key: string): UsageState {
   if (!byKey[key]) {
@@ -43,9 +39,7 @@ export function useUsage() {
   const userId = ref<string | null>(null)
 
   const initialPrefs = getOverviewPrefs()
-  const initialKind: UsageRangeKind =
-    initialPrefs.rangeKind ||
-    (initialPrefs.days === 1 ? "day" : initialPrefs.days === 30 ? "month" : "week")
+  const initialKind = initialPrefs.rangeKind
   const rangeKind = ref<UsageRangeKind>(initialKind)
   // A pinned past period survives a reload; anything else follows today
   // (docs/admin-ui.md § Overview page, Following today). An unparseable or
@@ -55,7 +49,6 @@ export function useUsage() {
     : null
   const activeDate = ref<Date>(pinnedDate ?? new Date())
   const range = computed<UsageRange>(() => buildUsageRange(rangeKind.value, activeDate.value))
-  const rangeKey = computed(() => `${range.value.kind}:${range.value.anchor}`)
 
   function isCurrentPeriod(): boolean {
     return range.value.anchor === buildUsageRange(rangeKind.value, new Date()).anchor
@@ -78,42 +71,32 @@ export function useUsage() {
    * - Network fetch only if cache missing/stale (>2 min) or opts.refresh.
    */
   async function loadRange(targetRange: UsageRange, opts?: { refresh?: boolean }) {
-    const key = `${targetRange.kind}:${targetRange.anchor}`
+    const key = rangeKey(targetRange)
     const state = getOrInitState(key)
     const force = !!opts?.refresh
 
     const cached = readUsageSummaryCache(userId.value, key)
     if (cached) {
       state.data = cached
-      state.fromCache = true
       state.loading = false
     } else if (!state.data) {
       state.loading = true
     }
 
-    if (!force && isUsageSummaryCacheFresh(userId.value, key, CACHE_TTL_MS)) {
+    if (!force && isUsageSummaryCacheFresh(userId.value, key)) {
       state.loading = false
-      state.refreshing = false
       return
     }
 
-    state.refreshing = true
     state.error = null
     try {
-      const data = await getUsageSummary({
-        from: targetRange.from,
-        to: targetRange.to,
-        grain: targetRange.grain,
-        offsetMinutes: targetRange.offsetMinutes,
-      })
+      const data = await getUsageSummary(targetRange)
       state.data = data
-      state.fromCache = false
       writeUsageSummaryCache(userId.value, key, data)
     } catch (e) {
       state.error = e instanceof Error ? e.message : "Failed to load usage summary"
     } finally {
       state.loading = false
-      state.refreshing = false
     }
   }
 
@@ -140,16 +123,12 @@ export function useUsage() {
   /**
    * Persists the whole selection — granularity *and* whether it follows today
    * or is pinned to a past period — from the current range, so the two can
-   * never drift apart in storage. `days` rides along as the legacy mirror of
-   * `kind`.
+   * never drift apart in storage.
    */
   function persistRange() {
-    const kind = range.value.kind
     followsToday.value = isCurrentPeriod()
-    const mappedDays: UsageDays = kind === "day" ? 1 : kind === "month" ? 30 : 7
     setOverviewPrefs({
-      rangeKind: kind,
-      days: mappedDays,
+      rangeKind: range.value.kind,
       pinnedAnchor: followsToday.value ? null : range.value.anchor,
     })
   }
@@ -196,28 +175,21 @@ export function useUsage() {
     document.removeEventListener("visibilitychange", onVisibilityChange)
   })
 
-  const currentState = computed(() => getOrInitState(rangeKey.value))
+  const currentState = computed(() => getOrInitState(rangeKey(range.value)))
   const summary = computed(() => currentState.value.data)
   const loading = computed(() => currentState.value.loading)
-  const refreshing = computed(() => currentState.value.refreshing)
   const error = computed(() => currentState.value.error)
-  const fromCache = computed(() => currentState.value.fromCache)
 
   return {
     summary,
     loading,
-    refreshing,
     error,
-    fromCache,
     rangeKind,
     activeDate,
     range,
-    rangeKey,
     setRangeKind,
     setDate,
     setUserId,
     refresh,
-    loadRange,
-    CACHE_TTL_MS,
   }
 }

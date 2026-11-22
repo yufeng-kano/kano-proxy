@@ -238,11 +238,11 @@ function modelsCell(provider: CliProvider): string {
             <code class="mono slug">{{ row.slug }}/*</code>
           </span>
           <RequestEditSwitches
-            :strip-fast-mode="!!row.strip_fast_mode"
-            :strip-claude-code-line="!!row.strip_claude_code_line"
+            :strip-fast-mode="row.strip_fast_mode"
+            :strip-claude-code-line="row.strip_claude_code_line"
             :fast-mode-hint="t('providers.edits.fastModeHintEndpoint')"
             :line-hint="t('providers.edits.lineHintEndpoint')"
-            :force-cache-ttl1h="!!row.force_cache_ttl_1h"
+            :force-cache-ttl1h="row.force_cache_ttl_1h"
             :cache-hint="row.format === 'anthropic' ? t('providers.edits.cacheHintEndpoint') : undefined"
             :busy="settingsBusyId === row.id"
             @change="onEdits(row, row.account_id, $event)"

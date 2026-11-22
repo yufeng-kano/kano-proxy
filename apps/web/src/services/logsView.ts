@@ -5,6 +5,7 @@
  *
  * Kept out of the page so it is tested without mounting anything.
  */
+import { formatLocalDate, getStartOfDay } from "@/components/overview/dateRange"
 import type { LogFacets, LogFacetTally, LogModelFilter, RequestLogRow } from "@/types"
 
 export const LOG_COLUMN_KEYS = [
@@ -76,7 +77,7 @@ export function modelName(model: string, provider: string): string {
 }
 
 /** One picker option. `key` is stable across loads and is what colors hang off. */
-export type PickerOption = {
+type PickerOption = {
   key: string
   filter: LogModelFilter
   label: string
@@ -171,27 +172,16 @@ export function optionColors(options: PickerOption[]): Map<string, string> {
   return colors
 }
 
-/** The local calendar day a timestamp falls on, as "YYYY-MM-DD". */
-export function localDay(value: string | Date): string {
-  const d = new Date(value)
-  const pad = (n: number) => String(n).padStart(2, "0")
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-
 /** Whole local days between the row's day and `now`'s: 0 today, 1 yesterday. */
 export function daysAgo(value: string, now: Date): number {
-  const [y1, m1, d1] = localDay(value).split("-").map(Number)
-  const [y2, m2, d2] = localDay(now).split("-").map(Number)
+  const [y1, m1, d1] = formatLocalDate(new Date(value)).split("-").map(Number)
+  const [y2, m2, d2] = formatLocalDate(now).split("-").map(Number)
   return Math.round((Date.UTC(y2!, m2! - 1, d2!) - Date.UTC(y1!, m1! - 1, d1!)) / 86_400_000)
-}
-
-function localMidnight(day: Date): Date {
-  return new Date(day.getFullYear(), day.getMonth(), day.getDate())
 }
 
 /** `[local midnight, now]` — what "today" means to the pickers. */
 export function todayRange(now: Date): { from: string; to: string } {
-  return { from: localMidnight(now).toISOString(), to: now.toISOString() }
+  return { from: getStartOfDay(now).toISOString(), to: now.toISOString() }
 }
 
 export type ExportRangeKind = "today" | "7d" | "30d" | "custom"
@@ -216,12 +206,7 @@ export function exportRange(
     return { from: from.toISOString(), to: to.toISOString() }
   }
   const back = kind === "today" ? 0 : kind === "7d" ? 6 : 29
-  const start = localMidnight(now)
+  const start = getStartOfDay(now)
   start.setDate(start.getDate() - back)
   return { from: start.toISOString(), to: now.toISOString() }
-}
-
-/** Minutes east of UTC right now — the offset the export writes local times in. */
-export function offsetMinutes(now: Date): number {
-  return -now.getTimezoneOffset()
 }

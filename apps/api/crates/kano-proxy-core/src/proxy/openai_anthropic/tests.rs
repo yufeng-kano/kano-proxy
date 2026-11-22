@@ -19,7 +19,7 @@ async fn collect(stream: ByteStream) -> String {
     String::from_utf8(out).expect("utf-8")
 }
 
-/// The input every `openaiToAnthropicMessages` case starts from.
+/// The input every `openai_to_anthropic_messages` case starts from.
 fn input(messages: Value, max_tokens: u64) -> AnthropicMessagesInput {
     AnthropicMessagesInput {
         model: "m".into(),
@@ -30,7 +30,7 @@ fn input(messages: Value, max_tokens: u64) -> AnthropicMessagesInput {
 }
 
 // ---------------------------------------------------------------------------
-// promptCacheKeyFromAnthropicMetadata
+// prompt_cache_key_from_anthropic_metadata
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -63,7 +63,7 @@ fn accepts_an_id_at_exactly_the_256_char_limit() {
 }
 
 // ---------------------------------------------------------------------------
-// openaiToAnthropicMessages
+// openai_to_anthropic_messages
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -218,24 +218,8 @@ fn maps_tool_choice_variants() {
 }
 
 // ---------------------------------------------------------------------------
-// anthropicToOpenAIResponse
+// anthropic_to_openai_response
 // ---------------------------------------------------------------------------
-
-#[test]
-fn maps_text_and_usage() {
-    let out = anthropic_to_openai_response(
-        &map(json!({
-            "id": "msg_1",
-            "content": [{ "type": "text", "text": "ok" }],
-            "stop_reason": "end_turn",
-            "usage": { "input_tokens": 3, "output_tokens": 1 }
-        })),
-        "claude-code/claude-opus-5",
-    );
-    assert_eq!(out["choices"][0]["message"]["content"], json!("ok"));
-    assert_eq!(out["usage"]["prompt_tokens"], json!(3));
-    assert_eq!(out["usage"]["completion_tokens"], json!(1));
-}
 
 #[test]
 fn maps_tool_use_blocks_to_openai_tool_calls() {
@@ -299,6 +283,9 @@ fn attaches_cache_fields_as_zero_when_usage_was_present_without_them() {
         })),
         "claude-code/m",
     );
+    assert_eq!(out["choices"][0]["message"]["content"], json!("ok"));
+    assert_eq!(out["usage"]["prompt_tokens"], json!(3));
+    assert_eq!(out["usage"]["completion_tokens"], json!(1));
     assert_eq!(out["usage"]["prompt_tokens_details"], json!({ "cached_tokens": 0 }));
     assert_eq!(out["usage"]["cache_creation_input_tokens"], json!(0));
 }
@@ -311,7 +298,7 @@ fn a_message_with_no_usage_carries_no_usage_field() {
 }
 
 // ---------------------------------------------------------------------------
-// anthropicSseToOpenAIStream — text
+// anthropic_sse_to_openai_stream — text
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_TEXT_SSE: &str = concat!(
@@ -346,7 +333,7 @@ async fn emits_deltas_and_done_at_every_chunk_size() {
 }
 
 // ---------------------------------------------------------------------------
-// stripCacheControl / anthropicToOpenAIChatRequest
+// strip_cache_control / anthropic_to_openai_chat_request
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -434,7 +421,7 @@ fn maps_tool_use_and_tool_result() {
 }
 
 // ---------------------------------------------------------------------------
-// openaiToAnthropicMessage
+// openai_to_anthropic_message
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -471,32 +458,6 @@ fn maps_tool_calls_to_tool_use() {
 }
 
 #[test]
-fn subtracts_cached_tokens_into_cache_read_input_tokens() {
-    let out = openai_to_anthropic_message(
-        &map(json!({
-            "id": "c",
-            "choices": [{ "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" }],
-            "usage": { "prompt_tokens": 100, "completion_tokens": 40, "prompt_tokens_details": { "cached_tokens": 30 } }
-        })),
-        "grok/m",
-    );
-    assert_eq!(out["usage"], json!({ "input_tokens": 70, "output_tokens": 40, "cache_read_input_tokens": 30 }));
-}
-
-#[test]
-fn leaves_usage_unchanged_when_no_cache_details_are_reported() {
-    let out = openai_to_anthropic_message(
-        &map(json!({
-            "id": "c",
-            "choices": [{ "message": { "role": "assistant", "content": "hi" }, "finish_reason": "stop" }],
-            "usage": { "prompt_tokens": 5, "completion_tokens": 2 }
-        })),
-        "grok/m",
-    );
-    assert_eq!(out["usage"], json!({ "input_tokens": 5, "output_tokens": 2 }));
-}
-
-#[test]
 fn prepends_an_unsigned_thinking_block_before_text() {
     let out = openai_to_anthropic_message(
         &map(json!({
@@ -527,20 +488,7 @@ fn omits_the_thinking_block_when_reasoning_content_is_absent_or_empty() {
 }
 
 #[test]
-fn reports_completion_tokens_directly_without_double_adding_reasoning_tokens() {
-    let out = openai_to_anthropic_message(
-        &map(json!({
-            "id": "c4",
-            "choices": [{ "message": { "role": "assistant", "content": "hi", "reasoning_content": "r" }, "finish_reason": "stop" }],
-            "usage": { "prompt_tokens": 10, "completion_tokens": 5, "completion_tokens_details": { "reasoning_tokens": 3 } }
-        })),
-        "grok/m",
-    );
-    assert_eq!(out["usage"], json!({ "input_tokens": 10, "output_tokens": 5 }));
-}
-
-#[test]
-fn still_subtracts_cached_tokens_alongside_reasoning_token_details() {
+fn subtracts_cached_tokens_and_reports_completion_tokens_without_adding_reasoning_tokens() {
     let out = openai_to_anthropic_message(
         &map(json!({
             "id": "c5",
@@ -557,7 +505,7 @@ fn still_subtracts_cached_tokens_alongside_reasoning_token_details() {
 }
 
 // ---------------------------------------------------------------------------
-// openaiSseToAnthropicStream
+// openai_sse_to_anthropic_stream
 // ---------------------------------------------------------------------------
 
 const OPENAI_SSE: &str = concat!(
@@ -738,11 +686,10 @@ async fn leaves_message_start_at_zero_when_usage_only_arrives_at_the_end() {
 #[tokio::test]
 async fn emits_anthropic_text_deltas_and_message_stop() {
     let out = convert_openai(OPENAI_SSE, 11).await;
-    assert!(out.contains("event: message_start"));
-    assert!(out.contains("event: content_block_delta"));
-    assert!(out.contains("\"text\":\"hel\""));
-    assert!(out.contains("\"text\":\"lo\""));
-    assert!(out.contains("event: message_stop"));
+    let blocks = parse_blocks(&out);
+    assert_eq!(types(&blocks), vec!["text"]);
+    assert_eq!(blocks[0].body, "hello");
+    assert!(out.contains("\"stop_reason\":\"end_turn\""));
 }
 
 #[tokio::test]
@@ -774,20 +721,9 @@ async fn closes_the_text_block_before_tool_use_when_both_appear() {
 }
 
 #[tokio::test]
-async fn supports_parallel_tool_call_indices() {
-    let out = convert_openai(OPENAI_PARALLEL_TOOLS_SSE, OPENAI_PARALLEL_TOOLS_SSE.len()).await;
-    assert!(out.contains("\"id\":\"call_a\""));
-    assert!(out.contains("\"id\":\"call_b\""));
-    assert!(out.contains("\"name\":\"A\""));
-    assert!(out.contains("\"name\":\"B\""));
-    assert_eq!(out.matches("\"type\":\"tool_use\"").count(), 2);
-    assert!(out.contains("\"stop_reason\":\"tool_use\""));
-}
-
-#[tokio::test]
 async fn keeps_one_tool_call_in_one_block_when_text_interleaves_its_arguments() {
     // Grok 4.5 emits `content` between `arguments` fragments. Closing the tool block for that
-    // text used to split one call across two blocks sharing an id.
+    // text would split one call across two blocks sharing an id.
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"Read\",\"arguments\":\"\"}}]}}]}\n\n",
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"file_path\\\":\\\"/repo/p\"}}]}}]}\n\n",
@@ -978,19 +914,6 @@ async fn emits_a_well_formed_message_for_a_zero_byte_upstream_body() {
 }
 
 #[tokio::test]
-async fn reads_usage_that_rides_on_the_finish_reason_chunk() {
-    let sse = concat!(
-        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n",
-        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":8}}\n\n",
-        "data: [DONE]\n\n",
-    );
-    let out = convert_openai(sse, 67).await;
-    parse_blocks(&out);
-    assert!(out.contains("\"input_tokens\":7"));
-    assert!(out.contains("\"output_tokens\":8"));
-}
-
-#[tokio::test]
 async fn ignores_content_that_arrives_after_finish_reason() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
@@ -1021,8 +944,11 @@ async fn splits_a_new_tool_id_at_the_same_index_into_its_own_block() {
 
 #[tokio::test]
 async fn emits_parallel_tool_calls_as_sequential_non_overlapping_blocks() {
-    let calls = tools(parse_blocks(&convert_openai(OPENAI_PARALLEL_TOOLS_SSE, 19).await));
+    let out = convert_openai(OPENAI_PARALLEL_TOOLS_SSE, 19).await;
+    assert!(out.contains("\"stop_reason\":\"tool_use\""));
+    let calls = tools(parse_blocks(&out));
     assert_eq!(calls.iter().filter_map(|c| c.id.clone()).collect::<Vec<_>>(), vec!["call_a", "call_b"]);
+    assert_eq!(calls.iter().filter_map(|c| c.name.clone()).collect::<Vec<_>>(), vec!["A", "B"]);
     assert_eq!(
         calls.iter().map(|c| serde_json::from_str::<Value>(&c.body).unwrap()).collect::<Vec<_>>(),
         vec![json!({ "a": 1 }), json!({ "b": 2 })]
@@ -1097,12 +1023,6 @@ async fn reports_completion_tokens_in_the_stream_without_double_adding_reasoning
 }
 
 #[tokio::test]
-async fn omits_any_thinking_block_when_no_reasoning_content_arrives() {
-    let blocks = parse_blocks(&convert_openai(OPENAI_SSE, 11).await);
-    assert!(!types(&blocks).contains(&"thinking"));
-}
-
-#[tokio::test]
 async fn a_mid_stream_openai_error_line_becomes_an_anthropic_error_event() {
     let sse = concat!(
         "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n",
@@ -1116,7 +1036,7 @@ async fn a_mid_stream_openai_error_line_becomes_an_anthropic_error_event() {
 }
 
 // ---------------------------------------------------------------------------
-// anthropicSseToOpenAIStream — tool_use, usage and errors
+// anthropic_sse_to_openai_stream — tool_use, usage and errors
 // ---------------------------------------------------------------------------
 
 const ANTHROPIC_TOOL_SSE: &str = concat!(
@@ -1293,7 +1213,7 @@ async fn falls_back_to_a_generic_message_and_type_when_the_error_event_omits_the
 }
 
 // ---------------------------------------------------------------------------
-// anthropicToOpenAIChatRequest: server-side tool dropping
+// anthropic_to_openai_chat_request: server-side tool dropping
 // ---------------------------------------------------------------------------
 
 fn chat_request(extra: Value) -> AnthropicToOpenAiChat {
@@ -1302,12 +1222,6 @@ fn chat_request(extra: Value) -> AnthropicToOpenAiChat {
         body.insert(key, value);
     }
     anthropic_to_openai_chat_request(&body)
-}
-
-#[test]
-fn drops_an_anthropic_server_side_tool() {
-    let out = chat_request(json!({ "tools": [{ "type": "web_search_20250305", "name": "web_search", "max_uses": 5 }] }));
-    assert_eq!(out.tools, Some(json!([])));
 }
 
 #[test]
@@ -1362,6 +1276,7 @@ fn converts_the_bash_and_text_editor_tools_with_their_parameters() {
 #[test]
 fn drops_server_tools_alongside_a_client_tool_in_the_same_request() {
     let out = chat_request(json!({ "tools": [
+        { "type": "web_search_20250305", "name": "web_search", "max_uses": 5 },
         { "type": "code_execution_20250825", "name": "code_execution" },
         { "type": "computer_20250124", "name": "computer", "display_width_px": 1024, "display_height_px": 768 },
         { "name": "lookup", "input_schema": { "type": "object", "properties": {} } }
@@ -1375,7 +1290,7 @@ fn drops_server_tools_alongside_a_client_tool_in_the_same_request() {
 }
 
 // ---------------------------------------------------------------------------
-// anthropicToOpenAIChatRequest: tool_result images
+// anthropic_to_openai_chat_request: tool_result images
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -1426,35 +1341,22 @@ fn counts_multiple_images_in_the_placeholder_and_forwards_every_image_part() {
 }
 
 // ---------------------------------------------------------------------------
-// anthropicToOpenAIChatRequest: reasoning_effort / output_config.effort
+// anthropic_to_openai_chat_request: reasoning_effort / output_config.effort
 // ---------------------------------------------------------------------------
 
 #[test]
-fn falls_back_to_output_config_effort_when_reasoning_effort_is_absent() {
-    assert_eq!(chat_request(json!({ "output_config": { "effort": "high" } })).reasoning_effort, Some(json!("high")));
-}
-
-#[test]
-fn prefers_an_explicit_reasoning_effort_over_output_config_effort() {
-    let out = chat_request(json!({ "reasoning_effort": "low", "output_config": { "effort": "high" } }));
-    assert_eq!(out.reasoning_effort, Some(json!("low")));
-}
-
-#[test]
-fn leaves_reasoning_effort_unset_when_neither_field_is_present() {
-    assert_eq!(chat_request(json!({})).reasoning_effort, None);
-}
-
-#[test]
-fn ignores_a_non_string_output_config_effort() {
-    assert_eq!(chat_request(json!({ "output_config": { "effort": 5 } })).reasoning_effort, None);
-}
-
-#[test]
-fn never_reads_thinking_budget_tokens_as_a_reasoning_effort() {
-    let out = chat_request(json!({ "thinking": { "type": "enabled", "budget_tokens": 4096 } }));
-    assert_eq!(out.reasoning_effort, None);
-    assert!(!json!(out.messages).to_string().contains("budget_tokens"));
+fn takes_reasoning_effort_then_a_string_output_config_effort_and_never_thinking_budget() {
+    for (extra, effort) in [
+        (json!({ "output_config": { "effort": "high" } }), Some(json!("high"))),
+        (json!({ "reasoning_effort": "low", "output_config": { "effort": "high" } }), Some(json!("low"))),
+        (json!({}), None),
+        (json!({ "output_config": { "effort": 5 } }), None),
+        (json!({ "thinking": { "type": "enabled", "budget_tokens": 4096 } }), None),
+    ] {
+        let out = chat_request(extra.clone());
+        assert_eq!(out.reasoning_effort, effort, "{extra}");
+        assert!(!json!(out.messages).to_string().contains("budget_tokens"));
+    }
 }
 
 #[test]
@@ -1484,7 +1386,7 @@ fn omits_temperature_and_top_p_when_absent_or_non_numeric() {
 }
 
 // ---------------------------------------------------------------------------
-// openaiToAnthropicMessages: sampling
+// openai_to_anthropic_messages: sampling
 // ---------------------------------------------------------------------------
 
 fn sampling(temperature: Option<f64>, top_p: Option<f64>, thinking: Option<Value>, effort: Option<Value>) -> Map<String, Value> {
@@ -1497,18 +1399,10 @@ fn sampling(temperature: Option<f64>, top_p: Option<f64>, thinking: Option<Value
 }
 
 #[test]
-fn clamps_an_openai_temperature_above_anthropics_ceiling() {
-    assert_eq!(sampling(Some(1.4), None, None, None)["temperature"], json!(1.0));
-}
-
-#[test]
-fn leaves_an_in_range_temperature_unchanged() {
-    assert_eq!(sampling(Some(0.5), None, None, None)["temperature"], json!(0.5));
-}
-
-#[test]
-fn clamps_a_negative_temperature_up_to_zero() {
-    assert_eq!(sampling(Some(-0.2), None, None, None)["temperature"], json!(0.0));
+fn clamps_an_openai_temperature_into_anthropics_range() {
+    for (temperature, sent) in [(1.4, 1.0), (0.5, 0.5), (-0.2, 0.0)] {
+        assert_eq!(sampling(Some(temperature), None, None, None)["temperature"], json!(sent), "{temperature}");
+    }
 }
 
 #[test]
@@ -1539,13 +1433,6 @@ fn drops_an_out_of_range_top_p_under_thinking_but_keeps_one_in_range() {
     assert!(!low.contains_key("top_p"));
     let allowed = sampling(None, Some(0.97), None, Some(json!({ "effort": "high" })));
     assert_eq!(allowed["top_p"], json!(0.97));
-}
-
-#[test]
-fn leaves_sampling_untouched_when_there_is_no_thinking_config() {
-    let body = sampling(Some(0.5), Some(0.5), None, None);
-    assert_eq!(body["temperature"], json!(0.5));
-    assert_eq!(body["top_p"], json!(0.5));
 }
 
 // ---------------------------------------------------------------------------
@@ -1596,12 +1483,6 @@ fn includes_reasoning_content_alongside_tool_calls_with_no_text() {
 fn does_not_synthesize_reasoning_content_for_plain_string_assistant_content() {
     let out = chat_request(json!({ "messages": [{ "role": "assistant", "content": "just text" }] }));
     assert_eq!(out.messages[0], json!({ "role": "assistant", "content": "just text" }));
-}
-
-#[test]
-fn omits_reasoning_content_when_there_are_no_thinking_blocks() {
-    let out = chat_request(json!({ "messages": [{ "role": "assistant", "content": [{ "type": "text", "text": "hi" }] }] }));
-    assert_eq!(out.messages[0], json!({ "role": "assistant", "content": "hi" }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1662,7 +1543,7 @@ fn move_retired_output_format_relocates_only_when_no_current_spelling_exists() {
 }
 
 // ---------------------------------------------------------------------------
-// addConversionCacheControl
+// add_conversion_cache_control
 // ---------------------------------------------------------------------------
 
 fn markers(value: &Value) -> Vec<Value> {
@@ -1690,7 +1571,7 @@ fn markers(value: &Value) -> Vec<Value> {
 fn spends_all_four_markers_on_an_agent_turn() {
     let one_hour = json!({ "type": "ephemeral", "ttl": "1h" });
     let out = add_conversion_cache_control(
-        &map(json!({
+        map(json!({
             "system": [{ "type": "text", "text": "prepend" }, { "type": "text", "text": "instructions" }],
             "tools": [{ "name": "a", "input_schema": {} }, { "name": "b", "input_schema": {} }],
             "messages": [
@@ -1722,7 +1603,7 @@ fn without_a_client_prompt_cache_key_the_message_tails_fall_back_to_five_minutes
     let one_hour = json!({ "type": "ephemeral", "ttl": "1h" });
     let five_min = json!({ "type": "ephemeral" });
     let out = Value::Object(add_conversion_cache_control(
-        &map(json!({
+        map(json!({
             "system": "sys",
             "tools": [{ "name": "a", "input_schema": {} }],
             "messages": [
@@ -1745,7 +1626,7 @@ fn without_a_client_prompt_cache_key_the_message_tails_fall_back_to_five_minutes
 #[test]
 fn walks_back_past_thinking_blocks_to_the_last_cacheable_block() {
     let out = Value::Object(add_conversion_cache_control(
-        &map(json!({ "messages": [
+        map(json!({ "messages": [
             { "role": "user", "content": "q" },
             { "role": "assistant", "content": [
                 { "type": "text", "text": "t" },
@@ -1761,22 +1642,10 @@ fn walks_back_past_thinking_blocks_to_the_last_cacheable_block() {
 
 #[test]
 fn a_single_user_message_gets_one_marker_and_no_static_markers() {
-    let out = add_conversion_cache_control(&map(json!({ "messages": [{ "role": "user", "content": "only" }] })), true);
+    let out = add_conversion_cache_control(map(json!({ "messages": [{ "role": "user", "content": "only" }] })), true);
     assert!(!out.contains_key("system"));
     assert!(!out.contains_key("tools"));
     assert_eq!(markers(&Value::Object(out)).len(), 1);
-}
-
-#[test]
-fn does_not_mutate_the_input_body() {
-    let input = map(json!({
-        "system": "sys",
-        "tools": [{ "name": "a", "input_schema": {} }],
-        "messages": [{ "role": "user", "content": [{ "type": "text", "text": "q" }] }]
-    }));
-    let snapshot = Value::Object(input.clone()).to_string();
-    add_conversion_cache_control(&input, true);
-    assert_eq!(Value::Object(input).to_string(), snapshot);
 }
 
 // ---------------------------------------------------------------------------

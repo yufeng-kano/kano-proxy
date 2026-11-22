@@ -1,4 +1,4 @@
-//! OpenAI / OpenRouter `input_audio` content parts (//! docs/api.md § Audio input).
+//! OpenAI / OpenRouter `input_audio` content parts (docs/api.md § Audio input).
 //!
 //! Only conversion targets need a mime: a passthrough provider forwards the client's part
 //! untouched and its upstream reads `format` itself.
@@ -52,9 +52,6 @@ fn mime_for_format(format: &str) -> Option<&'static str> {
 /// nothing this proxy can name a mime for. A `data:` URL's own mime wins over `format`: the
 /// client stated it explicitly.
 pub fn audio_inline(part: &Value) -> Option<AudioInline> {
-    if !part.is_object() {
-        return None;
-    }
     if part.get("type").and_then(Value::as_str) != Some("input_audio") {
         return None;
     }
@@ -92,9 +89,6 @@ pub fn scan_audio_parts(messages: &[Value]) -> AudioScan {
             continue;
         };
         for part in content {
-            if !part.is_object() {
-                continue;
-            }
             if part.get("type").and_then(Value::as_str) != Some("input_audio") {
                 continue;
             }

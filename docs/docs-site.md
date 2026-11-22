@@ -24,7 +24,7 @@ The docs are served from the **same hostname** as the admin UI, under `/docs/`. 
 
 **SPA fallback and the docs.** The static server answers an unknown path under `/docs/` with VitePress's own `404.html` and a real `404` status, and every other unknown path with the SPA's `index.html`. A blanket rewrite to `index.html` would swallow the documentation pages, so the two rules are separate and `/docs/` is matched first. Extensionless docs URLs (`/docs/guide/x`) resolve to `x.html`, which is what VitePress's own links expect.
 
-Checked by hand after the v4.7.0 deploy: `/docs/` and a docs page return 200 with their own titles, `/keys` returns the SPA shell with `noindex`, `/docs/no-such-page` returns 404. `/robots.txt` also carries `noindex` from the `/*` rule; harmless, since the file is read, not indexed.
+What a deploy should show: `/docs/` and a docs page return 200 with their own titles, an app path such as `/overview` returns the SPA shell with `noindex`, and `/docs/no-such-page` returns 404. `/robots.txt` also carries `noindex` from the `location /` rule; harmless, since the file is read, not indexed.
 
 Local: `pnpm dev` inside `apps/docs` serves the docs alone at `http://127.0.0.1:5174/docs/`.
 
@@ -44,7 +44,7 @@ Write every URL in the docs as `https://<your-domain>/...` exactly, so the fill 
 
 English is the reference tree; `zh-TW/` mirrors it page for page with the same file names, so the language switcher (`i18nRouting`) lands on the same topic. A page added to one tree is added to the other in the same change.
 
-The site is organised by what the reader is doing, and the sidebar follows the app's own sidebar where it describes the app (operator decision 2026-10-12, replacing the first layout of 2026-09-04: content and structure were rewritten, the default theme stays).
+The site is organised by what the reader is doing, and the sidebar follows the app's own sidebar where it describes the app (operator decision 2026-10-12).
 
 | Sidebar group | Pages | Covers |
 |---------------|-------|--------|
@@ -92,7 +92,7 @@ Only `/docs/*`, `/login` and `/llms.txt` are meant to be indexed. The admin rout
 | Piece | Where | What it does |
 |-------|-------|--------------|
 | `deploy/web/nginx.conf` | web image | `X-Robots-Tag: noindex` on `location /` and `/assets/`, none on `/docs/`, `= /login` and `= /llms.txt`. A catch-all rather than a route list, because any unknown path also serves the SPA shell. Nothing to maintain when a route is added |
-| `apps/web/public/robots.txt` | site root | Allows crawling, except the API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/cli/v1/`, `/agent/`): those are routed to the API server and never reach nginx, so the header cannot mark them, and an API surface is what `Disallow` is for. Its `Sitemap:` line points at `/docs/sitemap.xml` through the origin placeholder (§ The real hostname); without an origin the line is removed |
+| `apps/web/public/robots.txt` | site root | Allows crawling, except the API prefixes (`/openai/`, `/anthropic/`, `/g/`, `/api/`, `/cli/v1/`): those are routed to the API server and never reach nginx, so the header cannot mark them, and an API surface is what `Disallow` is for. Its `Sitemap:` line points at `/docs/sitemap.xml` through the origin placeholder (§ The real hostname); without an origin the line is removed |
 | `apps/web/index.html` | SPA shell | `description`, Open Graph and Twitter card tags, so a shared link to the app gets a preview card. Copy repeats the login pitch from the message catalog; keep them in sync |
 | Router `afterEach` | SPA | Sets `document.title` to `<page> · <site name>` from the route's `titleKey` (a catalog key), so tabs and history are readable. `<html lang>` is already set by `setLocale()` ([i18n.md](./i18n.md)) |
 | `site.ts` | docs | Per page: `<title>`, `description`, `og:title`, `og:description`, `og:url`, `og:locale`, a `canonical` link to itself and `hreflang` links to its `en` and `zh-TW` twins plus `x-default` (English), so each language is indexed once and searchers see their own. `sitemap.xml` under `/docs/`, without `lastmod`, since pages carry no dates (§ Location and build). The 404 page gets none of the URL tags |
@@ -105,7 +105,7 @@ The build writes the [llms.txt](https://llmstxt.org) set from the English sideba
 
 | File | Content |
 |------|---------|
-| `/docs/llms.txt`, also served at `/llms.txt` | The site name, its summary, a line saying samples use `https://<your-domain>`, then one link per page under the sidebar's group titles, each with the page's frontmatter `description` |
+| `/docs/llms.txt`, also served at `/llms.txt` | The site name, its summary, a line saying samples use `https://<your-domain>`, then the home page under "Start here" and one link per page under the sidebar's group titles, each with the page's frontmatter `description` |
 | `/docs/<page>.md` | The page's Markdown source without frontmatter, next to its HTML (`/docs/app/logs` → `/docs/app/logs.md`) |
 | `/docs/llms-full.txt` | Every English page in sidebar order, for a reader that wants the whole site in one request |
 
@@ -115,7 +115,7 @@ English only: the zh-TW tree says the same things. The links are absolute throug
 
 A private edition ([cloud-edition.md](./cloud-edition.md)) documents features the core does not have, on the same site. It does so from its own VitePress project rather than by patching this one:
 
-- Its `.vitepress/config.ts` imports `defineDocsConfig` from this package's `site.ts` and passes the sidebar groups and nav entries for its pages, which are appended after the core's. A page describing one of the edition's own app pages goes under `app/` and into `appPages`, which appends it to the core's **The app** group, so the sidebar keeps matching the app. Its theme re-exports this package's theme so the origin fill still runs.
+- Its `.vitepress/config.ts` imports `defineDocsConfig` from this package's `site.ts` and passes the sidebar groups and nav entries for its pages, which are appended after the core's. A page describing one of the edition's own app pages goes under `app/` and into `appPages`, which appends it to the core's **The app** group, so the sidebar keeps matching the app. Its theme extends this package's theme so the origin fill still runs.
 - Its source tree is **assembled at build time**: the core's `*.md` files copied first, the edition's pages copied over them into the same `guide/`, `agents/`, `zh-TW/…` layout. An edition page may not have the path of a core page; the core's text is the core's to change.
 - The assembled copy has no git history either, so `lastUpdated` stays off, as on the core site (§ Location and build).
 - The content rules above apply unchanged: an English page has its `zh-TW/` twin in the same change, placeholders only for secrets and hosts, no invented model ids.
@@ -125,5 +125,5 @@ A private edition ([cloud-edition.md](./cloud-edition.md)) documents features th
 ## Links into the docs
 
 - Login page footer: a "Documentation" link beside the contact address.
-- Add account dialog: its warning banner links **Risks and terms** (`/docs/guide/risks`, new tab) ([admin-ui.md](./admin-ui.md) § Providers page). The usage notice's own text links nothing but the edition's terms, in a new tab so the ticked box stays: the notice is the whole text the user agrees to, so it does not send them elsewhere to read more. The sign-in footer under it keeps its usual links (Docs, the edition's links, the contact address).
-- Signed-in sidebar: a "Documentation" entry above Changelog, opening in a new tab. Both use the `nav.docs` catalog key. An edition may move the sidebar entry into the account menu ([admin-ui.md](./admin-ui.md) § Layout: edition options).
+- Add account dialog: its warning banner links **Risks and terms** (`/docs/guide/risks`, new tab) ([admin-ui.md](./admin-ui.md) § Providers page). The usage notice's own text links nothing but the edition's terms, in a new tab so the ticked box stays: the notice is the whole text the user agrees to, so it does not send them elsewhere to read more. The sign-in footer under it keeps its usual links (Documentation, the edition's links, the contact address).
+- Signed-in sidebar: a "Documentation" entry above Changelog, opening in a new tab. Both use the `nav.docs` catalog key. An edition may move the sidebar entry into the account menu ([admin-ui.md](./admin-ui.md) § Layout: the shell, "Edition options").

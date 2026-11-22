@@ -3,21 +3,12 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomProviderFormat {
     Openai,
     Anthropic,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CustomProviderModelsMode {
-    Auto,
-    Manual,
 }
 
 impl CustomProviderFormat {
@@ -36,23 +27,6 @@ impl CustomProviderFormat {
     }
 }
 
-impl CustomProviderModelsMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CustomProviderModelsMode::Auto => "auto",
-            CustomProviderModelsMode::Manual => "manual",
-        }
-    }
-    pub fn parse(v: &str) -> Option<Self> {
-        match v {
-            "auto" => Some(CustomProviderModelsMode::Auto),
-            "manual" => Some(CustomProviderModelsMode::Manual),
-            _ => None,
-        }
-    }
-}
-
-pub const MAX_CUSTOM_PROVIDERS_PER_USER: usize = 20;
 pub const MAX_MANUAL_MODELS: usize = 100;
 pub const MAX_MANUAL_MODEL_ID_LENGTH: usize = 128;
 
@@ -82,24 +56,16 @@ pub const RESERVED_SLUGS: &[&str] = &[
     "model-groups",
 ];
 
-pub fn is_reserved_slug(slug: &str) -> bool {
-    RESERVED_SLUGS.contains(&slug)
-}
-
 // Lowercase alphanumeric + hyphens, must start and end alphanumeric, 2-32 chars total.
 static SLUG_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$").expect("slug regex"));
 
-/// `v` comes off the wire, so a non-string is simply not a format (the TypeScript type guard).
-pub fn is_custom_provider_format(v: &Value) -> bool {
-    v.as_str().map(|s| CustomProviderFormat::parse(s).is_some()).unwrap_or(false)
-}
-
+/// `models_mode`: `auto` (live `list_models`) or `manual` (the stored list).
 pub fn is_models_mode(v: &Value) -> bool {
-    v.as_str().map(|s| CustomProviderModelsMode::parse(s).is_some()).unwrap_or(false)
+    matches!(v.as_str(), Some("auto" | "manual"))
 }
 
-/// `None` is valid; `Some(message)` is the wire error, exactly as the TypeScript returns it.
+/// `None` is valid; `Some(message)` is the wire error.
 pub fn validate_slug(slug: &str) -> Option<String> {
     let len = slug.chars().count();
     if !(2..=32).contains(&len) {
@@ -111,7 +77,7 @@ pub fn validate_slug(slug: &str) -> Option<String> {
                 .into(),
         );
     }
-    if is_reserved_slug(slug) {
+    if RESERVED_SLUGS.contains(&slug) {
         return Some(format!("slug \"{slug}\" is reserved"));
     }
     None
@@ -139,7 +105,7 @@ pub fn validate_base_url_length(url: &str, field_name: &str) -> Option<String> {
 }
 
 /// `None` (field omitted) means "no manual models" — not an error. A JSON `null` is a
-/// non-array and is rejected, as in the TypeScript.
+/// non-array and is rejected.
 pub fn validate_manual_models(models: Option<&Value>) -> Result<Vec<String>, String> {
     let Some(models) = models else {
         return Ok(Vec::new());
@@ -224,16 +190,9 @@ mod tests {
     }
 
     #[test]
-    fn slug_rejects_every_reserved_name() {
-        for slug in RESERVED_SLUGS {
-            assert!(validate_slug(slug).is_some(), "{slug} must be reserved");
-        }
-    }
-
-    #[test]
-    fn reserved_list_covers_builtins_and_route_shaped_segments() {
-        for s in ["claude-code", "codex", "grok", "api", "admin", "models", "kano-proxy"] {
-            assert!(is_reserved_slug(s));
+    fn slug_rejects_builtins_and_route_shaped_segments() {
+        for slug in ["claude-code", "codex", "grok", "antigravity", "api", "admin", "models", "kano-proxy"] {
+            assert_eq!(validate_slug(slug), Some(format!("slug \"{slug}\" is reserved")));
         }
     }
 
@@ -313,18 +272,9 @@ mod tests {
     }
 
     #[test]
-    fn format_and_mode_guards_accept_exactly_their_values() {
-        assert!(is_custom_provider_format(&json!("openai")));
-        assert!(is_custom_provider_format(&json!("anthropic")));
-        assert!(!is_custom_provider_format(&json!("openrouter")));
-        assert!(!is_custom_provider_format(&Value::Null));
+    fn models_mode_guard_accepts_exactly_its_values() {
         assert!(is_models_mode(&json!("auto")));
         assert!(is_models_mode(&json!("manual")));
         assert!(!is_models_mode(&json!("live")));
-    }
-
-    #[test]
-    fn max_custom_providers_per_user_is_20() {
-        assert_eq!(MAX_CUSTOM_PROVIDERS_PER_USER, 20);
     }
 }

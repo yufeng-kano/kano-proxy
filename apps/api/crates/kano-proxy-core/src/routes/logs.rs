@@ -25,10 +25,13 @@ use crate::db::keys::list_keys;
 use crate::db::request_logs::{
     facet_rows_in_range, list_request_log_page, viewer_account_labels, FacetLogRow, LogPageQuery, RequestLogPageRow,
 };
+use crate::http::errors::admin_error as error;
 use crate::pool::extension::SharedLabel;
 use crate::pricing::litellm::PriceTable;
-use crate::routes::usage::{fill_estimated_costs, is_builtin_provider, js_number, read_time_price_table, MAX_SPAN_MS};
+use crate::providers::ProviderId;
 use crate::AppState;
+
+use super::usage::{fill_estimated_costs, parse_offset, read_time_price_table, MAX_SPAN_MS};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route("/", get(list)).route("/facets", get(facets)).route("/export", get(export))
@@ -40,24 +43,20 @@ const MAX_LIMIT: i64 = 100;
 /// history never sits in memory at once.
 const EXPORT_BATCH: i64 = 500;
 
-fn error(status: StatusCode, code: &str) -> Response {
-    (status, Json(json!({ "error": code }))).into_response()
-}
-
 /// The page cursor: the last shown row's `(created_at, id)`, base64 of `"<created_at> <id>"`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Cursor {
-    pub created_at: String,
-    pub id: String,
+#[derive(Debug, PartialEq, Eq)]
+struct Cursor {
+    created_at: String,
+    id: String,
 }
 
-pub fn encode_cursor(cursor: &Cursor) -> String {
+fn encode_cursor(cursor: &Cursor) -> String {
     BASE64.encode(format!("{} {}", cursor.created_at, cursor.id))
 }
 
 /// `None` for anything that is not exactly one base64-encoded `"<created_at> <id>"` pair —
 /// a malformed cursor is a 400, never a silently different page.
-pub fn decode_cursor(value: &str) -> Option<Cursor> {
+fn decode_cursor(value: &str) -> Option<Cursor> {
     if value.len() % 4 != 0 || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=') {
         return None;
     }
@@ -80,7 +79,7 @@ pub fn decode_cursor(value: &str) -> Option<Cursor> {
 
 /// `50` when absent; otherwise a plain decimal integer in `1..=100`. Anything else is a 400,
 /// so a typo never silently reads the whole table.
-pub fn parse_limit(value: Option<&str>) -> Option<i64> {
+fn parse_limit(value: Option<&str>) -> Option<i64> {
     let Some(value) = value else { return Some(DEFAULT_LIMIT) };
     if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit()) {
         return None;
@@ -116,7 +115,7 @@ fn filters(params: &HashMap<String, String>) -> Result<Filters<'_>, &'static str
 
 /// Required `from`/`to`, normalized to the stored ISO shape so the string comparison in SQL is
 /// a time comparison. Wider than a year is refused rather than scanned, as on the summary.
-pub fn parse_range(params: &HashMap<String, String>) -> Result<(i64, i64), &'static str> {
+fn parse_range(params: &HashMap<String, String>) -> Result<(i64, i64), &'static str> {
     let from = params.get("from").and_then(|v| parse_iso_ms(v)).ok_or("invalid_range")?;
     let to = params.get("to").and_then(|v| parse_iso_ms(v)).ok_or("invalid_range")?;
     if from > to {
@@ -156,25 +155,23 @@ async fn list(State(state): State<AppState>, session: SessionUser, Query(params)
         cursor: cursor.as_ref().map(|c| (c.created_at.as_str(), c.id.as_str())),
         limit: limit + 1,
     };
-    let Ok(mut fetched) = list_request_log_page(state.pool(), &query).await else {
+    let Ok(mut page) = list_request_log_page(state.pool(), &query).await else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     };
-    let has_next_page = fetched.len() as i64 > limit;
-    fetched.truncate(limit as usize);
-    let page = fetched;
+    let has_next_page = page.len() as i64 > limit;
+    page.truncate(limit as usize);
 
-    // Read-time pricing matches the summary. A missing or legacy table may be refreshed on
-    // this admin surface; proxied request handling never fetches it.
+    // Read-time pricing matches the summary. A missing table may be refreshed on this admin
+    // surface; proxied request handling never fetches it.
     let table = read_time_price_table(&state).await;
-    let mut priced = page.clone();
-    fill_estimated_costs(&mut priced, table.as_ref());
+    fill_estimated_costs(&mut page, table.as_ref());
 
     let Ok(names) = Names::load(&state, &session.user.id).await else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
     };
-    let shared = names.shared_labels(&state, &session.user.id, &priced).await;
+    let shared = names.shared_labels(&state, &session.user.id, &page).await;
 
-    let rows: Vec<Value> = priced.iter().map(|row| row_json(row, &names.resolve(row, &shared))).collect();
+    let rows: Vec<Value> = page.iter().map(|row| row_json(row, &names.resolve(row, &shared))).collect();
     let next_cursor = match page.last() {
         Some(last) if has_next_page => {
             Value::String(encode_cursor(&Cursor { created_at: last.created_at.clone(), id: last.id.clone() }))
@@ -271,7 +268,7 @@ fn row_json(row: &RequestLogPageRow, names: &Resolved) -> Value {
         "account_shared_by": names.account_shared_by,
         "api_key_name": names.api_key_name,
         "api_key_removed": names.api_key_removed,
-        "usage_type": if is_builtin_provider(&row.provider) { "oauth" } else { "api" },
+        "usage_type": if ProviderId::parse(&row.provider).is_some() { "oauth" } else { "api" },
         "status_code": row.status_code,
         "upstream_status": row.upstream_status,
         "error_code": row.error_code,
@@ -324,7 +321,7 @@ impl Tally {
 
 /// Counts per provider, per `(provider, model)` and per alias, each ordered by requests desc
 /// (ties keep first-seen order). Pure, so it is tested without a database.
-pub fn count_facets(rows: &[FacetLogRow]) -> Value {
+fn count_facets(rows: &[FacetLogRow]) -> Value {
     let mut providers: IndexMap<&str, Tally> = IndexMap::new();
     let mut models: IndexMap<(&str, &str), Tally> = IndexMap::new();
     let mut groups: IndexMap<&str, (Tally, IndexMap<&str, i64>)> = IndexMap::new();
@@ -363,7 +360,7 @@ pub fn count_facets(rows: &[FacetLogRow]) -> Value {
 
 /// Every field an export can carry, in the default (all fields) order. The `api_keys` id is
 /// not one of them.
-pub const EXPORT_FIELDS: [&str; 18] = [
+const EXPORT_FIELDS: [&str; 18] = [
     "time",
     "id",
     "provider",
@@ -385,7 +382,7 @@ pub const EXPORT_FIELDS: [&str; 18] = [
 ];
 
 /// `None` for an empty list, an unknown key, or a repeated one.
-pub fn parse_columns(value: Option<&str>) -> Option<Vec<&'static str>> {
+fn parse_columns(value: Option<&str>) -> Option<Vec<&'static str>> {
     let Some(value) = value else { return Some(EXPORT_FIELDS.to_vec()) };
     let mut columns: Vec<&'static str> = Vec::new();
     for key in value.split(',') {
@@ -398,8 +395,8 @@ pub fn parse_columns(value: Option<&str>) -> Option<Vec<&'static str>> {
     (!columns.is_empty()).then_some(columns)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ExportFormat {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportFormat {
     Csv,
     Json,
 }
@@ -416,7 +413,7 @@ fn field_value(field: &str, row: &RequestLogPageRow, names: &Resolved, offset_mi
         "account" => json!(names.account_label),
         "account_id" => json!(row.account_id),
         "api_key" => json!(names.api_key_name),
-        "type" => json!(if is_builtin_provider(&row.provider) { "oauth" } else { "api" }),
+        "type" => json!(if ProviderId::parse(&row.provider).is_some() { "oauth" } else { "api" }),
         "status" => json!(row.status_code),
         "upstream_status" => json!(row.upstream_status),
         "error_code" => json!(row.error_code),
@@ -431,7 +428,7 @@ fn field_value(field: &str, row: &RequestLogPageRow, names: &Resolved, offset_mi
 }
 
 /// `2026-11-13T14:31:52.000Z` at offset 480 → `2026-11-13T22:31:52.000+08:00`.
-pub fn local_iso(created_at: &str, offset_minutes: i64) -> String {
+fn local_iso(created_at: &str, offset_minutes: i64) -> String {
     let Some(ms) = parse_iso_ms(created_at) else { return created_at.to_string() };
     let shifted = iso_from_ms(ms + offset_minutes * 60_000);
     let sign = if offset_minutes < 0 { '-' } else { '+' };
@@ -441,7 +438,7 @@ pub fn local_iso(created_at: &str, offset_minutes: i64) -> String {
 
 /// RFC 4180 quoting. Text that a spreadsheet would read as a formula gets a leading `'`, so
 /// an account label like `=HYPERLINK(...)` stays text when the file is opened.
-pub fn csv_cell(value: &Value) -> String {
+fn csv_cell(value: &Value) -> String {
     let text = match value {
         Value::Null => return String::new(),
         Value::String(s) if s.starts_with(['=', '+', '-', '@', '\t', '\r']) => format!("'{s}"),
@@ -562,13 +559,9 @@ async fn export(State(state): State<AppState>, session: SessionUser, Query(param
     let Some(columns) = parse_columns(params.get("columns").map(String::as_str)) else {
         return error(StatusCode::BAD_REQUEST, "invalid_columns");
     };
-    // Minutes east of UTC for the CSV's local times, bounded like the summary's offset.
-    let offset_minutes = match params.get("offset") {
-        None => 0,
-        Some(value) => match js_number(value) {
-            Some(v) if v.fract() == 0.0 && v.abs() <= 840.0 => v as i64,
-            _ => return error(StatusCode::BAD_REQUEST, "invalid_offset"),
-        },
+    // Minutes east of UTC for the CSV's local times, read like the summary's offset.
+    let Some(offset_minutes) = parse_offset(&params) else {
+        return error(StatusCode::BAD_REQUEST, "invalid_offset");
     };
     let Ok(names) = Names::load(&state, &session.user.id).await else {
         return error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error");
@@ -618,10 +611,9 @@ mod tests {
     use super::*;
     use crate::auth::session::create_session;
     use crate::db::request_logs::{insert_request_log, RequestLogEntry};
-    use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_state, TEST_APP_URL};
+    use crate::db::test_support::{insert_user, skip_without_db, test_pool, test_state};
     use crate::extensions::Extensions;
     use crate::pool::extension::{ListSharedOptions, PoolExtension, ReserveContext, ReserveOutcome, SharedAccount};
-    use crate::providers::ProviderId;
     use crate::routing::types::RoutingCandidate;
     use crate::upstream::{MockTransport, UpstreamResponse};
     use axum::body::Body;
@@ -760,11 +752,10 @@ mod tests {
         assert_eq!(json["rows"].as_array().unwrap().len(), 50);
         assert!(json["next_cursor"].is_string());
 
-        for bad in ["0", "101", "1.5", "-1", "abc", ""] {
-            let response = get(router(state.clone()), &cookie, &format!("/api/logs?limit={bad}")).await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
-            assert_eq!(body_json(response).await, json!({ "error": "invalid_limit" }));
-        }
+        // Which values are refused is `parse_limit`'s table above; this pins the 400 itself.
+        let response = get(router(state.clone()), &cookie, "/api/logs?limit=101").await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(response).await, json!({ "error": "invalid_limit" }));
     }
 
     #[tokio::test]
@@ -1213,25 +1204,5 @@ mod tests {
         let empty = "/api/logs/export?format=json&from=2026-01-01T00:00:00.000Z&to=2026-01-02T00:00:00.000Z";
         let json: Value = serde_json::from_str(&body_text(get(router(state), &cookie, empty).await).await).unwrap();
         assert_eq!(json, json!([]));
-    }
-
-    #[tokio::test]
-    async fn the_admin_cors_and_no_store_rules_apply() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let state = test_state(pool, offline());
-        let (_, cookie) = signed_in(&state, "cors@example.com").await;
-        let response = router(state)
-            .oneshot(
-                Request::builder()
-                    .uri("/api/logs")
-                    .header(header::COOKIE, &cookie)
-                    .header(header::ORIGIN, TEST_APP_URL)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN).unwrap(), TEST_APP_URL);
-        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store");
     }
 }

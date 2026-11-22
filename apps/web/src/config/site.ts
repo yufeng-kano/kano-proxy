@@ -2,10 +2,10 @@
  * Site chrome for unauthenticated surfaces (login footer, etc.).
  *
  * The contact address is deploy-specific and comes only from
- * VITE_CONTACT_EMAIL (`.env.development` locally, `.env.production` or a Pages
- * build-environment variable for deploys). There is deliberately no fallback
- * address: a stale hardcoded default would ship a wrong contact to real users,
- * so an unset variable renders no link at all.
+ * VITE_CONTACT_EMAIL (`.env.development` locally, `.env.production` for
+ * deploys). There is deliberately no fallback address: a stale hardcoded
+ * default would ship a wrong contact to real users, so an unset variable
+ * renders no link at all.
  */
 export const SITE = {
   /**

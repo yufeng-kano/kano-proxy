@@ -95,7 +95,7 @@ const fields = computed<{ key: string; label: string; value: string; mono?: bool
         </dd>
       </div>
 
-      <!-- The api_keys id never leaves the Worker (docs/admin-ui.md § Logs
+      <!-- The api_keys id never leaves the server (docs/admin-ui.md § Logs
            page), so unlike the account field above, there is no id line
            here — just the name, the removed badge, or nothing to name. -->
       <div class="field">
@@ -150,15 +150,15 @@ dd {
   overflow-wrap: anywhere;
 }
 
-/* The id under a resolved name. It is the only handle left on an account that
-   has since been removed, so it is set to read: body size, one tone down from
-   the name rather than shrunk out of the way (docs/admin-ui.md
-   § Design restraint). */
 .shared-by {
   display: block;
   color: var(--text-secondary);
 }
 
+/* The id under a resolved name. It is the only handle left on an account that
+   has since been removed, so it is set to read: body size, one tone down from
+   the name rather than shrunk out of the way (docs/admin-ui.md
+   § Design restraint). */
 .id {
   display: block;
   margin-top: var(--space-1);

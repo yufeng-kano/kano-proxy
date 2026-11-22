@@ -1,7 +1,6 @@
 import { reactive, ref } from "vue"
 import { listCliDevices, listCliProviders } from "@/services/api"
 import {
-  CACHE_TTL_MS,
   isCliCacheFresh,
   readCliCache,
   writeCliCache,
@@ -12,9 +11,7 @@ type CliState = {
   devices: CliDevice[] | null
   providers: CliProvider[] | null
   loading: boolean
-  refreshing: boolean
   error: string | null
-  fromCache: boolean
 }
 
 // Module-level singleton, same pattern as useCustomProviders: state is shared
@@ -23,14 +20,15 @@ const state = reactive<CliState>({
   devices: null,
   providers: null,
   loading: false,
-  refreshing: false,
   error: null,
-  fromCache: false,
 })
 
-export function useCli() {
-  const userId = ref<string | null>(null)
+// Shared with the state it scopes: the Access page's Devices tab reloads
+// through its own call after a rename or revoke and never sets an id, so a
+// per-call id would leave that reload out of the signed-in user's cache.
+const userId = ref<string | null>(null)
 
+export function useCli() {
   function setUserId(id: string | null) {
     userId.value = id
   }
@@ -43,32 +41,27 @@ export function useCli() {
     if (cached) {
       state.devices = cached.devices
       state.providers = cached.providers
-      state.fromCache = true
       state.loading = false
     } else if (!state.devices) {
       state.loading = true
     }
 
-    if (!force && isCliCacheFresh(userId.value, CACHE_TTL_MS)) {
+    if (!force && isCliCacheFresh(userId.value)) {
       state.loading = false
-      state.refreshing = false
       return
     }
 
-    state.refreshing = true
     state.error = null
     try {
       const [devices, providers] = await Promise.all([listCliDevices(), listCliProviders()])
       state.devices = devices
       state.providers = providers
-      state.fromCache = false
       writeCliCache(userId.value, { devices, providers })
     } catch (e) {
       state.error = e instanceof Error ? e.message : "Failed to load CLI devices"
       // keep cache on failure
     } finally {
       state.loading = false
-      state.refreshing = false
     }
   }
 
@@ -82,5 +75,5 @@ export function useCli() {
     writeCliCache(userId.value, { devices: state.devices, providers: state.providers })
   }
 
-  return { state, setUserId, load, setEdits, CACHE_TTL_MS }
+  return { state, setUserId, load, setEdits }
 }

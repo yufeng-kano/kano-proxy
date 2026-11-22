@@ -97,7 +97,6 @@ export function useAuth() {
     error,
     isAuthenticated,
     noticeRequired,
-    refresh,
     ensureSession,
     logout,
     acceptNotice,

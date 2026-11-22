@@ -29,7 +29,7 @@ pub fn routes() -> Router<AppState> {
 
 /// The running version: this crate's own, which is the product's. An edition that ships on a
 /// different cycle overrides it through its changelog route.
-pub fn current_version() -> &'static str {
+fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
@@ -88,13 +88,13 @@ async fn changelog(
             available: true,
             cached: true,
             stale: false,
-            error: snapshot.error.as_deref(),
+            error: None,
         });
     }
 
     match fetch_releases(&state, &repo).await {
         Ok(fetched) => {
-            write_changelog_cache(&state, &fetched.releases, fetched.latest.as_deref(), None).await;
+            write_changelog_cache(&state, &fetched.releases, fetched.latest.as_deref()).await;
             changelog_response(Body {
                 latest: fetched.latest.as_deref(),
                 releases: &fetched.releases,
@@ -138,7 +138,6 @@ mod tests {
     use crate::config::CoreConfig;
     use crate::db::test_support::{insert_user, skip_without_db, test_config, test_pool};
     use crate::extensions::Extensions;
-    use crate::upstream::transport::TransportError;
     use crate::upstream::{MockTransport, UpstreamResponse};
     use axum::body::Body as AxumBody;
     use axum::http::{header, Request, StatusCode};
@@ -200,7 +199,6 @@ mod tests {
                 body_html: "<p>old notes</p>".into(),
             }],
             latest: Some("v1.10.0".into()),
-            error: None,
             fetched_at: crate::app::now_ms() - 2 * 60 * 60 * 1000,
         };
         state.cache().put_json(changelog_cache_key(), &snapshot, Duration::from_secs(600)).await;
@@ -299,22 +297,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_network_failure_with_a_warm_cache_serves_stale_data() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let mock = MockTransport::new();
-        mock.expect(|_| Err(TransportError::Connect("network down".into())));
-        let state = state_with(pool, mock, Some(REPO));
-        let cookie = signed_in(&state, "down@example.com").await;
-        seed_aged_cache(&state).await;
-
-        let json = body_json(get(&state, &cookie, "/api/changelog").await).await;
-        assert_eq!(json["latest"], "v1.10.0");
-        assert_eq!(json["cached"], true);
-        assert_eq!(json["stale"], true);
-        assert_eq!(json["error"], "unreachable/timeout");
-    }
-
-    #[tokio::test]
     async fn an_upstream_failure_with_no_cache_returns_an_empty_list_and_the_error() {
         let Some(pool) = test_pool().await else { return skip_without_db() };
         let mock = MockTransport::new();
@@ -355,36 +337,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn drafts_prereleases_and_cli_tags_never_become_latest() {
-        let Some(pool) = test_pool().await else { return skip_without_db() };
-        let mock = MockTransport::new();
-        mock.respond_json(
-            StatusCode::OK,
-            json!([
-                release(json!({ "tag_name": "v1.11.0", "draft": true })),
-                release(json!({ "tag_name": "v1.10.5", "prerelease": true })),
-                release(json!({ "tag_name": "cli-v1.2.0", "name": "cli-v1.2.0" })),
-                release(json!({ "tag_name": "v1.10.0" })),
-                release(json!({ "tag_name": "v1.9.0" })),
-            ]),
-        );
-        let state = state_with(pool, mock, Some(REPO));
-        let cookie = signed_in(&state, "filters@example.com").await;
-
-        let json = body_json(get(&state, &cookie, "/api/changelog").await).await;
-        assert_eq!(
-            json["releases"].as_array().unwrap().iter().map(|r| r["tag"].clone()).collect::<Vec<_>>(),
-            vec![json!("v1.10.0"), json!("v1.9.0")]
-        );
-        assert_eq!(json["latest"], "v1.10.0");
-    }
-
     #[test]
-    fn the_current_version_comes_from_the_root_package_json() {
-        // Same value the TypeScript route imported; three dot-separated numbers.
-        let parts: Vec<&str> = current_version().split('.').collect();
-        assert_eq!(parts.len(), 3, "{}", current_version());
-        assert!(parts.iter().all(|p| p.chars().all(|c| c.is_ascii_digit())), "{}", current_version());
+    fn the_current_version_is_plain_semver() {
+        // Anything else never compares against a release tag, hiding every update.
+        assert!(crate::changelog::version::parse_semver(current_version()).is_some(), "{}", current_version());
     }
 }

@@ -6,13 +6,14 @@
  * the metric's detail modal — full chart plus the Min/Max/Avg/Sum table —
  * which is also where every number in the mini chart is reachable as text.
  */
+import { computed } from "vue"
 import ActionIcon from "@/components/ui/ActionIcon.vue"
 import AppButton from "@/components/ui/AppButton.vue"
 import { useI18n } from "@/i18n"
 import BarChart from "./BarChart.vue"
 import type { MetricSeries } from "./series"
 
-defineProps<{
+const props = defineProps<{
   title: string
   series: MetricSeries
   formatValue: (n: number) => string
@@ -33,13 +34,13 @@ const { t } = useI18n()
 /** Top 4 named models; everything beyond folds into one visual "Others" line. */
 const LIST_ROWS = 4
 
-function listRows(series: MetricSeries) {
-  const rows = series.models.filter((m) => m.total > 0)
+const listRows = computed(() => {
+  const rows = props.series.models.filter((m) => m.total > 0)
   if (rows.length <= LIST_ROWS + 1) return { named: rows, othersTotal: null }
   const named = rows.slice(0, LIST_ROWS)
   const othersTotal = rows.slice(LIST_ROWS).reduce((sum, m) => sum + m.total, 0)
   return { named, othersTotal }
-}
+})
 </script>
 
 <template>
@@ -69,7 +70,7 @@ function listRows(series: MetricSeries) {
     <ul class="models" :aria-label="t('overview.card.topModels', { metric: title })">
       <template v-if="!loading">
         <li
-          v-for="m in listRows(series).named"
+          v-for="m in listRows.named"
           :key="m.key"
           class="model-row"
         >
@@ -77,12 +78,12 @@ function listRows(series: MetricSeries) {
           <span class="model-label" :title="m.label">{{ m.label }}</span>
           <span class="model-value tabular">{{ formatValue(m.total) }}</span>
         </li>
-        <li v-if="listRows(series).othersTotal != null" class="model-row">
+        <li v-if="listRows.othersTotal != null" class="model-row">
           <span class="swatch others" aria-hidden="true" />
           <span class="model-label">{{ t("overview.card.others") }}</span>
-          <span class="model-value tabular">{{ formatValue(listRows(series).othersTotal!) }}</span>
+          <span class="model-value tabular">{{ formatValue(listRows.othersTotal) }}</span>
         </li>
-        <li v-if="!series.models.some((m) => m.total > 0)" class="model-row empty">
+        <li v-if="!listRows.named.length" class="model-row empty">
           {{ t("overview.card.noActivity") }}
         </li>
       </template>

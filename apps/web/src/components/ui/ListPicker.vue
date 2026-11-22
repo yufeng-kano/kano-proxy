@@ -2,16 +2,16 @@
 /**
  * A button showing the current choice that opens a list of rich options —
  * name, subtitle, figures, an optional color dot — for a choice a native
- * `<select>` cannot show (docs/admin-ui.md § Components; Logs' provider and
- * model pickers).
+ * `<select>` cannot show (docs/admin-ui.md § Component primitives; Logs'
+ * provider and model pickers).
  *
- * Not modal, like the account menu (docs/admin-ui.md § Keyboard): Escape
- * closes it, a press outside closes it, focus returns to the button, and the
- * arrow keys walk the options. The panel is teleported to `body` and placed
+ * Not modal, like the account menu (docs/admin-ui.md § Accessibility floor):
+ * Escape closes it, a press outside closes it, focus returns to the button,
+ * and the arrow keys walk the options. The panel is teleported to `body` and placed
  * from the button's rect, because the sticky header it opens from clips and
  * its backdrop filter would trap a fixed child.
  */
-import { nextTick, onBeforeUnmount, ref, watch } from "vue"
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue"
 
 /* Two roots (button and teleported panel): attributes go to the button by hand. */
 defineOptions({ inheritAttrs: false })
@@ -56,9 +56,7 @@ const GUTTER = 16
 
 const OPTION = 'button[role="option"]'
 
-function current(): ListPickerOption | undefined {
-  return props.options.find((o) => o.key === props.modelValue)
-}
+const current = computed(() => props.options.find((o) => o.key === props.modelValue))
 
 /**
  * Hangs the panel from the button's edge, then pulls it back inside the
@@ -149,12 +147,12 @@ onBeforeUnmount(() => listen(false))
     class="trigger"
     aria-haspopup="listbox"
     :aria-expanded="open ? 'true' : 'false'"
-    :aria-label="`${label}: ${current()?.label ?? ''}`"
+    :aria-label="`${label}: ${current?.label ?? ''}`"
     @click="open = !open"
     @keydown="onKeydown"
   >
-    <span v-if="current()?.color" class="dot" :style="{ background: current()!.color! }" aria-hidden="true" />
-    <span class="trigger-label">{{ current()?.label }}</span>
+    <span v-if="current?.color" class="dot" :style="{ background: current.color }" aria-hidden="true" />
+    <span class="trigger-label">{{ current?.label }}</span>
     <svg class="chevron" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M6 9l6 6 6-6" />
     </svg>

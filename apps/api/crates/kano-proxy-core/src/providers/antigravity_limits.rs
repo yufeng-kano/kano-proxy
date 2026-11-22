@@ -1,4 +1,4 @@
-//! Antigravity 429 classification (//! docs/providers.md § Antigravity). Derived from CLIProxyAPI
+//! Antigravity 429 classification (docs/providers.md § Antigravity). Derived from CLIProxyAPI
 //! `internal/runtime/executor/antigravity_executor_credits.go` (`decideAntigravity429`) and
 //! `helps/json_retry_helpers.go` (`ParseRetryDelay`).
 //!
@@ -7,8 +7,9 @@
 //!
 //! - **Quota exhausted** — the subscription's allowance for that model family is spent.
 //!   Retrying in five minutes just burns the account again, so this benches long.
-//! - **Rate limited** — a short, transient throttle that carries its own `retryDelay`. This
-//!   benches for exactly that delay and fails over.
+//! - **Rate limited** — a throttle that carries its own `retryDelay`. This benches for exactly
+//!   that delay and fails over. CLIProxyAPI calls one of five minutes or more quota exhaustion
+//!   (`antigravityShortQuotaCooldownThreshold`); the bench is that same delay either way.
 //!
 //! Anything the body does not clearly place in either bucket is left unclassified, and the
 //! routing module's ordinary 429 default applies.
@@ -17,27 +18,12 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Antigravity429Kind {
-    QuotaExhausted,
-    RateLimited,
-    Unknown,
-}
-
-/// `retry_after_ms` is always `Some` for [`Antigravity429Kind::RateLimited`]; the other two
-/// kinds carry whatever the body stated, if anything.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Antigravity429 {
-    pub kind: Antigravity429Kind,
-    pub retry_after_ms: Option<i64>,
-}
-
 static DURATION_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^(\d+(?:\.\d+)?)s$").expect("valid regex"));
 static AFTER_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"after\s+(\d+)s\.?").expect("valid regex"));
 
 /// A protobuf `Duration` as proto-JSON: seconds with an optional fraction and a mandatory `s`
 /// suffix (`"17s"`, `"1.5s"`). Anything else is not a duration we are willing to act on.
-pub fn parse_proto_duration_ms(value: &Value) -> Option<i64> {
+fn parse_proto_duration_ms(value: &Value) -> Option<i64> {
     let text = value.as_str()?;
     let caps = DURATION_RE.captures(text.trim())?;
     let seconds: f64 = caps[1].parse().ok()?;
@@ -47,15 +33,11 @@ pub fn parse_proto_duration_ms(value: &Value) -> Option<i64> {
     Some((seconds * 1000.0).round() as i64)
 }
 
-/// `error.details[]`, object entries only. A heterogeneous details array (null / non-object
-/// entries) must classify as `unknown`, not crash the adapter into a generic 502 before
-/// dispatch can bench and fail over.
-fn error_details(body: &Value) -> Vec<&Value> {
-    body.get("error")
-        .and_then(|e| e.get("details"))
-        .and_then(Value::as_array)
-        .map(|details| details.iter().filter(|d| d.is_object()).collect())
-        .unwrap_or_default()
+/// `error.details[]`. Readers only ever `get` fields, so a null or non-object entry in a
+/// heterogeneous array is simply skipped: it must leave the 429 unclassified, not crash the
+/// adapter into a generic 502 before dispatch can bench and fail over.
+fn error_details(body: &Value) -> impl Iterator<Item = &Value> {
+    body.get("error").and_then(|e| e.get("details")).and_then(Value::as_array).into_iter().flatten()
 }
 
 fn detail_type(detail: &Value) -> &str {
@@ -66,9 +48,8 @@ fn detail_type(detail: &Value) -> &str {
 /// reads all three in this order: a `RetryInfo` detail's `retryDelay`, then an `ErrorInfo`
 /// detail's `metadata.quotaResetDelay`, then an `after <n>s` phrase inside the
 /// human-readable message.
-pub fn antigravity_retry_delay_ms(body: &Value) -> Option<i64> {
-    let details = error_details(body);
-    for detail in &details {
+fn antigravity_retry_delay_ms(body: &Value) -> Option<i64> {
+    for detail in error_details(body) {
         if detail_type(detail) != "type.googleapis.com/google.rpc.RetryInfo" {
             continue;
         }
@@ -76,7 +57,7 @@ pub fn antigravity_retry_delay_ms(body: &Value) -> Option<i64> {
             return Some(ms);
         }
     }
-    for detail in &details {
+    for detail in error_details(body) {
         if detail_type(detail) != "type.googleapis.com/google.rpc.ErrorInfo" {
             continue;
         }
@@ -90,51 +71,9 @@ pub fn antigravity_retry_delay_ms(body: &Value) -> Option<i64> {
     caps[1].parse::<i64>().ok().map(|s| s * 1000)
 }
 
-/// A `RATE_LIMIT_EXCEEDED` whose delay is at least this long is treated as quota exhaustion
-/// rather than a throttle — CLIProxyAPI's own `antigravityShortQuotaCooldownThreshold`.
-/// Below it the account recovers on its own soon enough to be worth coming back to.
-pub const ANTIGRAVITY_SHORT_COOLDOWN_MS: i64 = 5 * 60_000;
-
-pub fn classify_antigravity_429(body: &Value) -> Antigravity429 {
-    let retry_after_ms = antigravity_retry_delay_ms(body);
-    let unknown = Antigravity429 { kind: Antigravity429Kind::Unknown, retry_after_ms };
-    let status = body.get("error").and_then(|e| e.get("status")).and_then(Value::as_str);
-    match status {
-        Some(s) if s.eq_ignore_ascii_case("RESOURCE_EXHAUSTED") => {}
-        _ => return unknown,
-    }
-
-    for detail in error_details(body) {
-        if detail_type(detail) != "type.googleapis.com/google.rpc.ErrorInfo" {
-            continue;
-        }
-        let reason = detail.get("reason").and_then(Value::as_str).unwrap_or("").to_ascii_uppercase();
-        if reason == "QUOTA_EXHAUSTED" {
-            return Antigravity429 { kind: Antigravity429Kind::QuotaExhausted, retry_after_ms };
-        }
-        if reason == "RATE_LIMIT_EXCEEDED" {
-            let Some(ms) = retry_after_ms else { return unknown };
-            let kind = if ms >= ANTIGRAVITY_SHORT_COOLDOWN_MS {
-                Antigravity429Kind::QuotaExhausted
-            } else {
-                Antigravity429Kind::RateLimited
-            };
-            return Antigravity429 { kind, retry_after_ms };
-        }
-    }
-
-    // No structured reason: fall back to the same keyword sniff CLIProxyAPI does.
-    let text = json_text_lowercase(body);
-    if text.contains("quota_exhausted") || text.contains("quota exhausted") {
-        return Antigravity429 { kind: Antigravity429Kind::QuotaExhausted, retry_after_ms };
-    }
-    unknown
-}
-
-/// `JSON.stringify(body ?? "").toLowerCase()`.
+/// The whole body as lowercase JSON text, for CLIProxyAPI's keyword sniffs.
 fn json_text_lowercase(body: &Value) -> String {
-    let text = if body.is_null() { "\"\"".to_string() } else { body.to_string() };
-    text.to_lowercase()
+    body.to_string().to_lowercase()
 }
 
 /// Quota exhaustion with no upstream reset to go on. Google returns no reset timestamp in
@@ -145,15 +84,33 @@ pub const ANTIGRAVITY_QUOTA_BENCH_MS: i64 = 60 * 60_000;
 
 /// Epoch-ms this account should stay benched, or `None` to leave the default alone.
 pub fn antigravity_bench_until(body: &Value, now: i64) -> Option<i64> {
-    let verdict = classify_antigravity_429(body);
-    match verdict.kind {
-        Antigravity429Kind::QuotaExhausted => {
-            Some(now + verdict.retry_after_ms.unwrap_or(ANTIGRAVITY_QUOTA_BENCH_MS))
-        }
-        // `rate_limited` always carries its delay; the fallback keeps the branch total.
-        Antigravity429Kind::RateLimited => Some(now + verdict.retry_after_ms.unwrap_or(0)),
-        Antigravity429Kind::Unknown => None,
+    let status = body.get("error").and_then(|e| e.get("status")).and_then(Value::as_str);
+    if !status.is_some_and(|s| s.eq_ignore_ascii_case("RESOURCE_EXHAUSTED")) {
+        return None;
     }
+    let retry_after_ms = antigravity_retry_delay_ms(body);
+    let quota_exhausted = Some(now + retry_after_ms.unwrap_or(ANTIGRAVITY_QUOTA_BENCH_MS));
+
+    for detail in error_details(body) {
+        if detail_type(detail) != "type.googleapis.com/google.rpc.ErrorInfo" {
+            continue;
+        }
+        let reason = detail.get("reason").and_then(Value::as_str).unwrap_or("").to_ascii_uppercase();
+        if reason == "QUOTA_EXHAUSTED" {
+            return quota_exhausted;
+        }
+        if reason == "RATE_LIMIT_EXCEEDED" {
+            // A rate limit that states no delay is left to the routing module's default.
+            return retry_after_ms.map(|ms| now + ms);
+        }
+    }
+
+    // No structured reason: fall back to the same keyword sniff CLIProxyAPI does.
+    let text = json_text_lowercase(body);
+    if text.contains("quota_exhausted") || text.contains("quota exhausted") {
+        return quota_exhausted;
+    }
+    None
 }
 
 /// "No capacity" is a fleet-side condition, not an account one — CLIProxyAPI retries the
@@ -195,7 +152,7 @@ mod tests {
         json!({ "@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": retry_delay })
     }
 
-    // ── parseProtoDurationMs ────────────────────────────────────────────────
+    // ── parse_proto_duration_ms ─────────────────────────────────────────────
 
     #[test]
     fn reads_whole_and_fractional_second_durations() {
@@ -211,7 +168,7 @@ mod tests {
         assert_eq!(parse_proto_duration_ms(&Value::Null), None);
     }
 
-    // ── antigravityRetryDelayMs ─────────────────────────────────────────────
+    // ── antigravity_retry_delay_ms ──────────────────────────────────────────
 
     #[test]
     fn prefers_a_retry_info_detail() {
@@ -245,74 +202,7 @@ mod tests {
         assert_eq!(antigravity_retry_delay_ms(&Value::Null), None);
     }
 
-    // ── classifyAntigravity429 ──────────────────────────────────────────────
-
-    #[test]
-    fn classifies_an_explicit_quota_exhausted_reason() {
-        let body = resource_exhausted("quota", json!([error_info("QUOTA_EXHAUSTED", None)]));
-        assert_eq!(
-            classify_antigravity_429(&body),
-            Antigravity429 { kind: Antigravity429Kind::QuotaExhausted, retry_after_ms: None }
-        );
-    }
-
-    #[test]
-    fn treats_a_short_rate_limit_delay_as_a_transient_throttle() {
-        let body = resource_exhausted("rl", json!([error_info("RATE_LIMIT_EXCEEDED", None), retry_info("20s")]));
-        assert_eq!(
-            classify_antigravity_429(&body),
-            Antigravity429 { kind: Antigravity429Kind::RateLimited, retry_after_ms: Some(20_000) }
-        );
-    }
-
-    #[test]
-    fn promotes_a_long_rate_limit_delay_to_quota_exhaustion() {
-        let body = resource_exhausted("rl", json!([error_info("RATE_LIMIT_EXCEEDED", None), retry_info("3600s")]));
-        assert_eq!(
-            classify_antigravity_429(&body),
-            Antigravity429 { kind: Antigravity429Kind::QuotaExhausted, retry_after_ms: Some(3_600_000) }
-        );
-    }
-
-    #[test]
-    fn uses_the_threshold_boundary_inclusively() {
-        let body = resource_exhausted(
-            "rl",
-            json!([error_info("RATE_LIMIT_EXCEEDED", None), retry_info(&format!("{}s", ANTIGRAVITY_SHORT_COOLDOWN_MS / 1000))]),
-        );
-        assert_eq!(classify_antigravity_429(&body).kind, Antigravity429Kind::QuotaExhausted);
-    }
-
-    #[test]
-    fn leaves_a_rate_limit_with_no_delay_unclassified() {
-        let body = resource_exhausted("rl", json!([error_info("RATE_LIMIT_EXCEEDED", None)]));
-        assert_eq!(classify_antigravity_429(&body).kind, Antigravity429Kind::Unknown);
-    }
-
-    #[test]
-    fn falls_back_to_the_quota_keyword_with_no_structured_reason() {
-        let body = json!({ "error": { "status": "RESOURCE_EXHAUSTED", "message": "model quota exhausted for today" } });
-        assert_eq!(classify_antigravity_429(&body).kind, Antigravity429Kind::QuotaExhausted);
-    }
-
-    #[test]
-    fn survives_null_and_non_object_entries_in_a_heterogeneous_details_array() {
-        // Must classify, never panic — a classifier crash would turn a benchable 429 into a
-        // generic 502 before dispatch can fail over.
-        let verdict = classify_antigravity_429(&resource_exhausted(
-            "mixed",
-            json!([Value::Null, 42, "junk", error_info("QUOTA_EXHAUSTED", None)]),
-        ));
-        assert_eq!(verdict.kind, Antigravity429Kind::QuotaExhausted);
-    }
-
-    #[test]
-    fn does_not_classify_a_non_resource_exhausted_429() {
-        let body = json!({ "error": { "status": "UNAVAILABLE", "message": "backend busy" } });
-        assert_eq!(classify_antigravity_429(&body).kind, Antigravity429Kind::Unknown);
-    }
-
-    // ── antigravityBenchUntil ───────────────────────────────────────────────
+    // ── antigravity_bench_until ─────────────────────────────────────────────
 
     const NOW: i64 = 1_700_000_000_000;
 
@@ -329,17 +219,42 @@ mod tests {
     }
 
     #[test]
-    fn benches_exactly_the_throttle_window_for_a_transient_rate_limit() {
-        let body = resource_exhausted("rl", json!([error_info("RATE_LIMIT_EXCEEDED", None), retry_info("20s")]));
-        assert_eq!(antigravity_bench_until(&body, NOW), Some(NOW + 20_000));
+    fn benches_a_rate_limit_for_exactly_its_stated_delay_short_or_long() {
+        for (delay, ms) in [("20s", 20_000), ("300s", 300_000), ("3600s", 3_600_000)] {
+            let body = resource_exhausted("rl", json!([error_info("RATE_LIMIT_EXCEEDED", None), retry_info(delay)]));
+            assert_eq!(antigravity_bench_until(&body, NOW), Some(NOW + ms), "{delay}");
+        }
+    }
+
+    #[test]
+    fn leaves_a_rate_limit_with_no_delay_unclassified() {
+        let body = resource_exhausted("rl", json!([error_info("RATE_LIMIT_EXCEEDED", None)]));
+        assert_eq!(antigravity_bench_until(&body, NOW), None);
+    }
+
+    #[test]
+    fn falls_back_to_the_quota_keyword_with_no_structured_reason() {
+        let body = json!({ "error": { "status": "RESOURCE_EXHAUSTED", "message": "model quota exhausted for today" } });
+        assert_eq!(antigravity_bench_until(&body, NOW), Some(NOW + ANTIGRAVITY_QUOTA_BENCH_MS));
+    }
+
+    #[test]
+    fn survives_null_and_non_object_entries_in_a_heterogeneous_details_array() {
+        // Must classify, never panic — a classifier crash would turn a benchable 429 into a
+        // generic 502 before dispatch can fail over.
+        let body = resource_exhausted("mixed", json!([Value::Null, 42, "junk", error_info("QUOTA_EXHAUSTED", None)]));
+        assert_eq!(antigravity_bench_until(&body, NOW), Some(NOW + ANTIGRAVITY_QUOTA_BENCH_MS));
     }
 
     #[test]
     fn leaves_the_routing_modules_default_alone_when_unclassified() {
         assert_eq!(antigravity_bench_until(&json!({ "error": { "message": "?" } }), NOW), None);
+        // Not RESOURCE_EXHAUSTED, even with a quota keyword in the message.
+        let busy = json!({ "error": { "status": "UNAVAILABLE", "message": "backend busy, quota exhausted" } });
+        assert_eq!(antigravity_bench_until(&busy, NOW), None);
     }
 
-    // ── isAntigravityNoCapacity ─────────────────────────────────────────────
+    // ── is_antigravity_no_capacity ──────────────────────────────────────────
 
     #[test]
     fn recognizes_a_no_capacity_body_on_429_and_503() {

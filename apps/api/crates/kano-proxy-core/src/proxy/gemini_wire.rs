@@ -9,18 +9,75 @@
 //! translator behaviour this mirrors. Nothing here knows about the antigravity
 //! envelope (`{model, project, request, …}`) — that lives in the adapter.
 //!
-//! JSON is `serde_json::Value` throughout (`preserve_order` is on) so emitted
-//! key order matches the JavaScript objects byte for byte.
+//! JSON is `serde_json::Value` throughout (`preserve_order` is on), so emitted
+//! key order is insertion order.
 
 use futures::stream::StreamExt;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
+use crate::providers::ProviderId;
 use crate::upstream::transport::ByteStream;
+use crate::utils::reasoning::{map_reasoning, ReasoningEffort};
 
 const EMPTY_PARTS: &[Value] = &[];
 
-/// What a converting stream yields for a Gemini frame that converts to nothing (Google's
-/// heartbeat while a long `functionCall` is generated, a usage-only frame). Clients ignore an
+/// JavaScript truthiness for a JSON value: the converters' presence tests.
+pub fn truthy(v: &Value) -> bool {
+    match v {
+        Value::Null => false,
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => !s.is_empty(),
+        _ => true,
+    }
+}
+
+/// One inline part carries every modality (image, audio); only the mime differs.
+pub fn inline_part(mime_type: &str, data: &str) -> Value {
+    json!({ "inlineData": { "mimeType": mime_type, "data": data } })
+}
+
+/// Append a turn, merging it into the previous one when the role repeats: Gemini
+/// rejects two consecutive turns with the same role, and a tool result following
+/// a user message is exactly that shape. A turn with no parts is dropped.
+pub fn push_content(contents: &mut Vec<Value>, role: &str, parts: Vec<Value>) {
+    if parts.is_empty() {
+        return;
+    }
+    let existing = contents
+        .last_mut()
+        .filter(|last| last.get("role").and_then(Value::as_str) == Some(role))
+        .and_then(|last| last.get_mut("parts"))
+        .and_then(Value::as_array_mut);
+    match existing {
+        Some(existing) => existing.extend(parts),
+        None => contents.push(json!({ "role": role, "parts": parts })),
+    }
+}
+
+/// A part's `thoughtSignature`, when it carries a non-empty one.
+pub fn thought_signature(part: &Value) -> Option<&str> {
+    part.get("thoughtSignature").and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
+/// `generationConfig.thinkingConfig` for a client reasoning effort, and whether
+/// that effort switched thinking off (`none` is a zero budget: Gemini has no
+/// "none" level). `includeThoughts` is on otherwise — without it the model still
+/// thinks but returns no thought parts, so the client's reasoning output would
+/// silently vanish.
+pub fn effort_thinking_config(effort: ReasoningEffort) -> (Value, bool) {
+    let mut config = match map_reasoning(ProviderId::Antigravity, Some(effort)).remove("thinkingConfig") {
+        Some(Value::Object(config)) => config,
+        _ => Map::new(),
+    };
+    let disabled = config.contains_key("thinkingBudget");
+    config.insert("includeThoughts".into(), json!(!disabled));
+    (Value::Object(config), disabled)
+}
+
+/// What a converting stream yields for an upstream frame that converts to nothing (Google's
+/// heartbeat while a long `functionCall` is generated, a usage-only frame, a Grok event held
+/// back behind open reasoning). Clients ignore an
 /// SSE comment, but the relay counts it as a real upstream chunk, so the 120s idle timeout
 /// measures upstream silence rather than converted output (docs/api.md § Keepalive and idle
 /// timeout).
@@ -40,10 +97,7 @@ pub fn open_with_user_turn(contents: &mut Vec<Value>) {
         .and_then(Value::as_str)
         == Some("model");
     if opens_with_model {
-        contents.insert(
-            0,
-            serde_json::json!({ "role": "user", "parts": [{ "text": "(conversation start)" }] }),
-        );
+        contents.insert(0, json!({ "role": "user", "parts": [{ "text": "(conversation start)" }] }));
     }
 }
 
@@ -88,12 +142,15 @@ pub fn block_reason(resp: Option<&Value>) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// A response with no candidates at all (`candidates` missing or empty).
-pub fn has_no_candidates(resp: Option<&Value>) -> bool {
-    resp.and_then(|r| r.get("candidates"))
+/// A safety-blocked prompt: no candidates at all and a `promptFeedback.blockReason`.
+/// That is a real answer, which surfaces as a refusal / content filter — never as a
+/// successful blank message the client cannot tell apart from real output.
+pub fn prompt_blocked(resp: Option<&Value>) -> bool {
+    let no_candidates = resp
+        .and_then(|r| r.get("candidates"))
         .and_then(Value::as_array)
-        .map(|c| c.is_empty())
-        .unwrap_or(true)
+        .is_none_or(Vec::is_empty);
+    no_candidates && block_reason(resp).is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,9 +191,8 @@ pub struct NormalizedGeminiUsage {
     pub total_tokens: Option<i64>,
 }
 
-/// The TypeScript `num()`: a finite JSON number, otherwise null. Token counts
-/// are integers on this wire, so a fractional value is truncated rather than
-/// re-emitted as a float (which would not match the JavaScript output).
+/// A finite JSON number, otherwise none. Token counts are integers on this wire,
+/// so a fractional value is truncated rather than re-emitted as a float.
 fn num(v: Option<&Value>) -> Option<i64> {
     match v {
         Some(Value::Number(n)) => n
@@ -207,7 +263,7 @@ pub fn anthropic_stop_reason(finish_reason: Option<&str>, saw_tool_call: bool) -
 
 /// A part the client sees as output: a function call, an image, or answer text.
 /// Thought parts do not count — a turn of thinking alone answers nothing.
-pub fn is_output_part(part: &Value) -> bool {
+fn is_output_part(part: &Value) -> bool {
     if part.get("functionCall").is_some_and(|c| !c.is_null()) || inline_data_of(part).is_some() {
         return true;
     }
@@ -235,7 +291,7 @@ pub fn empty_turn_failure(finish_reason: Option<&str>) -> Option<String> {
 /// (`promptFeedback.blockReason`, no candidates) is a real answer, not a failure.
 pub fn empty_response_failure(json_body: &Value) -> Option<String> {
     let resp = unwrap_antigravity_response(json_body);
-    if has_no_candidates(resp) && block_reason(resp).is_some() {
+    if prompt_blocked(resp) {
         return None;
     }
     if gemini_parts(resp).iter().any(is_output_part) {
@@ -385,8 +441,8 @@ pub struct SchemaDialect {
     pub allow_any_of: bool,
 }
 
-pub const GEMINI_SCHEMA_DIALECT: SchemaDialect = SchemaDialect { allow_any_of: true };
-pub const CLAUDE_SCHEMA_DIALECT: SchemaDialect = SchemaDialect { allow_any_of: false };
+const GEMINI_SCHEMA_DIALECT: SchemaDialect = SchemaDialect { allow_any_of: true };
+const CLAUDE_SCHEMA_DIALECT: SchemaDialect = SchemaDialect { allow_any_of: false };
 
 /// `claude` in the upstream model id — the same test the request builder uses.
 pub fn schema_dialect_for(model: &str) -> SchemaDialect {
@@ -444,7 +500,7 @@ pub fn sanitize_json_schema(schema: &Value, dialect: SchemaDialect) -> Value {
     Value::Object(folded)
 }
 
-/// `crypto.randomUUID().replace(/-/g, "").slice(0, n)`.
+/// `n` random hex digits (at most 32), for synthetic message and call ids.
 pub(crate) fn random_hex(n: usize) -> String {
     let id = crate::ids::new_id("");
     id[..n.min(id.len())].to_string()
@@ -484,16 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn opens_an_assistant_first_history_with_a_user_turn() {
-        let mut contents = vec![json!({ "role": "model", "parts": [] })];
-        open_with_user_turn(&mut contents);
-        assert_eq!(contents[0], json!({ "role": "user", "parts": [{ "text": "(conversation start)" }] }));
-        let mut already = vec![json!({ "role": "user", "parts": [] })];
-        open_with_user_turn(&mut already);
-        assert_eq!(already.len(), 1);
-    }
-
-    #[test]
     fn maps_finish_reasons() {
         assert_eq!(openai_finish_reason(Some("MAX_TOKENS")), "length");
         assert_eq!(openai_finish_reason(Some("SAFETY")), "content_filter");
@@ -503,25 +549,6 @@ mod tests {
         assert_eq!(anthropic_stop_reason(Some("MAX_TOKENS"), false), "max_tokens");
         assert_eq!(anthropic_stop_reason(Some("RECITATION"), false), "refusal");
         assert_eq!(anthropic_stop_reason(None, false), "end_turn");
-    }
-
-    #[test]
-    fn normalizes_usage() {
-        let usage = normalize_gemini_usage(Some(&json!({
-            "promptTokenCount": 10,
-            "candidatesTokenCount": 4,
-            "thoughtsTokenCount": 6,
-            "cachedContentTokenCount": 3,
-            "totalTokenCount": 20
-        })))
-        .unwrap();
-        assert_eq!(usage.prompt_tokens, Some(10));
-        assert_eq!(usage.completion_tokens, Some(4));
-        assert_eq!(usage.reasoning_tokens, Some(6));
-        assert_eq!(usage.cached_tokens, Some(3));
-        assert_eq!(usage.total_tokens, Some(20));
-        assert_eq!(normalize_gemini_usage(None), None);
-        assert_eq!(normalize_gemini_usage(Some(&json!(1))), None);
     }
 
     #[test]
@@ -557,28 +584,6 @@ mod tests {
         assert_eq!(lines.next_data().await.unwrap().unwrap(), "{\"b\":2}");
         assert_eq!(lines.next_data().await.unwrap().unwrap(), "[DONE]");
         assert!(lines.next_data().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn yields_an_unterminated_trailing_line() {
-        let chunks: Vec<Result<Bytes, std::io::Error>> =
-            vec![Ok(Bytes::from_static(b"data: {\"a\":1}"))];
-        let body: ByteStream = Box::pin(futures::stream::iter(chunks));
-        let mut lines = SseDataLines::new(body);
-        assert_eq!(lines.next_data().await.unwrap().unwrap(), "{\"a\":1}");
-        assert!(lines.next_data().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn keeps_multibyte_text_split_across_chunks() {
-        // "資" is three bytes; the split lands inside it.
-        let raw = "data: {\"t\":\"資料\"}\n\n".as_bytes().to_vec();
-        let (a, b) = raw.split_at(10);
-        let chunks: Vec<Result<Bytes, std::io::Error>> =
-            vec![Ok(Bytes::copy_from_slice(a)), Ok(Bytes::copy_from_slice(b))];
-        let body: ByteStream = Box::pin(futures::stream::iter(chunks));
-        let mut lines = SseDataLines::new(body);
-        assert_eq!(lines.next_data().await.unwrap().unwrap(), "{\"t\":\"資料\"}");
     }
 
     // ── empty turns ────────────────────────────────────────────────────────

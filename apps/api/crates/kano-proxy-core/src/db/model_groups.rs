@@ -1,5 +1,6 @@
-//! `model_groups` / `model_group_models` rows (//! docs/providers.md § Model groups). A group's model set is replaced atomically, never
-//! through a visible in-between state with zero or partial models.
+//! `model_groups` / `model_group_models` rows (docs/providers.md § Model groups). A group's
+//! model set is replaced atomically, never through a visible in-between state with zero or
+//! partial models.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,7 +8,7 @@ use sqlx::PgPool;
 
 use crate::ids::{new_id, now_iso};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct ModelGroupRow {
     pub id: String,
     pub user_id: String,
@@ -15,8 +16,8 @@ pub struct ModelGroupRow {
     pub name: String,
     /// The endpoint's URL id (`/g/<slug>/…`), unique per user and mutable.
     pub slug: String,
-    /// Raw column value; an unrecognized strategy is normalized by `routing::strategy`,
-    /// not here — this layer stores and returns what is in the row.
+    /// Raw column value — stored and served, not read by dispatch (`ordered` is the only
+    /// strategy).
     pub strategy: String,
     pub created_at: String,
     pub updated_at: String,
@@ -24,7 +25,7 @@ pub struct ModelGroupRow {
 
 /// One callable model of a group — 1..20 per group, name unique within the group, each with
 /// its own ordered target list.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct ModelGroupModelRow {
     pub id: String,
     pub user_id: String,
@@ -76,10 +77,9 @@ pub async fn get_group_by_slug(db: &PgPool, user_id: &str, slug: &str) -> Result
         .await
 }
 
-/// A group's models in insertion order — the order the caller submitted, which the
-/// TypeScript relied on SQLite's unordered table scan for. The rows share one `created_at`
-/// (they are written by a single `replace_group_models`) and the table has no sort column, so
-/// physical order (`ctid`) is what reproduces it; the model list carries no priority
+/// A group's models in insertion order — the order the caller submitted. The rows share one
+/// `created_at` (they are written by a single `replace_group_models`) and the table has no sort
+/// column, so physical order (`ctid`) is what reproduces it; the model list carries no priority
 /// semantics (unlike each model's targets), so this is a display nicety, not correctness.
 pub async fn list_models_for_group(db: &PgPool, group_id: &str) -> Result<Vec<ModelGroupModelRow>, sqlx::Error> {
     sqlx::query_as::<_, ModelGroupModelRow>(
@@ -130,10 +130,6 @@ pub async fn replace_group_models(
         .await?;
     }
     tx.commit().await
-}
-
-pub async fn count_model_groups(db: &PgPool, user_id: &str) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("SELECT COUNT(*) FROM model_groups WHERE user_id = $1").bind(user_id).fetch_one(db).await
 }
 
 pub async fn insert_model_group(
@@ -195,46 +191,28 @@ pub async fn update_model_group_fields(
     Ok(())
 }
 
-/// Deletes the group and its model rows in one transaction. The schema's `ON DELETE CASCADE`
-/// would cover the child rows; the explicit delete keeps the behavior obvious and costs one
-/// statement in the same transaction.
+/// Deletes the group; `model_group_models.group_id` is `ON DELETE CASCADE`, so its model rows
+/// go in the same statement.
 pub async fn delete_model_group(db: &PgPool, user_id: &str, id: &str) -> Result<bool, sqlx::Error> {
-    if get_model_group_by_id(db, user_id, id).await?.is_none() {
-        return Ok(false);
-    }
-    let mut tx = db.begin().await?;
-    sqlx::query("DELETE FROM model_group_models WHERE group_id = $1").bind(id).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM model_groups WHERE id = $1 AND user_id = $2")
+    let r = sqlx::query("DELETE FROM model_groups WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user_id)
-        .execute(&mut *tx)
+        .execute(db)
         .await?;
-    tx.commit().await?;
-    Ok(true)
+    Ok(r.rows_affected() > 0)
 }
 
-/// Tolerant parse, normalizing every entry to `{model, account_id}`:
-/// a plain `"provider/model"` string (still-accepted wire shorthand) becomes an unpinned
-/// target; an object reads `model` and an optional string `account_id`. Anything else is
-/// dropped rather than failing, so a malformed row degrades to fewer targets instead of a 500.
+/// Tolerant parse of the stored `{model, account_id?}` objects (the write path normalizes the
+/// wire's bare-string shorthand before storing). Anything else is dropped rather than failing,
+/// so a malformed row degrades to fewer targets instead of a 500.
 pub fn parse_group_targets(json: Option<&str>) -> Vec<GroupTarget> {
     let Some(json) = json.filter(|s| !s.is_empty()) else { return Vec::new() };
     let Ok(Value::Array(entries)) = serde_json::from_str::<Value>(json) else { return Vec::new() };
     let mut out = Vec::new();
     for entry in entries {
-        match entry {
-            Value::String(model) => out.push(GroupTarget { model, account_id: None }),
-            Value::Object(obj) => {
-                let Some(model) = obj.get("model").and_then(Value::as_str) else { continue };
-                let account_id = obj
-                    .get("account_id")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                out.push(GroupTarget { model: model.to_string(), account_id });
-            }
-            _ => {}
-        }
+        let Some(model) = entry.get("model").and_then(Value::as_str) else { continue };
+        let account_id = entry.get("account_id").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+        out.push(GroupTarget { model: model.to_string(), account_id });
     }
     out
 }
@@ -255,7 +233,6 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                GroupTarget { model: "codex/gpt-5".into(), account_id: None },
                 GroupTarget { model: "claude-code/opus".into(), account_id: Some("acc_1".into()) },
                 GroupTarget { model: "g/m".into(), account_id: None },
                 GroupTarget { model: "g/m2".into(), account_id: None },
@@ -270,7 +247,6 @@ mod tests {
         let group = insert_model_group(&pool, &user.id, "Prod", "prod", None).await.unwrap();
         assert!(group.id.starts_with("mgrp_"));
         assert_eq!(group.strategy, "ordered");
-        assert_eq!(count_model_groups(&pool, &user.id).await.unwrap(), 1);
         assert_eq!(get_group_by_slug(&pool, &user.id, "prod").await.unwrap().unwrap(), group);
         assert!(get_group_by_slug(&pool, "someone-else", "prod").await.unwrap().is_none());
         assert!(get_model_group_by_id(&pool, "someone-else", &group.id).await.unwrap().is_none());

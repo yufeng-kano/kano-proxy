@@ -60,7 +60,3 @@ impl std::fmt::Display for ProviderId {
         f.write_str(self.as_str())
     }
 }
-
-pub fn is_provider_id(s: &str) -> bool {
-    ProviderId::parse(s).is_some()
-}

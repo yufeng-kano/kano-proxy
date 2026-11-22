@@ -7,8 +7,6 @@ use crate::providers::DynAdapter;
 /// One `(provider, upstreamModel, account)` candidate — the flattened unit dispatch walks.
 #[derive(Clone)]
 pub struct RoutingCandidate {
-    pub target_index: usize,
-    pub pinned: bool,
     pub provider: String,
     pub upstream_model: String,
     pub is_builtin: bool,
@@ -32,11 +30,4 @@ pub struct CandidateFacts {
 pub struct OrderedCandidate {
     pub candidate: RoutingCandidate,
     pub facts: CandidateFacts,
-}
-
-/// Carried through ordering even though `ordered` ignores it — future stickiness.
-#[derive(Debug, Clone)]
-pub struct StrategyContext {
-    pub api_key_id: Option<String>,
-    pub strategy: String,
 }
