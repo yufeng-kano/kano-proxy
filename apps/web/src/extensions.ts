@@ -89,7 +89,7 @@ export interface WebExtensions {
    * CLI provider (docs/admin-ui.md § Providers page). It gets `ProviderRowAccessoryProps` and
    * renders nothing for a row it has nothing to say about.
    */
-  providerRowAccessory?: Component
+  providerRowAccessory?: Component<ProviderRowAccessoryProps>
 }
 
 export const webExtensionsKey: InjectionKey<WebExtensions> = Symbol("webExtensions")

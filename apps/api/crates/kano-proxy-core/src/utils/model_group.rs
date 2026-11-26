@@ -566,4 +566,21 @@ mod tests {
         .await
         .is_err());
     }
+
+    #[tokio::test]
+    async fn a_stored_target_is_kept_without_resolving_but_any_other_is_checked() {
+        let stored = [target("codex/gpt-5", Some("acc_gone"))];
+        let kept = validate_group_targets(&json!([{ "model": "codex/gpt-5", "account_id": "acc_gone" }]), &builtin_only, &no_accounts, &stored)
+            .await
+            .expect("the identical stored pin");
+        assert_eq!(kept, stored);
+        // Another account or another model is new, so its pin must resolve; so must the prefix of
+        // the same model unpinned.
+        let other_account = json!([{ "model": "codex/gpt-5", "account_id": "acc_other" }]);
+        assert!(validate_group_targets(&other_account, &builtin_or_codex, &no_accounts, &stored).await.is_err());
+        let other_model = json!([{ "model": "codex/gpt-5-mini", "account_id": "acc_gone" }]);
+        assert!(validate_group_targets(&other_model, &builtin_or_codex, &no_accounts, &stored).await.is_err());
+        let unpinned = json!([{ "model": "codex/gpt-5" }]);
+        assert!(validate_group_targets(&unpinned, &builtin_only, &no_accounts, &stored).await.is_err());
+    }
 }

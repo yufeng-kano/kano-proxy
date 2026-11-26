@@ -174,7 +174,7 @@ function unusableReason(model: ModelGroupModel, target: ModelGroupTarget, index:
         : t("groups.route.unavailable")
     case "unresolved":
       return t("groups.route.unresolved")
-    // A pin whose account is gone is the same fact the account tag beside it
+    // A pin that no longer resolves is the same fact the account tag beside it
     // already names, so that case keeps the note that says how to fix it.
     case "no_account":
       return isMissingAccount(target) ? t("groups.account.skipped") : t("groups.route.noAccount")
