@@ -48,7 +48,7 @@ The table also shows where the next request would go:
 
 - The target drawn in the accent color, marked **Current**, is the one the next request for that name would use.
 - A struck-through target cannot take requests right now, with the reason beside it, for example **Limit reached · resumes in 2 hours** or **Paused · resumes in 4 minutes**.
-- **Account removed** means the target's account was deleted. It is skipped until you pick another account.
+- **Account unavailable** means the target's account was deleted or is no longer shared with you, for example because its owner turned sharing off. It is skipped while it is unavailable. You can still edit and save the group with it, and a shared account that comes back is used again; pick another account to stop waiting for it.
 - **This model can't be reached anymore** means its provider is gone, for example a deleted custom endpoint.
 
 This view reads the same stored state the proxy uses to route, so it matches what the next request would do.
