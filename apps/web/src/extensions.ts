@@ -51,6 +51,19 @@ export interface FooterLink {
   href: string
 }
 
+/**
+ * Props the Providers page passes to `WebExtensions.providerRowAccessory` on each of the
+ * viewer's own rows (docs/cloud-edition.md § Web shell).
+ */
+export interface ProviderRowAccessoryProps {
+  /** The builtin provider id, or `"custom"` on a custom endpoint card. */
+  provider: string
+  /** The `upstream_accounts` row id: the account, or a custom endpoint's key row. */
+  accountId: string
+  /** The row's display name, for accessible names. */
+  label: string
+}
+
 export interface WebExtensions {
   routes?: RouteRecordRaw[]
   navigation?: readonly NavigationItem[]
@@ -70,6 +83,13 @@ export interface WebExtensions {
    * § Web shell). The standalone build has none.
    */
   noticeTerms?: readonly FooterLink[]
+  /**
+   * Rendered under the tags line of each of the viewer's own account rows and custom endpoint
+   * cards on the Providers page, outside the section's edit gate; never on a shared row or a
+   * CLI provider (docs/admin-ui.md § Providers page). It gets `ProviderRowAccessoryProps` and
+   * renders nothing for a row it has nothing to say about.
+   */
+  providerRowAccessory?: Component<ProviderRowAccessoryProps>
 }
 
 export const webExtensionsKey: InjectionKey<WebExtensions> = Symbol("webExtensions")

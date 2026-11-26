@@ -489,10 +489,11 @@ function pinnedLabel(target: ModelGroupTarget): string | null {
 }
 
 /**
- * A pin whose account is gone: neither the provider's rail nor the server's
- * read-time label knows it any more (docs/auth.md § Model groups). The target
- * is skipped at request time, so the row warns and offers a re-pick — dropping
- * the pin silently would change what the group routes to without saying so.
+ * A pin whose account no longer resolves: neither the provider's rail nor the
+ * server's read-time label knows it (docs/auth.md § Model groups). It was
+ * removed, or a share was turned off or withdrawn. The target is skipped at
+ * request time, so the row warns and offers a re-pick; saving keeps the pin
+ * as it is, so a share turned back on routes through it again.
  */
 function isMissingAccount(target: ModelGroupTarget): boolean {
   return !!target.account_id && !pinnedLabel(target)

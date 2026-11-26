@@ -9,7 +9,7 @@ This repository verifies, releases and distributes the CLI; it has no production
 ## Module boundaries
 
 - The core crate exports a router factory, configuration types and explicit extension traits. Its standalone binary is the reference self-hosted deployment.
-- The web app exports a bootstrap/router factory and explicit route, navigation and account-menu extension contracts. Its own entry point is the standalone web app.
+- The web app exports a bootstrap/router factory and explicit route, navigation, account-menu, settings-section and Providers-row extension contracts. Its own entry point is the standalone web app.
 - Extensions are passed at composition time; no global mutable plugin registry. Constructing two apps must not leak routes, middleware, or policies between them.
 - Authentication establishes the caller. Subscription policy runs after authentication without replacing the caller identity. Credentials are never returned to clients.
 - Personal pools are isolated by default. Cross-user account access exists only through the explicit pool extension below; unrestricted cross-tenant lookup is forbidden. Teams, sharing, member roles and budgets are edition features built on it; the core carries no team concept.
@@ -113,6 +113,18 @@ Two more fields shape what a signed-out visitor meets. The standalone build sets
 - `loginLinks` adds `{ label, href }` links to the sign-in page's footer after Documentation, such as the edition's terms and privacy notice. They are plain anchors, so an `href` may leave the app.
 
 `noticeTerms` takes the same `{ label, href }` shape: the documents a user agrees to on the usage notice page ([admin-ui.md](./admin-ui.md) § Usage notice page), such as the edition's Terms of Service and Privacy Notice. With them the checkbox reads "I have read this notice and agree to the …" with the links; without them, "I have read this notice." The links open in a new tab, so the page and its ticked box stay.
+
+`providerRowAccessory` is a component the Providers page renders on each of the viewer's **own** rows: every builtin account row and every custom endpoint card with an `account_id` ([admin-ui.md](./admin-ui.md) § Providers page). It never renders on a shared row, a shared endpoint card or a CLI provider. It sits under the row's tags line, at rest, outside the section's edit gate, and it gets three props:
+
+```ts
+interface ProviderRowAccessoryProps {
+  provider: string   // the builtin id, or "custom" on a custom endpoint card
+  accountId: string  // the upstream_accounts row id (a custom endpoint's key row)
+  label: string      // the row's display name, for accessible names
+}
+```
+
+The component decides on its own whether it has anything to say for that row and renders nothing otherwise, so a row it does not know grows no empty space. It reads and writes through the edition's own state and routes; the core passes it nothing else and never reads anything back from it. The standalone build sets none. The cloud edition uses it for the team sharing switch.
 
 ## Usage notice (composition-time, optional)
 

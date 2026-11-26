@@ -79,10 +79,17 @@ pub fn validate_strategy(strategy: &Value) -> Option<String> {
 /// accepted on the wire and in storage) or an object `{model, account_id?}`. Duplicate
 /// identity is `model` + `account_id` together, so the same model pinned to two different
 /// accounts (or once pinned and once not) is two legitimate targets.
+///
+/// `stored` is what the group already stores (empty on create). A target equal to one of
+/// them, same `model` and same `account_id`, skips both resolvers: a share turned off or
+/// withdrawn after it was saved must not block every other edit to the group
+/// (docs/providers.md § Model groups "Account pinning"). Routing still skips it while it does
+/// not resolve.
 pub async fn validate_group_targets<P, A, Fut>(
     targets: &Value,
     resolve_prefix: &P,
     resolve_account: &A,
+    stored: &[GroupTarget],
 ) -> Result<Vec<GroupTarget>, String>
 where
     P: Fn(&str) -> bool,
@@ -114,31 +121,31 @@ where
         let Some(split) = split_model_id(&trimmed) else {
             return Err(format!("target \"{trimmed}\" must be provider/model"));
         };
-        // A bare name (no slash) is rejected above by split_model_id already, but spell it
-        // out: a group can never target another group's model — no nesting, no cycles,
-        // structurally.
-        if !resolve_prefix(&split.prefix) {
-            return Err(format!(
-                "target \"{trimmed}\" has an unknown provider \"{}\"",
-                split.prefix
-            ));
-        }
-
-        let mut account_id: Option<String> = None;
-        match account_id_raw {
-            None | Some(Value::Null) => {}
-            Some(v) => {
-                let id = match v.as_str() {
-                    Some(s) if !s.is_empty() => s.to_string(),
-                    _ => return Err(format!("target \"{trimmed}\" has an invalid account_id")),
-                };
+        let account_id: Option<String> = match account_id_raw {
+            None | Some(Value::Null) => None,
+            Some(v) => match v.as_str() {
+                Some(s) if !s.is_empty() => Some(s.to_string()),
+                _ => return Err(format!("target \"{trimmed}\" has an invalid account_id")),
+            },
+        };
+        let kept = stored.iter().any(|s| s.model == trimmed && s.account_id == account_id);
+        if !kept {
+            // A bare name (no slash) is rejected above by split_model_id already, but spell
+            // it out: a group can never target another group's model — no nesting, no
+            // cycles, structurally.
+            if !resolve_prefix(&split.prefix) {
+                return Err(format!(
+                    "target \"{trimmed}\" has an unknown provider \"{}\"",
+                    split.prefix
+                ));
+            }
+            if let Some(id) = &account_id {
                 if !resolve_account(id.clone(), split.prefix.clone()).await {
                     return Err(format!(
                         "target \"{trimmed}\" account_id is not a \"{}\" account of this user or one shared with them",
                         split.prefix
                     ));
                 }
-                account_id = Some(id);
             }
         }
 
@@ -162,10 +169,14 @@ where
 /// groups may reuse a name freely since the endpoint is the namespace). Each entry's targets
 /// go through [`validate_group_targets`], with the model's name prefixed onto any error so
 /// the message says which model it is about.
+///
+/// `stored` is every target the group already stores, across all its models
+/// ([`validate_group_targets`]).
 pub async fn validate_group_models<P, A, Fut>(
     models: &Value,
     resolve_prefix: &P,
     resolve_account: &A,
+    stored: &[GroupTarget],
 ) -> Result<Vec<GroupModelInput>, String>
 where
     P: Fn(&str) -> bool,
@@ -198,7 +209,7 @@ where
         seen.push(name.clone());
 
         let targets = obj.get("targets").unwrap_or(&Value::Null);
-        match validate_group_targets(targets, resolve_prefix, resolve_account).await {
+        match validate_group_targets(targets, resolve_prefix, resolve_account, stored).await {
             Ok(targets) => out.push(GroupModelInput { name, targets }),
             Err(error) => return Err(format!("model \"{name}\": {error}")),
         }
@@ -288,7 +299,7 @@ mod tests {
         let res = validate_group_models(
             &json!([{ "name": " gpt-4o ", "targets": ["claude-code/claude-opus-5"] }]),
             &builtin_only,
-            &no_accounts,
+            &no_accounts, &[],
         )
         .await;
         assert_eq!(
@@ -305,26 +316,26 @@ mod tests {
         let models: Vec<Value> = (0..MAX_MODELS_PER_GROUP)
             .map(|i| json!({ "name": format!("model-{i}"), "targets": ["grok/grok-4.5"] }))
             .collect();
-        assert!(validate_group_models(&json!(models), &builtin_only, &no_accounts).await.is_ok());
+        assert!(validate_group_models(&json!(models), &builtin_only, &no_accounts, &[]).await.is_ok());
     }
 
     #[tokio::test]
     async fn models_reject_empty_non_array_and_above_max_counts() {
-        assert!(validate_group_models(&json!([]), &builtin_only, &no_accounts).await.is_err());
-        assert!(validate_group_models(&json!("gpt-4o"), &builtin_only, &no_accounts).await.is_err());
+        assert!(validate_group_models(&json!([]), &builtin_only, &no_accounts, &[]).await.is_err());
+        assert!(validate_group_models(&json!("gpt-4o"), &builtin_only, &no_accounts, &[]).await.is_err());
         let models: Vec<Value> = (0..MAX_MODELS_PER_GROUP + 1)
             .map(|i| json!({ "name": format!("model-{i}"), "targets": ["grok/grok-4.5"] }))
             .collect();
-        assert!(validate_group_models(&json!(models), &builtin_only, &no_accounts).await.is_err());
+        assert!(validate_group_models(&json!(models), &builtin_only, &no_accounts, &[]).await.is_err());
     }
 
     #[tokio::test]
     async fn models_reject_a_non_object_entry_and_a_non_string_name() {
-        assert!(validate_group_models(&json!(["gpt-4o"]), &builtin_only, &no_accounts).await.is_err());
+        assert!(validate_group_models(&json!(["gpt-4o"]), &builtin_only, &no_accounts, &[]).await.is_err());
         assert!(validate_group_models(
             &json!([{ "name": 42, "targets": ["grok/grok-4.5"] }]),
             &builtin_only,
-            &no_accounts
+            &no_accounts, &[]
         )
         .await
         .is_err());
@@ -338,7 +349,7 @@ mod tests {
                 { "name": " gpt-4o ", "targets": ["claude-code/claude-opus-5"] },
             ]),
             &builtin_only,
-            &no_accounts,
+            &no_accounts, &[],
         )
         .await;
         assert!(dup.is_err());
@@ -348,7 +359,7 @@ mod tests {
                 { "name": "gpt-4o", "targets": ["claude-code/claude-opus-5"] },
             ]),
             &builtin_only,
-            &no_accounts,
+            &no_accounts, &[],
         )
         .await;
         assert!(cased.is_ok());
@@ -359,7 +370,7 @@ mod tests {
         let res = validate_group_models(
             &json!([{ "name": "gpt-4o", "targets": [] }]),
             &builtin_only,
-            &no_accounts,
+            &no_accounts, &[],
         )
         .await;
         let err = res.expect_err("empty targets rejected");
@@ -371,7 +382,7 @@ mod tests {
         let res = validate_group_models(
             &json!([{ "name": "claude-code/claude-opus-5", "targets": ["grok/grok-4.5"] }]),
             &builtin_only,
-            &no_accounts,
+            &no_accounts, &[],
         )
         .await;
         assert!(res.is_ok());
@@ -380,11 +391,11 @@ mod tests {
     #[tokio::test]
     async fn targets_accept_the_string_shorthand_and_the_bare_object() {
         assert_eq!(
-            validate_group_targets(&json!(["claude-code/claude-opus-5"]), &builtin_or_codex, &no_accounts).await,
+            validate_group_targets(&json!(["claude-code/claude-opus-5"]), &builtin_or_codex, &no_accounts, &[]).await,
             Ok(vec![target("claude-code/claude-opus-5", None)])
         );
         assert_eq!(
-            validate_group_targets(&json!([{ "model": "claude-code/claude-opus-5" }]), &builtin_or_codex, &no_accounts)
+            validate_group_targets(&json!([{ "model": "claude-code/claude-opus-5" }]), &builtin_or_codex, &no_accounts, &[])
                 .await,
             Ok(vec![target("claude-code/claude-opus-5", None)])
         );
@@ -393,42 +404,42 @@ mod tests {
     #[tokio::test]
     async fn targets_count_bounds() {
         let ok: Vec<Value> = (0..MAX_TARGETS_PER_MODEL).map(|i| json!(format!("claude-code/model-{i}"))).collect();
-        assert!(validate_group_targets(&json!(ok), &builtin_or_codex, &no_accounts).await.is_ok());
+        assert!(validate_group_targets(&json!(ok), &builtin_or_codex, &no_accounts, &[]).await.is_ok());
         let too_many: Vec<Value> =
             (0..MAX_TARGETS_PER_MODEL + 1).map(|i| json!(format!("claude-code/model-{i}"))).collect();
-        assert!(validate_group_targets(&json!(too_many), &builtin_or_codex, &no_accounts).await.is_err());
-        assert!(validate_group_targets(&json!([]), &builtin_or_codex, &no_accounts).await.is_err());
-        assert!(validate_group_targets(&json!("claude-code/claude-opus-5"), &builtin_or_codex, &no_accounts)
+        assert!(validate_group_targets(&json!(too_many), &builtin_or_codex, &no_accounts, &[]).await.is_err());
+        assert!(validate_group_targets(&json!([]), &builtin_or_codex, &no_accounts, &[]).await.is_err());
+        assert!(validate_group_targets(&json!("claude-code/claude-opus-5"), &builtin_or_codex, &no_accounts, &[])
             .await
             .is_err());
     }
 
     #[tokio::test]
     async fn targets_reject_unknown_prefixes_bare_names_duplicates_and_bad_entries() {
-        assert!(validate_group_targets(&json!(["not-a-real-provider/model"]), &builtin_or_codex, &no_accounts)
+        assert!(validate_group_targets(&json!(["not-a-real-provider/model"]), &builtin_or_codex, &no_accounts, &[])
             .await
             .is_err());
-        assert!(validate_group_targets(&json!(["some-other-group"]), &builtin_or_codex, &no_accounts).await.is_err());
+        assert!(validate_group_targets(&json!(["some-other-group"]), &builtin_or_codex, &no_accounts, &[]).await.is_err());
         assert!(validate_group_targets(
             &json!(["claude-code/claude-opus-5", "claude-code/claude-opus-5"]),
             &builtin_or_codex,
-            &no_accounts
+            &no_accounts, &[]
         )
         .await
         .is_err());
-        assert!(validate_group_targets(&json!([42]), &builtin_or_codex, &no_accounts).await.is_err());
-        assert!(validate_group_targets(&json!([{ "model": 42 }]), &builtin_or_codex, &no_accounts).await.is_err());
+        assert!(validate_group_targets(&json!([42]), &builtin_or_codex, &no_accounts, &[]).await.is_err());
+        assert!(validate_group_targets(&json!([{ "model": 42 }]), &builtin_or_codex, &no_accounts, &[]).await.is_err());
     }
 
     #[tokio::test]
     async fn targets_accept_a_custom_slug_prefix_and_trim_each_string() {
         let custom = |prefix: &str| prefix == "my-endpoint";
         assert_eq!(
-            validate_group_targets(&json!(["my-endpoint/gpt-4o"]), &custom, &no_accounts).await,
+            validate_group_targets(&json!(["my-endpoint/gpt-4o"]), &custom, &no_accounts, &[]).await,
             Ok(vec![target("my-endpoint/gpt-4o", None)])
         );
         assert_eq!(
-            validate_group_targets(&json!([" claude-code/claude-opus-5 "]), &builtin_or_codex, &no_accounts).await,
+            validate_group_targets(&json!([" claude-code/claude-opus-5 "]), &builtin_or_codex, &no_accounts, &[]).await,
             Ok(vec![target("claude-code/claude-opus-5", None)])
         );
     }
@@ -439,7 +450,7 @@ mod tests {
             validate_group_targets(
                 &json!([{ "model": "claude-code/claude-opus-5", "account_id": "acc_1" }]),
                 &builtin_or_codex,
-                &all_accounts
+                &all_accounts, &[]
             )
             .await,
             Ok(vec![target("claude-code/claude-opus-5", Some("acc_1"))])
@@ -447,7 +458,7 @@ mod tests {
         assert!(validate_group_targets(
             &json!([{ "model": "claude-code/claude-opus-5", "account_id": "acc_1" }]),
             &builtin_or_codex,
-            &no_accounts
+            &no_accounts, &[]
         )
         .await
         .is_err());
@@ -467,7 +478,7 @@ mod tests {
                     { "model": "grok/grok-4.5", "account_id": "acc_grok" },
                 ]),
                 &builtin_or_codex,
-                &record,
+                &record, &[],
             )
             .await;
         }
@@ -485,14 +496,14 @@ mod tests {
         assert!(validate_group_targets(
             &json!([{ "model": "claude-code/claude-opus-5", "account_id": 42 }]),
             &builtin_or_codex,
-            &all_accounts
+            &all_accounts, &[]
         )
         .await
         .is_err());
         assert!(validate_group_targets(
             &json!([{ "model": "claude-code/claude-opus-5", "account_id": "" }]),
             &builtin_or_codex,
-            &all_accounts
+            &all_accounts, &[]
         )
         .await
         .is_err());
@@ -504,7 +515,7 @@ mod tests {
             validate_group_targets(
                 &json!([{ "model": "claude-code/claude-opus-5", "account_id": null }]),
                 &builtin_or_codex,
-                &all_accounts
+                &all_accounts, &[]
             )
             .await,
             Ok(vec![target("claude-code/claude-opus-5", None)])
@@ -519,7 +530,7 @@ mod tests {
                 { "model": "claude-code/claude-opus-5", "account_id": "acc_2" },
             ]),
             &builtin_or_codex,
-            &all_accounts,
+            &all_accounts, &[],
         )
         .await
         .expect("two distinct pins");
@@ -531,7 +542,7 @@ mod tests {
                 { "model": "claude-code/claude-opus-5" },
             ]),
             &builtin_or_codex,
-            &all_accounts,
+            &all_accounts, &[],
         )
         .await
         .expect("one pinned, one not");
@@ -543,16 +554,33 @@ mod tests {
                 { "model": "claude-code/claude-opus-5", "account_id": "acc_1" },
             ]),
             &builtin_or_codex,
-            &all_accounts
+            &all_accounts, &[]
         )
         .await
         .is_err());
         assert!(validate_group_targets(
             &json!([{ "model": "claude-code/claude-opus-5" }, "claude-code/claude-opus-5"]),
             &builtin_or_codex,
-            &all_accounts
+            &all_accounts, &[]
         )
         .await
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn a_stored_target_is_kept_without_resolving_but_any_other_is_checked() {
+        let stored = [target("codex/gpt-5", Some("acc_gone"))];
+        let kept = validate_group_targets(&json!([{ "model": "codex/gpt-5", "account_id": "acc_gone" }]), &builtin_only, &no_accounts, &stored)
+            .await
+            .expect("the identical stored pin");
+        assert_eq!(kept, stored);
+        // Another account or another model is new, so its pin must resolve; so must the prefix of
+        // the same model unpinned.
+        let other_account = json!([{ "model": "codex/gpt-5", "account_id": "acc_other" }]);
+        assert!(validate_group_targets(&other_account, &builtin_or_codex, &no_accounts, &stored).await.is_err());
+        let other_model = json!([{ "model": "codex/gpt-5-mini", "account_id": "acc_gone" }]);
+        assert!(validate_group_targets(&other_model, &builtin_or_codex, &no_accounts, &stored).await.is_err());
+        let unpinned = json!([{ "model": "codex/gpt-5" }]);
+        assert!(validate_group_targets(&unpinned, &builtin_only, &no_accounts, &stored).await.is_err());
     }
 }

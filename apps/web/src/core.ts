@@ -1,5 +1,13 @@
 export { createWebApp } from "./bootstrap"
-export type { WebExtensions, NavigationItem, AccountMenuItem, SettingsSection, ShellOptions, FooterLink } from "./extensions"
+export type {
+  WebExtensions,
+  NavigationItem,
+  AccountMenuItem,
+  SettingsSection,
+  ShellOptions,
+  FooterLink,
+  ProviderRowAccessoryProps,
+} from "./extensions"
 export { request as apiRequest } from "./services/api"
 export { useAuth } from "./composables/useAuth"
 export { useConfirm, type ConfirmOptions } from "./composables/useConfirm"

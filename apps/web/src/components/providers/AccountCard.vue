@@ -19,6 +19,7 @@ import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import StatusDot from "@/components/ui/StatusDot.vue"
 import UsageBar from "@/components/ui/UsageBar.vue"
+import { useWebExtensions } from "@/extensions"
 import { useI18n } from "@/i18n"
 import type { CodexCredits, ProviderAccount, RequestEdits } from "@/types"
 
@@ -59,6 +60,9 @@ const emit = defineEmits<{
 }>()
 
 const { t, format } = useI18n()
+
+/** The edition's line on the viewer's own rows (docs/cloud-edition.md § Web shell). */
+const { providerRowAccessory } = useWebExtensions()
 
 /**
  * Server data, not copy: an email or upstream username identifies the account
@@ -449,6 +453,17 @@ watch(
         </AppButton>
       </div>
     </div>
+
+    <!-- At rest, outside the gate, and only on the viewer's own rows: a
+         borrowed row is not theirs to change (docs/admin-ui.md § Providers
+         page). The component renders nothing for a row it does not know. -->
+    <component
+      :is="providerRowAccessory"
+      v-if="providerRowAccessory && !share && provider"
+      :provider="provider"
+      :account-id="account.id"
+      :label="displayName"
+    />
 
     <!-- A shared row never reads the owner's usage surface itself — no probe
          error, and nothing here ever asks upstream about someone else's

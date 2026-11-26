@@ -1,9 +1,11 @@
 import { expect, it } from "vitest"
-import { createSSRApp, h, type Component } from "vue"
+import { createSSRApp, defineComponent, h, type Component } from "vue"
 import { renderToString, type SSRContext } from "vue/server-renderer"
 import AccountCard from "@/components/providers/AccountCard.vue"
 import AddAccountDialog from "@/components/AddAccountDialog.vue"
-import type { ProviderAccount } from "@/types"
+import CustomProviderCard from "@/components/providers/CustomProviderCard.vue"
+import { webExtensionsKey, type WebExtensions } from "@/extensions"
+import type { CustomProvider, ProviderAccount } from "@/types"
 
 // Rendered on the server renderer: the app has no DOM test environment, and
 // what these tests pin is what a resting row and the dialog's first step show.
@@ -373,4 +375,49 @@ it("names a Claude Max row by its tier, as Anthropic has since the 2026-10-30 re
   expect(
     await badge({ plan_type: "claude_max", rate_limit_tier: "default_claude_max_20x", plan_display_name: null }),
   ).toBe("Ultra")
+})
+
+it("renders the edition's row accessory on own rows only, with the row's ids", async () => {
+  const accessory = defineComponent({
+    props: { provider: String, accountId: String, label: String },
+    setup: (p) => () => h("span", { class: "accessory" }, `${p.provider}:${p.accountId}:${p.label}`),
+  })
+  const extensions: WebExtensions = { providerRowAccessory: accessory }
+  async function withExtensions(component: Component, props: Record<string, unknown>) {
+    const app = createSSRApp({ render: () => h(component, props) }).provide(webExtensionsKey, extensions)
+    return renderToString(app)
+  }
+
+  const own = await withExtensions(AccountCard, { account: account(), provider: "claude-code" })
+  expect(own).toContain("claude-code:acct-1:owner@example.com")
+
+  const borrowed = await withExtensions(AccountCard, {
+    account: account({ share: { teamId: "t", teamName: "Team", ownerLabel: "Owner" } }),
+    provider: "claude-code",
+  })
+  expect(borrowed).not.toContain('class="accessory"')
+
+  const endpoint = {
+    id: "cprov_1",
+    slug: "gw",
+    name: "Gateway",
+    format: "openai",
+    base_url: "https://gw.example.com/v1",
+    count_tokens_url: null,
+    models_mode: "auto",
+    manual_models: [],
+    key_mask: "sk-…a1",
+    account_id: "acct-key",
+    status: "active",
+    strip_fast_mode: false,
+    strip_claude_code_line: false,
+    force_cache_ttl_1h: false,
+  } as CustomProvider
+  expect(await withExtensions(CustomProviderCard, { provider: endpoint })).toContain("custom:acct-key:Gateway")
+  // Without its key row there is nothing for an edition to address.
+  const keyless = await withExtensions(CustomProviderCard, { provider: { ...endpoint, account_id: null } })
+  expect(keyless).not.toContain('class="accessory"')
+
+  // The standalone build passes none, and the row grows nothing.
+  expect(await render(AccountCard, { account: account(), provider: "claude-code" })).not.toContain("accessory")
 })
