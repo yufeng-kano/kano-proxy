@@ -17,6 +17,7 @@ import AppButton from "@/components/ui/AppButton.vue"
 import Badge from "@/components/ui/Badge.vue"
 import Banner from "@/components/ui/Banner.vue"
 import StatusDot from "@/components/ui/StatusDot.vue"
+import { useWebExtensions } from "@/extensions"
 import { useI18n } from "@/i18n"
 import { testCustomProvider } from "@/services/api"
 import type { CustomProvider, CustomProviderTestResult, RequestEdits } from "@/types"
@@ -50,6 +51,9 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
+
+/** The edition's line on the viewer's own rows (docs/cloud-edition.md § Web shell). */
+const { providerRowAccessory } = useWebExtensions()
 
 const testing = ref(false)
 const testResult = ref<CustomProviderTestResult | null>(null)
@@ -228,6 +232,17 @@ async function runTest() {
         </AppButton>
       </div>
     </div>
+
+    <!-- At rest, outside the gate, like on an account row; it needs the key
+         row, which is what an edition addresses (docs/admin-ui.md § Providers
+         page). -->
+    <component
+      :is="providerRowAccessory"
+      v-if="providerRowAccessory && provider.account_id"
+      provider="custom"
+      :account-id="provider.account_id"
+      :label="provider.name"
+    />
 
     <dl class="details">
       <div class="detail">

@@ -621,8 +621,8 @@ export const en = {
   "groups.account.any": "Any account",
   "groups.account.anyHint_one": "Pool order · {count} account",
   "groups.account.anyHint_other": "Pool order · {count} accounts",
-  "groups.account.missing": "Account removed",
-  "groups.account.skipped": "Skipped until you pick another account",
+  "groups.account.missing": "Account unavailable",
+  "groups.account.skipped": "Skipped while the account is unavailable",
   // --- Where the next request goes. "Current" marks the target the group
   // would dispatch to right now; the rest say why a target is being skipped,
   // in the user's terms ("Paused", not "benched") and with the time it comes

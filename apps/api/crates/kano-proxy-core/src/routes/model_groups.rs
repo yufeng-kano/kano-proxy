@@ -156,8 +156,14 @@ async fn to_list_item(state: &AppState, user_id: &str, lookup: &SharedLookup, ro
 /// slug of a custom endpoint a pool extension shares with the caller, never another user's
 /// otherwise. A pinned `account_id` is the caller's own row or, for a builtin prefix, a row the
 /// pool extension currently shares with the caller — never a shared endpoint's key row, since a
-/// shared slug is not a builtin.
-async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> anyhow::Result<Result<Vec<GroupModelInput>, String>> {
+/// shared slug is not a builtin. A target equal to one in `stored` (the group's own, on an
+/// update) is kept without either check.
+async fn validate_models(
+    state: &AppState,
+    user_id: &str,
+    models: &Value,
+    stored: &[GroupTarget],
+) -> anyhow::Result<Result<Vec<GroupModelInput>, String>> {
     let own = own_provider_slugs(state, user_id).await?;
     let missed_own = AtomicBool::new(false);
     let own_prefix = |prefix: &str| {
@@ -194,7 +200,7 @@ async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> any
         }
     };
     let take_failure = || failure.lock().expect("failure slot").take();
-    let mut validated = validate_group_models(models, &own_prefix, &resolve_account).await;
+    let mut validated = validate_group_models(models, &own_prefix, &resolve_account, stored).await;
     if let Some(error) = take_failure() {
         return Err(error);
     }
@@ -204,7 +210,7 @@ async fn validate_models(state: &AppState, user_id: &str, models: &Value) -> any
     if validated.is_err() && missed_own.load(Ordering::Relaxed) {
         let shared: HashSet<String> = lookup.all(state, user_id).await?.iter().map(|s| s.provider.slug.clone()).collect();
         let any_prefix = |prefix: &str| ProviderId::parse(prefix).is_some() || own.contains(prefix) || shared.contains(prefix);
-        validated = validate_group_models(models, &any_prefix, &resolve_account).await;
+        validated = validate_group_models(models, &any_prefix, &resolve_account, stored).await;
         if let Some(error) = take_failure() {
             return Err(error);
         }
@@ -248,7 +254,7 @@ pub(crate) async fn create_for_user(state: &AppState, user_id: &str, body: &Byte
     }
 
     let models_value = body.get("models").cloned().unwrap_or(Value::Null);
-    let models = match validate_models(state, user_id, &models_value).await {
+    let models = match validate_models(state, user_id, &models_value, &[]).await {
         Err(_) => return internal_error(),
         Ok(Err(message)) => return error(StatusCode::BAD_REQUEST, &message),
         Ok(Ok(models)) => models,
@@ -334,7 +340,12 @@ pub(crate) async fn update_for_user(state: &AppState, user_id: &str, id: &str, b
 
     let mut models: Option<Vec<GroupModelInput>> = None;
     if let Some(raw) = body.get("models") {
-        match validate_models(state, user_id, raw).await {
+        // The group's stored targets keep their pins even when they no longer resolve
+        // (docs/providers.md § Model groups "Account pinning").
+        let Ok(stored_models) = list_models_for_group(state.pool(), id).await else { return internal_error() };
+        let stored: Vec<GroupTarget> =
+            stored_models.iter().flat_map(|m| parse_group_targets(Some(&m.targets_json))).collect();
+        match validate_models(state, user_id, raw, &stored).await {
             Err(_) => return internal_error(),
             Ok(Err(message)) => return error(StatusCode::BAD_REQUEST, &message),
             Ok(Ok(validated)) => models = Some(validated),
@@ -1042,6 +1053,70 @@ mod tests {
         assert_eq!(team["models"][0]["targets"][0]["account_label"], Value::Null);
         assert_eq!(team["models"][0]["routing"]["targets"][0]["reason"], "no_account");
         assert_eq!(team["models"][0]["routing"]["current_target_index"], 1);
+    }
+
+    #[tokio::test]
+    async fn an_update_keeps_stored_targets_that_no_longer_resolve_but_checks_new_ones() {
+        use crate::pool::extension::test_support::share_info;
+        use crate::pool::SharedAccount;
+
+        let Some(pool) = test_pool().await else { return skip_without_db() };
+        let owner = insert_user(&pool, "owner@example.com").await;
+        let endpoint = owner_endpoint(&pool, &owner.id, "team-gw", "openai", "https://owner.example.com/v1", None).await;
+        let ext = SharedCustomExtension::lending(vec![endpoint]);
+        let state = state_with_extension(pool, MockTransport::new(), ext.clone());
+        let (user_id, cookie) = signed_in(&state, "borrower@example.com").await;
+        seed_account(&state, &user_id, "acc_mine", "claude-code", Some("me@example.com"), None).await;
+        seed_account(&state, &owner.id, "acc_lent", "claude-code", Some("owner@example.com"), None).await;
+        let lent = get_account(state.pool(), &owner.id, "acc_lent").await.unwrap().unwrap();
+        ext.accounts.lock().unwrap().push(SharedAccount { account: lent, priority: 0, share: share_info(), usage: None });
+        let lent_pin = json!({ "model": "claude-code/claude-opus-5", "account_id": "acc_lent" });
+        let targets = json!([lent_pin.clone(), "team-gw/gpt-4o", "claude-code/claude-opus-5"]);
+        let response = create_group(
+            &state,
+            &cookie,
+            json!({ "name": "Team", "slug": "team-ep", "models": [{ "name": "opus", "targets": targets }] }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let id = body_json(response).await["id"].as_str().unwrap().to_string();
+
+        // Both shares are turned off: neither the pin nor the shared slug resolves any more.
+        ext.accounts.lock().unwrap().clear();
+        ext.shared.lock().unwrap().clear();
+        let path = format!("/api/model-groups/{id}");
+
+        // Reordering the group and adding a model of the caller's own keeps both as stored.
+        let reordered = json!([
+            { "name": "opus", "targets": ["claude-code/claude-opus-5", "team-gw/gpt-4o", lent_pin.clone()] },
+            { "name": "sonnet", "targets": [{ "model": "claude-code/claude-sonnet-5", "account_id": "acc_mine" }] },
+        ]);
+        let response = send(&state, "PUT", &path, &cookie, Some(json!({ "models": reordered }))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = body_json(response).await;
+        assert_eq!(json["models"][0]["targets"][2]["account_id"], "acc_lent");
+        assert_eq!(json["models"][0]["targets"][2]["account_label"], Value::Null);
+        assert_eq!(json["models"][0]["targets"][1]["model"], "team-gw/gpt-4o");
+
+        // A target the group never stored is checked as on create, even on the same account
+        // or the same slug.
+        for (label, target) in [
+            ("a new model pinned to the unresolved account", json!({ "model": "claude-code/claude-sonnet-5", "account_id": "acc_lent" })),
+            ("a new model on the unresolved slug", json!("team-gw/o3")),
+        ] {
+            let models = json!([{ "name": "opus", "targets": [lent_pin.clone(), target] }]);
+            let response = send(&state, "PUT", &path, &cookie, Some(json!({ "models": models }))).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{label}");
+        }
+
+        // Another group cannot borrow this group's stored pin.
+        let response = create_group(
+            &state,
+            &cookie,
+            json!({ "name": "Copy", "slug": "copy-ep", "models": [{ "name": "opus", "targets": [lent_pin] }] }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
