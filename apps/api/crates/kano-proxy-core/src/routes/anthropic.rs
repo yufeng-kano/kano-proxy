@@ -201,6 +201,7 @@ pub async fn handle_anthropic_messages(
             resolved.group_name.clone(),
             resolved.candidates.clone(),
         )
+        .with_request_body(&body)
     });
 
     // claude-code / custom anthropic-format: native Messages passthrough. grok and antigravity
