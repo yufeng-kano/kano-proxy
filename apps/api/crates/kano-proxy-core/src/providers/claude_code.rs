@@ -274,6 +274,18 @@ async fn forward_to_anthropic(
         .header("authorization", &format!("Bearer {}", acc.credential.access_token))
         .header("anthropic-version", anthropic_version)
         .header("anthropic-beta", &resolve_beta_header(client_beta, has_output_config));
+    for (name, value) in headers.iter() {
+        let key = name.as_str();
+        if key.starts_with("anthropic-")
+            && key != "anthropic-beta"
+            && key != "anthropic-version"
+            && !key.ends_with("-key")
+            && !key.ends_with("-token")
+            && value.to_str().is_ok_and(|v| !v.trim().is_empty())
+        {
+            req.headers.insert(name.clone(), value.clone());
+        }
+    }
     req = with_client_fingerprint(req, Some(headers));
     if let Some(timeout) = extras.first_byte_timeout {
         req = req.timeout(timeout);

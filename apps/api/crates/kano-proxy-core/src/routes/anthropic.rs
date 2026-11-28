@@ -24,6 +24,10 @@ use crate::proxy::dispatch::{
 };
 use crate::proxy::dispatch_anthropic_via_openai::{dispatch_anthropic_via_openai, ViaOpenAiDispatchOptions};
 use crate::proxy::request_json::read_proxy_json;
+use crate::proxy::safeguard::{
+    handle_subagent_review, is_subagent_review_request, wrap_response as wrap_safeguard_response,
+    SafeguardDispatch, SafeguardSpec,
+};
 use crate::utils::loop_guard::{detect_anthropic_tool_loop, loop_detected_message};
 use crate::utils::model::logging_provider_from_raw_model;
 use crate::AppState;
@@ -112,13 +116,37 @@ fn invalid_json() -> Response {
     ApiError::anthropic(StatusCode::BAD_REQUEST, "invalid_request_error", "Invalid JSON").into_response()
 }
 
-/// `anthropic-beta` / `anthropic-version` are forwarded when the client sent them; nothing else
-/// of the client's header set reaches the adapter.
+/// `anthropic-beta` / `anthropic-version` for converting routes (`grok`, `antigravity`, etc.);
+/// nothing else of the client's header set reaches those adapters so header-sensitive upstreams
+/// such as Antigravity stay unaffected.
 fn passthrough_headers(headers: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
     for name in ["anthropic-beta", "anthropic-version"] {
         if let Some(value) = headers.get(name) {
             out.insert(HeaderName::from_static(name), value.clone());
+        }
+    }
+    out
+}
+
+/// Headers forwarded to native Anthropic passthrough adapters (`claude-code`, custom
+/// `format=anthropic`): all `anthropic-*` headers (excluding any credential-like suffix) plus the
+/// Claude Code CLI client fingerprint headers (docs/api.md § Auto mode server-side safeguards,
+/// docs/providers.md § Claude Code).
+fn native_anthropic_passthrough_headers(headers: &HeaderMap) -> HeaderMap {
+    const FINGERPRINT_HEADERS: [&str; 5] = [
+        "user-agent",
+        "x-stainless-package-version",
+        "x-stainless-runtime-version",
+        "x-stainless-os",
+        "x-stainless-arch",
+    ];
+    let mut out = HeaderMap::new();
+    for (name, value) in headers.iter() {
+        let key = name.as_str();
+        let is_anthropic = key.starts_with("anthropic-") && !key.ends_with("-key") && !key.ends_with("-token");
+        if is_anthropic || FINGERPRINT_HEADERS.contains(&key) {
+            out.insert(name.clone(), value.clone());
         }
     }
     out
@@ -162,6 +190,18 @@ pub async fn handle_anthropic_messages(
     // Grok sticky headers: forwarded if the client supplied them; never invented.
     let affinity = affinity_from(headers);
     let target_model = canonical_model_id(&resolved.primary.provider, &resolved.primary.upstream_model);
+    let safeguard_spec = SafeguardSpec::from_request(&body);
+    let safeguard_dispatch = safeguard_spec.as_ref().map(|_| {
+        SafeguardDispatch::new(
+            id.user_id.clone(),
+            Some(id.api_key_id.clone()),
+            resolved.primary.provider.clone(),
+            resolved.raw.clone(),
+            resolved.primary.upstream_model.clone(),
+            resolved.group_name.clone(),
+            resolved.candidates.clone(),
+        )
+    });
 
     // claude-code / custom anthropic-format: native Messages passthrough. grok and antigravity
     // also expose `messages`, but those paths convert to another wire format, so the loop guard
@@ -169,13 +209,13 @@ pub async fn handle_anthropic_messages(
     if is_native_anthropic_passthrough(&resolved.primary.provider, resolved.primary.adapter.has_messages()) {
         // Only the model is normalized to the bare upstream id — strict cache_control
         // passthrough, no other body field is touched (dispatch does the model rewrite).
-        return dispatch_anthropic_messages(
+        let response = dispatch_anthropic_messages(
             cx,
             AnthropicDispatchOptions {
                 user_id: id.user_id.clone(),
                 api_key_id: Some(id.api_key_id.clone()),
                 body,
-                headers: passthrough_headers(headers),
+                headers: native_anthropic_passthrough_headers(headers),
                 model: target_model,
                 provider: resolved.primary.provider.clone(),
                 group_name: resolved.group_name.clone(),
@@ -185,6 +225,19 @@ pub async fn handle_anthropic_messages(
             },
         )
         .await;
+        return match (safeguard_spec, safeguard_dispatch) {
+            (Some(spec), Some(dispatch)) => wrap_safeguard_response(cx.clone(), dispatch, spec, response).await,
+            _ => response,
+        };
+    }
+
+    // Standalone auto-mode subagent review (`max_tokens: 0` with a trailing assistant `tool_use`):
+    // non-native upstreams reject `max_tokens: 0` or trailing assistant turns, so classify the
+    // trailing tool uses directly using the resolved candidates.
+    if let (Some(spec), Some(dispatch)) = (&safeguard_spec, &safeguard_dispatch) {
+        if is_subagent_review_request(&body) {
+            return handle_subagent_review(cx, dispatch, spec, &body).await;
+        }
     }
 
     // Conversion ingress (grok Responses / codex / custom-openai). The loop guard applies here
@@ -212,7 +265,7 @@ pub async fn handle_anthropic_messages(
     // Gemini) both convert inside their own `messages()`, so they dispatch through the Messages
     // path rather than the Chat Completions one. Past the passthrough branch above, an adapter
     // with `messages()` is one of those two.
-    if resolved.primary.adapter.has_messages() {
+    let response = if resolved.primary.adapter.has_messages() {
         let mut upstream_headers = passthrough_headers(headers);
         // Client-supplied isolation headers are already stripped: only the route sets them.
         if let Some(value) = &affinity.conv_id {
@@ -226,7 +279,7 @@ pub async fn handle_anthropic_messages(
         }
         set_header(&mut upstream_headers, "x-kano-raw-model", &resolved.raw);
 
-        return dispatch_anthropic_messages(
+        dispatch_anthropic_messages(
             cx,
             AnthropicDispatchOptions {
                 user_id: id.user_id.clone(),
@@ -240,25 +293,30 @@ pub async fn handle_anthropic_messages(
                 ..Default::default()
             },
         )
-        .await;
-    }
+        .await
+    } else {
+        dispatch_anthropic_via_openai(
+            cx,
+            ViaOpenAiDispatchOptions {
+                user_id: id.user_id.clone(),
+                api_key_id: Some(id.api_key_id.clone()),
+                provider: resolved.primary.provider.clone(),
+                raw_model: resolved.raw.clone(),
+                upstream_model: resolved.primary.upstream_model.clone(),
+                body,
+                affinity: Some(affinity),
+                group_name: resolved.group_name.clone(),
+                candidates: resolved.candidates,
+                ..Default::default()
+            },
+        )
+        .await
+    };
 
-    dispatch_anthropic_via_openai(
-        cx,
-        ViaOpenAiDispatchOptions {
-            user_id: id.user_id.clone(),
-            api_key_id: Some(id.api_key_id.clone()),
-            provider: resolved.primary.provider.clone(),
-            raw_model: resolved.raw.clone(),
-            upstream_model: resolved.primary.upstream_model.clone(),
-            body,
-            affinity: Some(affinity),
-            group_name: resolved.group_name.clone(),
-            candidates: resolved.candidates,
-            ..Default::default()
-        },
-    )
-    .await
+    match (safeguard_spec, safeguard_dispatch) {
+        (Some(spec), Some(dispatch)) => wrap_safeguard_response(cx.clone(), dispatch, spec, response).await,
+        _ => response,
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -342,14 +400,20 @@ pub async fn handle_anthropic_count_tokens(
         return Json(json!({ "input_tokens": tokens.unwrap_or(0) })).into_response();
     }
 
-    // Native passthrough only, same as /v1/messages.
+    // Native passthrough gets the full anthropic-* + client-fingerprint header set; converting
+    // providers such as antigravity keep the narrow passthrough_headers set.
+    let count_headers = if is_native_anthropic_passthrough(&resolved.primary.provider, resolved.primary.adapter.has_messages()) {
+        native_anthropic_passthrough_headers(headers)
+    } else {
+        passthrough_headers(headers)
+    };
     dispatch_anthropic_messages(
         cx,
         AnthropicDispatchOptions {
             user_id: id.user_id.clone(),
             api_key_id: Some(id.api_key_id.clone()),
             body,
-            headers: passthrough_headers(headers),
+            headers: count_headers,
             model: canonical_model_id(&resolved.primary.provider, &resolved.primary.upstream_model),
             provider: resolved.primary.provider.clone(),
             endpoint: AnthropicEndpoint::CountTokens,
@@ -1258,5 +1322,143 @@ mod request_edit_tests {
         let sent = f.mock.requests()[0].json();
         assert_eq!(sent["messages"][0], json!({ "role": "system", "content": format!("{BILLING}\n\nrules") }));
         assert!(!sent.to_string().contains(CC_LINE));
+    }
+
+    #[tokio::test]
+    async fn native_passthrough_forwards_anthropic_headers_and_claude_fingerprint_only() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        f.account("claude-code").await;
+        f.mock.respond_json(StatusCode::OK, anthropic_ok());
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/anthropic/v1/messages")
+            .header("x-api-key", &f.key)
+            .header("content-type", "application/json")
+            .header("anthropic-beta", "dangerous-tool-use-2026-09-03")
+            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-workspace-id", "ws_123")
+            .header("anthropic-api-key", "must-not-forward")
+            .header("user-agent", "claude-cli/2.1.332 (external, cli)")
+            .header("x-stainless-os", "Linux")
+            .body(axum::body::Body::from(
+                json!({ "model": "claude-code/claude-opus-5", "max_tokens": 16, "messages": user_message() }).to_string(),
+            ))
+            .unwrap();
+
+        let response = f.router().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let calls = f.mock.requests();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].header("anthropic-workspace-id"), Some("ws_123"));
+        assert!(calls[0].header("anthropic-api-key").is_none());
+        assert_eq!(calls[0].header("user-agent"), Some("claude-cli/2.1.332 (external, cli)"));
+        assert_eq!(calls[0].header("x-stainless-os"), Some("Linux"));
+        assert!(calls[0].header("anthropic-beta").unwrap().contains("dangerous-tool-use-2026-09-03"));
+    }
+
+    #[tokio::test]
+    async fn converted_route_with_safeguards_runs_classifier_and_attaches_safeguard_results() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        custom_gateway(&f).await;
+        // First upstream call: main model emits a tool_call.
+        f.mock.respond_json(
+            StatusCode::OK,
+            json!({
+                "id": "chatcmpl_main",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_bash_1",
+                            "type": "function",
+                            "function": { "name": "Bash", "arguments": "{\"command\":\"cargo test\"}" }
+                        }]
+                    },
+                    "finish_reason": "tool_calls"
+                }],
+                "usage": { "prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30 }
+            }),
+        );
+        // Second upstream call: classifier model judges the tool_call safe.
+        f.mock.respond_json(
+            StatusCode::OK,
+            json!({
+                "id": "chatcmpl_cls",
+                "object": "chat.completion",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "{\"tool_uses\":{\"call_bash_1\":{\"outcome\":\"not_flagged\"}}}"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 40, "completion_tokens": 10, "total_tokens": 50 }
+            }),
+        );
+
+        let body = json!({
+            "model": "mygw/local-model",
+            "max_tokens": 128,
+            "messages": [{ "role": "user", "content": "Run cargo test" }],
+            "tools": [{ "name": "Bash", "input_schema": { "type": "object" } }],
+            "safeguards": [{
+                "type": "dangerous_tool_use",
+                "classifier_context": {
+                    "auto_mode": { "allow": ["running tests"], "soft_deny": [], "hard_deny": [] }
+                }
+            }]
+        });
+        let response = f.router().oneshot(f.post("/anthropic/v1/messages", body)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json: serde_json::Value =
+            serde_json::from_slice(&axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+        assert_eq!(f.mock.requests().len(), 2);
+        assert_eq!(
+            json["safeguard_results"][0]["status"]["tool_uses"]["call_bash_1"],
+            json!({ "type": "evaluated", "outcome": "not_flagged" })
+        );
+    }
+
+    #[tokio::test]
+    async fn antigravity_route_does_not_receive_extra_native_passthrough_headers() {
+        let Some(f) = fixture().await else { return skip_without_db() };
+        let mut extra = serde_json::Map::new();
+        extra.insert("project_id".into(), json!("proj_test"));
+        f.account_with_extra("antigravity", extra).await;
+        f.mock.respond_json(
+            StatusCode::OK,
+            json!({
+                "response": {
+                    "candidates": [{ "content": { "role": "model", "parts": [{ "text": "ok" }] }, "finishReason": "STOP" }],
+                    "usageMetadata": { "promptTokenCount": 5, "candidatesTokenCount": 2 }
+                }
+            }),
+        );
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/anthropic/v1/messages")
+            .header("x-api-key", &f.key)
+            .header("content-type", "application/json")
+            .header("anthropic-workspace-id", "ws_should_not_leak")
+            .header("user-agent", "claude-cli/2.1.332 (external, cli)")
+            .header("x-stainless-os", "Linux")
+            .body(axum::body::Body::from(
+                json!({ "model": "antigravity/gemini-3-flash", "max_tokens": 16, "messages": user_message() }).to_string(),
+            ))
+            .unwrap();
+
+        let response = f.router().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let calls = f.mock.requests();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].header("anthropic-workspace-id").is_none());
+        assert!(calls[0].header("x-stainless-os").is_none());
+        assert_ne!(calls[0].header("user-agent"), Some("claude-cli/2.1.332 (external, cli)"));
     }
 }

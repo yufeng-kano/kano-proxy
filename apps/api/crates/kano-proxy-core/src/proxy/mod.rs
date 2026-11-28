@@ -16,6 +16,7 @@ pub mod openai_anthropic;
 pub mod request_edits;
 pub mod request_json;
 pub mod responses_openai;
+pub mod safeguard;
 pub mod sse;
 pub mod sse_error_rewrite;
 pub mod sse_lines;

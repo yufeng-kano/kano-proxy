@@ -96,6 +96,18 @@ impl CustomAnthropicAdapter {
             if let Some(beta) = &beta {
                 request = request.header("anthropic-beta", beta);
             }
+            for (name, value) in headers.iter() {
+                let key = name.as_str();
+                if key.starts_with("anthropic-")
+                    && key != "anthropic-beta"
+                    && key != "anthropic-version"
+                    && !key.ends_with("-key")
+                    && !key.ends_with("-token")
+                    && value.to_str().is_ok_and(|v| !v.trim().is_empty())
+                {
+                    request.headers.insert(name.clone(), value.clone());
+                }
+            }
             if let Some(timeout) = extras.first_byte_timeout {
                 request = request.timeout(timeout);
             }
